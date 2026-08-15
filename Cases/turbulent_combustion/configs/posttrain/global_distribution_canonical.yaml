@@ -1,0 +1,22 @@
+defaults:
+  - ../dataset.yaml
+  - ../sensors/T_only_random.yaml
+  - ../coherence/global_distribution_canonical.yaml
+stage: post_training
+case: turbulent_combustion
+source_run: null
+source_checkpoint: last.pt
+inherit_base_config: true
+source: {kind: native_run, allow_integration_source: true}
+model: {name: pointcloud_ffm, backbone: gl_rbf_enh, gather_mode: topk_rbf}
+observations: {protocol: random_uniform, seed: 42, fields: {T: {count: 128}}}
+objectives:
+  data_retention: {enabled: true, weight: 0.1}
+  coherence: {enabled: true, weight: 1.0}
+rollout: {steps: 2, solver: euler}
+observation_consistency: {mode: endpoint_smooth, strength: 1.0, sigma: 0.05, schedule_power: 2.0, final_clamp: true, chunk_size: 4096}
+trainable: {scope: full_model}
+optimization: {epochs: 1, batch_size: 1, train_fraction: 0.01, lr: 5.0e-5, weight_decay: 0.0, grad_clip: 1.0, gradient_balance: weighted_sum, config_missing_behavior: error}
+runtime: {seed: 42, device: 'cuda:0', deterministic: true, num_workers: 0}
+evaluation: {split: validation, max_samples: 1, query_points: 512, generation_steps: 2, seed: 2027}
+output: {experiment_name: phase7_combustion_global_distribution}

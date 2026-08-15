@@ -1,0 +1,9 @@
+observations:
+  protocol: structured_stride
+  seed: 42
+  spatial_downsample_ratio: 8
+  phase: 0
+  # Activate only after the case validates and records the 403x100 index map.
+  requires_validated_grid_mapping: true
+  fields:
+    T: {count: 630}

@@ -1,0 +1,4 @@
+seed: 42
+device: cuda:0
+num_workers: 0
+deterministic: true

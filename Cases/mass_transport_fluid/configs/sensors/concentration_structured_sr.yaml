@@ -1,0 +1,7 @@
+observations:
+  protocol: structured_stride
+  seed: 42
+  spatial_downsample_ratio: 4
+  phase: 0
+  fields:
+    concentration: {count: 64}

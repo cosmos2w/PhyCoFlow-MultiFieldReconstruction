@@ -1,0 +1,12 @@
+dataset:
+  path: ../../Dataset/kolmogorov/kolmogorov.h5
+  split: train
+  reconstruction_unit: snapshot
+  field_names: [u, v, p]
+  field_units: [dimensionless, dimensionless, dimensionless]
+  normalization: mean_std
+  time_stride: 1
+  benchmark_eligible: true
+  grid_mapping_verified: true
+  coordinate_dim: 2
+  grid_shape: [256, 256]

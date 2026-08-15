@@ -1,0 +1,59 @@
+release: Phase 8 integration release
+scope: >-
+  Matched one-update Brusselator checks on one validation trajectory. These rows
+  demonstrate stage wiring, metric aggregation, and traceability; they are not
+  tuned scientific performance estimates.
+claims:
+  allowed:
+    - All four training paths execute against the same formal dataset and frozen sensors.
+    - Physics and data-driven post-training leave their source runs immutable.
+  forbidden:
+    - Ranking methods by the one-sample values below.
+    - Reporting uncertainty or confidence intervals from one trajectory.
+frozen_sensor_manifest: benchmarks/v0_integration/brusselator_u128_validation.json
+dataset_full_sha256: 973907181a043471a2bdd40e11596a3403b966fa44af7c7dc8b50a611655fdac
+code_files:
+  - src/phycoflow_reconstruction/cli.py
+  - src/phycoflow_reconstruction/config/schema.py
+  - src/phycoflow_reconstruction/config/validate.py
+  - src/phycoflow_reconstruction/contracts.py
+  - src/phycoflow_reconstruction/data/h5_dataset.py
+  - src/phycoflow_reconstruction/data/manifest.py
+  - src/phycoflow_reconstruction/data/sensor_protocols.py
+  - src/phycoflow_reconstruction/evaluation/checkpoint.py
+  - src/phycoflow_reconstruction/physics/operators.py
+  - src/phycoflow_reconstruction/training/base_training.py
+  - src/phycoflow_reconstruction/training/post_training.py
+  - src/phycoflow_reconstruction/training/physics_post_training.py
+  - src/phycoflow_reconstruction/training/direct_physics.py
+  - Cases/brusselator/physics.py
+entries:
+  - id: plain_coordinate_mlp
+    stage: base_training
+    matched_sensor_group: brusselator_u128
+    formal_benchmark: true
+    budget: {optimizer_updates: 1, label: integration_truncated}
+    report: benchmarks/v0_integration/reports/plain_coordinate_mlp.json
+    resolved_config: benchmarks/v0_integration/configs/plain_coordinate_mlp.yaml
+  - id: global_distribution_posttrain
+    stage: post_training_data_coherence
+    matched_sensor_group: brusselator_u128
+    formal_benchmark: true
+    budget: {optimizer_updates: 1, label: integration_truncated}
+    report: benchmarks/v0_integration/reports/global_distribution_posttrain.json
+    resolved_config: benchmarks/v0_integration/configs/global_distribution_posttrain.yaml
+    coherence_report: benchmarks/v0_integration/reports/global_distribution_native_after.json
+  - id: periodic_physics_posttrain
+    stage: post_training_pde
+    matched_sensor_group: brusselator_u128
+    formal_benchmark: true
+    budget: {optimizer_updates: 1, label: integration_truncated}
+    report: benchmarks/v0_integration/reports/periodic_physics_posttrain.json
+    resolved_config: benchmarks/v0_integration/configs/periodic_physics_posttrain.yaml
+  - id: direct_pinn
+    stage: direct_physics
+    matched_sensor_group: brusselator_u128
+    formal_benchmark: true
+    budget: {optimizer_updates: 1, label: integration_truncated}
+    report: benchmarks/v0_integration/reports/direct_pinn.json
+    resolved_config: benchmarks/v0_integration/configs/direct_pinn.yaml

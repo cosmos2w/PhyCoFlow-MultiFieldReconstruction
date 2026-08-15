@@ -1,0 +1,3 @@
+stage: base_training
+required: [case, dataset, model, observations, optimization, runtime, output]
+forbidden: [source_run, source_checkpoint, coherence, physics]

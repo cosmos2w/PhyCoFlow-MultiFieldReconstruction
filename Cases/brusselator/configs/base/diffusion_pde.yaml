@@ -1,0 +1,6 @@
+defaults: [plain_defaults.yaml]
+model:
+  name: diffusion_pde
+  hidden_channels: 64
+  training_timesteps: 1000
+output: {experiment_name: diffusion_pde_plain}

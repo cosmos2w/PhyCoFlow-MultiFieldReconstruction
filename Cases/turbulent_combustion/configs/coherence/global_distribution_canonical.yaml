@@ -1,0 +1,14 @@
+coherence:
+  schedule: {start_epoch: 1, every_n_steps: 1, weight_warmup_epochs: 0, interval_rescale: false}
+  compute_budget: {batch_size: 1, point_count: 512}
+  families:
+    global_distribution:
+      enabled: true
+      target_use: training_reference
+      units: model_units
+      fields: [CH4, CO, T, U_1, p]
+      reference_bank: {enabled: true, path: null, max_samples: 8, points_per_sample: 512, seed: 1234}
+      components:
+        self: {enabled: true, weight: 1.0}
+        mutual: {enabled: true, weight: 1.0, directions: 8, seed: 1234}
+        cross: {enabled: true, weight: 1.0, directions: 16, top_fraction: 0.1, seed: 1234, include_axes: true, qmc: true}

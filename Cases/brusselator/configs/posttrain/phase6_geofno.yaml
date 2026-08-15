@@ -1,0 +1,4 @@
+defaults: [phase6_common.yaml]
+source_run: runs/phase4_final_geofno/20260814T224642Z_ced803ed
+output: {experiment_name: phase6_geofno_gpu1}
+

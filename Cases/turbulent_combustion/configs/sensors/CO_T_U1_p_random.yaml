@@ -1,0 +1,8 @@
+observations:
+  protocol: random_uniform
+  seed: 42
+  fields:
+    CO: {count: 96}
+    T: {count: 192}
+    U_1: {count: 96}
+    p: {count: 96}

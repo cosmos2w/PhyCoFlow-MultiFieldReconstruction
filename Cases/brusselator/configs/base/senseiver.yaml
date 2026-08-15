@@ -1,0 +1,9 @@
+defaults: [plain_defaults.yaml]
+model:
+  name: senseiver
+  width: 128
+  num_latents: 64
+  heads: 4
+  depth: 3
+  query_points: 4096
+output: {experiment_name: senseiver_plain}

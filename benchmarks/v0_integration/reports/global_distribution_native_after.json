@@ -1,0 +1,33 @@
+{
+  "coherence": {
+    "components": {
+      "global_distribution.cross.joint_topk_swd": 1.776508092880249,
+      "global_distribution.mutual.pairwise_swd": 1.1362361907958984,
+      "global_distribution.self.marginal_w2": 1.0875213146209717
+    },
+    "family": "global_distribution",
+    "reference_ids": [
+      "trajectory_000041:143"
+    ],
+    "target_use": "training_reference",
+    "total": 4.000265598297119,
+    "units": "model_units"
+  },
+  "inference": {
+    "generation_steps": 2,
+    "points_per_sample": 512,
+    "samples": 1,
+    "seconds": 0.0004509035497903824
+  },
+  "mse_normalized": 0.02093525417149067,
+  "observed_entry_mse_normalized": 0.009440673515200615,
+  "per_field_mse_normalized": {
+    "u": 0.019526973366737366,
+    "v": 0.02234353870153427
+  },
+  "sample_ids": [
+    "trajectory_000000:0"
+  ],
+  "sensor_manifest_sha256": "9d8537ec41395cab2594798a99f7c5ae2c781ca7790813613e1ecf46f39c9711",
+  "unobserved_entry_mse_normalized": 0.020980332046747208
+}

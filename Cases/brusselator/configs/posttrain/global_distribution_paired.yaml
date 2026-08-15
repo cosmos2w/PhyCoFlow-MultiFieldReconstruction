@@ -1,0 +1,11 @@
+defaults: [global_distribution_reference.yaml]
+
+coherence:
+  families:
+    global_distribution:
+      target_use: paired_supervised
+      reference_bank:
+        enabled: false
+
+output:
+  experiment_name: pointcloud_ffm_global_distribution_paired

@@ -1,0 +1,21 @@
+name: contracts
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  unit-contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.11'}
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e '.[dev,operator]'
+      - run: ruff check src Cases tests scripts figures/scripts
+      - run: pytest
+      - run: >-
+          python scripts/aggregate_benchmark.py
+          --suite benchmarks/v0_integration/suite.yaml
+          --output /tmp/phase8_results.yaml

@@ -1,0 +1,8 @@
+observations:
+  protocol: uniform_spacetime_stride
+  seed: 42
+  temporal_downsample_ratio: 4
+  spatial_downsample_ratio: 8
+  phase: 0
+  fields:
+    u: {count: 3232}

@@ -1,0 +1,36 @@
+# Local dataset payloads and links; only explanations are versioned.
+Dataset/**/*.h5
+Dataset/**/*.hdf5
+Dataset/**/*.pt
+Dataset/**/*.pth
+Dataset/**/*.npy
+Dataset/**/*.npz
+Dataset/**/cache/
+
+# All run products are local unless explicitly exported later.
+Cases/**/runs/
+Cases/**/manifests/
+*.pt
+*.pth
+*.csv
+*.json
+*.log
+*.png
+*.pdf
+
+# Python/editor caches.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# Canonical project and case configs are source files despite repository-wide
+# generated-YAML rules in the parent workspace.
+!configs/**/*.yaml
+!Cases/**/configs/**/*.yaml
+!benchmarks/**/*.json
+!benchmarks/**/*.yaml
+!figures/generated/**/*.svg

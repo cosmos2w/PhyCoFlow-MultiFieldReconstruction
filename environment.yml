@@ -1,0 +1,22 @@
+name: phycoflow_reconstruction
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pytorch>=2.5
+  - pytorch-cuda=12.1
+  - numpy
+  - h5py
+  - pyyaml
+  - tqdm
+  - wrapt<2
+  - matplotlib
+  - pytest
+  - ruff
+  - pip
+  - pip:
+      - conflictfree==0.1.8
+      - neuraloperator==2.0.0
+      - pykeops==2.3

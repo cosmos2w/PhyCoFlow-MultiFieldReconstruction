@@ -1,0 +1,7 @@
+defaults: [plain_defaults.yaml]
+model:
+  name: pointcloud_ffm
+  backbone: fno
+  prior: rff
+  fno_hidden_channels: 32
+output: {experiment_name: pointcloud_ffm_fno_plain}

@@ -1,0 +1,9 @@
+observations:
+  protocol: structured_stride
+  seed: 42
+  spatial_downsample_ratio: 8
+  phase: 0
+  requires_validated_grid_mapping: true
+  fields:
+    u: {count: 1024}
+    v: {count: 1024}

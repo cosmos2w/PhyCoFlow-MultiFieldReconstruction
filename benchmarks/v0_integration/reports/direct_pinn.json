@@ -1,0 +1,51 @@
+{
+  "case_diagnostics": {
+    "boundary_operator": "periodic_spectral",
+    "positivity_violation_mse": 0.0,
+    "relative_pde_residual_u": 2.089975118637085,
+    "relative_pde_residual_v": 1.4566354751586914,
+    "temporal_derivative_source": "paired_finite_difference"
+  },
+  "compute": {
+    "peak_cuda_memory_bytes": 35021312,
+    "query_points_per_sample": 36864,
+    "seconds": 0.001566990278661251,
+    "seconds_per_sample": 0.001566990278661251
+  },
+  "mse_normalized": 0.02830173633992672,
+  "mse_physical": 0.007435570936650038,
+  "observed_entry_mse_normalized": 0.034086063504219055,
+  "per_field_mse_normalized": {
+    "u": 0.03287559002637863,
+    "v": 0.023727882653474808
+  },
+  "per_field_mse_physical": {
+    "u": 0.005642949603497982,
+    "v": 0.009228191338479519
+  },
+  "trace": {
+    "checkpoint": "checkpoints/best.pt",
+    "checkpoint_sha256": "05193a69ec7c41454661169b5d5240a1fe5a1ce39a3ae140e78ccbd8f21309e1",
+    "dataset_catalog_name": "brusselator.h5",
+    "dataset_fingerprint": "460e6e3c6209e0a002c02620ba17522c5b550c67fb808f8694d95171acaaa6cb",
+    "plot_payload": "evaluation/phase8/reconstruction.pt",
+    "plot_payload_sha256": "e73d63cf9416777fcbb018c5e023971e2fffd41ce5644f9a20afd945c4695424",
+    "portable_plot_payload": "evaluation/phase8/reconstruction.npz",
+    "portable_plot_payload_sha256": "e040a2e5f5b3124e8337c7a64d9eee7e80b18302d7b491622b5bb66707d2de13",
+    "query_indices": "evaluation/phase8/query_indices.pt",
+    "query_indices_sha256": "09e00318d440f7b8c33816056e8a7c9dd5781bbffad585f3cb37fdc9f2fd0860",
+    "resolved_config_sha256": "be3c6f7186ef9f8b362ee70c67c71d6e5343e0b3bbb94c632d77d1374b1a597f",
+    "run": "runs/phase8_brusselator_direct_pinn/20260815T033514Z_9e57507e",
+    "sample_ids": [
+      "trajectory_000000:0"
+    ],
+    "sensor_manifest": "evaluation/phase8/sensor_manifest.json",
+    "sensor_manifest_sha256": "e72d49313809e64d351703399b27e3c55d38829d6b3051ca0cd57df671121984",
+    "split": "validation"
+  },
+  "uncertainty": {
+    "available": false,
+    "reason": "model returned no ensemble samples"
+  },
+  "unobserved_entry_mse_normalized": 0.02829167991876602
+}

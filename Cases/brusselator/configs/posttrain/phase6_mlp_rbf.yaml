@@ -1,0 +1,4 @@
+defaults: [phase6_common.yaml]
+source_run: runs/phase4_final_mlp_rbf/20260814T224544Z_3c3a1dae
+output: {experiment_name: phase6_mlp_rbf_gpu1}
+

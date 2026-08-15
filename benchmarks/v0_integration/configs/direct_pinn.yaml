@@ -1,0 +1,48 @@
+dataset:
+  path: /data/wanglz/PhyCoFlow/datagen/processed/brusselator.h5
+  split: train
+  reconstruction_unit: snapshot
+  field_names:
+  - u
+  - v
+  field_units:
+  - dimensionless
+  - dimensionless
+  normalization: mean_std
+  time_stride: 1
+  benchmark_eligible: true
+  include_temporal_derivative: true
+observations:
+  protocol: random_uniform
+  seed: 42
+  fields:
+    u:
+      count: 128
+stage: direct_physics
+case: brusselator
+model:
+  name: pinn
+  hidden_dim: 64
+  fourier_bands: 8
+  physics_weight: 1.0
+physics:
+  provider: brusselator_periodic
+  domain_length: 20.0
+  temporal_derivative_source: paired_finite_difference
+  weights:
+    pde_u: 1.0
+    pde_v: 1.0
+    positivity: 0.01
+optimization:
+  epochs: 1
+  batch_size: 1
+  lr: 0.0001
+  weight_decay: 0.0
+  grad_clip: 1.0
+runtime:
+  seed: 42
+  device: cuda:0
+  deterministic: true
+  num_workers: 0
+output:
+  experiment_name: phase8_brusselator_direct_pinn

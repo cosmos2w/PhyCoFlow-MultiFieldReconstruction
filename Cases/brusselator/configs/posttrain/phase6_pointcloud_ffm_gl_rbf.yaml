@@ -1,0 +1,3 @@
+defaults: [phase6_common.yaml]
+source_run: runs/phase4_pointcloud_final/20260814T224403Z_e0430a92
+output: {experiment_name: phase6_pointcloud_ffm_gl_rbf_gpu1}

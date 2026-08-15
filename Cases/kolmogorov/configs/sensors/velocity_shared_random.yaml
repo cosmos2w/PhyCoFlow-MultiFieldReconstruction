@@ -1,0 +1,7 @@
+observations:
+  protocol: random_uniform
+  seed: 42
+  shared_locations: true
+  fields:
+    u: {count: 512}
+    v: {count: 512}

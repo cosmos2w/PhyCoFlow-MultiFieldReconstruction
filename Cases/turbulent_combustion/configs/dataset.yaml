@@ -1,0 +1,13 @@
+dataset:
+  path: ../../Dataset/turbulent_combustion/Merged_CH4COTU1P.h5
+  split: train
+  reconstruction_unit: snapshot
+  field_names: [CH4, CO, T, U_1, p]
+  field_units: [unknown, unknown, unknown, unknown, unknown]
+  normalization: none
+  time_stride: 1
+  benchmark_eligible: true
+  coordinate_dim: 2
+  grid_shape: [100, 403]
+  coordinate_reorder: lexicographic_yx
+  grid_mapping_verified: true

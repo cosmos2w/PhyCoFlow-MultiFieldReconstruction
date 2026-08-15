@@ -1,0 +1,7 @@
+defaults: [plain_defaults.yaml]
+model:
+  name: deeponet
+  width: 128
+  basis_dim: 64
+  query_points: 4096
+output: {experiment_name: deeponet_plain}

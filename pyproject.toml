@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "phycoflow-reconstruction"
+version = "0.1.0"
+description = "Sparse multi-field physical-state reconstruction research framework"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.24",
+  "torch>=2.1",
+  "h5py>=3.9",
+  "PyYAML>=6.0",
+  "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+operator = ["neuraloperator==2.0.0", "wrapt>=1.16,<2"]
+legacy = ["pykeops==2.3"]
+posttrain = ["conflictfree==0.1.8"]
+plot = ["matplotlib>=3.7"]
+dev = ["pytest>=8", "ruff>=0.5"]
+all = [
+  "matplotlib>=3.7",
+  "conflictfree==0.1.8",
+  "neuraloperator==2.0.0",
+  "pykeops==2.3",
+  "pytest>=8",
+  "ruff>=0.5",
+  "wrapt>=1.16,<2",
+]
+
+[project.scripts]
+phycoflow-reconstruct = "phycoflow_reconstruction.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"

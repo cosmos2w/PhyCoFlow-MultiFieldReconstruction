@@ -1,0 +1,41 @@
+dataset:
+  path: /data/wanglz/PhyCoFlow/datagen/processed/brusselator.h5
+  split: train
+  reconstruction_unit: snapshot
+  field_names:
+  - u
+  - v
+  field_units:
+  - dimensionless
+  - dimensionless
+  normalization: mean_std
+  time_stride: 1
+  benchmark_eligible: true
+observations:
+  protocol: random_uniform
+  seed: 42
+  fields:
+    u:
+      count: 128
+stage: base_training
+case: brusselator
+optimization:
+  epochs: 200
+  batch_size: 4
+  lr: 0.0001
+  weight_decay: 1.0e-06
+  grad_clip: 1.0
+runtime:
+  seed: 42
+  device: cuda:0
+  deterministic: true
+  num_workers: 0
+evaluation:
+  generation_steps: 8
+output:
+  experiment_name: phase4_final_coordinate_mlp
+model:
+  name: coordinate_mlp
+  hidden_dim: 128
+  fourier_bands: 16
+  query_points: 4096

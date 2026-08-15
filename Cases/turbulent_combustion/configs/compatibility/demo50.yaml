@@ -1,0 +1,13 @@
+legacy:
+  run_directory: ../../../0_demo_TurbulentCombustion/Save_TrainedModel/ffm_tc_pointcloud_DemoN50_20260706_084857
+  checkpoint: best.pt
+  dataset_path: ../../../0_demo_TurbulentCombustion/Dataset/Merged_COTU0U1P.h5
+  channel_mapping:
+    - {channel: 0, checkpoint_label: CH4, dataset_field: CO}
+    - {channel: 1, checkpoint_label: CO, dataset_field: T}
+    - {channel: 2, checkpoint_label: T, dataset_field: U_0}
+    - {channel: 3, checkpoint_label: U_1, dataset_field: U_1}
+    - {channel: 4, checkpoint_label: p, dataset_field: p}
+
+output:
+  manifest: manifests/demo50_compatibility.json

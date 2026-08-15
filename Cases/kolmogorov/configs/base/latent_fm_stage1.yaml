@@ -1,0 +1,6 @@
+defaults: [plain_defaults.yaml]
+model:
+  name: latent_fm
+  stage: 1
+  latent_channels: 16
+output: {experiment_name: latent_fm_stage1}

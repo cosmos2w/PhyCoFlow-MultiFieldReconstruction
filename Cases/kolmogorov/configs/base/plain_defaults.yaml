@@ -1,0 +1,25 @@
+defaults:
+  - ../dataset.yaml
+  - ../sensors/velocity_shared_random.yaml
+
+stage: base_training
+case: kolmogorov
+
+optimization:
+  epochs: 200
+  batch_size: 2
+  lr: 1.0e-4
+  weight_decay: 1.0e-6
+  grad_clip: 1.0
+
+runtime:
+  seed: 42
+  device: cuda:0
+  deterministic: true
+  num_workers: 0
+
+evaluation:
+  generation_steps: 8
+
+output:
+  experiment_name: replace_by_model_config

@@ -1,0 +1,19 @@
+coherence:
+  schedule: {start_epoch: 1, every_n_steps: 1, weight_warmup_epochs: 0, interval_rescale: false}
+  compute_budget: {batch_size: 2, point_count: 1024}
+  families:
+    global_distribution:
+      enabled: true
+      target_use: training_reference
+      units: model_units
+      fields: [u, v, p]
+      reference_bank: {enabled: true, path: null, max_samples: 16, points_per_sample: 1024, seed: 1234}
+      components:
+        self: {enabled: true, weight: 1.0}
+        mutual:
+          enabled: true
+          weight: 1.0
+          pairs: [[u, v], [u, p], [v, p]]
+          directions: 16
+          seed: 1234
+        cross: {enabled: true, weight: 1.0, directions: 32, top_fraction: 0.1, seed: 1234, include_axes: true, qmc: true}

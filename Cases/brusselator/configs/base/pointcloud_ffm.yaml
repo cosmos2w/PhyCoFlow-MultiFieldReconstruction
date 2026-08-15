@@ -1,0 +1,15 @@
+defaults: [plain_defaults.yaml]
+model:
+  name: pointcloud_ffm
+  backbone: gl_rbf_enh
+  gather_mode: topk_rbf
+  hidden_dim: 128
+  latent_dim: 128
+  num_latents: 32
+  heads: 4
+  latent_blocks: 2
+  gather_topk: 16
+  query_chunk_size: 2048
+  prior: rff
+  query_points: 4096
+output: {experiment_name: pointcloud_ffm_gl_rbf_enh_plain}

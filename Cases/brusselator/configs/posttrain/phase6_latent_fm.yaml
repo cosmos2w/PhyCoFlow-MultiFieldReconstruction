@@ -1,0 +1,4 @@
+defaults: [phase6_common.yaml]
+source_run: runs/phase4_final_latent_fm_stage2/20260814T224752Z_7c8047be
+output: {experiment_name: phase6_latent_fm_gpu1}
+

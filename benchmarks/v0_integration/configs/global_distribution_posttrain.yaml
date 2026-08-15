@@ -1,0 +1,128 @@
+coherence:
+  schedule:
+    start_epoch: 1
+    every_n_steps: 1
+    weight_warmup_epochs: 0
+    interval_rescale: false
+  compute_budget:
+    batch_size: 2
+    point_count: 512
+  families:
+    global_distribution:
+      enabled: true
+      target_use: training_reference
+      units: model_units
+      fields:
+      - u
+      - v
+      reference_bank:
+        enabled: true
+        path: null
+        max_samples: 16
+        points_per_sample: 512
+        seed: 1234
+      components:
+        self:
+          enabled: true
+          weight: 1.0
+          channel_weights:
+            u: 1.0
+            v: 1.0
+        mutual:
+          enabled: true
+          weight: 1.0
+          pairs:
+          - - u
+            - v
+          directions: 16
+          seed: 1234
+        cross:
+          enabled: true
+          weight: 1.0
+          directions: 32
+          top_fraction: 0.1
+          seed: 1234
+          include_axes: true
+          qmc: true
+stage: post_training
+case: brusselator
+source_run: /home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/Cases/brusselator/runs/phase4_final_coordinate_mlp/20260814T224525Z_2110739a
+source_checkpoint: last.pt
+inherit_base_config: true
+source:
+  kind: native_run
+  allow_integration_source: true
+  inherited_base_keys:
+  - dataset
+  - model
+  - observations
+  config_origins:
+    dataset: source_run.resolved_config.yaml
+    model: source_run.resolved_config.yaml
+    observations: source_run.resolved_config.yaml
+    post_training: child_config
+model:
+  name: coordinate_mlp
+  hidden_dim: 128
+  fourier_bands: 16
+  query_points: 4096
+observations:
+  protocol: random_uniform
+  seed: 42
+  fields:
+    u:
+      count: 128
+objectives:
+  data_retention:
+    enabled: true
+    weight: 0.1
+  coherence:
+    enabled: true
+    weight: 1.0
+rollout:
+  steps: 2
+  solver: euler
+observation_consistency:
+  mode: endpoint_smooth
+  strength: 1.0
+  sigma: 0.05
+  schedule_power: 2.0
+  final_clamp: true
+  chunk_size: 4096
+trainable:
+  scope: full_model
+optimization:
+  epochs: 100
+  batch_size: 2
+  train_fraction: 0.25
+  lr: 5.0e-05
+  weight_decay: 1.0e-06
+  grad_clip: 1.0
+  gradient_balance: weighted_sum
+  config_missing_behavior: error
+runtime:
+  seed: 42
+  device: cuda:0
+  deterministic: true
+  num_workers: 0
+evaluation:
+  split: validation
+  max_samples: 1
+  query_points: 512
+  generation_steps: 2
+  seed: 2027
+output:
+  experiment_name: phase6_coordinate_mlp_gpu1
+dataset:
+  path: /data/wanglz/PhyCoFlow/datagen/processed/brusselator.h5
+  split: train
+  reconstruction_unit: snapshot
+  field_names:
+  - u
+  - v
+  field_units:
+  - dimensionless
+  - dimensionless
+  normalization: mean_std
+  time_stride: 1
+  benchmark_eligible: true
