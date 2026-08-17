@@ -92,22 +92,16 @@ def _load_case_config(
     if validate_stage:
         validate_config(config)
     config["dataset"]["path"] = str(_resolve_dataset_path(config, case_dir))
-    reference_path = (
-        config.get("coherence", {})
-        .get("families", {})
-        .get("global_distribution", {})
-        .get("reference_bank", {})
-        .get("path")
-    )
-    if reference_path:
+    for family in config.get("coherence", {}).get("families", {}).values():
+        reference = family.get("reference_bank", {})
+        reference_path = reference.get("path")
+        if not reference_path:
+            continue
         reference_path = Path(reference_path)
-        resolved_reference = (
+        reference["path"] = str(
             reference_path.resolve()
             if reference_path.is_absolute()
             else (case_dir / reference_path).resolve()
-        )
-        config["coherence"]["families"]["global_distribution"]["reference_bank"]["path"] = str(
-            resolved_reference
         )
     stage1_checkpoint = config.get("model", {}).get("stage1_checkpoint")
     if stage1_checkpoint:

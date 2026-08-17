@@ -25,12 +25,10 @@ def observation_summary(batch: ObservationBatch, num_fields: int) -> torch.Tenso
         bsz, num_fields, device=batch.obs_coords.device, dtype=batch.obs_values.dtype
     )
     counts = torch.zeros_like(sums)
-    for batch_index in range(bsz):
-        valid = batch.obs_valid_mask[batch_index]
-        fields = batch.obs_field_ids[batch_index, valid]
-        values = batch.obs_values[batch_index, valid, 0]
-        sums[batch_index].scatter_add_(0, fields, values)
-        counts[batch_index].scatter_add_(0, fields, torch.ones_like(values))
+    fields = batch.obs_field_ids.clamp(0, num_fields - 1)
+    valid = batch.obs_valid_mask.to(batch.obs_values.dtype)
+    sums.scatter_add_(1, fields, batch.obs_values[:, :, 0] * valid)
+    counts.scatter_add_(1, fields, valid)
     means = sums / counts.clamp_min(1)
     return torch.cat([means, (counts > 0).to(means.dtype)], dim=-1)
 

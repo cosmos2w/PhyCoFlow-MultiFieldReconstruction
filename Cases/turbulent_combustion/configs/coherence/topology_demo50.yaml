@@ -1,0 +1,39 @@
+coherence:
+  schedule:
+    start_epoch: 1
+    every_n_steps: 1
+    weight_warmup_epochs: 0
+    interval_rescale: false
+  compute_budget:
+    batch_size: 4
+    point_count: 4096
+    query_policy: fixed_shared
+    query_seed: 100045
+  families:
+    topology:
+      enabled: true
+      weight: 1.0
+      target_use: paired_supervised
+      units: model_units
+      fields: [CO, T]
+      reference_bank: {enabled: false}
+      geometry:
+        grid_shape: [32, 128]
+        axes: [0, 1]
+        neighbors: 4
+        power: 2.0
+        periodic: false
+      filtration:
+        quantiles: [0.10, 0.25, 0.40, 0.50, 0.60, 0.75, 0.90]
+        dimensions: [0, 1]
+        directions: [superlevel, sublevel]
+        sharpness: 12.0
+        smoothing_sigma: 0.8
+      components:
+        self: {enabled: true, weight: 1.0}
+        mutual:
+          enabled: true
+          weight: 1.0
+          pairs: [[CO, T]]
+          lines: 3
+          theta_min_degrees: 15.0

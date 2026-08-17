@@ -77,6 +77,27 @@ def test_base_sections_reject_misspelled_or_invalid_nested_values():
         validate_config(config)
 
 
+def test_training_preview_config_is_strict():
+    config = _base_config()
+    config["evaluation"] = {
+        "preview": {
+            "enabled": True,
+            "every_epochs": 5,
+            "split": "validation",
+            "sample_index": 0,
+            "query_points": None,
+            "generation_steps": 2,
+            "seed": 2027,
+            "keep_history": False,
+        }
+    }
+    validate_config(config)
+
+    config["evaluation"]["preview"]["every_epochs"] = 0
+    with pytest.raises(ValueError, match="every_epochs"):
+        validate_config(config)
+
+
 def test_observation_batch_contract():
     batch = ObservationBatch(
         obs_coords=torch.zeros(2, 3, 2),

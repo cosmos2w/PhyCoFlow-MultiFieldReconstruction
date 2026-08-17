@@ -168,13 +168,18 @@ class ObservationBatch:
         if self.obs_indices is not None and torch.any(self.obs_indices[self.obs_valid_mask] < 0):
             raise ValueError("valid observations cannot use negative point indices")
 
-    def to(self, device: torch.device | str) -> ObservationBatch:
+    def to(
+        self,
+        device: torch.device | str,
+        *,
+        non_blocking: bool = False,
+    ) -> ObservationBatch:
         def move(value: torch.Tensor | None) -> torch.Tensor | None:
-            return None if value is None else value.to(device)
+            return None if value is None else value.to(device, non_blocking=non_blocking)
 
         def move_nested(value: Any) -> Any:
             if isinstance(value, torch.Tensor):
-                return value.to(device)
+                return value.to(device, non_blocking=non_blocking)
             if isinstance(value, dict):
                 return {key: move_nested(item) for key, item in value.items()}
             if isinstance(value, tuple):
@@ -184,17 +189,53 @@ class ObservationBatch:
             return value
 
         return ObservationBatch(
-            obs_coords=self.obs_coords.to(device),
-            obs_values=self.obs_values.to(device),
-            obs_field_ids=self.obs_field_ids.to(device),
-            obs_valid_mask=self.obs_valid_mask.to(device),
-            query_coords=self.query_coords.to(device),
-            query_valid_mask=self.query_valid_mask.to(device),
+            obs_coords=self.obs_coords.to(device, non_blocking=non_blocking),
+            obs_values=self.obs_values.to(device, non_blocking=non_blocking),
+            obs_field_ids=self.obs_field_ids.to(device, non_blocking=non_blocking),
+            obs_valid_mask=self.obs_valid_mask.to(device, non_blocking=non_blocking),
+            query_coords=self.query_coords.to(device, non_blocking=non_blocking),
+            query_valid_mask=self.query_valid_mask.to(device, non_blocking=non_blocking),
             target_fields=move(self.target_fields),
             sample_ids=self.sample_ids,
             obs_indices=move(self.obs_indices),
             logical_shapes=self.logical_shapes,
             metadata=move_nested(self.metadata),
+        )
+
+    def pin_memory(self) -> ObservationBatch:
+        """Pin compact batch tensors so asynchronous CUDA copies can overlap loading."""
+
+        def pin_tensor(value: torch.Tensor) -> torch.Tensor:
+            # Expanded shared-query views have overlapping zero-stride storage,
+            # which CUDA pinning cannot write into. Materialize only those views.
+            return (value if value.is_contiguous() else value.contiguous()).pin_memory()
+
+        def pin(value: torch.Tensor | None) -> torch.Tensor | None:
+            return None if value is None else pin_tensor(value)
+
+        def pin_nested(value: Any) -> Any:
+            if isinstance(value, torch.Tensor):
+                return pin_tensor(value)
+            if isinstance(value, dict):
+                return {key: pin_nested(item) for key, item in value.items()}
+            if isinstance(value, tuple):
+                return tuple(pin_nested(item) for item in value)
+            if isinstance(value, list):
+                return [pin_nested(item) for item in value]
+            return value
+
+        return ObservationBatch(
+            obs_coords=pin_tensor(self.obs_coords),
+            obs_values=pin_tensor(self.obs_values),
+            obs_field_ids=pin_tensor(self.obs_field_ids),
+            obs_valid_mask=pin_tensor(self.obs_valid_mask),
+            query_coords=pin_tensor(self.query_coords),
+            query_valid_mask=pin_tensor(self.query_valid_mask),
+            target_fields=pin(self.target_fields),
+            sample_ids=self.sample_ids,
+            obs_indices=pin(self.obs_indices),
+            logical_shapes=self.logical_shapes,
+            metadata=pin_nested(self.metadata),
         )
 
 
@@ -252,6 +293,7 @@ class CoherenceComponentSpec:
     units: str
     differentiable: bool
     required_geometry: str = "none"
+    aggregation: str = "per_sample"
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def validate(self) -> None:
@@ -261,6 +303,8 @@ class CoherenceComponentSpec:
             raise ValueError(f"invalid coherence target_use={self.target_use!r}")
         if self.units not in {"model_units", "physical_units"}:
             raise ValueError(f"invalid coherence units={self.units!r}")
+        if self.aggregation not in {"per_sample", "ensemble"}:
+            raise ValueError(f"invalid coherence aggregation={self.aggregation!r}")
 
 
 @dataclass(frozen=True)
@@ -295,7 +339,7 @@ class CoherenceContext:
 class TermResult:
     """One coherence component result with explicit availability semantics."""
 
-    per_sample_cost: torch.Tensor
+    per_sample_cost: torch.Tensor | None
     scalar_loss: torch.Tensor
     diagnostics: dict[str, Any] = field(default_factory=dict)
     valid_mask: torch.Tensor | None = None
@@ -311,7 +355,7 @@ class FamilyResult:
     """Aggregated result while preserving family-owned component paths."""
 
     component_results: dict[str, TermResult]
-    per_sample_cost: torch.Tensor
+    per_sample_cost: torch.Tensor | None
     scalar_loss: torch.Tensor
     diagnostics: dict[str, Any] = field(default_factory=dict)
 
@@ -325,23 +369,27 @@ class PhysicsProvider(Protocol):
 class CoherenceComponent(Protocol):
     spec: CoherenceComponentSpec
 
-    def loss(
+    def __call__(
         self,
-        prediction: torch.Tensor,
-        batch: ObservationBatch,
-        context: CoherenceContext,
-    ) -> LossBundle: ...
+        generated: torch.Tensor,
+        reference: torch.Tensor,
+    ) -> TermResult: ...
 
 
 class CoherenceFamily(Protocol):
     spec: CoherenceFamilySpec
+    family_name: str
+    target_use: str
+    units: str
 
-    def loss(
+    def __call__(
         self,
-        prediction: torch.Tensor,
-        batch: ObservationBatch,
-        context: CoherenceContext,
-    ) -> LossBundle: ...
+        generated: torch.Tensor,
+        reference: torch.Tensor,
+        *,
+        coordinates: torch.Tensor | None = None,
+        context: CoherenceContext | Mapping[str, Any] | None = None,
+    ) -> FamilyResult: ...
 
 
 class ReconstructionModel(Protocol):

@@ -18,5 +18,12 @@ observation_consistency: {mode: endpoint_smooth, strength: 1.0, sigma: 0.05, sch
 trainable: {scope: full_model}
 optimization: {epochs: 1, batch_size: 1, train_fraction: 0.1, lr: 5.0e-5, weight_decay: 0.0, grad_clip: 1.0, gradient_balance: weighted_sum, config_missing_behavior: error}
 runtime: {seed: 42, device: 'cuda:0', deterministic: true, num_workers: 0}
-evaluation: {split: validation, max_samples: 1, query_points: 1024, generation_steps: 2, seed: 2027}
+evaluation:
+  split: validation
+  max_samples: 1
+  query_points: 1024
+  generation_steps: 2
+  seed: 2027
+  preview: {enabled: true, every_epochs: 1, split: validation, sample_index: 0, query_points: null, generation_steps: 2, seed: 2027, keep_history: false}
+checkpointing: {enabled: true, every_epochs: 1, save_epoch_one: true}
 output: {experiment_name: phase7_ks_global_distribution}

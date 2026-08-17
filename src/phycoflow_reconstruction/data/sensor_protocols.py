@@ -120,7 +120,14 @@ def build_observation_batch(
     *,
     query_points: int | None = None,
     manifest_indices: Mapping[str, Sequence[Sequence[int]]] | None = None,
+    query_indices: Sequence[int] | torch.Tensor | None = None,
 ) -> ObservationBatch:
+    """Build one reproducible sparse-input/query batch.
+
+    The protocol seed drives both random sensor selection and efficient query
+    subsampling. Training loops must offset that seed by the global optimizer
+    step; evaluation intentionally keeps it fixed for comparable metrics.
+    """
     protocol.validate()
     if not samples:
         raise ValueError("cannot build an empty observation batch")
@@ -162,7 +169,15 @@ def build_observation_batch(
             )
         )
 
-        if query_points is None or query_points >= sample.values.shape[0]:
+        if query_indices is not None:
+            query_ids = torch.as_tensor(query_indices, dtype=torch.long)
+            if query_ids.ndim != 1 or query_ids.numel() < 1:
+                raise ValueError("query_indices must be a non-empty one-dimensional sequence")
+            if torch.any(query_ids < 0) or torch.any(query_ids >= sample.values.shape[0]):
+                raise ValueError("query_indices contain an out-of-range point")
+            if torch.unique(query_ids).numel() != query_ids.numel():
+                raise ValueError("query_indices must be unique")
+        elif query_points is None or query_points >= sample.values.shape[0]:
             query_ids = torch.arange(sample.values.shape[0])
         else:
             # Offset seeds by sample while retaining deterministic adapter-independent queries.

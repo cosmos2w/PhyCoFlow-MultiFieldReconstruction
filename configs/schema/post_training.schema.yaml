@@ -16,5 +16,7 @@ notes:
   - Exactly one of coherence or physics is allowed.
   - Source dataset/model/observation sections may be inherited before validation.
   - Both post-training modes require objectives, rollout, observation_consistency, and trainable.
-  - global_distribution.target_use is training_reference or paired_supervised.
+  - All data-driven families declare training_reference or paired_supervised target use.
+  - cross_spectrum and topology require a fixed_shared query policy.
+  - Cross-frequency coherence requires a coherence ensemble batch of at least three.
   - Observation consistency is a rollout constraint, not a coherence family.

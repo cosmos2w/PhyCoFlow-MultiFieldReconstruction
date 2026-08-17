@@ -102,6 +102,7 @@ def fit_reference_bank(
     max_samples: int,
     points_per_sample: int,
     seed: int,
+    fixed_point_indices: torch.Tensor | None = None,
 ) -> ReferenceBank:
     """Fit an empirical bank using deterministic samples from a training dataset."""
     if (
@@ -123,7 +124,16 @@ def fit_reference_bank(
         count = min(int(points_per_sample), sample.values.shape[0])
         if count < 2:
             raise ValueError("reference sample contains fewer than two valid points")
-        indices = torch.randperm(sample.values.shape[0], generator=generator)[:count].sort().values
+        if fixed_point_indices is None:
+            indices = torch.randperm(sample.values.shape[0], generator=generator)[:count].sort().values
+        else:
+            indices = torch.as_tensor(fixed_point_indices, dtype=torch.long).clone()
+            if indices.ndim != 1 or indices.numel() != count:
+                raise ValueError("fixed reference point indices must match points_per_sample")
+            if torch.any(indices < 0) or torch.any(indices >= sample.values.shape[0]):
+                raise ValueError("fixed reference point indices contain an out-of-range point")
+            if torch.unique(indices).numel() != indices.numel():
+                raise ValueError("fixed reference point indices must be unique")
         if count != points_per_sample:
             raise ValueError(
                 f"requested {points_per_sample} bank points from a sample with only {sample.values.shape[0]}"
@@ -169,6 +179,9 @@ def fit_reference_bank(
             "seed": int(seed),
             "max_samples": int(max_samples),
             "points_per_sample": int(points_per_sample),
+            "point_policy": (
+                "random_per_sample" if fixed_point_indices is None else "fixed_shared"
+            ),
         },
     )
     bank.validate()

@@ -17,6 +17,7 @@ COMMON_KEYS = {
     "runtime",
     "output",
     "evaluation",
+    "checkpointing",
     "source_run",
     "source_checkpoint",
     "coherence",
@@ -126,9 +127,27 @@ def _validate_common_sections(config: Mapping[str, Any]) -> None:
                 raise ValueError(f"observations.fields.{name} has an invalid count range")
 
     runtime = _require_mapping(config, "runtime")
-    _reject_unknown(runtime, {"seed", "device", "deterministic", "num_workers"}, "runtime")
+    runtime_keys = {
+        "seed",
+        "device",
+        "deterministic",
+        "num_workers",
+        "progress",
+        "plot_every_steps",
+        "data_strategy",
+        "vram_dataset_threshold_gb",
+    }
+    _reject_unknown(runtime, runtime_keys, "runtime")
     if int(runtime.get("num_workers", 0)) < 0:
         raise ValueError("runtime.num_workers must be non-negative")
+    if "progress" in runtime and not isinstance(runtime["progress"], bool):
+        raise TypeError("runtime.progress must be boolean")
+    if int(runtime.get("plot_every_steps", 10)) < 1:
+        raise ValueError("runtime.plot_every_steps must be positive")
+    if runtime.get("data_strategy", "auto") not in {"auto", "vram", "async_cpu"}:
+        raise ValueError("runtime.data_strategy must be auto, vram, or async_cpu")
+    if float(runtime.get("vram_dataset_threshold_gb", 20.0)) <= 0:
+        raise ValueError("runtime.vram_dataset_threshold_gb must be positive")
     output = _require_mapping(config, "output")
     _reject_unknown(output, {"experiment_name"}, "output")
     if not output.get("experiment_name"):
@@ -138,12 +157,55 @@ def _validate_common_sections(config: Mapping[str, Any]) -> None:
         raise TypeError("evaluation must be a mapping")
     _reject_unknown(
         evaluation,
-        {"split", "max_samples", "query_points", "generation_steps", "seed"},
+        {"split", "max_samples", "query_points", "generation_steps", "seed", "preview"},
         "evaluation",
     )
     for key in ("max_samples", "query_points", "generation_steps"):
         if key in evaluation and int(evaluation[key]) < 1:
             raise ValueError(f"evaluation.{key} must be positive")
+    preview = evaluation.get("preview", {})
+    if not isinstance(preview, Mapping):
+        raise TypeError("evaluation.preview must be a mapping")
+    _reject_unknown(
+        preview,
+        {
+            "enabled",
+            "every_epochs",
+            "split",
+            "sample_index",
+            "query_points",
+            "generation_steps",
+            "seed",
+            "keep_history",
+        },
+        "evaluation.preview",
+    )
+    for key in ("enabled", "keep_history"):
+        if key in preview and not isinstance(preview[key], bool):
+            raise TypeError(f"evaluation.preview.{key} must be boolean")
+    if int(preview.get("every_epochs", 10)) < 1:
+        raise ValueError("evaluation.preview.every_epochs must be positive")
+    if int(preview.get("sample_index", 0)) < 0:
+        raise ValueError("evaluation.preview.sample_index must be non-negative")
+    for key in ("query_points", "generation_steps"):
+        if preview.get(key) is not None and int(preview[key]) < 1:
+            raise ValueError(f"evaluation.preview.{key} must be positive when provided")
+    if preview.get("split", "validation") not in {"train", "validation", "test"}:
+        raise ValueError("evaluation.preview.split is invalid")
+
+    checkpointing = config.get("checkpointing", {})
+    if not isinstance(checkpointing, Mapping):
+        raise TypeError("checkpointing must be a mapping")
+    _reject_unknown(
+        checkpointing,
+        {"enabled", "every_epochs", "save_epoch_one"},
+        "checkpointing",
+    )
+    for key in ("enabled", "save_epoch_one"):
+        if key in checkpointing and not isinstance(checkpointing[key], bool):
+            raise TypeError(f"checkpointing.{key} must be boolean")
+    if int(checkpointing.get("every_epochs", 10)) < 1:
+        raise ValueError("checkpointing.every_epochs must be positive")
 
 
 def _validate_optimization_values(settings: Mapping[str, Any]) -> None:
@@ -251,7 +313,18 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
         }:
             raise ValueError("optimization.gradient_balance must be weighted_sum or config")
         _reject_unknown(
-            config["runtime"], {"seed", "device", "deterministic", "num_workers"}, "runtime"
+            config["runtime"],
+            {
+                "seed",
+                "device",
+                "deterministic",
+                "num_workers",
+                "progress",
+                "plot_every_steps",
+                "data_strategy",
+                "vram_dataset_threshold_gb",
+            },
+            "runtime",
         )
         _reject_unknown(config["output"], {"experiment_name"}, "output")
         return
@@ -287,49 +360,140 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
     if int(schedule.get("start_epoch", 1)) < 1 or int(schedule.get("every_n_steps", 1)) < 1:
         raise ValueError("coherence schedule start_epoch/every_n_steps must be positive")
     compute = coherence.get("compute_budget", {})
-    _reject_unknown(compute, {"batch_size", "point_count"}, "coherence.compute_budget")
+    _reject_unknown(
+        compute,
+        {"batch_size", "point_count", "query_policy", "query_seed"},
+        "coherence.compute_budget",
+    )
     if int(compute.get("batch_size", 1)) < 1 or int(compute.get("point_count", 2)) < 2:
         raise ValueError("coherence compute budget requires batch_size>=1 and point_count>=2")
+    query_policy = compute.get("query_policy", "random_per_sample")
+    if query_policy not in {"random_per_sample", "fixed_shared"}:
+        raise ValueError("coherence.compute_budget.query_policy is invalid")
 
     families = coherence.get("families", {})
-    if set(families) != {"global_distribution"}:
-        raise ValueError("Phase-5 post-training must configure exactly global_distribution")
-    family = families["global_distribution"]
-    _reject_unknown(
-        family,
-        {"enabled", "target_use", "units", "fields", "reference_bank", "components"},
-        "coherence.families.global_distribution",
-    )
-    target_use = family.get("target_use", "training_reference")
-    if target_use not in {"training_reference", "paired_supervised"}:
-        raise ValueError(
-            "global_distribution.target_use must be training_reference or paired_supervised"
-        )
-    reference = family.get("reference_bank", {})
-    _reject_unknown(
-        reference, {"enabled", "path", "max_samples", "points_per_sample", "seed"}, "reference_bank"
-    )
-    if target_use == "training_reference" and not bool(reference.get("enabled", True)):
-        raise ValueError("training_reference coherence requires an enabled reference bank")
-    if target_use == "training_reference":
-        if (
-            int(reference.get("max_samples", 0)) < 1
-            or int(reference.get("points_per_sample", 0)) < 2
-        ):
-            raise ValueError("reference bank requires max_samples>=1 and points_per_sample>=2")
-        if int(reference["points_per_sample"]) != int(compute["point_count"]):
-            raise ValueError("reference-bank and coherence compute point counts must match")
-    components = family.get("components", {})
-    if not components:
-        raise ValueError("global_distribution.components cannot be empty")
-    component_keys = {
-        "self": {"enabled", "weight", "channel_weights"},
-        "mutual": {"enabled", "weight", "pairs", "directions", "seed"},
-        "cross": {"enabled", "weight", "directions", "top_fraction", "seed", "include_axes", "qmc"},
+    supported_families = {"global_distribution", "cross_spectrum", "topology"}
+    if not isinstance(families, Mapping) or not families:
+        raise ValueError("post-training coherence must configure at least one family")
+    unknown_families = sorted(set(families) - supported_families)
+    if unknown_families:
+        raise ValueError(f"unsupported coherence families: {unknown_families}")
+    enabled_families = [
+        name for name, settings in families.items() if bool(settings.get("enabled", True))
+    ]
+    if not enabled_families:
+        raise ValueError("post-training coherence must enable at least one family")
+    if any(name in {"cross_spectrum", "topology"} for name in enabled_families) and (
+        query_policy != "fixed_shared"
+    ):
+        raise ValueError("cross_spectrum/topology coherence requires query_policy=fixed_shared")
+
+    common_family_keys = {
+        "enabled",
+        "weight",
+        "target_use",
+        "units",
+        "fields",
+        "reference_bank",
+        "components",
     }
-    _reject_unknown(components, set(component_keys), "global_distribution.components")
-    for name, settings in components.items():
-        _reject_unknown(settings, component_keys[name], f"global_distribution.components.{name}")
+    reference_keys = {"enabled", "path", "max_samples", "points_per_sample", "seed"}
+    for family_name, family in families.items():
+        if not isinstance(family, Mapping):
+            raise TypeError(f"coherence.families.{family_name} must be a mapping")
+        extra_keys = {
+            "global_distribution": set(),
+            "cross_spectrum": {"pairs", "graph", "eps"},
+            "topology": {"geometry", "filtration"},
+        }[family_name]
+        _reject_unknown(
+            family,
+            common_family_keys | extra_keys,
+            f"coherence.families.{family_name}",
+        )
+        if float(family.get("weight", 1.0)) < 0:
+            raise ValueError(f"coherence family {family_name} weight must be non-negative")
+        target_use = family.get("target_use", "training_reference")
+        if target_use not in {"training_reference", "paired_supervised"}:
+            raise ValueError(f"{family_name}.target_use is invalid")
+        if family.get("units", "model_units") not in {"model_units", "physical_units"}:
+            raise ValueError(f"{family_name}.units is invalid")
+        reference = family.get("reference_bank", {})
+        _reject_unknown(reference, reference_keys, f"{family_name}.reference_bank")
+        if target_use == "training_reference" and bool(family.get("enabled", True)):
+            if not bool(reference.get("enabled", True)):
+                raise ValueError("training_reference coherence requires an enabled reference bank")
+            if (
+                int(reference.get("max_samples", 0)) < 1
+                or int(reference.get("points_per_sample", 0)) < 2
+            ):
+                raise ValueError("reference bank requires max_samples>=1 and points_per_sample>=2")
+            if int(reference["points_per_sample"]) != int(compute["point_count"]):
+                raise ValueError("reference-bank and coherence compute point counts must match")
+
+        components = family.get("components", {})
+        if not isinstance(components, Mapping) or not components:
+            raise ValueError(f"{family_name}.components cannot be empty")
+        component_keys = {
+            "global_distribution": {
+                "self": {"enabled", "weight", "channel_weights"},
+                "mutual": {"enabled", "weight", "pairs", "directions", "seed"},
+                "cross": {
+                    "enabled", "weight", "directions", "top_fraction", "seed",
+                    "include_axes", "qmc",
+                },
+            },
+            "cross_spectrum": {
+                "same_frequency": {"enabled", "weight"},
+                "cross_frequency": {"enabled", "weight"},
+                "band_energy": {"enabled", "weight"},
+            },
+            "topology": {
+                "self": {"enabled", "weight"},
+                "mutual": {"enabled", "weight", "pairs", "lines", "theta_min_degrees"},
+            },
+        }[family_name]
+        _reject_unknown(components, set(component_keys), f"{family_name}.components")
+        for component_name, settings in components.items():
+            _reject_unknown(
+                settings,
+                component_keys[component_name],
+                f"{family_name}.components.{component_name}",
+            )
+            if float(settings.get("weight", 1.0)) < 0:
+                raise ValueError("coherence component weights must be non-negative")
+
+        if family_name == "cross_spectrum":
+            graph = family.get("graph", {})
+            _reject_unknown(
+                graph,
+                {"k_neighbors", "sigma", "num_modes", "exclude_zero", "bands"},
+                "cross_spectrum.graph",
+            )
+            if int(graph.get("k_neighbors", 16)) < 1 or int(graph.get("num_modes", 64)) < 1:
+                raise ValueError("cross_spectrum graph sizes must be positive")
+            cross_frequency = components.get("cross_frequency", {})
+            if bool(cross_frequency.get("enabled", True)) and int(compute["batch_size"]) < 3:
+                raise ValueError("cross-frequency coherence requires compute batch_size>=3")
+            same_frequency = components.get("same_frequency", {})
+            if bool(same_frequency.get("enabled", True)) and int(compute["batch_size"]) < 2:
+                raise ValueError("same-frequency coherence requires compute batch_size>=2")
+        elif family_name == "topology":
+            geometry = family.get("geometry", {})
+            _reject_unknown(
+                geometry,
+                {"grid_shape", "axes", "neighbors", "power", "periodic"},
+                "topology.geometry",
+            )
+            filtration = family.get("filtration", {})
+            _reject_unknown(
+                filtration,
+                {"quantiles", "dimensions", "directions", "sharpness", "smoothing_sigma"},
+                "topology.filtration",
+            )
+
+    if int(config["optimization"].get("batch_size", 1)) < int(compute["batch_size"]):
+        raise ValueError("optimization.batch_size must be >= coherence.compute_budget.batch_size")
 
     rollout = config["rollout"]
     _reject_unknown(rollout, {"steps", "solver"}, "rollout")
@@ -373,11 +537,22 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
     if optimization.get("config_missing_behavior", "error") not in {"error", "weighted_sum"}:
         raise ValueError("optimization.config_missing_behavior must be error or weighted_sum")
     _reject_unknown(
-        config["runtime"], {"seed", "device", "deterministic", "num_workers"}, "runtime"
+        config["runtime"],
+        {
+            "seed",
+            "device",
+            "deterministic",
+            "num_workers",
+            "progress",
+            "plot_every_steps",
+            "data_strategy",
+            "vram_dataset_threshold_gb",
+        },
+        "runtime",
     )
     _reject_unknown(
         config.get("evaluation", {}),
-        {"split", "max_samples", "query_points", "generation_steps", "seed"},
+        {"split", "max_samples", "query_points", "generation_steps", "seed", "preview"},
         "evaluation",
     )
     _reject_unknown(config["output"], {"experiment_name"}, "output")
@@ -409,7 +584,18 @@ def _validate_direct_physics(config: Mapping[str, Any]) -> None:
     )
     _validate_optimization_values(config["optimization"])
     _reject_unknown(
-        config["runtime"], {"seed", "device", "deterministic", "num_workers"}, "runtime"
+        config["runtime"],
+        {
+            "seed",
+            "device",
+            "deterministic",
+            "num_workers",
+            "progress",
+            "plot_every_steps",
+            "data_strategy",
+            "vram_dataset_threshold_gb",
+        },
+        "runtime",
     )
     _reject_unknown(config["output"], {"experiment_name"}, "output")
 

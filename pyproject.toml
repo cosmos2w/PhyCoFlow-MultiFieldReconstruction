@@ -9,6 +9,7 @@ description = "Sparse multi-field physical-state reconstruction research framewo
 requires-python = ">=3.10"
 dependencies = [
   "numpy>=1.24",
+  "scipy>=1.10",
   "torch>=2.1",
   "h5py>=3.9",
   "PyYAML>=6.0",

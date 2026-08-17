@@ -1,4 +1,4 @@
-"""Coherence-family construction and reserved extension declarations."""
+"""Coherence-family construction."""
 
 from __future__ import annotations
 
@@ -8,12 +8,11 @@ from typing import Any
 from ..contracts import DataSpec
 from ..data.normalization import FieldNormalizer
 from ..registry import COHERENCE_FAMILY_REGISTRY
+from .families.cross_spectrum import CrossSpectrumFamily
 from .families.global_distribution import GlobalDistributionFamily
+from .families.topology import TopologyFamily
 
-RESERVED_FAMILIES = {
-    "cross_spectrum": "Scientific definitions pending co-worker contribution.",
-    "topology": "Scientific definitions pending co-worker contribution.",
-}
+RESERVED_FAMILIES: dict[str, str] = {}
 
 
 def _register_defaults() -> None:
@@ -31,6 +30,33 @@ def _register_defaults() -> None:
                 "license": "repository-local scientific implementation",
             },
         )
+    if "cross_spectrum" not in COHERENCE_FAMILY_REGISTRY.names():
+        COHERENCE_FAMILY_REGISTRY.register(
+            "cross_spectrum",
+            CrossSpectrumFamily,
+            version="1",
+            metadata={
+                "components": (
+                    "same_frequency.magnitude_squared",
+                    "cross_frequency.band_energy_coupling",
+                    "band_energy.log_power",
+                ),
+                "aggregation": "ensemble",
+            },
+        )
+    if "topology" not in COHERENCE_FAMILY_REGISTRY.names():
+        COHERENCE_FAMILY_REGISTRY.register(
+            "topology",
+            TopologyFamily,
+            version="1",
+            metadata={
+                "components": (
+                    "self.betti_curves",
+                    "mutual.fibered_betti_curves",
+                ),
+                "aggregation": "per_sample",
+            },
+        )
 
 
 def build_coherence_family(
@@ -41,10 +67,6 @@ def build_coherence_family(
 ):
     _register_defaults()
     normalized = str(name).strip().lower()
-    if normalized in RESERVED_FAMILIES:
-        raise NotImplementedError(
-            f"coherence family {normalized!r} is reserved: {RESERVED_FAMILIES[normalized]}"
-        )
     return COHERENCE_FAMILY_REGISTRY.build(
         normalized,
         config=config,

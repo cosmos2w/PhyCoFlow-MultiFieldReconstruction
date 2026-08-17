@@ -16,10 +16,31 @@ runtime:
   seed: 42
   device: cuda:0
   deterministic: true
-  num_workers: 0
+  # Used only by the >=20 GB compact asynchronous fallback. The resident path
+  # performs no DataLoader multiprocessing inside the training loop.
+  num_workers: 4
+  progress: true
+  plot_every_steps: 10
+  # auto keeps HDF5 fields in VRAM below this logical, uncompressed size.
+  data_strategy: auto
+  vram_dataset_threshold_gb: 20
 
 evaluation:
   generation_steps: 8
+  preview:
+    enabled: true
+    every_epochs: 25
+    split: validation
+    sample_index: 0
+    query_points: null
+    generation_steps: 8
+    seed: 2027
+    keep_history: false
+
+checkpointing:
+  enabled: true
+  every_epochs: 5
+  save_epoch_one: true
 
 output:
   experiment_name: replace_by_model_config

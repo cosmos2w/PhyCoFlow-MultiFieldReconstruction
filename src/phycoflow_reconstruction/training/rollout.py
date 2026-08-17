@@ -19,6 +19,8 @@ def subset_query_batch(
     point_count: int,
     *,
     generator: torch.Generator,
+    indices: torch.Tensor | None = None,
+    shared: bool = False,
 ) -> ObservationBatch:
     """Select identical query/target entries while retaining original point IDs."""
     if point_count >= batch.query_coords.shape[1]:
@@ -26,16 +28,31 @@ def subset_query_batch(
     if point_count < 2:
         raise ValueError("coherence query subsets require at least two points")
     batch_size, query_count, coordinate_dim = batch.query_coords.shape
-    selected = torch.stack(
-        [
-            torch.randperm(query_count, device=batch.query_coords.device, generator=generator)[
-                :point_count
+    if indices is not None:
+        selected_once = torch.as_tensor(
+            indices, device=batch.query_coords.device, dtype=torch.long
+        )
+        if selected_once.ndim != 1 or selected_once.numel() != point_count:
+            raise ValueError("explicit query indices must be one-dimensional and match point_count")
+        if torch.any(selected_once < 0) or torch.any(selected_once >= query_count):
+            raise ValueError("explicit query indices contain an out-of-range position")
+        selected = selected_once[None, :].expand(batch_size, -1)
+    elif shared:
+        selected_once = torch.randperm(
+            query_count, device=batch.query_coords.device, generator=generator
+        )[:point_count].sort().values
+        selected = selected_once[None, :].expand(batch_size, -1)
+    else:
+        selected = torch.stack(
+            [
+                torch.randperm(query_count, device=batch.query_coords.device, generator=generator)[
+                    :point_count
+                ]
+                .sort()
+                .values
+                for _ in range(batch_size)
             ]
-            .sort()
-            .values
-            for _ in range(batch_size)
-        ]
-    )
+        )
     coordinate_indices = selected.unsqueeze(-1).expand(-1, -1, coordinate_dim)
     query_coords = torch.gather(batch.query_coords, 1, coordinate_indices)
     query_mask = torch.gather(batch.query_valid_mask, 1, selected)

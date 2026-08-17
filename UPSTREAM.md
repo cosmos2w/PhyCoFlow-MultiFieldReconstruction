@@ -5,7 +5,7 @@ library dependency, a clean-room local implementation guided by publications
 and public interfaces, or a version-locked extraction from this repository's
 own historical demo. No upstream repository is vendored as a monolith.
 
-The repository revisions below were reviewed on 2026-08-14. A future upgrade
+The repository revisions below were reviewed on 2026-08-16. A future upgrade
 must update this file and rerun model-contract and real-case integration checks.
 
 | Reference | Reviewed revision | License | Use in this project |
@@ -15,6 +15,8 @@ must update this file and rerun model-contract and real-case integration checks.
 | [DiffusionPDE](https://github.com/jhhuangchloe/DiffusionPDE) | `1e2bc8b9e312f3a936630a30d2f49aedabf0cea7` | CC BY-NC-SA 4.0 | Conceptual partial-observation reference only. No source was copied; the compact value/mask-conditioned denoiser is a clean local implementation. |
 | [DeepXDE](https://github.com/lululxvi/deepxde) | `91bda9aafb8b1c1ea7e932c232ad4880a088f7f3` | LGPL-2.1 | Conceptual API reference for PINN and DeepONet. It is not a dependency and no code was copied. |
 | [Meta Flow Matching](https://github.com/facebookresearch/flow_matching) | `11568d37f8d5a080e12aa7b5305d9c35ae07d136` | CC BY-NC 4.0 | Mathematical reference only. The local 1-RF interpolation, Euler integration, and losses are independently implemented. |
+| [PhyCoFlowModel Cross-Spectral Coherence](https://github.com/ctrl-is/PhyCoFlowModel-Cross-Spectral-Coherence) | `add1b1a6422c` | MIT | Scientific/source reference for the normalized graph-Laplacian basis, same-frequency coherence, and cross-band energy-coupling estimators. The integrated adapter adds project contracts, fixed-geometry hashes, vectorization, validation, and artifacts. |
+| [PhyCoFlow topology development](https://github.com/jachen25/PhyCoFlow_dev/tree/main/src) | `ab49ea37a` | Project-supervised contribution | Scientific/source reference for exact-forward straight-through Betti curves and fibered multi-field filtrations. The integrated v1 extracts the active definitions into the common geometry/runtime contract and excludes case physics and retired modes. |
 
 ## Repository-local compatibility source
 

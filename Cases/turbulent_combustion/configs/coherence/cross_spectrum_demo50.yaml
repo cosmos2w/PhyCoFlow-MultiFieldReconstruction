@@ -1,0 +1,31 @@
+coherence:
+  schedule:
+    start_epoch: 1
+    every_n_steps: 1
+    weight_warmup_epochs: 0
+    interval_rescale: false
+  compute_budget:
+    batch_size: 4
+    point_count: 4096
+    query_policy: fixed_shared
+    query_seed: 100045
+  families:
+    cross_spectrum:
+      enabled: true
+      weight: 1.0
+      target_use: paired_supervised
+      units: model_units
+      fields: [CO, T, U_0, U_1, p]
+      pairs: [[CO, T], [T, U_0], [T, U_1], [U_0, U_1]]
+      reference_bank: {enabled: false}
+      graph:
+        k_neighbors: 16
+        sigma: null
+        num_modes: 48
+        exclude_zero: true
+        bands: [low, mid, high]
+      eps: 1.0e-8
+      components:
+        same_frequency: {enabled: true, weight: 1.0}
+        cross_frequency: {enabled: true, weight: 1.0}
+        band_energy: {enabled: false, weight: 0.0}

@@ -34,3 +34,10 @@ dist/
 !benchmarks/**/*.json
 !benchmarks/**/*.yaml
 !figures/generated/**/*.svg
+
+# Researcher-specific experiment configs stay local. Canonical base, sensor,
+# post-training, direct-training, and template configs remain versioned.
+Cases/**/configs/_experiments/
+
+ProjectCreate.md
+UPSTREAM.md

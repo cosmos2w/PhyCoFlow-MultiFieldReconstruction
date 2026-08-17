@@ -57,6 +57,8 @@ evaluation:
   query_points: 512
   generation_steps: 2
   seed: 2027
+  preview: {enabled: true, every_epochs: 10, split: validation, sample_index: 0, query_points: null, generation_steps: 2, seed: 2027, keep_history: false}
+
+checkpointing: {enabled: true, every_epochs: 5, save_epoch_one: true}
 
 output: {experiment_name: phase6_unresolved}
-

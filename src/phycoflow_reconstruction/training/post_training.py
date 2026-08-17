@@ -8,6 +8,7 @@ explicit for every route.
 
 from __future__ import annotations
 
+import json
 import math
 from collections.abc import Mapping
 from dataclasses import asdict
@@ -16,17 +17,27 @@ from time import perf_counter
 from typing import Any
 
 import torch
-from torch.utils.data import DataLoader
 
 from ..coherence import ReferenceBank, build_enabled_families, fit_reference_bank
 from ..contracts import FamilyResult, ObservationBatch
 from ..data.factory import FieldDataset, open_field_dataset
 from ..data.manifest import dataset_fingerprint, manifest_from_batch
 from ..data.sensor_protocols import SensorProtocol, build_observation_batch
+from ..data.training_batches import (
+    build_training_batch_source,
+    dataset_field_bytes,
+    fixed_query_indices,
+)
 from ..evaluation import reconstruction_metrics
 from ..utils.reproducibility import seed_everything
-from .common import collate_field_samples, sensor_protocol_from_config
+from .checkpointing import PeriodicCheckpointManager
+from .common import (
+    iter_unique_batch_indices,
+    sensor_protocol_from_config,
+)
 from .gradient_balance import data_only_update, two_objective_update
+from .monitoring import TrainingMonitor
+from .preview import TrainingReconstructionPreview
 from .rollout import differentiable_reconstruction, subset_query_batch
 from .run_store import (
     RunStore,
@@ -133,11 +144,37 @@ def _gather_prediction(
     return torch.stack(gathered)
 
 
+def _requires_fixed_geometry(family) -> bool:
+    return any(component.required_geometry != "none" for component in family.spec.components)
+
+
+def _validate_reference_geometry(
+    family_name: str,
+    family,
+    bank: ReferenceBank,
+    query_ids: torch.Tensor | None,
+    *,
+    step: int,
+    batch_size: int,
+) -> None:
+    if not _requires_fixed_geometry(family):
+        return
+    if query_ids is None:
+        raise TypeError(f"{family_name} requires serialized query indices")
+    bank_rows = [
+        (int(step) * int(batch_size) + offset) % bank.values.shape[0]
+        for offset in range(batch_size)
+    ]
+    expected = bank.point_indices[bank_rows]
+    if not torch.equal(expected, query_ids.detach().cpu()):
+        raise ValueError(f"{family_name} training references do not share prediction geometry")
+
+
 def _coherence_objective(
     model,
     batch: ObservationBatch,
     family,
-    bank: ReferenceBank | None,
+    bank: ReferenceBank | Mapping[str, ReferenceBank | None] | None,
     config: Mapping[str, Any],
     *,
     step: int,
@@ -145,13 +182,12 @@ def _coherence_objective(
 ) -> tuple[FamilyResult, tuple[str, ...]]:
     compute = config["coherence"]["compute_budget"]
     selected = _slice_batch(batch, int(compute["batch_size"]))
-    if family.target_use == "training_reference":
-        # Executable leakage barrier: the target is removed before either
-        # query subsampling or the differentiable rollout sees this batch.
-        selected = _without_target(selected)
     complete = selected
     selected = subset_query_batch(complete, int(compute["point_count"]), generator=generator)
+    # Dense targets are reference payloads only. They never enter a coherence
+    # rollout, including explicitly paired-supervised structural losses.
     model_batch = complete if model.capabilities.structured_grid_required else selected
+    model_batch = _without_target(model_batch)
     prediction = differentiable_reconstruction(
         model,
         model_batch,
@@ -162,21 +198,75 @@ def _coherence_objective(
     )
     if model.capabilities.structured_grid_required:
         prediction = _gather_prediction(prediction, complete, selected)
-    if family.target_use == "paired_supervised":
-        if selected.target_fields is None:
-            raise ValueError("paired_supervised coherence requires the dense training target")
-        reference, reference_ids = selected.target_fields, selected.sample_ids
-    else:
-        if selected.target_fields is not None:
-            raise AssertionError("training_reference coherence received a paired target")
-        if bank is None:
-            raise ValueError("training_reference coherence requires a fitted reference bank")
-        reference, reference_ids = bank.select(
-            prediction.shape[0], step=step, device=prediction.device, dtype=prediction.dtype
+    families = dict(family) if isinstance(family, Mapping) else {family.family_name: family}
+    banks = dict(bank) if isinstance(bank, Mapping) else {
+        name: bank for name in families
+    }
+    component_results = {}
+    family_results: dict[str, FamilyResult] = {}
+    reference_ids_all: list[str] = []
+    scalar_loss = prediction.sum() * 0.0
+    per_sample_parts = []
+    for family_name, family_module in families.items():
+        family_bank = banks.get(family_name)
+        if family_module.target_use == "paired_supervised":
+            if selected.target_fields is None:
+                raise ValueError("paired_supervised coherence requires the dense training target")
+            reference, reference_ids = selected.target_fields, selected.sample_ids
+        else:
+            if family_bank is None:
+                raise ValueError(
+                    f"training_reference coherence family {family_name} requires a reference bank"
+                )
+            reference, reference_ids = family_bank.select(
+                prediction.shape[0], step=step, device=prediction.device, dtype=prediction.dtype
+            )
+            if reference.shape[1] != prediction.shape[1]:
+                raise ValueError("reference-bank and coherence point counts differ")
+            query_ids = selected.metadata.get("query_indices")
+            _validate_reference_geometry(
+                family_name,
+                family_module,
+                family_bank,
+                query_ids if isinstance(query_ids, torch.Tensor) else None,
+                step=step,
+                batch_size=prediction.shape[0],
+            )
+        result = family_module(
+            prediction,
+            reference,
+            coordinates=selected.query_coords,
+            context={"sample_ids": selected.sample_ids, "reference_ids": reference_ids},
         )
-        if reference.shape[1] != prediction.shape[1]:
-            raise ValueError("reference-bank and coherence point counts differ")
-    return family(prediction, reference), reference_ids
+        family_results[family_name] = result
+        component_results.update(result.component_results)
+        weight = float(getattr(family_module, "family_weight", 1.0))
+        scalar_loss = scalar_loss + weight * result.scalar_loss
+        if result.per_sample_cost is not None:
+            per_sample_parts.append(weight * result.per_sample_cost)
+        reference_ids_all.extend(reference_ids)
+    per_sample = (
+        torch.stack(per_sample_parts).sum(dim=0)
+        if len(per_sample_parts) == len(families)
+        else None
+    )
+    combined = FamilyResult(
+        component_results=component_results,
+        per_sample_cost=per_sample,
+        scalar_loss=scalar_loss,
+        diagnostics={
+            "family": "combined" if len(families) > 1 else next(iter(families)),
+            "families": {
+                name: {
+                    "weight": float(getattr(families[name], "family_weight", 1.0)),
+                    "scalar_loss": result.scalar_loss.detach(),
+                    **result.diagnostics,
+                }
+                for name, result in family_results.items()
+            },
+        },
+    )
+    return combined, tuple(dict.fromkeys(reference_ids_all))
 
 
 def _component_scalars(result: FamilyResult) -> dict[str, float]:
@@ -229,13 +319,35 @@ def _build_comparison_batch(
     config: Mapping[str, Any],
 ) -> ObservationBatch:
     point_count = int(
-        config.get("evaluation", {}).get("query_points", config["model"].get("query_points", 4096))
+        config.get("evaluation", {}).get(
+            "query_points", config["coherence"]["compute_budget"]["point_count"]
+        )
     )
     evaluation = config.get("evaluation", {})
+    compute = config["coherence"]["compute_budget"]
+    explicit_indices = None
+    if compute.get("query_policy", "random_per_sample") == "fixed_shared":
+        explicit_indices = fixed_query_indices(
+            batch.query_coords.shape[1],
+            point_count,
+            seed=int(
+                compute.get(
+                    "query_seed",
+                    config["observations"].get("seed", config["runtime"].get("seed", 42))
+                    + 100_003,
+                )
+            ),
+        )
     generator = torch.Generator(device=batch.query_coords.device).manual_seed(
         int(evaluation.get("seed", 2027)) + 100_003
     )
-    return subset_query_batch(batch, point_count, generator=generator)
+    return subset_query_batch(
+        batch,
+        point_count,
+        generator=generator,
+        indices=explicit_indices,
+        shared=explicit_indices is not None,
+    )
 
 
 def _evaluate(
@@ -243,7 +355,7 @@ def _evaluate(
     complete_batch: ObservationBatch,
     comparison_batch: ObservationBatch,
     family,
-    bank: ReferenceBank | None,
+    bank: ReferenceBank | Mapping[str, ReferenceBank | None] | None,
     field_names: tuple[str, ...],
     config: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -253,9 +365,7 @@ def _evaluate(
     model_batch = (
         complete_batch if model.capabilities.structured_grid_required else comparison_batch
     )
-    inference_batch = (
-        _without_target(model_batch) if family.target_use == "training_reference" else model_batch
-    )
+    inference_batch = _without_target(model_batch)
     evaluation = config.get("evaluation", {})
     evaluation_seed = int(evaluation.get("seed", 2027))
     generator = torch.Generator(device=complete_batch.query_coords.device).manual_seed(
@@ -286,24 +396,74 @@ def _evaluate(
             torch.cuda.synchronize(complete_batch.query_coords.device)
         inference_seconds = perf_counter() - inference_started
         metrics = reconstruction_metrics(prediction, target, comparison_batch, field_names)
-        if family.target_use == "paired_supervised":
-            reference, reference_ids = target, comparison_batch.sample_ids
-        else:
-            if inference_batch.target_fields is not None:
-                raise AssertionError("target-free inference received a dense target")
-            if bank is None:
-                raise ValueError("target-free evaluation requires the training reference bank")
-            reference, reference_ids = bank.select(
-                prediction.shape[0],
-                step=0,
-                device=prediction.device,
-                dtype=prediction.dtype,
-            )
-            if reference.shape[1] != prediction.shape[1]:
-                raise ValueError(
-                    "evaluation.query_points must equal reference_bank.points_per_sample"
+        families = dict(family) if isinstance(family, Mapping) else {family.family_name: family}
+        banks = dict(bank) if isinstance(bank, Mapping) else {name: bank for name in families}
+        family_payloads = {}
+        combined_components = {}
+        combined_total = prediction.sum() * 0.0
+        all_reference_ids: list[str] = []
+        for family_name, family_module in families.items():
+            if family_module.target_use == "paired_supervised":
+                reference, reference_ids = target, comparison_batch.sample_ids
+            else:
+                family_bank = banks.get(family_name)
+                if family_bank is None:
+                    raise ValueError(
+                        f"target-free evaluation for {family_name} requires a training bank"
+                    )
+                reference, reference_ids = family_bank.select(
+                    prediction.shape[0],
+                    step=0,
+                    device=prediction.device,
+                    dtype=prediction.dtype,
                 )
-        family_result = family(prediction, reference)
+                if reference.shape[1] != prediction.shape[1]:
+                    raise ValueError(
+                        "evaluation.query_points must equal reference_bank.points_per_sample"
+                    )
+                query_ids = comparison_batch.metadata.get("query_indices")
+                _validate_reference_geometry(
+                    family_name,
+                    family_module,
+                    family_bank,
+                    query_ids if isinstance(query_ids, torch.Tensor) else None,
+                    step=0,
+                    batch_size=prediction.shape[0],
+                )
+            family_result = family_module(
+                prediction,
+                reference,
+                coordinates=comparison_batch.query_coords,
+                context={
+                    "sample_ids": comparison_batch.sample_ids,
+                    "reference_ids": reference_ids,
+                },
+            )
+            weight = float(getattr(family_module, "family_weight", 1.0))
+            combined_total = combined_total + weight * family_result.scalar_loss
+            combined_components.update(_component_scalars(family_result))
+            all_reference_ids.extend(reference_ids)
+            family_payloads[family_name] = {
+                "target_use": family_module.target_use,
+                "units": family_module.units,
+                "weight": weight,
+                "total": float(family_result.scalar_loss.cpu()),
+                "weighted_total": float((weight * family_result.scalar_loss).cpu()),
+                "components": _component_scalars(family_result),
+                "reference_ids": list(reference_ids),
+                "diagnostics": family_result.diagnostics,
+            }
+        target_uses = {module.target_use for module in families.values()}
+        units = {module.units for module in families.values()}
+        coherence_payload = {
+            "family": "combined" if len(families) > 1 else next(iter(families)),
+            "target_use": next(iter(target_uses)) if len(target_uses) == 1 else "mixed",
+            "units": next(iter(units)) if len(units) == 1 else "mixed",
+            "total": float(combined_total.cpu()),
+            "components": combined_components,
+            "reference_ids": list(dict.fromkeys(all_reference_ids)),
+            "families": family_payloads,
+        }
     return {
         **metrics,
         "inference": {
@@ -312,14 +472,7 @@ def _evaluate(
             "points_per_sample": prediction.shape[1],
             "generation_steps": int(evaluation.get("generation_steps", 2)),
         },
-        "coherence": {
-            "family": "global_distribution",
-            "target_use": family.target_use,
-            "units": family.units,
-            "total": float(family_result.scalar_loss.cpu()),
-            "components": _component_scalars(family_result),
-            "reference_ids": list(reference_ids),
-        },
+        "coherence": coherence_payload,
         "sample_ids": list(comparison_batch.sample_ids),
     }
 
@@ -329,8 +482,9 @@ def _reference_bank(
     dataset: FieldDataset,
     *,
     existing_path: Path | None = None,
+    family_name: str = "global_distribution",
 ) -> ReferenceBank | None:
-    family = config["coherence"]["families"]["global_distribution"]
+    family = config["coherence"]["families"][family_name]
     if family.get("target_use") != "training_reference":
         return None
     settings = family["reference_bank"]
@@ -342,11 +496,28 @@ def _reference_bank(
             raise ValueError("reference_bank.path must be resolved by the case launcher")
         bank = ReferenceBank.load(source)
     else:
+        compute = config["coherence"]["compute_budget"]
+        fixed_points = None
+        if compute.get("query_policy", "random_per_sample") == "fixed_shared":
+            fixed_points = fixed_query_indices(
+                math.prod(dataset.data_spec.logical_shape),
+                int(settings["points_per_sample"]),
+                seed=int(
+                    compute.get(
+                        "query_seed",
+                        config["observations"].get(
+                            "seed", config["runtime"].get("seed", 42)
+                        )
+                        + 100_003,
+                    )
+                ),
+            )
         bank = fit_reference_bank(
             dataset,
             max_samples=int(settings.get("max_samples", 64)),
             points_per_sample=int(settings["points_per_sample"]),
             seed=int(settings.get("seed", 1234)),
+            fixed_point_indices=fixed_points,
         )
     if bank.metadata["dataset_fingerprint"] != dataset_fingerprint(dataset.path):
         raise ValueError("reference bank belongs to another dataset payload")
@@ -414,14 +585,47 @@ def run_post_training(
         if device.type == "cuda" and checkpoint["rng_state"].get("torch_cuda"):
             torch.cuda.set_rng_state_all(checkpoint["rng_state"]["torch_cuda"])
 
-    family = build_enabled_families(
+    families = build_enabled_families(
         config["coherence"], train_dataset.data_spec, train_dataset.normalizer
-    )["global_distribution"].to(device)
-    bank_path = store.run_dir / "artifacts" / "coherence_reference.pt"
-    bank = _reference_bank(config, train_dataset, existing_path=bank_path if resume else None)
-    if bank is not None and not bank_path.exists():
-        bank.save(bank_path)
-    family_path = store.save_artifact("global_distribution_family.pt", family.state_artifact())
+    )
+    families = {name: family.to(device) for name, family in families.items()}
+    banks: dict[str, ReferenceBank | None] = {}
+    for family_name in families:
+        artifact_name = (
+            "coherence_reference.pt"
+            if family_name == "global_distribution"
+            else f"coherence_reference_{family_name}.pt"
+        )
+        bank_path = store.run_dir / "artifacts" / artifact_name
+        banks[family_name] = _reference_bank(
+            config,
+            train_dataset,
+            existing_path=bank_path if resume else None,
+            family_name=family_name,
+        )
+        if banks[family_name] is not None and not bank_path.exists():
+            banks[family_name].save(bank_path)
+    family_paths = {
+        name: store.run_dir / "artifacts" / f"{name}_family.pt" for name in families
+    }
+    if resume is not None:
+        manifest = json.loads((store.run_dir / "run_manifest.json").read_text())
+        expected_hashes = manifest.get("coherence_family_state_sha256s", {})
+        for name, family in families.items():
+            path = family_paths[name]
+            if not path.is_file():
+                raise FileNotFoundError(f"resume is missing coherence family artifact: {path}")
+            if expected_hashes.get(name) and file_sha256(path) != expected_hashes[name]:
+                raise ValueError(f"resume coherence family artifact hash mismatch: {name}")
+            artifact = torch.load(path, map_location=device, weights_only=True)
+            family.load_state_artifact(artifact)
+            if checkpoint is not None and name in checkpoint.get("family_states", {}):
+                family.load_state_dict(checkpoint["family_states"][name])
+    else:
+        family_paths = {
+            name: store.save_artifact(f"{name}_family.pt", family.state_artifact())
+            for name, family in families.items()
+        }
     store.save_artifact("normalization.pt", train_dataset.normalizer.state_dict())
     store.write_json("artifacts/trainable_parameters.json", {"names": list(trainable_names)})
     store.write_json(
@@ -451,8 +655,23 @@ def run_post_training(
         ),
         dataset_path=str(train_dataset.path),
         dataset_fingerprint=dataset_fingerprint(train_dataset.path),
-        reference_bank_sha256=None if bank is None else bank.digest(),
-        coherence_family_state_sha256=file_sha256(family_path),
+        reference_bank_sha256=(
+            None
+            if banks.get("global_distribution") is None
+            else banks["global_distribution"].digest()
+        ),
+        reference_bank_sha256s={
+            name: None if bank is None else bank.digest() for name, bank in banks.items()
+        },
+        coherence_family_state_sha256=(
+            file_sha256(family_paths["global_distribution"])
+            if set(family_paths) == {"global_distribution"}
+            else None
+        ),
+        coherence_family_state_sha256s={
+            name: file_sha256(path) for name, path in family_paths.items()
+        },
+        coherence_families=list(families),
     )
 
     evaluation_split = config.get("evaluation", {}).get("split", "validation")
@@ -477,13 +696,24 @@ def run_post_training(
             model,
             evaluation_batch,
             comparison_batch,
-            family,
-            bank,
+            families,
+            banks,
             train_dataset.field_names,
             config,
         )
         before_metrics["sensor_manifest_sha256"] = evaluation_manifest.digest()
         store.write_json("evaluation/before.json", before_metrics)
+    # Evaluation initializes geometry-dependent fixed artifacts. Persist those
+    # exact tensors rather than the empty lazy-construction placeholders.
+    family_paths = {
+        name: store.save_artifact(f"{name}_family.pt", family.state_artifact())
+        for name, family in families.items()
+    }
+    store.update_manifest(
+        coherence_family_state_sha256s={
+            name: file_sha256(path) for name, path in family_paths.items()
+        }
+    )
 
     batch_size = int(config["optimization"].get("batch_size", 1))
     epochs = int(config["optimization"].get("epochs", 1))
@@ -500,18 +730,28 @@ def run_post_training(
     index_generator = torch.Generator(device="cpu").manual_seed(seed + 17)
     if checkpoint is not None:
         index_generator.set_state(checkpoint["rng_state"]["index_generator"])
-    sampled_indices = torch.randint(
-        0,
+    sampled_indices = iter_unique_batch_indices(
         len(train_dataset),
-        (final_step - start_step, batch_size),
+        final_step - start_step,
+        batch_size,
         generator=index_generator,
-    ).tolist()
-    loader = DataLoader(
+    )
+    query_points = (
+        None
+        if model.capabilities.structured_grid_required
+        else int(config["coherence"]["compute_budget"]["point_count"])
+    )
+    batch_source = build_training_batch_source(
         train_dataset,
-        batch_sampler=sampled_indices,
-        num_workers=int(config["runtime"].get("num_workers", 0)),
-        collate_fn=collate_field_samples,
-        persistent_workers=bool(config["runtime"].get("num_workers", 0)),
+        sampled_indices,
+        config,
+        query_points=query_points,
+        device=device,
+        start_step=start_step,
+    )
+    store.update_manifest(
+        training_data_strategy=batch_source.strategy,
+        training_dataset_logical_bytes=dataset_field_bytes(train_dataset),
     )
     store.set_status("running", start_step=start_step, final_step=final_step)
     if device.type == "cuda":
@@ -519,21 +759,31 @@ def run_post_training(
         torch.cuda.synchronize(device)
     training_started = perf_counter()
     model.train()
+    monitor = TrainingMonitor(
+        store.run_dir,
+        start_step=start_step,
+        final_step=final_step,
+        configured_steps=configured_steps,
+        steps_per_epoch=steps_per_epoch,
+        description=f"post:{config['model']['name']}",
+        enabled=bool(config["runtime"].get("progress", True)),
+        plot_every_steps=int(config["runtime"].get("plot_every_steps", 10)),
+    )
+    preview = TrainingReconstructionPreview(
+        config,
+        store=store,
+        steps_per_epoch=steps_per_epoch,
+        device=device,
+    )
+    checkpoint_manager = PeriodicCheckpointManager(
+        config,
+        store=store,
+        steps_per_epoch=steps_per_epoch,
+    )
     last_result = None
-    for offset, samples in enumerate(loader):
+    for offset, batch in enumerate(batch_source):
         global_step = start_step + offset
         epoch = global_step // steps_per_epoch + 1
-        step_protocol = SensorProtocol(
-            **{**protocol.to_dict(), "seed": protocol.seed + global_step}
-        )
-        query_points = (
-            None
-            if model.capabilities.structured_grid_required
-            else config["model"].get("query_points")
-        )
-        batch = build_observation_batch(samples, step_protocol, query_points=query_points).to(
-            device
-        )
         model.train()
         data_loss = model.training_loss(batch).total
         every = int(config["coherence"]["schedule"].get("every_n_steps", 1))
@@ -553,8 +803,8 @@ def run_post_training(
             result, reference_ids = _coherence_objective(
                 model,
                 batch,
-                family,
-                bank,
+                families,
+                banks,
                 config,
                 step=global_step,
                 generator=rollout_generator,
@@ -596,6 +846,35 @@ def run_post_training(
                 )
             )
         store.append_history(row)
+        monitor.record(row, lr=optimizer.param_groups[0]["lr"])
+        if checkpoint_manager.due_for_preview_or_checkpoint(global_step + 1, preview):
+            # Keep the case artifacts and checkpoint family state at the same
+            # recovery boundary.
+            family_paths = {
+                name: store.save_artifact(f"{name}_family.pt", family.state_artifact())
+                for name, family in families.items()
+            }
+            checkpoint_manager.save(
+                _post_checkpoint_payload(
+                    model,
+                    optimizer,
+                    global_step=global_step + 1,
+                    config=config,
+                    train_dataset=train_dataset,
+                    families=families,
+                    source_hashes_before=source_hashes_before,
+                    index_generator=index_generator,
+                    device=device,
+                    config_sha256=store.config_hash,
+                ),
+                model=model,
+                preview=preview,
+                global_step=global_step + 1,
+                fallback_metric=row["data_loss"],
+            )
+
+    monitor.close()
+    batch_source.close()
 
     if device.type == "cuda":
         torch.cuda.synchronize(device)
@@ -604,33 +883,44 @@ def run_post_training(
         model,
         evaluation_batch,
         comparison_batch,
-        family,
-        bank,
+        families,
+        banks,
         train_dataset.field_names,
         config,
     )
     after_metrics["sensor_manifest_sha256"] = evaluation_manifest.digest()
     store.write_json("evaluation/after.json", after_metrics)
-    checkpoint_payload = {
-        "model": checkpoint_model_state(model),
-        "optimizer": optimizer.state_dict(),
-        "global_step": final_step,
-        "source_run": str(config["source_run"]),
-        "source_checkpoint": str(source_checkpoint_path(config)),
-        "source_hashes": source_hashes_before,
-        "data_spec": asdict(train_dataset.data_spec),
-        "normalization": train_dataset.normalizer.state_dict(),
-        "family_state": family.state_dict(),
-        "family_config": family.config,
-        "config_sha256": store.config_hash,
-        "rng_state": {
-            "torch_cpu": torch.get_rng_state(),
-            "torch_cuda": torch.cuda.get_rng_state_all() if device.type == "cuda" else [],
-            "index_generator": index_generator.get_state(),
-        },
+    family_paths = {
+        name: store.save_artifact(f"{name}_family.pt", family.state_artifact())
+        for name, family in families.items()
     }
-    last_path = store.save_checkpoint("last", checkpoint_payload)
-    best_path = store.save_checkpoint("best", checkpoint_payload)
+    checkpoint_payload = _post_checkpoint_payload(
+        model,
+        optimizer,
+        global_step=final_step,
+        config=config,
+        train_dataset=train_dataset,
+        families=families,
+        source_hashes_before=source_hashes_before,
+        index_generator=index_generator,
+        device=device,
+        config_sha256=store.config_hash,
+    )
+    saved = checkpoint_manager.save(
+        checkpoint_payload,
+        model=model,
+        preview=preview,
+        global_step=final_step,
+        fallback_metric=float(row["data_loss"]),
+        force=True,
+    )
+    if saved is None:
+        raise RuntimeError("final checkpoint save was unexpectedly skipped")
+    last_path, _ = saved
+    best_path = store.run_dir / "checkpoints" / "best.pt"
+    if not best_path.is_file():
+        best_path = store.save_checkpoint("best", checkpoint_payload)
+    preview.close()
     source_hashes_after = source_hashes(config)
     if source_hashes_after != source_hashes_before:
         raise RuntimeError("source run changed during child post-training")
@@ -638,6 +928,7 @@ def run_post_training(
     store.update_manifest(
         checkpoint_hashes={
             "last": file_sha256(last_path),
+            "latest": file_sha256(last_path),
             "best": file_sha256(best_path),
         },
         source_hashes_after=source_hashes_after,
@@ -645,13 +936,21 @@ def run_post_training(
         evaluation_sensor_manifest_sha256=evaluation_manifest.digest(),
         before_metric=None if before_metrics is None else before_metrics.get("mse_normalized"),
         after_metric=after_metrics.get("mse_normalized"),
+        coherence_family_state_sha256s={
+            name: file_sha256(path) for name, path in family_paths.items()
+        },
     )
     store.set_status(
         status,
         global_step=final_step,
         configured_steps=configured_steps,
         source_immutable_verified=True,
-        coherence_target_use=family.target_use,
+        coherence_target_use=(
+            next(iter({family.target_use for family in families.values()}))
+            if len({family.target_use for family in families.values()}) == 1
+            else "mixed"
+        ),
+        coherence_target_uses={name: family.target_use for name, family in families.items()},
         final_coherence_loss=(
             None if last_result is None else float(last_result.scalar_loss.detach().cpu())
         ),
@@ -664,3 +963,37 @@ def run_post_training(
     train_dataset.close()
     evaluation_dataset.close()
     return store.run_dir
+
+
+def _post_checkpoint_payload(
+    model,
+    optimizer,
+    *,
+    global_step: int,
+    config: Mapping[str, Any],
+    train_dataset,
+    families: Mapping[str, Any],
+    source_hashes_before: Mapping[str, Any],
+    index_generator: torch.Generator,
+    device: torch.device,
+    config_sha256: str,
+) -> dict[str, Any]:
+    """Build an internally consistent post-training recovery checkpoint."""
+    return {
+        "model": checkpoint_model_state(model),
+        "optimizer": optimizer.state_dict(),
+        "global_step": int(global_step),
+        "source_run": str(config["source_run"]),
+        "source_checkpoint": str(source_checkpoint_path(config)),
+        "source_hashes": dict(source_hashes_before),
+        "data_spec": asdict(train_dataset.data_spec),
+        "normalization": train_dataset.normalizer.state_dict(),
+        "family_states": {name: family.state_dict() for name, family in families.items()},
+        "family_configs": {name: family.config for name, family in families.items()},
+        "config_sha256": config_sha256,
+        "rng_state": {
+            "torch_cpu": torch.get_rng_state(),
+            "torch_cuda": torch.cuda.get_rng_state_all() if device.type == "cuda" else [],
+            "index_generator": index_generator.get_state(),
+        },
+    }

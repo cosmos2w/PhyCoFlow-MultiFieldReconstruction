@@ -1,4 +1,4 @@
-defaults: [../coherence/global_distribution_demo50.yaml]
+defaults: [../coherence/all_three_demo50.yaml]
 
 stage: post_training
 case: turbulent_combustion
@@ -22,7 +22,6 @@ dataset:
   field_names: [CO, T, U_0, U_1, p]
   field_units: [unknown, unknown, unknown, unknown, unknown]
   normalization: none
-  # Demo50 encoded all stored x,y,z columns, including the constant z plane.
   coordinate_dim: 3
   time_stride: 1
   benchmark_eligible: true
@@ -41,9 +40,7 @@ objectives:
   data_retention: {enabled: true, weight: 0.1}
   coherence: {enabled: true, weight: 1.0}
 
-rollout:
-  steps: 2
-  solver: euler
+rollout: {steps: 2, solver: euler}
 
 observation_consistency:
   mode: endpoint_smooth
@@ -53,12 +50,11 @@ observation_consistency:
   final_clamp: true
   chunk_size: 2048
 
-trainable:
-  scope: full_model
+trainable: {scope: full_model}
 
 optimization:
   epochs: 10000
-  batch_size: 1
+  batch_size: 4
   train_fraction: 0.25
   lr: 5.0e-5
   weight_decay: 1.0e-6
@@ -73,16 +69,27 @@ runtime:
   device: cuda:0
   deterministic: true
   num_workers: 0
+  data_strategy: auto
+  progress: true
+  plot_every_steps: 10
 
 evaluation:
   split: validation
-  max_samples: 1
-  query_points: 512
+  max_samples: 4
+  query_points: 4096
   generation_steps: 2
   seed: 2027
-  preview: {enabled: true, every_epochs: 1, split: validation, sample_index: 0, query_points: null, generation_steps: 2, seed: 2027, keep_history: false}
+  preview:
+    enabled: false
+    every_epochs: 1
+    split: validation
+    sample_index: 0
+    query_points: null
+    generation_steps: 2
+    seed: 2027
+    keep_history: false
 
-checkpointing: {enabled: true, every_epochs: 1, save_epoch_one: true}
+checkpointing: {enabled: true, every_epochs: 5, save_epoch_one: true}
 
 output:
-  experiment_name: demo50_global_distribution_posttrain
+  experiment_name: demo50_all_coherence_posttrain

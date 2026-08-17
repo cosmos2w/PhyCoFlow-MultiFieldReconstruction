@@ -15,16 +15,20 @@ from pathlib import Path
 from typing import Any
 
 import torch
-from torch.utils.data import DataLoader
 
 from ..data.factory import open_field_dataset
 from ..data.manifest import dataset_fingerprint, manifest_from_batch
-from ..data.sensor_protocols import SensorProtocol, build_observation_batch
+from ..data.training_batches import build_training_batch_source, dataset_field_bytes
 from ..evaluation import reconstruction_metrics
 from ..models import build_model
 from ..registry import MODEL_REGISTRY
 from ..utils.reproducibility import seed_everything
-from .common import collate_field_samples, sensor_protocol_from_config
+from .checkpointing import PeriodicCheckpointManager
+from .common import (
+    iter_unique_batch_indices,
+)
+from .monitoring import TrainingMonitor
+from .preview import TrainingReconstructionPreview
 from .run_store import RunStore, checkpoint_model_state, file_sha256, load_model_state_strict
 
 
@@ -83,13 +87,13 @@ def run_base_training(
 
     batch_size = int(config["optimization"].get("batch_size", 1))
     epochs = int(config["optimization"].get("epochs", 1))
-    configured_steps = epochs * math.ceil(len(dataset) / batch_size)
+    steps_per_epoch = math.ceil(len(dataset) / batch_size)
+    configured_steps = epochs * steps_per_epoch
     if start_step >= configured_steps:
         raise ValueError(f"run already reached configured_steps={configured_steps}")
     final_step = (
         min(configured_steps, start_step + max_steps) if max_steps is not None else configured_steps
     )
-    protocol = sensor_protocol_from_config(config)
     query_points = (
         None if model.capabilities.structured_grid_required else config["model"].get("query_points")
     )
@@ -121,30 +125,49 @@ def run_base_training(
     store.set_status("running", start_step=start_step, final_step=final_step)
 
     step_count = final_step - start_step
-    sampled_indices = torch.randint(
-        0,
+    sampled_indices = iter_unique_batch_indices(
         len(dataset),
-        (step_count, batch_size),
+        step_count,
+        batch_size,
         generator=index_generator,
-    ).tolist()
-    loader = DataLoader(
+    )
+    batch_source = build_training_batch_source(
         dataset,
-        batch_sampler=sampled_indices,
-        num_workers=int(config["runtime"].get("num_workers", 0)),
-        collate_fn=collate_field_samples,
-        persistent_workers=bool(config["runtime"].get("num_workers", 0)),
+        sampled_indices,
+        config,
+        query_points=query_points,
+        device=device,
+        start_step=start_step,
+    )
+    store.update_manifest(
+        training_data_strategy=batch_source.strategy,
+        training_dataset_logical_bytes=dataset_field_bytes(dataset),
     )
 
+    monitor = TrainingMonitor(
+        store.run_dir,
+        start_step=start_step,
+        final_step=final_step,
+        configured_steps=configured_steps,
+        steps_per_epoch=steps_per_epoch,
+        description=f"base:{config['model']['name']}",
+        enabled=bool(config["runtime"].get("progress", True)),
+        plot_every_steps=int(config["runtime"].get("plot_every_steps", 10)),
+    )
+    preview = TrainingReconstructionPreview(
+        config,
+        store=store,
+        steps_per_epoch=steps_per_epoch,
+        device=device,
+    )
+    checkpoint_manager = PeriodicCheckpointManager(
+        config,
+        store=store,
+        steps_per_epoch=steps_per_epoch,
+    )
     last_batch = None
-    for step_offset, samples in enumerate(loader):
+    for step_offset, batch in enumerate(batch_source):
         global_step = start_step + step_offset
-        # Vary training sensors by step while remaining reproducible.
-        step_protocol = SensorProtocol(
-            **{**protocol.to_dict(), "seed": protocol.seed + global_step}
-        )
-        batch = build_observation_batch(samples, step_protocol, query_points=query_points).to(
-            device
-        )
         model.train()
         optimizer.zero_grad(set_to_none=True)
         losses = model.training_loss(batch)
@@ -162,7 +185,30 @@ def run_base_training(
             **{name: float(value.detach().cpu()) for name, value in losses.components.items()},
         }
         store.append_history(row)
+        monitor.record(row, lr=optimizer.param_groups[0]["lr"])
+        if checkpoint_manager.due_for_preview_or_checkpoint(global_step + 1, preview):
+            checkpoint_manager.save(
+                _base_checkpoint_payload(
+                    model,
+                    optimizer,
+                    global_step=global_step + 1,
+                    config=config,
+                    dataset=dataset,
+                    evaluation_mse=None,
+                    parameter_count=parameter_count,
+                    trainable_parameter_count=trainable_parameter_count,
+                    index_generator=index_generator,
+                    device=device,
+                    config_sha256=store.config_hash,
+                ),
+                model=model,
+                preview=preview,
+                global_step=global_step + 1,
+                fallback_metric=row["total"],
+            )
         last_batch = batch
+    monitor.close()
+    batch_source.close()
 
     if last_batch is None:
         raise ValueError("training performed no optimizer steps")
@@ -199,32 +245,40 @@ def run_base_training(
         },
     )
 
-    checkpoint = {
-        "model": checkpoint_model_state(model),
-        "optimizer": optimizer.state_dict(),
-        "global_step": final_step,
-        "model_name": config["model"]["name"],
-        "model_config": dict(config["model"]),
-        "data_spec": asdict(dataset.data_spec),
-        "normalization": dataset.normalizer.state_dict(),
-        "evaluation_mse": evaluation_mse,
-        "parameter_count": parameter_count,
-        "trainable_parameter_count": trainable_parameter_count,
-        "config_sha256": store.config_hash,
-        "rng_state": {
-            "torch_cpu": torch.get_rng_state(),
-            "torch_cuda": torch.cuda.get_rng_state_all() if device.type == "cuda" else [],
-            "index_generator": index_generator.get_state(),
-        },
-    }
-    last_checkpoint = store.save_checkpoint("last", checkpoint)
-    best_checkpoint = store.save_checkpoint("best", checkpoint)
+    checkpoint = _base_checkpoint_payload(
+        model,
+        optimizer,
+        global_step=final_step,
+        config=config,
+        dataset=dataset,
+        evaluation_mse=evaluation_mse,
+        parameter_count=parameter_count,
+        trainable_parameter_count=trainable_parameter_count,
+        index_generator=index_generator,
+        device=device,
+        config_sha256=store.config_hash,
+    )
+    saved = checkpoint_manager.save(
+        checkpoint,
+        model=model,
+        preview=preview,
+        global_step=final_step,
+        fallback_metric=float(row["total"]),
+        force=True,
+    )
+    if saved is None:
+        raise RuntimeError("final checkpoint save was unexpectedly disabled")
+    last_checkpoint, _ = saved
+    best_checkpoint = store.run_dir / "checkpoints" / "best.pt"
+    if not best_checkpoint.is_file():
+        best_checkpoint = store.save_checkpoint("best", checkpoint)
+    preview.close()
     store.update_manifest(
         checkpoint_hashes={
             "last": file_sha256(last_checkpoint),
+            "latest": file_sha256(last_checkpoint),
             "best": file_sha256(best_checkpoint),
         },
-        best_metric={"name": "integration_mse_normalized", "value": evaluation_mse},
     )
     status = "completed" if final_step >= configured_steps else "integration_truncated"
     store.set_status(
@@ -240,3 +294,38 @@ def run_base_training(
     )
     dataset.close()
     return store.run_dir
+
+
+def _base_checkpoint_payload(
+    model,
+    optimizer,
+    *,
+    global_step: int,
+    config: Mapping[str, Any],
+    dataset,
+    evaluation_mse: float | None,
+    parameter_count: int,
+    trainable_parameter_count: int,
+    index_generator: torch.Generator,
+    device: torch.device,
+    config_sha256: str,
+) -> dict[str, Any]:
+    """Build the same resumable payload for periodic and terminal saves."""
+    return {
+        "model": checkpoint_model_state(model),
+        "optimizer": optimizer.state_dict(),
+        "global_step": int(global_step),
+        "model_name": config["model"]["name"],
+        "model_config": dict(config["model"]),
+        "data_spec": asdict(dataset.data_spec),
+        "normalization": dataset.normalizer.state_dict(),
+        "evaluation_mse": evaluation_mse,
+        "parameter_count": parameter_count,
+        "trainable_parameter_count": trainable_parameter_count,
+        "config_sha256": config_sha256,
+        "rng_state": {
+            "torch_cpu": torch.get_rng_state(),
+            "torch_cuda": torch.cuda.get_rng_state_all() if device.type == "cuda" else [],
+            "index_generator": index_generator.get_state(),
+        },
+    }

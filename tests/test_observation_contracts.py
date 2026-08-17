@@ -96,6 +96,23 @@ def test_variable_sensor_counts_are_seeded_and_bounded():
     assert 5 <= count <= 11
 
 
+def test_step_seed_resamples_random_sensors_and_queries_reproducibly():
+    sample = _sample()
+    first_protocol = SensorProtocol(field_counts={"a": 4}, seed=31)
+    next_protocol = SensorProtocol(field_counts={"a": 4}, seed=32)
+
+    first = build_observation_batch([sample], first_protocol, query_points=5)
+    replay = build_observation_batch([sample], first_protocol, query_points=5)
+    next_step = build_observation_batch([sample], next_protocol, query_points=5)
+
+    assert torch.equal(first.obs_indices, replay.obs_indices)
+    assert torch.equal(first.metadata["query_indices"], replay.metadata["query_indices"])
+    assert not torch.equal(first.obs_indices, next_step.obs_indices)
+    assert not torch.equal(
+        first.metadata["query_indices"], next_step.metadata["query_indices"]
+    )
+
+
 def test_manifest_indices_reject_duplicates_and_out_of_range_points():
     sample = _sample()
     protocol = SensorProtocol(field_counts={"a": 2})

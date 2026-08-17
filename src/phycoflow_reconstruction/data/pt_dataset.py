@@ -68,6 +68,7 @@ class PTFieldDataset(Dataset[FieldSample]):
         if coordinates.ndim < 2 or coordinates.shape[-1] < 1:
             raise ValueError("PT coordinates must have shape [...,D] with D>=1")
         self.coordinates_raw = coordinates.float().reshape(-1, coordinates.shape[-1])
+        self.coordinates = _minmax(self.coordinates_raw)
         self.times = payload["time"].float().flatten()
         self.conditions = payload["conditions"].float()
         self.batch_count, self.time_count, _, _, _, channels = self.fields.shape
@@ -115,6 +116,12 @@ class PTFieldDataset(Dataset[FieldSample]):
             self._items = [(trajectory, None) for trajectory in trajectories]
             logical_shape = (self.time_count, *self.grid_shape)
             coordinate_dim = 2
+            spatial = self.coordinates_raw[:, 0]
+            time_grid, space_grid = torch.meshgrid(self.times, spatial, indexing="ij")
+            self.space_time_coordinates_raw = torch.stack(
+                (time_grid, space_grid), dim=-1
+            ).reshape(-1, 2)
+            self.space_time_coordinates = _minmax(self.space_time_coordinates_raw)
         else:
             raise ValueError(f"unsupported reconstruction_unit={reconstruction_unit!r}")
 
@@ -199,7 +206,7 @@ class PTFieldDataset(Dataset[FieldSample]):
         raw = self.coordinates_raw[:, : self.data_spec.coordinate_dim]
         sample = FieldSample(
             values=self.normalizer.encode(values),
-            coordinates=_minmax(raw),
+            coordinates=self.coordinates[:, : self.data_spec.coordinate_dim],
             coordinates_raw=raw,
             time=self.times[frame],
             trajectory_id=self.trajectory_ids[trajectory],
@@ -207,23 +214,17 @@ class PTFieldDataset(Dataset[FieldSample]):
             conditions=self.conditions[trajectory],
             field_names=self.field_names,
             logical_shape=self.grid_shape,
-            metadata={
-                "trajectory_index": trajectory,
-                "query_indices": torch.arange(values.shape[0]),
-            },
+            metadata={"trajectory_index": trajectory},
         )
         sample.validate()
         return sample
 
     def _space_time_sample(self, trajectory: int) -> FieldSample:
         values = self.fields[trajectory].reshape(-1, self.fields.shape[-1])
-        spatial = self.coordinates_raw[:, 0]
-        time_grid, space_grid = torch.meshgrid(self.times, spatial, indexing="ij")
-        raw = torch.stack((time_grid, space_grid), dim=-1).reshape(-1, 2)
         sample = FieldSample(
             values=self.normalizer.encode(values),
-            coordinates=_minmax(raw),
-            coordinates_raw=raw,
+            coordinates=self.space_time_coordinates,
+            coordinates_raw=self.space_time_coordinates_raw,
             time=self.times,
             trajectory_id=self.trajectory_ids[trajectory],
             time_index=None,
@@ -231,10 +232,7 @@ class PTFieldDataset(Dataset[FieldSample]):
             field_names=self.field_names,
             logical_shape=(self.time_count, self.coordinates_raw.shape[0]),
             reconstruction_unit="space_time_trajectory",
-            metadata={
-                "trajectory_index": trajectory,
-                "query_indices": torch.arange(values.shape[0]),
-            },
+            metadata={"trajectory_index": trajectory},
         )
         sample.validate()
         return sample

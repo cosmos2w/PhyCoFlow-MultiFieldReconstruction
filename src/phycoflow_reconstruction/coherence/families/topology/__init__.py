@@ -1,5 +1,5 @@
-"""Reserved topology family; no scientific loss is implemented yet."""
+"""Differentiable topology coherence family."""
 
-from .family import TopologyFamilyRequirements
+from .family import TopologyFamily
 
-__all__ = ["TopologyFamilyRequirements"]
+__all__ = ["TopologyFamily"]

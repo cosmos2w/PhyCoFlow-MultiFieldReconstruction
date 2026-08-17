@@ -33,6 +33,20 @@ runtime:
 
 evaluation:
   generation_steps: 2
+  preview:
+    enabled: true
+    every_epochs: 1
+    split: validation
+    sample_index: 0
+    query_points: null
+    generation_steps: 2
+    seed: 2027
+    keep_history: false
+
+checkpointing:
+  enabled: true
+  every_epochs: 1
+  save_epoch_one: true
 
 output:
   experiment_name: phase4_ks_pointcloud

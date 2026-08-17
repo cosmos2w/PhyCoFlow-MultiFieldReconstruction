@@ -36,6 +36,9 @@ class GlobalDistributionFamily(nn.Module):
         self.config = dict(config)
         self.target_use = str(config.get("target_use", "training_reference"))
         self.units = str(config.get("units", "model_units"))
+        self.family_weight = float(config.get("weight", 1.0))
+        if self.family_weight < 0:
+            raise ValueError("global_distribution.weight must be non-negative")
         if self.target_use not in {"training_reference", "paired_supervised"}:
             raise ValueError(
                 "global_distribution.target_use must be training_reference or paired_supervised"
@@ -44,6 +47,8 @@ class GlobalDistributionFamily(nn.Module):
             raise ValueError("global_distribution.units must be model_units or physical_units")
 
         field_names = tuple(config.get("fields") or data_spec.field_names)
+        if len(set(field_names)) != len(field_names):
+            raise ValueError("global-distribution fields must be unique")
         lookup = {name: index for index, name in enumerate(data_spec.field_names)}
         unknown = sorted(set(field_names) - set(lookup))
         if unknown:
@@ -131,7 +136,14 @@ class GlobalDistributionFamily(nn.Module):
         scale = self.normalization_scale.to(device=generated.device, dtype=generated.dtype)
         return generated * scale + offset, reference * scale + offset
 
-    def forward(self, generated: torch.Tensor, reference: torch.Tensor) -> FamilyResult:
+    def forward(
+        self,
+        generated: torch.Tensor,
+        reference: torch.Tensor,
+        *,
+        coordinates: torch.Tensor | None = None,
+        context: Any | None = None,
+    ) -> FamilyResult:
         require_field_tensor("generated", generated)
         require_field_tensor("reference", reference)
         if generated.shape != reference.shape:
@@ -174,3 +186,10 @@ class GlobalDistributionFamily(nn.Module):
             "units": self.units,
             "state_dict": self.state_dict(),
         }
+
+    def load_state_artifact(self, artifact: Mapping[str, Any]) -> None:
+        if artifact.get("family") != self.family_name or artifact.get("version") != self.version:
+            raise ValueError("global-distribution family artifact identity mismatch")
+        if dict(artifact.get("config", {})) != self.config:
+            raise ValueError("global-distribution family artifact config mismatch")
+        self.load_state_dict(artifact["state_dict"], strict=True)

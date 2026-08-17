@@ -115,6 +115,7 @@ class H5FieldDataset(Dataset[FieldSample]):
             stored_coords = handle["coordinates"][:].reshape(-1, 3).astype(np.float32)
             self.point_permutation = self._coordinate_permutation(stored_coords)
             self.raw_spatial_coords = torch.from_numpy(stored_coords)[self.point_permutation]
+            self.spatial_coords = _normalize_coordinates(self.raw_spatial_coords)
             self.times = torch.from_numpy(handle["time"][:].astype(np.float32))
             self.conditions = torch.from_numpy(handle["conditions"][:].astype(np.float32))
             self.trajectory_ids = self._read_trajectory_ids(handle)
@@ -143,7 +144,7 @@ class H5FieldDataset(Dataset[FieldSample]):
             logical_shape = self.grid_shape
             inferred_coordinate_dim = max(
                 1,
-                int((_normalize_coordinates(self.raw_spatial_coords).amax(0) > 0).sum()),
+                int((self.spatial_coords.amax(0) > 0).sum()),
             )
             if coordinate_dim is not None and not inferred_coordinate_dim <= coordinate_dim <= 3:
                 raise ValueError(
@@ -156,6 +157,12 @@ class H5FieldDataset(Dataset[FieldSample]):
             self._items = [(b, None) for b in self.selection.trajectory_indices]
             logical_shape = (self.time_count, *self.grid_shape)
             coordinate_dim = 2
+            spatial_x = self.raw_spatial_coords[:, 0]
+            time_grid, space_grid = torch.meshgrid(self.times, spatial_x, indexing="ij")
+            self.space_time_coords_raw = torch.stack(
+                (time_grid, space_grid), dim=-1
+            ).reshape(-1, 2)
+            self.space_time_coords = _normalize_coordinates(self.space_time_coords_raw)
         else:
             raise ValueError(f"unsupported reconstruction_unit={reconstruction_unit!r}")
 
@@ -261,12 +268,11 @@ class H5FieldDataset(Dataset[FieldSample]):
             .reshape(-1, self.channel_count)
             .astype(np.float32)
         )[self.point_permutation]
-        coords_raw = self.raw_spatial_coords.clone()
+        coords_raw = self.raw_spatial_coords
         active = max(1, self.data_spec.coordinate_dim)
         coords_raw = coords_raw[:, :active]
         metadata: dict[str, Any] = {
             "trajectory_index": trajectory_index,
-            "query_indices": torch.arange(values.shape[0]),
             **self._sample_context(trajectory_index, time_index),
         }
         if self.include_temporal_derivative:
@@ -301,7 +307,7 @@ class H5FieldDataset(Dataset[FieldSample]):
             }
         return FieldSample(
             values=self.normalizer.encode(values),
-            coordinates=_normalize_coordinates(coords_raw),
+            coordinates=self.spatial_coords[:, :active],
             coordinates_raw=coords_raw,
             time=self.times[time_index].clone(),
             trajectory_id=self.trajectory_ids[trajectory_index],
@@ -320,13 +326,10 @@ class H5FieldDataset(Dataset[FieldSample]):
             .reshape(self.time_count, -1, self.channel_count)
             .astype(np.float32)
         )[:, self.point_permutation].reshape(-1, self.channel_count)
-        spatial_x = self.raw_spatial_coords[:, 0]
-        time_grid, space_grid = torch.meshgrid(self.times, spatial_x, indexing="ij")
-        coords_raw = torch.stack([time_grid, space_grid], dim=-1).reshape(-1, 2)
         return FieldSample(
             values=self.normalizer.encode(values),
-            coordinates=_normalize_coordinates(coords_raw),
-            coordinates_raw=coords_raw,
+            coordinates=self.space_time_coords,
+            coordinates_raw=self.space_time_coords_raw,
             time=self.times.clone(),
             trajectory_id=self.trajectory_ids[trajectory_index],
             time_index=None,
@@ -336,7 +339,6 @@ class H5FieldDataset(Dataset[FieldSample]):
             reconstruction_unit="space_time_trajectory",
             metadata={
                 "trajectory_index": trajectory_index,
-                "query_indices": torch.arange(values.shape[0]),
                 **self._sample_context(trajectory_index, None),
             },
         )

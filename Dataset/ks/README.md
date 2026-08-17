@@ -3,7 +3,7 @@
 This canonical 1-D periodic dataset solves
 `u_t + u u_x + u_xx + u_xxxx = 0` on a dimensionless domain of length 60.
 
-- Shape: `[100,401,256,1,1,1]` (`float32`, approximately 39 MiB)
+- Shape: `[1000,401,256,1,1,1]` (`float32`, approximately 390 MiB)
 - Field: `u`
 - Conditions: advection, second-order, and fourth-order coefficients
 - Splits: 80 train, 10 validation, 10 test trajectories
