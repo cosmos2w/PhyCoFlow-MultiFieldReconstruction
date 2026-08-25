@@ -29,7 +29,13 @@ from .checkpointing import PeriodicCheckpointManager
 from .common import (
     iter_unique_batch_indices,
 )
-from .gradients import adaptive_backward_and_clip_
+from .model_lifecycle import (
+    add_training_aux_state,
+    after_optimizer_step,
+    backward_and_clip_model_loss,
+    evaluation_weight_context,
+    load_training_aux_state,
+)
 from .monitoring import TrainingMonitor
 from .preview import TrainingReconstructionPreview
 from .run_store import RunStore, checkpoint_model_state, file_sha256, load_model_state_strict
@@ -91,6 +97,7 @@ def run_base_training(
         if checkpoint_normalizer.digest() != dataset.normalizer.digest():
             raise ValueError("checkpoint normalization disagrees with the configured dataset")
         load_model_state_strict(model, checkpoint["model"])
+        load_training_aux_state(model, checkpoint)
         optimizer.load_state_dict(checkpoint["optimizer"])
         start_step = int(checkpoint["global_step"])
 
@@ -200,8 +207,9 @@ def run_base_training(
         telemetry.start_step(global_step)
         model.train()
         losses, gradient_norm, backward_loss_scale, backward_retries = (
-            adaptive_backward_and_clip_(
-                lambda batch=batch: model.training_loss(batch),
+            backward_and_clip_model_loss(
+                model,
+                batch,
                 model.parameters(),
                 float(config["optimization"].get("grad_clip", 1.0)),
                 initial_scale=backward_loss_scale,
@@ -213,6 +221,7 @@ def run_base_training(
         )
         telemetry.start_phase("optimizer")
         optimizer.step()
+        after_optimizer_step(model)
         telemetry.end_phase("optimizer")
         telemetry.finish_step()
         if (global_step + 1) % steps_per_epoch == 0:
@@ -256,7 +265,7 @@ def run_base_training(
     if last_batch is None:
         raise ValueError("training performed no optimizer steps")
     model.eval()
-    with torch.no_grad():
+    with evaluation_weight_context(model), torch.no_grad():
         evaluation_generator = torch.Generator(device=device).manual_seed(seed + 1_000_003)
         reconstruction = model.reconstruct(
             last_batch,
@@ -356,7 +365,7 @@ def _base_checkpoint_payload(
     backward_loss_scale: float,
 ) -> dict[str, Any]:
     """Build the same resumable payload for periodic and terminal saves."""
-    return {
+    payload = {
         "model": checkpoint_model_state(model),
         "optimizer": optimizer.state_dict(),
         "global_step": int(global_step),
@@ -375,3 +384,4 @@ def _base_checkpoint_payload(
             "index_generator": index_generator.get_state(),
         },
     }
+    return add_training_aux_state(payload, model)

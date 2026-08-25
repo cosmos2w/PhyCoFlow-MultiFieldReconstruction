@@ -17,6 +17,11 @@ from ..data.factory import open_field_dataset
 from ..data.sensor_protocols import build_observation_batch
 from ..evaluation import reconstruction_metrics
 from .common import sensor_protocol_from_config
+from .model_lifecycle import (
+    add_training_aux_state,
+    evaluation_weight_context,
+    load_training_aux_state,
+)
 from .run_store import (
     RunStore,
     checkpoint_model_state,
@@ -257,21 +262,23 @@ class TrainingReconstructionPreview:
             return None
         assert self.dataset is not None and self.batch is not None
         if checkpoint_path is None:
+            checkpoint_payload = {
+                "model": checkpoint_model_state(model),
+                "global_step": int(global_step),
+                "config_sha256": self.store.config_hash,
+                "purpose": "qualitative_training_preview",
+            }
             checkpoint_path = self.store.save_checkpoint(
                 "preview_latest",
-                {
-                    "model": checkpoint_model_state(model),
-                    "global_step": int(global_step),
-                    "config_sha256": self.store.config_hash,
-                    "purpose": "qualitative_training_preview",
-                },
+                add_training_aux_state(checkpoint_payload, model),
             )
         checkpoint = load_project_checkpoint(checkpoint_path)
         load_model_state_strict(model, checkpoint["model"])
+        load_training_aux_state(model, checkpoint)
         was_training = model.training
         model.eval()
         seed = int(self.settings.get("seed", 2027)) + int(global_step)
-        with torch.no_grad():
+        with evaluation_weight_context(model), torch.no_grad():
             generator = torch.Generator(device=self.device).manual_seed(seed)
             reconstruction = model.reconstruct(
                 self.batch,

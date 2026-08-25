@@ -14,6 +14,7 @@ from ..data.factory import FieldDataset, open_field_dataset
 from ..data.normalization import FieldNormalizer
 from ..models import build_model
 from ..models.compatibility import load_legacy_demo50
+from .model_lifecycle import load_training_aux_state
 from .run_store import file_sha256, load_model_state_strict, load_project_checkpoint
 
 
@@ -104,6 +105,7 @@ def load_source_model(
         raise ValueError("source checkpoint field order disagrees with the selected dataset")
     model = build_model(config["model"], dataset.data_spec)
     load_model_state_strict(model, checkpoint["model"])
+    load_training_aux_state(model, checkpoint)
     checkpoint_normalizer = FieldNormalizer(
         checkpoint["normalization"]["offset"],
         checkpoint["normalization"]["scale"],

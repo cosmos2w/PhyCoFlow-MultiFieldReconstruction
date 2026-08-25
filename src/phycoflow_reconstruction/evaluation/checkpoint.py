@@ -23,6 +23,7 @@ from ..data.sensor_protocols import build_observation_batch
 from ..models import build_model
 from ..physics import build_case_diagnostics, build_case_physics
 from ..training.common import sensor_protocol_from_config
+from ..training.model_lifecycle import evaluation_weight_context, load_training_aux_state
 from ..training.run_store import file_sha256, load_model_state_strict, load_project_checkpoint
 from .metrics import reconstruction_metrics
 
@@ -126,6 +127,7 @@ def evaluate_run(
     if checkpoint_normalizer.digest() != dataset.normalizer.digest():
         raise ValueError("checkpoint normalization disagrees with the configured dataset")
     load_model_state_strict(model, payload["model"])
+    load_training_aux_state(model, payload)
     model.eval()
     steps = int(
         generation_steps
@@ -134,7 +136,7 @@ def evaluate_run(
     )
     seed = int(config.get("evaluation", {}).get("seed", 2027))
 
-    with torch.no_grad():
+    with evaluation_weight_context(model), torch.no_grad():
         warmup = torch.Generator(device=device).manual_seed(seed)
         model.reconstruct(batch, steps=steps, generator=warmup)
         if device.type == "cuda":

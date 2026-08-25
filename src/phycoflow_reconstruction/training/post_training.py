@@ -36,6 +36,12 @@ from .common import (
     sensor_protocol_from_config,
 )
 from .gradient_balance import data_only_update, two_objective_update
+from .model_lifecycle import (
+    add_training_aux_state,
+    after_optimizer_step,
+    evaluation_weight_context,
+    load_training_aux_state,
+)
 from .monitoring import TrainingMonitor
 from .preview import TrainingReconstructionPreview
 from .rollout import differentiable_reconstruction, subset_query_batch
@@ -372,7 +378,7 @@ def _evaluate(
         evaluation_seed
     )
     model.eval()
-    with torch.no_grad():
+    with evaluation_weight_context(model), torch.no_grad():
         warmup_generator = torch.Generator(device=complete_batch.query_coords.device).manual_seed(
             evaluation_seed + 1
         )
@@ -384,7 +390,7 @@ def _evaluate(
     if complete_batch.query_coords.device.type == "cuda":
         torch.cuda.synchronize(complete_batch.query_coords.device)
     inference_started = perf_counter()
-    with torch.no_grad():
+    with evaluation_weight_context(model), torch.no_grad():
         prediction = model.reconstruct(
             inference_batch,
             steps=int(evaluation.get("generation_steps", 2)),
@@ -579,6 +585,7 @@ def run_post_training(
         store = RunStore.resume(resume, config)
         checkpoint = store.load_checkpoint("last")
         load_model_state_strict(model, checkpoint["model"])
+        load_training_aux_state(model, checkpoint)
         optimizer.load_state_dict(checkpoint["optimizer"])
         start_step = int(checkpoint["global_step"])
         torch.set_rng_state(checkpoint["rng_state"]["torch_cpu"])
@@ -845,6 +852,7 @@ def run_post_training(
                     grad_clip=config["optimization"].get("grad_clip"),
                 )
             )
+        after_optimizer_step(model)
         store.append_history(row)
         monitor.record(row, lr=optimizer.param_groups[0]["lr"])
         if checkpoint_manager.due_for_preview_or_checkpoint(global_step + 1, preview):
@@ -979,7 +987,7 @@ def _post_checkpoint_payload(
     config_sha256: str,
 ) -> dict[str, Any]:
     """Build an internally consistent post-training recovery checkpoint."""
-    return {
+    payload = {
         "model": checkpoint_model_state(model),
         "optimizer": optimizer.state_dict(),
         "global_step": int(global_step),
@@ -997,3 +1005,4 @@ def _post_checkpoint_payload(
             "index_generator": index_generator.get_state(),
         },
     }
+    return add_training_aux_state(payload, model)

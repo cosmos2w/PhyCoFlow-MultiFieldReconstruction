@@ -21,6 +21,11 @@ from ..utils.reproducibility import seed_everything
 from .checkpointing import PeriodicCheckpointManager
 from .common import iter_unique_batch_indices
 from .gradients import stable_clip_grad_norm_
+from .model_lifecycle import (
+    add_training_aux_state,
+    after_optimizer_step,
+    evaluation_weight_context,
+)
 from .monitoring import TrainingMonitor
 from .preview import TrainingReconstructionPreview
 from .run_store import RunStore, checkpoint_model_state, file_sha256
@@ -142,6 +147,7 @@ def run_direct_physics_training(
             gradient_scale=backward_loss_scale,
         )
         optimizer.step()
+        after_optimizer_step(model)
         row = {
                 "step": step + 1,
                 "total": float(losses.total.detach().cpu()),
@@ -171,7 +177,7 @@ def run_direct_physics_training(
     if last_batch is None or last_losses is None:
         raise ValueError("direct-physics training performed no update")
     model.eval()
-    with torch.no_grad():
+    with evaluation_weight_context(model), torch.no_grad():
         reconstruction = model.reconstruct(last_batch)
         metrics = reconstruction_metrics(
             reconstruction.prediction,
@@ -237,7 +243,7 @@ def _direct_checkpoint_payload(
     config_sha256: str,
 ) -> dict[str, Any]:
     """Build the common periodic/terminal direct-training checkpoint."""
-    return {
+    payload = {
         "model": checkpoint_model_state(model),
         "optimizer": optimizer.state_dict(),
         "global_step": int(global_step),
@@ -247,3 +253,4 @@ def _direct_checkpoint_payload(
         "normalization": dataset.normalizer.state_dict(),
         "config_sha256": config_sha256,
     }
+    return add_training_aux_state(payload, model)

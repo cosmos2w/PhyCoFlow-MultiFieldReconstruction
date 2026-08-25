@@ -27,6 +27,11 @@ from .common import (
     sensor_protocol_from_config,
 )
 from .gradient_balance import two_objective_update
+from .model_lifecycle import (
+    add_training_aux_state,
+    after_optimizer_step,
+    evaluation_weight_context,
+)
 from .monitoring import TrainingMonitor
 from .preview import TrainingReconstructionPreview
 from .rollout import differentiable_reconstruction
@@ -44,7 +49,7 @@ def _protocol(config: Mapping[str, Any], step: int = 0) -> SensorProtocol:
 
 def _evaluate(model, physics, batch, fields, config, seed: int) -> dict[str, Any]:
     model.eval()
-    with torch.no_grad():
+    with evaluation_weight_context(model), torch.no_grad():
         generator = torch.Generator(device=batch.query_coords.device).manual_seed(seed)
         reconstruction = model.reconstruct(
             batch,
@@ -187,6 +192,7 @@ def run_physics_post_training(
             grad_clip=config["optimization"].get("grad_clip"),
             config_missing_behavior=config["optimization"].get("config_missing_behavior", "error"),
         )
+        after_optimizer_step(model)
         row = {
                 "step": step + 1,
                 "data_loss": float(data_loss.detach().cpu()),
@@ -280,7 +286,7 @@ def _physics_post_checkpoint_payload(
     config_sha256: str,
 ) -> dict[str, Any]:
     """Build the common periodic/terminal physics-refinement checkpoint."""
-    return {
+    payload = {
         "model": checkpoint_model_state(model),
         "optimizer": optimizer.state_dict(),
         "global_step": int(global_step),
@@ -292,3 +298,4 @@ def _physics_post_checkpoint_payload(
         "source_hashes": dict(source_hashes_before),
         "config_sha256": config_sha256,
     }
+    return add_training_aux_state(payload, model)
