@@ -32,6 +32,12 @@ derivative became non-finite. The common safeguard is therefore frozen at
 float32 while extending representable raw derivatives to approximately
 `4e74`. The run again restarts from seed 42 with no failed weights reused.
 
+The `2^-120` run completed 44 epochs and preserved checkpoints 1/20/40 before
+another scaled derivative overflowed. The common scale is now `2^-140`, near
+the lower end of exactly representable float32 powers of two, with unscale and
+clip multiplication performed in float64. The new run again starts from seed
+42; no prior weights are reused.
+
 ## Model and protocol
 
 - Downstream model: `pointcloud_ffm` with `backbone: gl_rbf_enh`.

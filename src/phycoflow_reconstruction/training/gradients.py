@@ -55,5 +55,9 @@ def stable_clip_grad_norm_(
     with torch.no_grad():
         for gradient in gradients:
             values = gradient._values() if gradient.is_sparse else gradient
-            values.mul_(coefficient.to(device=values.device, dtype=values.dtype))
+            # Apply potentially large unscale factors in float64, then copy the
+            # final clipped value back. This keeps very small power-of-two loss
+            # scales safe even when the unclipped norm later falls below one.
+            clipped = values.to(dtype=torch.float64) * coefficient.to(values.device)
+            values.copy_(clipped.to(dtype=values.dtype))
     return total_norm

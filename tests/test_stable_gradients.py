@@ -39,7 +39,7 @@ def test_stable_clip_handles_huge_finite_float32_gradients():
 
 def test_scaled_backward_avoids_overflow_and_unscales_before_clipping():
     parameter = torch.nn.Parameter(torch.ones(4, dtype=torch.float32))
-    loss_scale = 2.0**-64
+    loss_scale = 2.0**-140
     loss = ((parameter * 1.0e20) * 1.0e20).sum()
 
     (loss * loss_scale).backward()
