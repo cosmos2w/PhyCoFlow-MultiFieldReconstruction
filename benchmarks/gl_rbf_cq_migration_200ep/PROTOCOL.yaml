@@ -1,0 +1,59 @@
+benchmark: gl_rbf_cq_migration_200ep
+branch: validation/proj-multifield-gl-rbf-cq
+source_branch: release/gl-rbf-cq-portable-prep
+arms:
+  A:
+    config: configs/A_legacy_gl_rbf_enh_200ep.yaml
+    model: pointcloud_ffm/gl_rbf_enh
+    execution: legacy_downstream
+  B:
+    config: configs/B_gl_rbf_cq_legacy_mha_200ep.yaml
+    model: gl_rbf_cq
+    condition_attention_execution: legacy_mha
+    sensor_attention_padding_mode: full
+    query_execution_microbatch: 2048
+    reuse_condition_context: true
+  C:
+    config: configs/C_gl_rbf_cq_cached_kv_200ep.yaml
+    model: gl_rbf_cq
+    condition_attention_execution: cached_kv
+    sensor_attention_padding_mode: full
+    query_execution_microbatch: 2048
+    reuse_condition_context: true
+common:
+  coordinate_dim: 2
+  field_order: [CH4, CO, T, U_1, p]
+  sensor_protocol: random_uniform
+  sensor_fields: [T]
+  sensor_count_range: [192, 384]
+  seed: 42
+  batch_size: 128
+  query_points: 4096
+  epochs: 200
+  learning_rate: 1.0e-4
+  weight_decay: 1.0e-6
+  grad_clip: 1.0
+  deterministic: true
+  fixed_validation_split: validation
+  fixed_validation_samples: 20
+  evaluation_milestones: [20, 40, 60, 100, 150, 200]
+  posthoc_metric_milestones: [20, 40, 60, 100, 150, 200]
+  checkpoint_epochs: [1, 20, 40, 60, 100, 150, 200]
+  training_preview: disabled
+  evaluation_generation_steps: 32
+telemetry:
+  enabled: true
+  fields:
+    - epoch
+    - epoch_wall_time_s
+    - training_only_epoch_time_s
+    - steps_per_epoch
+    - mean_step_time_s
+    - median_step_time_s
+    - mean_forward_native_loss_time_s
+    - mean_backward_time_s
+    - mean_optimizer_time_s
+    - peak_cuda_allocated_bytes
+    - peak_cuda_reserved_bytes
+    - parameter_count
+    - trainable_parameter_count

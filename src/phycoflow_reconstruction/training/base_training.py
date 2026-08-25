@@ -23,6 +23,7 @@ from ..evaluation import reconstruction_metrics
 from ..models import build_model
 from ..registry import MODEL_REGISTRY
 from ..utils.reproducibility import seed_everything
+from .benchmark_telemetry import BenchmarkTelemetry
 from .checkpointing import PeriodicCheckpointManager
 from .common import (
     iter_unique_batch_indices,
@@ -68,6 +69,9 @@ def run_base_training(
     trainable_parameter_count = sum(
         parameter.numel() for parameter in model.parameters() if parameter.requires_grad
     )
+    telemetry_settings = config.get("benchmark_telemetry", {})
+    if not isinstance(telemetry_settings, Mapping):
+        raise TypeError("benchmark_telemetry must be a mapping")
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=float(config["optimization"].get("lr", 1e-4)),
@@ -111,6 +115,7 @@ def run_base_training(
         model_name=registry_entry.name,
         model_version=registry_entry.version,
         model_registry_metadata=registry_entry.metadata,
+        benchmark_telemetry_enabled=bool(telemetry_settings.get("enabled", False)),
     )
     store.save_artifact("normalization.pt", dataset.normalizer.state_dict())
     store.write_json(
@@ -165,19 +170,37 @@ def run_base_training(
         store=store,
         steps_per_epoch=steps_per_epoch,
     )
+    telemetry = BenchmarkTelemetry.from_config(
+        config,
+        store.run_dir,
+        device=device,
+        steps_per_epoch=steps_per_epoch,
+        parameter_count=parameter_count,
+        trainable_parameter_count=trainable_parameter_count,
+    )
     last_batch = None
     for step_offset, batch in enumerate(batch_source):
         global_step = start_step + step_offset
+        telemetry.start_step(global_step)
         model.train()
         optimizer.zero_grad(set_to_none=True)
+        telemetry.start_phase("forward_native_loss")
         losses = model.training_loss(batch)
+        telemetry.end_phase("forward_native_loss")
         if not torch.isfinite(losses.total):
             raise FloatingPointError(f"non-finite loss at step {global_step}: {losses.total}")
+        telemetry.start_phase("backward")
         losses.total.backward()
+        telemetry.end_phase("backward")
         gradient_norm = torch.nn.utils.clip_grad_norm_(
             model.parameters(), float(config["optimization"].get("grad_clip", 1.0))
         )
+        telemetry.start_phase("optimizer")
         optimizer.step()
+        telemetry.end_phase("optimizer")
+        telemetry.finish_step()
+        if (global_step + 1) % steps_per_epoch == 0:
+            telemetry.finish_epoch((global_step + 1) // steps_per_epoch)
         row = {
             "step": global_step + 1,
             "total": float(losses.total.detach().cpu()),
@@ -209,6 +232,7 @@ def run_base_training(
         last_batch = batch
     monitor.close()
     batch_source.close()
+    telemetry.close()
 
     if last_batch is None:
         raise ValueError("training performed no optimizer steps")

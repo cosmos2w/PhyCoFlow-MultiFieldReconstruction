@@ -142,6 +142,11 @@ def build_model(config: Mapping[str, Any], data_spec: DataSpec, physics_provider
             "rbf_sigma",
             "fno_hidden_channels",
             "query_chunk_size",
+            "field_embedding_dim",
+            "fourier_bands",
+            "fourier_max_frequency",
+            "rff_features",
+            "rff_lengthscale",
         },
     }
     if name not in allowed_by_model:

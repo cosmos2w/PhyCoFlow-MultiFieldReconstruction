@@ -33,6 +33,7 @@ dist/
 !Cases/**/configs/**/*.yaml
 !benchmarks/**/*.json
 !benchmarks/**/*.yaml
+!benchmarks/**/*.csv
 !figures/generated/**/*.svg
 
 # Researcher-specific experiment configs stay local. Canonical base, sensor,

@@ -41,6 +41,11 @@ class PointCloudFFM(nn.Module):
         rbf_sigma: float = 0.08,
         fno_hidden_channels: int = 32,
         query_chunk_size: int = 2048,
+        field_embedding_dim: int = 24,
+        fourier_bands: int = 16,
+        fourier_max_frequency: float = 32.0,
+        rff_features: int = 64,
+        rff_lengthscale: float = 0.15,
     ) -> None:
         super().__init__()
         self.num_fields = num_fields
@@ -57,6 +62,9 @@ class PointCloudFFM(nn.Module):
                 gather_topk,
                 rbf_sigma,
                 query_chunk_size=query_chunk_size,
+                field_embedding_dim=field_embedding_dim,
+                fourier_bands=fourier_bands,
+                fourier_max_frequency=fourier_max_frequency,
             )
         elif backbone == "fno":
             self.velocity_model = FNOFlowBackbone(num_fields, logical_shape, fno_hidden_channels)
@@ -67,7 +75,11 @@ class PointCloudFFM(nn.Module):
             raise ValueError("PointCloudFFM supports only gl_rbf_enh or fno")
 
         if prior == "rff":
-            self.prior = RFFGaussianPrior(coordinate_dim)
+            self.prior = RFFGaussianPrior(
+                coordinate_dim,
+                features=int(rff_features),
+                lengthscale=float(rff_lengthscale),
+            )
         elif prior == "iid":
             self.prior = IIDGaussianPrior()
         else:

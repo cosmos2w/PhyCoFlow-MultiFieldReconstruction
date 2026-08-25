@@ -1,5 +1,8 @@
 """Observation tests prove deterministic manifests and independent KS strides."""
 
+import hashlib
+import json
+
 import pytest
 import torch
 
@@ -10,6 +13,7 @@ from phycoflow_reconstruction.data.manifest import (
     manifest_from_batch,
 )
 from phycoflow_reconstruction.data.sensor_protocols import SensorProtocol, build_observation_batch
+from phycoflow_reconstruction.evaluation.metrics import reconstruction_metrics
 from phycoflow_reconstruction.models import build_model
 
 
@@ -51,6 +55,49 @@ def test_random_protocol_is_adapter_independent(tmp_path):
     build_model({"name": "coordinate_mlp", "hidden_dim": 8}, spec)
     build_model({"name": "deeponet", "width": 8, "basis_dim": 4}, spec)
     assert point_batch.obs_indices.numpy().tobytes() == grid_batch.obs_indices.numpy().tobytes()
+
+
+def test_manifest_persists_query_indices_for_exact_replay(tmp_path):
+    sample = _sample()
+    first = build_observation_batch([sample], SensorProtocol(field_counts={"a": 4}, seed=7), query_points=5)
+    path = tmp_path / "data.h5"
+    path.write_bytes(b"fixture")
+    manifest = manifest_from_batch(first, path, "validation")
+    assert manifest.query_indices == {"t0:0": first.metadata["query_indices"][0].tolist()}
+    manifest_path = tmp_path / "manifest.json"
+    manifest.save(manifest_path)
+    replay = build_batch_from_manifest([sample], SensorManifest.load(manifest_path), path)
+    assert torch.equal(first.metadata["query_indices"], replay.metadata["query_indices"])
+    assert torch.equal(first.obs_indices, replay.obs_indices)
+
+
+def test_legacy_v3_manifest_digest_without_query_indices_stays_compatible(tmp_path):
+    payload = {
+        "dataset_path": "fixture.h5",
+        "dataset_fingerprint": "dataset",
+        "split": "validation",
+        "protocol": {"seed": 42},
+        "indices": {"sample": [[0, 0]]},
+        "version": "3",
+    }
+    digest = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    path = tmp_path / "legacy.json"
+    path.write_text(json.dumps({**payload, "manifest_sha256": digest}), encoding="utf-8")
+    loaded = SensorManifest.load(path)
+    assert loaded.query_indices is None
+    assert loaded.digest() == digest
+
+
+def test_reconstruction_metrics_include_mean_per_field_and_worst_relative_l2():
+    batch = build_observation_batch([_sample()], SensorProtocol(field_counts={"a": 2}, seed=3))
+    target = batch.target_fields
+    assert target is not None
+    report = reconstruction_metrics(target + 1.0, target, batch, ("a", "b"))
+    assert report["mean_relative_l2"] is not None
+    assert set(report["per_field_relative_l2"]) == {"a", "b"}
+    assert report["worst_field_relative_l2"] >= max(report["per_field_relative_l2"].values()) - 1e-6
 
 
 def test_space_time_ratios_are_independent():

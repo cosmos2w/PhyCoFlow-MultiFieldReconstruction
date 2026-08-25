@@ -8,6 +8,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+import torch
+
 from ..contracts import FieldSample, ObservationBatch
 from .sensor_protocols import SensorProtocol, build_observation_batch
 
@@ -19,19 +21,25 @@ class SensorManifest:
     split: str
     protocol: dict[str, Any]
     indices: dict[str, list[list[int]]]
+    query_indices: dict[str, list[int]] | None = None
     version: str = "3"
 
+    def _payload(self) -> dict[str, Any]:
+        payload = asdict(self)
+        # Version-3 manifests predating persisted query selections did not
+        # contain this key. Omitting it when absent keeps their digest stable.
+        if self.query_indices is None:
+            payload.pop("query_indices", None)
+        return payload
+
     def digest(self) -> str:
-        payload = json.dumps(asdict(self), sort_keys=True, separators=(",", ":")).encode("utf-8")
+        payload = json.dumps(self._payload(), sort_keys=True, separators=(",", ":")).encode("utf-8")
         return hashlib.sha256(payload).hexdigest()
 
     def save(self, path: str | Path) -> None:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps({**asdict(self), "manifest_sha256": self.digest()}, indent=2),
-            encoding="utf-8",
-        )
+        path.write_text(json.dumps({**self._payload(), "manifest_sha256": self.digest()}, indent=2), encoding="utf-8")
 
     @classmethod
     def load(cls, path: str | Path) -> SensorManifest:
@@ -65,6 +73,10 @@ def manifest_from_batch(
     if batch.obs_indices is None:
         raise ValueError("manifest creation requires observation indices")
     indices: dict[str, list[list[int]]] = {}
+    query_indices: dict[str, list[int]] = {}
+    batch_query_indices = batch.metadata.get("query_indices")
+    if not isinstance(batch_query_indices, torch.Tensor):
+        raise TypeError("manifest creation requires query indices")
     for batch_index, sample_id in enumerate(batch.sample_ids):
         valid = batch.obs_valid_mask[batch_index]
         indices[sample_id] = [
@@ -74,6 +86,11 @@ def manifest_from_batch(
                 batch.obs_field_ids[batch_index, valid].tolist(),
             )
         ]
+        query_valid = batch.query_valid_mask[batch_index]
+        query_indices[sample_id] = [
+            int(point)
+            for point in batch_query_indices[batch_index, query_valid].tolist()
+        ]
     return SensorManifest(
         # Catalog-relative identity keeps a frozen manifest portable across
         # equivalent local links; the content fingerprint remains authoritative.
@@ -82,6 +99,7 @@ def manifest_from_batch(
         split=split,
         protocol=dict(batch.metadata["protocol"]),
         indices=indices,
+        query_indices=query_indices,
     )
 
 
@@ -106,6 +124,7 @@ def build_batch_from_manifest(
     return build_observation_batch(
         samples,
         protocol,
-        query_points=query_points,
+        query_points=None if manifest.query_indices else query_points,
         manifest_indices=manifest.indices,
+        query_indices=manifest.query_indices,
     )

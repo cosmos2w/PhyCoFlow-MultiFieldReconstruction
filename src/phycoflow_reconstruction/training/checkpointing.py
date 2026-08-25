@@ -28,6 +28,12 @@ class PeriodicCheckpointManager:
         self.enabled = bool(settings.get("enabled", True))
         self.every_epochs = int(settings.get("every_epochs", 10))
         self.save_epoch_one = bool(settings.get("save_epoch_one", True))
+        configured_epochs = settings.get("epochs")
+        self.checkpoint_epochs = (
+            frozenset(int(epoch) for epoch in configured_epochs)
+            if configured_epochs is not None
+            else None
+        )
         self.steps_per_epoch = max(1, int(steps_per_epoch))
         self.store = store
         self.best_value = self._existing_best_value()
@@ -43,6 +49,8 @@ class PeriodicCheckpointManager:
         if not self.enabled or global_step % self.steps_per_epoch:
             return False
         epoch = global_step // self.steps_per_epoch
+        if self.checkpoint_epochs is not None:
+            return epoch in self.checkpoint_epochs
         return (self.save_epoch_one and epoch == 1) or epoch % self.every_epochs == 0
 
     def due_for_preview_or_checkpoint(
@@ -67,6 +75,7 @@ class PeriodicCheckpointManager:
         # Disabling periodic saves must never suppress the terminal recovery
         # checkpoint. ``force`` is used by every trainer at normal/truncated
         # termination so a completed run is always evaluable and resumable.
+        milestone_due = self.due(global_step)
         if not force and not self.due_for_preview_or_checkpoint(global_step, preview):
             return None
 
@@ -76,6 +85,10 @@ class PeriodicCheckpointManager:
         # validation preview. This validates checkpoint readability while the
         # originating process and model are still available.
         last_path = self.store.save_checkpoint("last", checkpoint)
+        milestone_path = None
+        if milestone_due:
+            epoch = global_step // self.steps_per_epoch
+            milestone_path = self.store.save_checkpoint(f"epoch_{epoch:03d}", checkpoint)
         preview_report = preview.update(
             model,
             global_step=global_step,
@@ -117,9 +130,19 @@ class PeriodicCheckpointManager:
             "last": file_sha256(last_path),
             "latest": file_sha256(last_path),
         }
+        if milestone_path is not None:
+            checkpoint_hashes[f"epoch_{global_step // self.steps_per_epoch:03d}"] = file_sha256(
+                milestone_path
+            )
         existing_best = self.store.run_dir / "checkpoints" / "best.pt"
         if existing_best.is_file():
             checkpoint_hashes["best"] = file_sha256(existing_best)
+        manifest_path = self.store.run_dir / "run_manifest.json"
+        existing_hashes = json.loads(manifest_path.read_text(encoding="utf-8")).get(
+            "checkpoint_hashes", {}
+        )
+        if isinstance(existing_hashes, Mapping):
+            checkpoint_hashes = {**existing_hashes, **checkpoint_hashes}
         self.store.update_manifest(
             checkpoint_hashes=checkpoint_hashes,
             latest_checkpoint_step=int(global_step),
@@ -133,6 +156,11 @@ class PeriodicCheckpointManager:
                 "training_epoch": global_step / self.steps_per_epoch,
                 "last": str(last_path.relative_to(self.store.run_dir)),
                 "latest": "checkpoints/latest.pt",
+                "milestone": (
+                    str(milestone_path.relative_to(self.store.run_dir))
+                    if milestone_path is not None
+                    else None
+                ),
                 "best": (
                     str(existing_best.relative_to(self.store.run_dir))
                     if existing_best.is_file()

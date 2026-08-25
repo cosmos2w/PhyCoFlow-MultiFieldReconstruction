@@ -27,6 +27,21 @@ def reconstruction_metrics(
         str(name): float(squared[..., field][batch.query_valid_mask].mean().cpu())
         for field, name in enumerate(field_names)
     }
+    valid_float = batch.query_valid_mask.to(dtype=prediction.dtype)
+    sample_error_sq = (squared * valid_float.unsqueeze(-1)).sum(dim=(1, 2))
+    sample_target_sq = (target.square() * valid_float.unsqueeze(-1)).sum(dim=(1, 2))
+    sample_relative_l2 = torch.sqrt(
+        sample_error_sq / sample_target_sq.clamp_min(torch.finfo(prediction.dtype).eps)
+    )
+    field_error_sq = (squared * valid_float.unsqueeze(-1)).sum(dim=1)
+    field_target_sq = (target.square() * valid_float.unsqueeze(-1)).sum(dim=1)
+    field_relative_l2 = torch.sqrt(
+        field_error_sq / field_target_sq.clamp_min(torch.finfo(prediction.dtype).eps)
+    )
+    per_field_relative = {
+        str(name): float(field_relative_l2[:, field].mean().cpu())
+        for field, name in enumerate(field_names)
+    }
 
     observed = torch.zeros_like(valid)
     query_indices = batch.metadata.get("query_indices")
@@ -50,6 +65,9 @@ def reconstruction_metrics(
     return {
         "mse_normalized": float(total.cpu()),
         "per_field_mse_normalized": per_field,
+        "mean_relative_l2": float(sample_relative_l2.mean().cpu()),
+        "per_field_relative_l2": per_field_relative,
+        "worst_field_relative_l2": float(max(per_field_relative.values())),
         "observed_entry_mse_normalized": (
             float(squared[observed].mean().cpu()) if observed.any() else None
         ),

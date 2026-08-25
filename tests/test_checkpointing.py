@@ -86,3 +86,42 @@ def test_forced_terminal_save_is_not_suppressed_when_periodic_saves_are_disabled
     )
     assert store.load_checkpoint("last")["global_step"] == 3
     assert store.load_checkpoint("best")["global_step"] == 3
+
+
+def test_explicit_epoch_schedule_keeps_immutable_milestone_checkpoints(tmp_path):
+    config = {
+        "stage": "base_training",
+        "case": "fixture",
+        "output": {},
+        "checkpointing": {
+            "enabled": True,
+            "every_epochs": 20,
+            "epochs": [1, 2],
+            "save_epoch_one": True,
+        },
+    }
+    store = RunStore.create(tmp_path, "milestones", config)
+    manager = PeriodicCheckpointManager(config, store=store, steps_per_epoch=2)
+    model = torch.nn.Linear(2, 1)
+    preview = _Preview()
+
+    manager.save(
+        {"model": model.state_dict()},
+        model=model,
+        preview=preview,
+        global_step=2,
+        fallback_metric=1.0,
+    )
+    manager.save(
+        {"model": model.state_dict()},
+        model=model,
+        preview=preview,
+        global_step=4,
+        fallback_metric=0.5,
+    )
+    assert store.load_checkpoint("epoch_001")["global_step"] == 2
+    assert store.load_checkpoint("epoch_002")["global_step"] == 4
+    assert store.load_checkpoint("last")["global_step"] == 4
+    manifest = json.loads((store.run_dir / "run_manifest.json").read_text())
+    assert "epoch_001" in manifest["checkpoint_hashes"]
+    assert "epoch_002" in manifest["checkpoint_hashes"]

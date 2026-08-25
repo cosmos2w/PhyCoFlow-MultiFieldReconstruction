@@ -124,6 +124,7 @@ def run_case_cli(case_name: str, case_dir: str | Path) -> int:
         if command == "build-manifest":
             subparser.add_argument("--output", type=Path, required=True)
             subparser.add_argument("--max-samples", type=int, default=8)
+            subparser.add_argument("--query-points", type=int)
             subparser.add_argument(
                 "--split", choices=("train", "validation", "test"), default="validation"
             )
@@ -202,7 +203,11 @@ def run_case_cli(case_name: str, case_dir: str | Path) -> int:
         if sample_count < 1:
             raise ValueError(f"split {args.split!r} contains no samples")
         samples = [dataset[index] for index in range(sample_count)]
-        batch = build_observation_batch(samples, sensor_protocol_from_config(config))
+        batch = build_observation_batch(
+            samples,
+            sensor_protocol_from_config(config),
+            query_points=args.query_points,
+        )
         manifest = manifest_from_batch(batch, config["dataset"]["path"], dataset.split_name)
         output = (
             args.output.resolve()

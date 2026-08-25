@@ -1,0 +1,72 @@
+{
+  "arm": "A",
+  "model": "pointcloud_ffm/gl_rbf_enh",
+  "formal_run_status": "blocked_before_launch",
+  "branch": "validation/proj-multifield-gl-rbf-cq",
+  "source_branch": "release/gl-rbf-cq-portable-prep",
+  "source_commit": "a7992a5c462458d4689d2312491f0220cd0d4d1a",
+  "protocol": {
+    "batch_size": 128,
+    "query_points": 4096,
+    "sensor_count_range": [192, 384],
+    "sensor_fields": ["T"],
+    "seed": 42,
+    "epochs": 200
+  },
+  "dataset_train_samples": 8000,
+  "steps_per_epoch": 63,
+  "configured_steps": 12600,
+  "parameter_count": 4778118,
+  "trainable_parameter_count": 4778118,
+  "exact_protocol_smoke": {
+    "device": "cuda:0",
+    "batch_size": 128,
+    "query_points": 4096,
+    "sensor_count": 384,
+    "outcome": "cuda_oom_during_backward",
+    "error": "Tried to allocate 8.00 GiB. GPU 0 total capacity 47.38 GiB, 5.63 GiB free; process memory 41.71 GiB; PyTorch allocated 34.77 GiB and reserved 6.44 GiB.",
+    "protocol_changed": false
+  },
+  "allocator_identical_retry": {
+    "device": "cuda:0",
+    "batch_size": 128,
+    "query_points": 4096,
+    "sensor_count": 384,
+    "outcome": "cuda_oom_during_backward",
+    "error": "Tried to allocate 96.00 GiB against a 47.38 GiB GPU; 26.55 GiB allocated, 168 MiB reserved-unallocated, and 20.13 GiB free.",
+    "expandable_segments_tested": true,
+    "fragmentation_ruled_out": true,
+    "protocol_changed": false
+  },
+  "controlled_diagnostic_smoke": [
+    {
+      "device": "cuda:0",
+      "batch_size": 8,
+      "query_points": 4096,
+      "sensor_count": 384,
+      "step_seconds": 0.064059,
+      "forward_native_loss_seconds": 0.015182,
+      "backward_seconds": 0.047423,
+      "optimizer_seconds": 0.001231,
+      "peak_cuda_allocated_bytes": 8308785664,
+      "peak_cuda_reserved_bytes": 9969860608
+    },
+    {
+      "device": "cuda:0",
+      "batch_size": 32,
+      "query_points": 4096,
+      "sensor_count": 384,
+      "step_seconds": 0.228475,
+      "forward_native_loss_seconds": 0.045227,
+      "backward_seconds": 0.181704,
+      "optimizer_seconds": 0.001343,
+      "peak_cuda_allocated_bytes": 32964593152,
+      "peak_cuda_reserved_bytes": 39684407296
+    }
+  ],
+  "notes": [
+    "The exact B128/Q4096 smoke is a launch gate; no Arm-A formal run was started.",
+    "No scientific benchmark setting was reduced or changed to work around OOM.",
+    "Arm-A remains the un-migrated legacy implementation; no GL_rbf_CQ source was added."
+  ]
+}

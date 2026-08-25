@@ -28,6 +28,7 @@ COMMON_KEYS = {
     "objectives",
     "rollout",
     "observation_consistency",
+    "benchmark_telemetry",
     "trainable",
 }
 
@@ -198,7 +199,7 @@ def _validate_common_sections(config: Mapping[str, Any]) -> None:
         raise TypeError("checkpointing must be a mapping")
     _reject_unknown(
         checkpointing,
-        {"enabled", "every_epochs", "save_epoch_one"},
+        {"enabled", "every_epochs", "epochs", "save_epoch_one"},
         "checkpointing",
     )
     for key in ("enabled", "save_epoch_one"):
@@ -206,6 +207,21 @@ def _validate_common_sections(config: Mapping[str, Any]) -> None:
             raise TypeError(f"checkpointing.{key} must be boolean")
     if int(checkpointing.get("every_epochs", 10)) < 1:
         raise ValueError("checkpointing.every_epochs must be positive")
+    if "epochs" in checkpointing:
+        epochs = checkpointing["epochs"]
+        if not isinstance(epochs, (list, tuple)) or not epochs or any(int(epoch) < 1 for epoch in epochs):
+            raise ValueError("checkpointing.epochs must be a non-empty list of positive epochs")
+        if len({int(epoch) for epoch in epochs}) != len(epochs):
+            raise ValueError("checkpointing.epochs must not contain duplicates")
+
+    telemetry = config.get("benchmark_telemetry", {})
+    if not isinstance(telemetry, Mapping):
+        raise TypeError("benchmark_telemetry must be a mapping")
+    _reject_unknown(telemetry, {"enabled", "sample_steps"}, "benchmark_telemetry")
+    if "enabled" in telemetry and not isinstance(telemetry["enabled"], bool):
+        raise TypeError("benchmark_telemetry.enabled must be boolean")
+    if int(telemetry.get("sample_steps", 0)) < 0:
+        raise ValueError("benchmark_telemetry.sample_steps must be non-negative")
 
 
 def _validate_optimization_values(settings: Mapping[str, Any]) -> None:

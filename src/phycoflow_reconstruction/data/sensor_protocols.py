@@ -120,7 +120,7 @@ def build_observation_batch(
     *,
     query_points: int | None = None,
     manifest_indices: Mapping[str, Sequence[Sequence[int]]] | None = None,
-    query_indices: Sequence[int] | torch.Tensor | None = None,
+    query_indices: Mapping[str, Sequence[int]] | Sequence[int] | torch.Tensor | None = None,
 ) -> ObservationBatch:
     """Build one reproducible sparse-input/query batch.
 
@@ -169,8 +169,13 @@ def build_observation_batch(
             )
         )
 
-        if query_indices is not None:
-            query_ids = torch.as_tensor(query_indices, dtype=torch.long)
+        provided_query_indices = (
+            query_indices.get(sample_id)
+            if isinstance(query_indices, Mapping)
+            else query_indices
+        )
+        if provided_query_indices is not None:
+            query_ids = torch.as_tensor(provided_query_indices, dtype=torch.long)
             if query_ids.ndim != 1 or query_ids.numel() < 1:
                 raise ValueError("query_indices must be a non-empty one-dimensional sequence")
             if torch.any(query_ids < 0) or torch.any(query_ids >= sample.values.shape[0]):

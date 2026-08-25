@@ -1,0 +1,68 @@
+defaults:
+  - ../../../Cases/turbulent_combustion/configs/dataset.yaml
+
+stage: base_training
+case: turbulent_combustion
+model:
+  name: pointcloud_ffm
+  backbone: gl_rbf_enh
+  gather_mode: topk_rbf
+  hidden_dim: 256
+  latent_dim: 256
+  num_latents: 128
+  heads: 8
+  latent_blocks: 4
+  gather_topk: 32
+  rbf_sigma: 0.05
+  field_embedding_dim: 128
+  fourier_bands: 32
+  fourier_max_frequency: 64.0
+  rff_features: 256
+  rff_lengthscale: 0.15
+  query_chunk_size: 2048
+  query_points: 4096
+  prior: rff
+observations:
+  protocol: random_uniform
+  seed: 42
+  fields:
+    T: {count_min: 192, count_max: 384}
+optimization:
+  epochs: 200
+  batch_size: 128
+  lr: 1.0e-4
+  weight_decay: 1.0e-6
+  grad_clip: 1.0
+runtime:
+  seed: 42
+  device: 'cuda:0'
+  deterministic: true
+  num_workers: 4
+  data_strategy: async_cpu
+  progress: true
+  plot_every_steps: 200
+evaluation:
+  split: validation
+  max_samples: 20
+  query_points: 4096
+  generation_steps: 32
+  seed: 2027
+  preview:
+    enabled: false
+    every_epochs: 20
+    split: validation
+    sample_index: 0
+    query_points: 4096
+    generation_steps: 32
+    seed: 2027
+    keep_history: false
+checkpointing:
+  enabled: true
+  every_epochs: 20
+  epochs: [1, 20, 40, 60, 100, 150, 200]
+  save_epoch_one: true
+benchmark_telemetry:
+  enabled: true
+  sample_steps: 5
+output:
+  experiment_name: gl_rbf_cq_migration_200ep_A_legacy_gl_rbf_enh

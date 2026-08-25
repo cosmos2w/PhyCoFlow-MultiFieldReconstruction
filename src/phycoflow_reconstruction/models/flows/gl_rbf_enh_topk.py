@@ -28,6 +28,8 @@ class EnhancedGLRBFTopK(nn.Module):
         rbf_sigma: float = 0.08,
         fourier_bands: int = 16,
         query_chunk_size: int = 2048,
+        field_embedding_dim: int = 24,
+        fourier_max_frequency: float = 32.0,
     ) -> None:
         super().__init__()
         self.num_fields = num_fields
@@ -36,10 +38,22 @@ class EnhancedGLRBFTopK(nn.Module):
         if self.query_chunk_size < 1:
             raise ValueError("query_chunk_size must be positive")
         self.log_rbf_sigma = nn.Parameter(torch.log(torch.tensor(float(rbf_sigma))))
-        self.position = FourierFeatures(coordinate_dim, fourier_bands)
-        self.field_embedding = nn.Embedding(num_fields, 24)
+        if int(field_embedding_dim) < 1:
+            raise ValueError("field_embedding_dim must be positive")
+        if int(fourier_bands) < 1:
+            raise ValueError("fourier_bands must be positive")
+        if float(fourier_max_frequency) <= 0:
+            raise ValueError("fourier_max_frequency must be positive")
+        self.position = FourierFeatures(
+            coordinate_dim,
+            int(fourier_bands),
+            max_frequency=float(fourier_max_frequency),
+        )
+        self.field_embedding = nn.Embedding(num_fields, int(field_embedding_dim))
 
-        self.sensor_projection = make_mlp(self.position.out_dim + 1 + 24, latent_dim, latent_dim, 3)
+        self.sensor_projection = make_mlp(
+            self.position.out_dim + 1 + int(field_embedding_dim), latent_dim, latent_dim, 3
+        )
         self.point_projection = make_mlp(
             self.position.out_dim + num_fields + 1, hidden_dim, hidden_dim, 3
         )
