@@ -151,6 +151,11 @@ def run_case_cli(case_name: str, case_dir: str | Path) -> int:
     evaluator.add_argument("--generation-steps", type=int)
     evaluator.add_argument("--device")
     evaluator.add_argument("--report-name", default="benchmark")
+    evaluator.add_argument(
+        "--weight-selection",
+        choices=("configured", "live"),
+        default="configured",
+    )
 
     args = parser.parse_args()
     if args.command == "evaluate-run":
@@ -175,6 +180,7 @@ def run_case_cli(case_name: str, case_dir: str | Path) -> int:
             generation_steps=args.generation_steps,
             device_name=args.device,
             report_name=args.report_name,
+            weight_selection=args.weight_selection,
         )
         print(report)
         return 0

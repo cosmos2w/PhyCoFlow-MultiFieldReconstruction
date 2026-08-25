@@ -12,6 +12,7 @@ from phycoflow_reconstruction.training.model_lifecycle import (
     backward_and_clip_model_loss,
     evaluation_weight_context,
     load_training_aux_state,
+    selected_evaluation_weight_context,
 )
 
 
@@ -182,3 +183,14 @@ def test_aux_state_restore_is_strict_in_both_directions():
         load_training_aux_state(_LifecycleModel(), {"model": {}})
     with pytest.raises(TypeError, match="cannot restore"):
         load_training_aux_state(_PlainModel(), {"training_aux_state": {}})
+
+
+def test_evaluation_weight_selection_configured_and_live():
+    model = _LifecycleModel()
+    with selected_evaluation_weight_context(model, "configured"):
+        assert float(model.weight) == 7.0
+    with selected_evaluation_weight_context(model, "live"):
+        assert float(model.weight) == 2.0
+
+    with pytest.raises(ValueError, match="configured.*live"):
+        selected_evaluation_weight_context(model, "unknown")

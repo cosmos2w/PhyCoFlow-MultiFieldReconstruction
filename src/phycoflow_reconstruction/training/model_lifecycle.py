@@ -91,6 +91,17 @@ def evaluation_weight_context(model: nn.Module) -> AbstractContextManager[Any]:
     return hook() if callable(hook) else nullcontext()
 
 
+def selected_evaluation_weight_context(
+    model: nn.Module, selection: str
+) -> AbstractContextManager[Any]:
+    """Select configured lifecycle weights or bypass swapping for live weights."""
+    if selection == "configured":
+        return evaluation_weight_context(model)
+    if selection == "live":
+        return nullcontext()
+    raise ValueError("weight_selection must be 'configured' or 'live'")
+
+
 def add_training_aux_state(payload: dict[str, Any], model: nn.Module) -> dict[str, Any]:
     """Add optional resumable model state without changing hookless payloads."""
     hook = getattr(model, "training_aux_state_dict", None)
