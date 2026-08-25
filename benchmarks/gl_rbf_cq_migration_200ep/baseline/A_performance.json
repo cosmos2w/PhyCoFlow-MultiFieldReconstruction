@@ -1,11 +1,11 @@
 {
   "arm": "A",
   "model": "pointcloud_ffm/gl_rbf_enh",
-  "formal_run_status": "ready_to_restart_with_calibrated_2^-130_scaled_backward_from_seed_42",
+  "formal_run_status": "ready_to_restart_with_exact_rng_adaptive_backward_scaling_from_seed_42",
   "branch": "validation/proj-multifield-gl-rbf-cq",
   "source_branch": "release/gl-rbf-cq-portable-prep",
   "source_commit": "a7992a5c462458d4689d2312491f0220cd0d4d1a",
-  "phase1_freeze_commit": "abe0ba2e282f41eaab1e099bea6e01b52dadedeb",
+  "phase1_freeze_commit": "35473774ef0a2e274059af0c6b632fde9b426bb2",
   "protocol": {
     "requested_batch_size": 128,
     "batch_size": 40,
@@ -73,8 +73,29 @@
     "2^-130_step1_norm": 316861.14924366126,
     "2^-131_step1_norm": 0.0,
     "2^-132_step1_norm": 0.0,
-    "selected_scale": "2^-130",
-    "selection_reason": "smallest exact power-of-two scale with a nonzero real-data gradient"
+    "selected_scale": "2^-128_initial_adaptive",
+    "selection_reason": "2^-128 is viable at initialization; the exact-RNG adaptive controller moves by one power-of-two only when a logical step overflows or completely underflows"
+  },
+  "failed_formal_attempt_after_fixed_2^-130_scale": {
+    "run_dir": "Cases/turbulent_combustion/runs/gl_rbf_cq_migration_200ep_A_legacy_gl_rbf_enh/20260825T050045Z_71253755",
+    "last_completed_step": 218,
+    "outcome": "nonfinite_scaled_backward_rejected_before_optimizer",
+    "last_finite_unscaled_gradient_norm": 2.5447e65,
+    "diagnosis": "the calibrated early-step fixed scale did not remain viable as gradient magnitude evolved, proving that no single preselected scale was supported by the observed run",
+    "contaminated_weights_reused": false,
+    "generic_fix_commit": "35473774ef0a2e274059af0c6b632fde9b426bb2"
+  },
+  "adaptive_backward_smoke": {
+    "run_dir": "Cases/turbulent_combustion/runs/gl_rbf_cq_migration_200ep_A_legacy_gl_rbf_enh/20260825T051019Z_5efad87b",
+    "status": "integration_truncated",
+    "completed_steps": 250,
+    "initial_scale": "2^-128",
+    "maximum_backward_retries_per_step": 0,
+    "epoch_1_training_only_seconds": 58.379788427613676,
+    "epoch_1_median_sampled_step_seconds": 0.28753018188476565,
+    "peak_cuda_allocated_bytes": 41202117632,
+    "peak_cuda_reserved_bytes": 49595547648,
+    "contaminated_weights_reused": false
   },
   "original_b128_smoke": {
     "device": "cuda:0",
@@ -141,7 +162,8 @@
     "The second attempt safely rejected a genuinely non-finite backward result at step 1259; the next seed-42 restart uses the common algebraically unscaled backward safeguard.",
     "The 2^-64 attempt safely stopped at step 938 when a scaled derivative overflowed; the next common A/B/C scale is 2^-120.",
     "The 2^-120 attempt safely stopped after epoch 44; the final float32-representable common scale is 2^-140.",
-    "2^-140 underflowed completely; real-data calibration selected 2^-130 as the smallest viable common scale.",
+    "2^-140 underflowed completely; real-data calibration found an early-step boundary between 2^-130 and 2^-131, but the subsequent fixed 2^-130 run overflowed at step 219.",
+    "The common A/B/C controller now retries the identical RNG step at adjacent power-of-two scales and persists its current scale in checkpoints; a 250-step real-data smoke passed the fixed-scale failure boundary.",
     "Arm-A remains the un-migrated legacy implementation; no GL_rbf_CQ source was added."
   ]
 }

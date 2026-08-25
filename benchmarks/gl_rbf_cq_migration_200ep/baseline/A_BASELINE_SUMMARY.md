@@ -39,10 +39,19 @@ clip multiplication performed in float64. The new run again starts from seed
 42; no prior weights are reused.
 
 The `2^-140` attempt was rejected after all gradients through step 290 were
-zero. Short real-data B40/Q4096 calibrations then established the actual
-float32 boundary: `2^-130` is finite, while `2^-131` and `2^-132` underflow.
-The formal common A/B/C scale is therefore `2^-130`, the smallest viable exact
-power of two. The next run again starts from seed 42.
+zero. Short real-data B40/Q4096 calibrations found an early-step float32
+boundary: `2^-130` was finite, while `2^-131` and `2^-132` underflowed. A
+seed-42 run at fixed `2^-130` nevertheless overflowed at step 219, showing that
+no observed fixed scale remained viable as gradient magnitude evolved.
+
+Commit `35473774` therefore replaces the fixed value with a common A/B/C
+adaptive numerical controller. It starts at `2^-128`, moves one exact power of
+two only after complete underflow or overflow, discards failed gradients, and
+restores the pre-forward CPU/CUDA RNG state before recomputing the logical
+step. Gradients are algebraically unscaled before the unchanged global clip,
+and the active scale is checkpointed for exact resume. A clean 250-step
+real-data GPU-0 smoke passed the prior fixed-scale failure boundary; its
+truncated weights are not reused. The formal run again starts from seed 42.
 
 ## Model and protocol
 
@@ -54,7 +63,8 @@ power of two. The next run again starts from seed 42.
   coordinate dimension 2; existing normalization and split contracts.
 - Sensors: random-uniform T-only, 192--384 valid sensors, seed 42.
 - Training: 200 epochs, batch size 40, query points 4096, lr 1e-4,
-  weight decay 1e-6, gradient clip 1.0, deterministic seed 42.
+  weight decay 1e-6, gradient clip 1.0, deterministic seed 42, exact-RNG
+  adaptive backward scaling initialized at `2^-128`.
 - Training preview is disabled; immutable checkpoints are saved at epochs
   `1, 20, 40, 60, 100, 150, 200`, and fixed-manifest evaluation is post-hoc.
 
