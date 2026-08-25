@@ -26,6 +26,12 @@ unscales it as part of the same global clip. The final clipped gradient is
 mathematically unchanged, and A/B/C use the identical safeguard. The next
 formal attempt again starts from seed 42 rather than either failed run.
 
+The `2^-64` attempt then stopped safely at step 938 when even a scaled
+derivative became non-finite. The common safeguard is therefore frozen at
+`2^-120`, which remains exactly representable and safely invertible in
+float32 while extending representable raw derivatives to approximately
+`4e74`. The run again restarts from seed 42 with no failed weights reused.
+
 ## Model and protocol
 
 - Downstream model: `pointcloud_ffm` with `backbone: gl_rbf_enh`.

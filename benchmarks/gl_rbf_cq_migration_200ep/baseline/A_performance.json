@@ -1,7 +1,7 @@
 {
   "arm": "A",
   "model": "pointcloud_ffm/gl_rbf_enh",
-  "formal_run_status": "ready_to_restart_with_scaled_backward_from_seed_42",
+  "formal_run_status": "ready_to_restart_with_2^-120_scaled_backward_from_seed_42",
   "branch": "validation/proj-multifield-gl-rbf-cq",
   "source_branch": "release/gl-rbf-cq-portable-prep",
   "source_commit": "a7992a5c462458d4689d2312491f0220cd0d4d1a",
@@ -37,6 +37,14 @@
     "contaminated_weights_reused": false,
     "generic_fix_commit": "cf44ffceba3c82058f2908975be263b765bdf3fd",
     "fix": "2^-64 power-of-two backward scaling with algebraically exact unscale/global clipping; identical for A/B/C"
+  },
+  "failed_formal_attempt_after_2^-64_backward_scale": {
+    "run_dir": "Cases/turbulent_combustion/runs/gl_rbf_cq_migration_200ep_A_legacy_gl_rbf_enh/20260825T040221Z_cb83e430",
+    "last_completed_step": 937,
+    "outcome": "nonfinite_scaled_backward_rejected_before_optimizer",
+    "diagnosis": "at least one 2^-64-scaled float32 gradient was non-finite; last finite unscaled global norm was 5.642082117653928e32",
+    "contaminated_weights_reused": false,
+    "next_safeguard": "2^-120 exact power-of-two scale extends representable raw derivatives to approximately 4e74 while remaining safely invertible in float32"
   },
   "original_b128_smoke": {
     "device": "cuda:0",
@@ -101,6 +109,7 @@
     "B40 is the largest stable batch selected for identical A/B/C execution.",
     "The first B40 formal attempt exposed float32 gradient-norm overflow and was discarded; the restart begins from seed 42 after the generic stable-clipping fix.",
     "The second attempt safely rejected a genuinely non-finite backward result at step 1259; the next seed-42 restart uses the common algebraically unscaled backward safeguard.",
+    "The 2^-64 attempt safely stopped at step 938 when a scaled derivative overflowed; the next common A/B/C scale is 2^-120.",
     "Arm-A remains the un-migrated legacy implementation; no GL_rbf_CQ source was added."
   ]
 }
