@@ -28,7 +28,7 @@ from .checkpointing import PeriodicCheckpointManager
 from .common import (
     iter_unique_batch_indices,
 )
-from .gradients import stable_clip_grad_norm_
+from .gradients import adaptive_backward_and_clip_
 from .monitoring import TrainingMonitor
 from .preview import TrainingReconstructionPreview
 from .run_store import RunStore, checkpoint_model_state, file_sha256, load_model_state_strict
@@ -93,6 +93,9 @@ def run_base_training(
     batch_size = int(config["optimization"].get("batch_size", 1))
     epochs = int(config["optimization"].get("epochs", 1))
     backward_loss_scale = float(config["optimization"].get("backward_loss_scale", 1.0))
+    adaptive_backward_scaling = bool(
+        config["optimization"].get("adaptive_backward_scaling", False)
+    )
     steps_per_epoch = math.ceil(len(dataset) / batch_size)
     configured_steps = epochs * steps_per_epoch
     if start_step >= configured_steps:
@@ -109,6 +112,11 @@ def run_base_training(
         if device.type == "cuda" and checkpoint["rng_state"].get("torch_cuda"):
             torch.cuda.set_rng_state_all(checkpoint["rng_state"]["torch_cuda"])
         index_generator.set_state(checkpoint["rng_state"]["index_generator"])
+        backward_loss_scale = float(
+            checkpoint.get("training_state", {}).get(
+                "backward_loss_scale", backward_loss_scale
+            )
+        )
     store.update_manifest(
         dataset_path=str(dataset.path),
         dataset_fingerprint=dataset_fingerprint(dataset.path),
@@ -185,19 +193,17 @@ def run_base_training(
         global_step = start_step + step_offset
         telemetry.start_step(global_step)
         model.train()
-        optimizer.zero_grad(set_to_none=True)
-        telemetry.start_phase("forward_native_loss")
-        losses = model.training_loss(batch)
-        telemetry.end_phase("forward_native_loss")
-        if not torch.isfinite(losses.total):
-            raise FloatingPointError(f"non-finite loss at step {global_step}: {losses.total}")
-        telemetry.start_phase("backward")
-        (losses.total * backward_loss_scale).backward()
-        telemetry.end_phase("backward")
-        gradient_norm = stable_clip_grad_norm_(
-            model.parameters(),
-            float(config["optimization"].get("grad_clip", 1.0)),
-            gradient_scale=backward_loss_scale,
+        losses, gradient_norm, backward_loss_scale, backward_retries = (
+            adaptive_backward_and_clip_(
+                lambda batch=batch: model.training_loss(batch),
+                model.parameters(),
+                float(config["optimization"].get("grad_clip", 1.0)),
+                initial_scale=backward_loss_scale,
+                adaptive=adaptive_backward_scaling,
+                device=device,
+                start_phase=telemetry.start_phase,
+                end_phase=telemetry.end_phase,
+            )
         )
         telemetry.start_phase("optimizer")
         optimizer.step()
@@ -209,6 +215,8 @@ def run_base_training(
             "step": global_step + 1,
             "total": float(losses.total.detach().cpu()),
             "gradient_norm": float(torch.as_tensor(gradient_norm).detach().cpu()),
+            "backward_loss_scale": backward_loss_scale,
+            "backward_retries": backward_retries,
             **{name: float(value.detach().cpu()) for name, value in losses.components.items()},
         }
         store.append_history(row)
@@ -227,6 +235,7 @@ def run_base_training(
                     index_generator=index_generator,
                     device=device,
                     config_sha256=store.config_hash,
+                    backward_loss_scale=backward_loss_scale,
                 ),
                 model=model,
                 preview=preview,
@@ -285,6 +294,7 @@ def run_base_training(
         index_generator=index_generator,
         device=device,
         config_sha256=store.config_hash,
+        backward_loss_scale=backward_loss_scale,
     )
     saved = checkpoint_manager.save(
         checkpoint,
@@ -337,6 +347,7 @@ def _base_checkpoint_payload(
     index_generator: torch.Generator,
     device: torch.device,
     config_sha256: str,
+    backward_loss_scale: float,
 ) -> dict[str, Any]:
     """Build the same resumable payload for periodic and terminal saves."""
     return {
@@ -351,6 +362,7 @@ def _base_checkpoint_payload(
         "parameter_count": parameter_count,
         "trainable_parameter_count": trainable_parameter_count,
         "config_sha256": config_sha256,
+        "training_state": {"backward_loss_scale": float(backward_loss_scale)},
         "rng_state": {
             "torch_cpu": torch.get_rng_state(),
             "torch_cuda": torch.cuda.get_rng_state_all() if device.type == "cuda" else [],

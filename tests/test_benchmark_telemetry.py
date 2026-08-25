@@ -34,7 +34,8 @@ def test_arm_a_config_matches_historical_scale_and_common_protocol():
         "lr": 1.0e-4,
         "weight_decay": 1.0e-6,
         "grad_clip": 1.0,
-        "backward_loss_scale": 7.346839692639297e-40,
+        "backward_loss_scale": 2.938735877055719e-39,
+        "adaptive_backward_scaling": True,
     }
     assert config["observations"]["fields"] == {"T": {"count_min": 192, "count_max": 384}}
 
@@ -92,6 +93,29 @@ def test_benchmark_telemetry_records_cpu_step_and_epoch(tmp_path):
     assert payload["epochs"][0]["steps_per_epoch"] == 2
     assert payload["epochs"][0]["parameter_count"] == 12
     assert payload["steps"][0]["forward_native_loss_time_s"] >= 0
+
+
+def test_benchmark_telemetry_accumulates_retry_phase_time(tmp_path):
+    telemetry = BenchmarkTelemetry(
+        tmp_path,
+        enabled=True,
+        device=torch.device("cpu"),
+        steps_per_epoch=1,
+        parameter_count=1,
+        trainable_parameter_count=1,
+    )
+    telemetry.start_step(0)
+    telemetry.start_phase("backward")
+    telemetry.end_phase("backward")
+    telemetry.start_phase("backward")
+    telemetry.end_phase("backward")
+    telemetry.finish_step()
+    telemetry.close()
+
+    payload = json.loads(
+        (tmp_path / "metrics" / "benchmark_telemetry.json").read_text(encoding="utf-8")
+    )
+    assert payload["steps"][0]["backward_time_s"] >= 0
 
 
 def test_benchmark_telemetry_is_noop_when_disabled(tmp_path):

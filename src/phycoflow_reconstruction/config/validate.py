@@ -238,13 +238,25 @@ def _validate_optimization_values(settings: Mapping[str, Any]) -> None:
     backward_loss_scale = float(settings.get("backward_loss_scale", 1.0))
     if not math.isfinite(backward_loss_scale) or not 0 < backward_loss_scale <= 1:
         raise ValueError("optimization.backward_loss_scale must be finite and in (0, 1]")
+    if "adaptive_backward_scaling" in settings and not isinstance(
+        settings["adaptive_backward_scaling"], bool
+    ):
+        raise TypeError("optimization.adaptive_backward_scaling must be boolean")
 
 
 def _validate_base_training(config: Mapping[str, Any]) -> None:
     optimization = _require_mapping(config, "optimization")
     _reject_unknown(
         optimization,
-        {"epochs", "batch_size", "lr", "weight_decay", "grad_clip", "backward_loss_scale"},
+        {
+            "epochs",
+            "batch_size",
+            "lr",
+            "weight_decay",
+            "grad_clip",
+            "backward_loss_scale",
+            "adaptive_backward_scaling",
+        },
         "optimization",
     )
     _validate_optimization_values(optimization)

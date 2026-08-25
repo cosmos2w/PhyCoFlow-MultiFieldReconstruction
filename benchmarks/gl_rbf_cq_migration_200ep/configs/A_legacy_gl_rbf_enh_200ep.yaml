@@ -33,7 +33,8 @@ optimization:
   lr: 1.0e-4
   weight_decay: 1.0e-6
   grad_clip: 1.0
-  backward_loss_scale: 7.346839692639297e-40  # 2^-130; calibrated smallest viable scale
+  backward_loss_scale: 2.938735877055719e-39  # 2^-128 viable initial scale
+  adaptive_backward_scaling: true
 runtime:
   seed: 42
   device: 'cuda:0'

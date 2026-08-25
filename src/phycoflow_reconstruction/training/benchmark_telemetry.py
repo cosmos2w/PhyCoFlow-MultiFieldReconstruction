@@ -126,7 +126,8 @@ class BenchmarkTelemetry:
                 start.record()
             self._cuda_events[str(name)] = (start, torch.cuda.Event(enable_timing=True))
         else:
-            self._step["phases"][str(name)] = {"started": perf_counter()}
+            phase = self._step["phases"].setdefault(str(name), {"seconds": 0.0})
+            phase["started"] = perf_counter()
 
     def end_phase(self, name: str) -> None:
         if not self.enabled or self._step is None:
@@ -140,12 +141,13 @@ class BenchmarkTelemetry:
                 raise RuntimeError(f"benchmark telemetry phase {key!r} was not started")
             with torch.cuda.device(self.device):
                 events[1].record()
-            self._step["phases"][key] = {"events": events}
+            phase = self._step["phases"].setdefault(key, {"events": []})
+            phase["events"].append(events)
         else:
             phase = self._step["phases"].get(key)
             if phase is None:
                 raise RuntimeError(f"benchmark telemetry phase {key!r} was not started")
-            phase["seconds"] = max(0.0, perf_counter() - phase.pop("started"))
+            phase["seconds"] += max(0.0, perf_counter() - phase.pop("started"))
 
     def finish_step(self) -> None:
         if not self.enabled or self._step is None:
@@ -159,7 +161,10 @@ class BenchmarkTelemetry:
             _synchronize(self.device)
             total_ms = float(step["total_start"].elapsed_time(step["total_end"]))
             phase_seconds = {
-                name: float(payload["events"][0].elapsed_time(payload["events"][1])) / 1000.0
+                name: sum(
+                    float(events[0].elapsed_time(events[1])) / 1000.0
+                    for events in payload["events"]
+                )
                 for name, payload in step["phases"].items()
             }
         else:

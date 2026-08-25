@@ -3,7 +3,10 @@
 import pytest
 import torch
 
-from phycoflow_reconstruction.training.gradients import stable_clip_grad_norm_
+from phycoflow_reconstruction.training.gradients import (
+    adaptive_backward_and_clip_,
+    stable_clip_grad_norm_,
+)
 
 
 def test_stable_clip_matches_torch_for_ordinary_finite_gradients():
@@ -64,3 +67,51 @@ def test_stable_clip_rejects_nonfinite_individual_gradients(value):
 def test_stable_clip_accepts_an_empty_gradient_set():
     parameter = torch.nn.Parameter(torch.ones(1))
     assert float(stable_clip_grad_norm_([parameter], 1.0)) == 0.0
+
+
+def test_adaptive_backward_retries_overflow_with_identical_rng_draw():
+    parameter = torch.nn.Parameter(torch.zeros(()))
+    draws = []
+
+    class Losses:
+        def __init__(self, total):
+            self.total = total
+
+    def closure():
+        draw = torch.rand(())
+        draws.append(draw.detach().clone())
+        return Losses(((parameter * 2.0e19) * 2.0e19) + draw * 0.0)
+
+    _, norm, scale, retries = adaptive_backward_and_clip_(
+        closure,
+        parameter,
+        1.0,
+        adaptive=True,
+    )
+
+    assert retries == 1
+    assert scale == 2.0**-1
+    assert torch.equal(draws[0], draws[1])
+    assert torch.isfinite(norm)
+    assert torch.isfinite(parameter.grad)
+
+
+def test_adaptive_backward_grows_scale_after_complete_underflow():
+    parameter = torch.nn.Parameter(torch.ones(()))
+
+    class Losses:
+        def __init__(self, total):
+            self.total = total
+
+    _, norm, scale, retries = adaptive_backward_and_clip_(
+        lambda: Losses(parameter * 1.0e-20),
+        parameter,
+        1.0,
+        initial_scale=2.0**-128,
+        adaptive=True,
+    )
+
+    assert retries > 0
+    assert scale > 2.0**-128
+    assert float(norm) > 0.0
+    assert torch.isfinite(parameter.grad)
