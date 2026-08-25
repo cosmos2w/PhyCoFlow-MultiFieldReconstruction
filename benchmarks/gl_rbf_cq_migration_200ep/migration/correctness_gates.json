@@ -3,7 +3,16 @@
   "benchmark": "gl_rbf_cq_migration_200ep",
   "status": "passed",
   "scope": "portable core plus downstream adapter gates; no formal training run",
+  "post_migration_implementation_head": "4500bd1",
   "test_command": "PYTHONPATH=src conda run -n phycoflow_env pytest -q tests/test_gl_rbf_cq_configs.py tests/test_gl_rbf_cq_portable_gates.py tests/test_gl_rbf_cq_downstream_gates.py",
+  "test_results": {
+    "strengthened_migration_gates": "13 passed",
+    "portable_release_focused": "55 passed",
+    "portable_source_full_regression": "173 passed",
+    "downstream_full_regression": "142 passed, 1 opt-in GPU test skipped in the default invocation",
+    "downstream_opt_in_legacy_equivalence_gpu1": "1 passed on physical GPU 1",
+    "downstream_ruff": "passed; the byte-identical frozen portable package is explicitly excluded"
+  },
   "gate_groups": {
     "isolated_import": "passed",
     "synthetic_forward_backward_2d_3d_f5_other_and_padding": "passed",
@@ -18,6 +27,36 @@
   "evidence": {
     "initialization_identity": "migration/initialization_identity.json",
     "fixed_validation_manifest": "../fixed_validation_manifest.json",
-    "fixed_validation_manifest_sha256": "2071583f79e30f17bc586d907da184b5c79dfc82c01b4d652ccf05652e2c2b6f"
+    "fixed_validation_manifest_sha256": "2071583f79e30f17bc586d907da184b5c79dfc82c01b4d652ccf05652e2c2b6f",
+    "exact_protocol_gpu_smoke": {
+      "common": {
+        "batch_size": 40,
+        "query_points": 4096,
+        "neighbor_backend": "keops",
+        "parameter_count": 5461817,
+        "status": "integration_truncated_after_one_successful_step"
+      },
+      "gpu0_legacy_mha": {
+        "run_id": "20260825T093602Z_93b0b3f4",
+        "loss": 2.0934629440307617,
+        "gradient_norm": 0.9139918837646217,
+        "peak_cuda_allocated_bytes": 6765062144,
+        "peak_cuda_reserved_bytes": 7667187712
+      },
+      "gpu1_cached_kv": {
+        "run_id": "20260825T093627Z_245fd571",
+        "loss": 2.0934627056121826,
+        "gradient_norm": 0.913991883214484,
+        "peak_cuda_allocated_bytes": 6600427520,
+        "peak_cuda_reserved_bytes": 7499415552
+      },
+      "gpu2_legacy_mha": {
+        "run_id": "20260825T093627Z_93b0b3f4",
+        "loss": 2.0934629440307617,
+        "gradient_norm": 0.9139918837399829,
+        "peak_cuda_allocated_bytes": 6765062144,
+        "peak_cuda_reserved_bytes": 7667187712
+      }
+    }
   }
 }
