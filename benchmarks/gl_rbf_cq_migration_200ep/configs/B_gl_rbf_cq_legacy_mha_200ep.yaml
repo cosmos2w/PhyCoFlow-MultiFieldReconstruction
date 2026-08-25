@@ -1,0 +1,116 @@
+defaults:
+  - ../../../Cases/turbulent_combustion/configs/dataset.yaml
+
+stage: base_training
+case: turbulent_combustion
+dataset:
+  normalization: mean_std
+  normalization_stats_path: ../../benchmarks/gl_rbf_cq_migration_200ep/downstream_train_normalization.json
+model:
+  name: gl_rbf_cq
+  backbone: GL_rbf_ENH_CQ
+  sigma_min: 1.0e-4
+  prior: rff
+  rff_features: 256
+  rff_lengthscale: 0.15
+  hidden_dim: 256
+  cond_dim: 128
+  field_embed_dim: 128
+  rbf_sigma: 0.05
+  USE_FOURIER_PE: true
+  fourier_pe_num_bands: 32
+  fourier_pe_max_freq: 64.0
+  latent_dim: 256
+  num_latents: 128
+  num_heads: 8
+  num_latent_blocks: 4
+  ff_mult: 4
+  attn_dropout: 0.0
+  mlp_dropout: 0.0
+  summary_type: mean
+  sensor_coord_encoding: fourier
+  latent_sensor_reinject: true
+  latent_reinject_every: 1
+  condition_attention_execution: legacy_mha
+  sensor_attention_padding_mode: full
+  gather_mode: topk_rbf_glres
+  gather_topk: 32
+  gather_query_chunk_size: 2048
+  learnable_rbf_sigma: true
+  neighbor_backend: keops
+  sensor_local_topk: 16
+  sensor_local_dropout: 0.0
+  query_latent_readout: true
+  query_readout_type: coord
+  query_readout_scale_init: 1.0e-2
+  enhanced_head_norm: true
+  glres_scale_init: 1.0e-2
+  cq_query_dim: 128
+  cq_readout_mode: lowrank
+  cq_readout_rank: 64
+  cq_readout_heads: 4
+  cq_fusion_mode: additive
+  cq_global_scale_init: 1.0
+  cq_local_scale_init: 1.0
+  cq_readout_scale_init: 1.0e-2
+  cq_time_conditioning: sinusoidal_film
+  cq_time_embed_dim: 128
+  cq_time_max_period: 10000.0
+  cq_time_film_zero_init: true
+  cq_measurement_support_mode: rbf_value_support
+  cq_measurement_support_normalize: true
+  model_ema_enabled: true
+  model_ema_decay: 0.999
+  model_ema_eval: true
+  query_points: 4096
+  train_query_microbatch_size: 2048
+  reuse_condition_context_across_query_microbatches: true
+  reconstruction_execution_mode: cached_streamed
+  reconstruction_query_chunk_size: 8192
+  reconstruction_cache_level: static_features
+  ode_solver: euler
+observations:
+  protocol: random_uniform
+  seed: 42
+  fields:
+    T: {count_min: 192, count_max: 384}
+optimization:
+  epochs: 200
+  batch_size: 40
+  lr: 1.0e-4
+  weight_decay: 1.0e-6
+  grad_clip: 1.0
+  backward_loss_scale: 1.0
+runtime:
+  seed: 42
+  device: 'cuda:0'
+  deterministic: true
+  num_workers: 4
+  data_strategy: async_cpu
+  progress: true
+  plot_every_steps: 200
+evaluation:
+  split: validation
+  max_samples: 20
+  query_points: 4096
+  generation_steps: 32
+  seed: 2027
+  preview:
+    enabled: false
+    every_epochs: 20
+    split: validation
+    sample_index: 0
+    query_points: 4096
+    generation_steps: 32
+    seed: 2027
+    keep_history: false
+checkpointing:
+  enabled: true
+  every_epochs: 20
+  epochs: [1, 20, 40, 60, 100, 150, 200]
+  save_epoch_one: true
+benchmark_telemetry:
+  enabled: true
+  sample_steps: 5
+output:
+  experiment_name: gl_rbf_cq_migration_200ep_B_gl_rbf_cq_legacy_mha
