@@ -18,6 +18,7 @@ import torch
 
 from ..data.factory import open_field_dataset
 from ..data.manifest import dataset_fingerprint, manifest_from_batch
+from ..data.normalization import FieldNormalizer
 from ..data.training_batches import build_training_batch_source, dataset_field_bytes
 from ..evaluation import reconstruction_metrics
 from ..models import build_model
@@ -86,6 +87,9 @@ def run_base_training(
     else:
         store = RunStore.resume(resume, config)
         checkpoint = store.load_checkpoint("last")
+        checkpoint_normalizer = FieldNormalizer(**checkpoint["normalization"])
+        if checkpoint_normalizer.digest() != dataset.normalizer.digest():
+            raise ValueError("checkpoint normalization disagrees with the configured dataset")
         load_model_state_strict(model, checkpoint["model"])
         optimizer.load_state_dict(checkpoint["optimizer"])
         start_step = int(checkpoint["global_step"])
@@ -126,6 +130,8 @@ def run_base_training(
         model_version=registry_entry.version,
         model_registry_metadata=registry_entry.metadata,
         benchmark_telemetry_enabled=bool(telemetry_settings.get("enabled", False)),
+        normalization_method=dataset.normalizer.method,
+        normalization_digest=dataset.normalizer.digest(),
     )
     store.save_artifact("normalization.pt", dataset.normalizer.state_dict())
     store.write_json(

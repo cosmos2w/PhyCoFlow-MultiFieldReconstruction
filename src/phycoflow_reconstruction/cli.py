@@ -92,6 +92,14 @@ def _load_case_config(
     if validate_stage:
         validate_config(config)
     config["dataset"]["path"] = str(_resolve_dataset_path(config, case_dir))
+    statistics_path = config["dataset"].get("normalization_stats_path")
+    if statistics_path:
+        statistics_path = Path(statistics_path)
+        config["dataset"]["normalization_stats_path"] = str(
+            statistics_path.resolve()
+            if statistics_path.is_absolute()
+            else (case_dir / statistics_path).resolve()
+        )
     for family in config.get("coherence", {}).get("families", {}).values():
         reference = family.get("reference_bank", {})
         reference_path = reference.get("path")
@@ -188,6 +196,14 @@ def run_case_cli(case_name: str, case_dir: str | Path) -> int:
         if "stage" in config:
             validate_config(config)
         report = validate_dataset(config["dataset"]["path"], config["dataset"].get("field_names"))
+        if config["dataset"].get("normalization_stats_path"):
+            dataset = open_field_dataset(config["dataset"], split="train")
+            report["normalization"] = {
+                "method": dataset.normalizer.method,
+                "digest": dataset.normalizer.digest(),
+                "statistics_path": config["dataset"]["normalization_stats_path"],
+            }
+            dataset.close()
         report["benchmark_eligible"] = bool(config["dataset"].get("benchmark_eligible", True))
         report["formal_benchmark_valid"] = bool(report["valid"] and report["benchmark_eligible"])
         if not report["benchmark_eligible"]:

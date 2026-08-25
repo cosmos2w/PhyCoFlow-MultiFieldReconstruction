@@ -18,6 +18,7 @@ from ..data.manifest import (
     dataset_fingerprint,
     manifest_from_batch,
 )
+from ..data.normalization import FieldNormalizer
 from ..data.sensor_protocols import build_observation_batch
 from ..models import build_model
 from ..physics import build_case_diagnostics, build_case_physics
@@ -121,6 +122,9 @@ def evaluate_run(
     model = build_model(config["model"], dataset.data_spec, physics_provider=physics).to(device)
     checkpoint_path = _checkpoint_path(run_dir, checkpoint)
     payload = load_project_checkpoint(checkpoint_path)
+    checkpoint_normalizer = FieldNormalizer(**payload["normalization"])
+    if checkpoint_normalizer.digest() != dataset.normalizer.digest():
+        raise ValueError("checkpoint normalization disagrees with the configured dataset")
     load_model_state_strict(model, payload["model"])
     model.eval()
     steps = int(

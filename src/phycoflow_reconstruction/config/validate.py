@@ -58,6 +58,7 @@ def _validate_common_sections(config: Mapping[str, Any]) -> None:
             "field_names",
             "field_units",
             "normalization",
+            "normalization_stats_path",
             "time_stride",
             "benchmark_eligible",
             "allow_nonbenchmark",
@@ -78,12 +79,21 @@ def _validate_common_sections(config: Mapping[str, Any]) -> None:
         raise ValueError("dataset.reconstruction_unit is invalid")
     if int(dataset.get("time_stride", 1)) < 1:
         raise ValueError("dataset.time_stride must be positive")
+    if "normalization_stats_path" in dataset:
+        if not str(dataset["normalization_stats_path"]).strip():
+            raise ValueError("dataset.normalization_stats_path must be non-empty")
+        if dataset.get("normalization") not in {"mean_std", "robust_99"}:
+            raise ValueError(
+                "dataset.normalization_stats_path requires normalization=mean_std or robust_99"
+            )
     names = dataset.get("field_names")
     units = dataset.get("field_units")
     if names is not None and (not names or len(set(names)) != len(names)):
         raise ValueError("dataset.field_names must be non-empty and unique")
     if names is not None and units is not None and len(names) != len(units):
         raise ValueError("dataset.field_units must align with field_names")
+    if "normalization_stats_path" in dataset and not names:
+        raise ValueError("dataset.field_names is required with normalization_stats_path")
 
     observations = _require_mapping(config, "observations")
     _reject_unknown(

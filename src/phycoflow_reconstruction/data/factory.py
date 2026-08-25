@@ -11,6 +11,7 @@ from collections.abc import Mapping
 from typing import Any, TypeAlias
 
 from .h5_dataset import H5FieldDataset
+from .manifest import dataset_fingerprint
 from .normalization import FieldNormalizer
 from .pt_dataset import PTFieldDataset
 
@@ -25,6 +26,18 @@ def open_field_dataset(
 ) -> FieldDataset:
     """Open one supported payload using the common dataset config vocabulary."""
     path = config["path"]
+    statistics_path = config.get("normalization_stats_path")
+    if normalizer is None and statistics_path:
+        configured_fields = config.get("field_names")
+        if not configured_fields:
+            raise ValueError("dataset.field_names is required with normalization_stats_path")
+        normalizer = FieldNormalizer.from_artifact(
+            statistics_path,
+            field_names=tuple(str(name) for name in configured_fields),
+            dataset_fingerprint=dataset_fingerprint(path),
+        )
+        if normalizer.method != config.get("normalization"):
+            raise ValueError("normalization statistics method disagrees with dataset config")
     common = {
         "split": split or config.get("split", "train"),
         "reconstruction_unit": config.get("reconstruction_unit", "snapshot"),

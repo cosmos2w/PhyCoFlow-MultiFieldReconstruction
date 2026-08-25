@@ -35,10 +35,10 @@ common:
   learning_rate: 1.0e-4
   weight_decay: 1.0e-6
   grad_clip: 1.0
-  backward_loss_scale: 2.938735877055719e-39
-  adaptive_backward_scaling: true
-  backward_loss_scale_semantics: "Start at 2^-128; retry the identical RNG step at a power-of-two lower scale on overflow or higher scale on complete underflow, algebraically unscale, then apply the common global clip. Identical for A/B/C."
-  backward_loss_scale_calibration: "Real-data B40/Q4096 calibration found no viable fixed scale across training: 2^-130 was finite early but later overflowed, while 2^-140 underflowed early."
+  backward_loss_scale: 1.0
+  adaptive_backward_scaling: false
+  backward_loss_scale_semantics: "Ordinary full-scale backward for A/B/C after verified downstream training-only mean/std normalization."
+  normalization_artifact: downstream_train_normalization.json
   deterministic: true
   fixed_validation_split: validation
   fixed_validation_samples: 20

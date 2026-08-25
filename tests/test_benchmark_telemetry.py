@@ -34,9 +34,12 @@ def test_arm_a_config_matches_historical_scale_and_common_protocol():
         "lr": 1.0e-4,
         "weight_decay": 1.0e-6,
         "grad_clip": 1.0,
-        "backward_loss_scale": 2.938735877055719e-39,
-        "adaptive_backward_scaling": True,
+        "backward_loss_scale": 1.0,
     }
+    assert config["dataset"]["normalization"] == "mean_std"
+    assert config["dataset"]["normalization_stats_path"].endswith(
+        "downstream_train_normalization.json"
+    )
     assert config["observations"]["fields"] == {"T": {"count_min": 192, "count_max": 384}}
 
 

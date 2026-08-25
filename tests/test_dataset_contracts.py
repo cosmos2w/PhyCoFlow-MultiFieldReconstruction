@@ -1,5 +1,7 @@
 """Dataset tests cover trajectory/frame splits and reversible KS layout."""
 
+import hashlib
+import json
 from pathlib import Path
 
 import h5py
@@ -10,6 +12,7 @@ from torch.utils.data import DataLoader
 
 from phycoflow_reconstruction.data.factory import open_field_dataset
 from phycoflow_reconstruction.data.h5_dataset import H5FieldDataset
+from phycoflow_reconstruction.data.manifest import dataset_fingerprint
 from phycoflow_reconstruction.data.pt_dataset import PTFieldDataset
 from phycoflow_reconstruction.data.sensor_protocols import SensorProtocol, build_observation_batch
 from phycoflow_reconstruction.data.splits import chronological_frame_indices
@@ -56,6 +59,24 @@ def _write_fixture(path: Path, trajectories: int = 3, times: int = 5) -> None:
         handle.attrs["schema_version"] = "1.0"
 
 
+def _write_normalization_artifact(path: Path, dataset_path: Path) -> None:
+    payload = {
+        "version": "1",
+        "method": "mean_std",
+        "field_names": ["a", "b"],
+        "offset": [2.0, 4.0],
+        "scale": [2.0, 4.0],
+        "dataset_fingerprint": dataset_fingerprint(dataset_path),
+        "statistics_split": "train",
+        "split_strategy": "stored_trajectory",
+        "sample_value_count_per_field": 20,
+    }
+    payload["artifact_sha256"] = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
 def test_trajectory_split_and_snapshot(tmp_path):
     path = tmp_path / "fixture.h5"
     _write_fixture(path)
@@ -90,6 +111,62 @@ def test_h5_loader_reopens_safely_in_workers(tmp_path):
     dataset = H5FieldDataset(path, split="train")
     loader = DataLoader(dataset, batch_size=1, num_workers=2, collate_fn=_first_sample)
     assert next(iter(loader)).trajectory_id == "t0"
+
+
+def test_external_training_normalizer_is_verified_and_reused_across_splits(tmp_path):
+    dataset_path = tmp_path / "fixture.h5"
+    artifact_path = tmp_path / "normalization.json"
+    _write_fixture(dataset_path)
+    _write_normalization_artifact(artifact_path, dataset_path)
+    config = {
+        "path": dataset_path,
+        "field_names": ["a", "b"],
+        "normalization": "mean_std",
+        "normalization_stats_path": artifact_path,
+    }
+
+    train = open_field_dataset(config, split="train")
+    validation = open_field_dataset(config, split="validation")
+
+    assert torch.equal(train.normalizer.offset, torch.tensor([2.0, 4.0]))
+    assert torch.equal(train.normalizer.scale, torch.tensor([2.0, 4.0]))
+    assert train.normalizer.digest() == validation.normalizer.digest()
+    values = torch.tensor([4.0, 12.0])
+    assert torch.equal(train.normalizer.decode(train.normalizer.encode(values)), values)
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "match"),
+    [
+        ("field_names", ["b", "a"], "field order"),
+        ("statistics_split", "validation", "training split"),
+        ("dataset_fingerprint", "wrong", "dataset fingerprint"),
+    ],
+)
+def test_external_normalizer_rejects_provenance_mismatch(
+    tmp_path, key, value, match
+):
+    dataset_path = tmp_path / "fixture.h5"
+    artifact_path = tmp_path / "normalization.json"
+    _write_fixture(dataset_path)
+    _write_normalization_artifact(artifact_path, dataset_path)
+    payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+    payload.pop("artifact_sha256")
+    payload[key] = value
+    payload["artifact_sha256"] = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    artifact_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=match):
+        open_field_dataset(
+            {
+                "path": dataset_path,
+                "field_names": ["a", "b"],
+                "normalization": "mean_std",
+                "normalization_stats_path": artifact_path,
+            }
+        )
 
 
 def test_coordinate_reorder_and_physics_context_follow_query_indices(tmp_path):
