@@ -20,6 +20,7 @@ from ..physics import build_case_physics
 from ..utils.reproducibility import seed_everything
 from .checkpointing import PeriodicCheckpointManager
 from .common import iter_unique_batch_indices
+from .gradients import stable_clip_grad_norm_
 from .monitoring import TrainingMonitor
 from .preview import TrainingReconstructionPreview
 from .run_store import RunStore, checkpoint_model_state, file_sha256
@@ -134,7 +135,7 @@ def run_direct_physics_training(
         if not torch.isfinite(losses.total):
             raise FloatingPointError("direct-physics objective is non-finite")
         losses.total.backward()
-        gradient_norm = torch.nn.utils.clip_grad_norm_(
+        gradient_norm = stable_clip_grad_norm_(
             model.parameters(), float(config["optimization"].get("grad_clip", 1.0))
         )
         optimizer.step()

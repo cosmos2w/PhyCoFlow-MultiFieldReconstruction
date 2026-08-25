@@ -28,6 +28,7 @@ from .checkpointing import PeriodicCheckpointManager
 from .common import (
     iter_unique_batch_indices,
 )
+from .gradients import stable_clip_grad_norm_
 from .monitoring import TrainingMonitor
 from .preview import TrainingReconstructionPreview
 from .run_store import RunStore, checkpoint_model_state, file_sha256, load_model_state_strict
@@ -192,7 +193,7 @@ def run_base_training(
         telemetry.start_phase("backward")
         losses.total.backward()
         telemetry.end_phase("backward")
-        gradient_norm = torch.nn.utils.clip_grad_norm_(
+        gradient_norm = stable_clip_grad_norm_(
             model.parameters(), float(config["optimization"].get("grad_clip", 1.0))
         )
         telemetry.start_phase("optimizer")

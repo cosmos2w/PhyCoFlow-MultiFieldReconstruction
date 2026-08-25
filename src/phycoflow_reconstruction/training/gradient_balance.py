@@ -8,6 +8,8 @@ from typing import Any
 import torch
 from torch import nn
 
+from .gradients import stable_clip_grad_norm_
+
 
 def _trainable_parameters(model: nn.Module) -> list[nn.Parameter]:
     parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
@@ -56,7 +58,7 @@ def data_only_update(
     optimizer.zero_grad(set_to_none=True)
     (float(weight) * loss).backward()
     norm = (
-        nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+        stable_clip_grad_norm_(model.parameters(), grad_clip)
         if grad_clip
         else torch.tensor(float("nan"))
     )
@@ -134,7 +136,7 @@ def two_objective_update(
     optimizer.zero_grad(set_to_none=True)
     _assign_flat_gradient(parameters, selected)
     if grad_clip:
-        nn.utils.clip_grad_norm_(parameters, float(grad_clip))
+        stable_clip_grad_norm_(parameters, float(grad_clip))
     optimizer.step()
     return {
         "update_mode": update_mode,
