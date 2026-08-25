@@ -1,11 +1,12 @@
 {
   "arm": "A",
   "model": "pointcloud_ffm/gl_rbf_enh",
-  "formal_run_status": "ready_to_restart_with_verified_training_only_normalization_from_seed_42",
+  "formal_run_status": "completed_and_fixed_manifest_evaluated",
   "branch": "validation/proj-multifield-gl-rbf-cq",
   "source_branch": "release/gl-rbf-cq-portable-prep",
   "source_commit": "a7992a5c462458d4689d2312491f0220cd0d4d1a",
   "phase1_freeze_commit": "26258a684cede37d68f80fdfe4da8882c806e593",
+  "formal_run_head": "326c02129f6481781fe71456acb1e638d11830c3",
   "protocol": {
     "requested_batch_size": 128,
     "batch_size": 40,
@@ -134,6 +135,130 @@
     "peak_cuda_reserved_bytes": 49595547648,
     "contaminated_weights_reused": false
   },
+  "formal_run": {
+    "run_dir": "Cases/turbulent_combustion/runs/gl_rbf_cq_migration_200ep_A_legacy_gl_rbf_enh/20260825T054028Z_0c41ff4a",
+    "run_id": "20260825T054028Z_0c41ff4a",
+    "status": "completed",
+    "launch_head": "326c02129f6481781fe71456acb1e638d11830c3",
+    "config_source_sha256": "9fb98efb8fafa56a58d358391e6bc8be6da0fd02ffee9f1ce24f9d22826d3996",
+    "config_semantic_sha256": "0c41ff4a5bc347fbccb0ec7ea52f2c56cb9a64aa33dcad6cd3c53771eb5a1e81",
+    "resolved_config_sha256": "2c0a4ba9ec061e1397b57861284e63a3c20c12f95345290665ba678a08b8e035",
+    "dataset_fingerprint": "8c49936567eced7ab94887c336b9b35aaf7ec70dea7479aee83434ff970455d5",
+    "normalization_artifact_sha256": "b7e31a1497e8d8b76e0ac8c9e7744d202e52581050825bb299f0a8870c353a39",
+    "normalization_artifact_file_sha256": "77404844ea7698015fbe47d43ff89420d7827f0770505e11171111d7b1b05965",
+    "normalizer_digest": "50c5e65e563fee03f4c15df336e064753981f8555a06e7465a4722553b3746f1",
+    "fixed_validation_manifest_sha256": "2071583f79e30f17bc586d907da184b5c79dfc82c01b4d652ccf05652e2c2b6f",
+    "fixed_validation_manifest_file_sha256": "f2510f7dd76daaf15f61eab796d299d9ecb0c274e933609c2c21262fc66f3fd9",
+    "fixed_query_indices_sha256": "16c263270389ab8665563c1d6fdcab3c2f193df481eed2b2717b20dfe7b40a5a",
+    "configured_steps": 40000,
+    "completed_steps": 40000,
+    "parameter_count": 4778118,
+    "trainable_parameter_count": 4778118,
+    "endpoint_evaluation_mse_normalized": 0.31303632259368896,
+    "final_training_loss": 0.37987685203552246,
+    "final_gradient_norm": 7.796180427726905,
+    "training_loss_min": 0.3039245903491974,
+    "training_loss_min_step": 39669,
+    "training_loss_max": 2.1097817420959473,
+    "training_loss_max_step": 1,
+    "gradient_norm_min": 0.07684864281998385,
+    "gradient_norm_min_step": 16,
+    "gradient_norm_max": 41.561493243483994,
+    "gradient_norm_max_step": 25318,
+    "history_rows": 40000,
+    "all_recorded_losses_finite": true,
+    "all_recorded_gradient_norms_finite": true,
+    "backward_loss_scale": 1.0,
+    "adaptive_backward_scaling": false,
+    "backward_retry_sum": 0,
+    "total_epoch_wall_seconds": 11945.559277623892,
+    "steady_state_epoch_wall_seconds_mean": 59.72597691031575,
+    "steady_state_epoch_wall_seconds_median": 59.73496127873659,
+    "steady_state_training_only_epoch_seconds_mean": 59.55916823181862,
+    "steady_state_sampled_step_seconds_mean": 0.29732525110292674,
+    "steady_state_sampled_step_seconds_median": 0.2973563232421875,
+    "peak_cuda_allocated_bytes": 41202117632,
+    "peak_cuda_reserved_bytes": 49595547648,
+    "run_artifact_sha256": {
+      "run_manifest.json": "d1fb845deb53bcc072aaed9fdf63781722bafe72cc4128c079b607e366580a6c",
+      "status.json": "ebb2028951052743f27887a8141aaf8193cd519730b0abd20ad6851ba59db9e8",
+      "history.jsonl": "edcca9da93b69e604b6ebfee8129927741ee7838ac36083ea6fc027f9f9f0d05",
+      "benchmark_telemetry.json": "dcad74c7f66a6be74d7062dc5715c06c2ef0bfbc714d49f00ecac19822e891c3",
+      "benchmark_telemetry_epochs.csv": "a59a409f7b943bcc5f614d90f3824dad7dab7c8041df4de1a051965745b2169b",
+      "normalization.pt": "412ab2cd247f7e26d83e74cc4c1c34b90bd79206602e4373fa5b1abe395e9f85",
+      "split_manifest.json": "c293dca482540d47d9d4d4c07c30ecbd88f2f9e71995ec002f65befb0e79dc17",
+      "integration.json": "c994ee8c6d83531fdf9686aa8c9e15fd918a7fc79cd572e0b69c94ac852026a0"
+    },
+    "checkpoint_sha256": {
+      "epoch_001": "27f41652b7400b4dc2c03e239dde29b7a80cffafe0333e408fd612d7fb6fa469",
+      "epoch_020": "708625199528472a76759a46bf752a016a1a0abbf0c96050ed7dd14f4559515e",
+      "epoch_040": "cc594ed82851c3e887dd13027d85fec3d699dde8ac769e71ae5fb628f3c98700",
+      "epoch_060": "e529a4b27ec0d50901889e4564e5e82fd8b85d4bc5788a43af76db29eeef832e",
+      "epoch_100": "809bb4f48e0875e6baa94eb73689e37f29655507d3e1c70b489ef62b75eab782",
+      "epoch_150": "5308677e00b73164505737ac994088f498b1373dad17ace5584c427b7936abf1",
+      "epoch_200": "75f5dd07a0212a6b894753be72c29e71ab8db1dfcc1c3b9241890b7b27e7c53c",
+      "last": "04609cc5378cea5cb8b1da3ebbed9adaee16bc4e7903360b215d5d49ccea376c",
+      "best": "8a863d8772eafce1bb5142238b0c702f150f7fa3ab38c9e7f29eb2a0863a0f0d"
+    },
+    "fixed_manifest_convergence": [
+      {
+        "epoch": 1,
+        "report_sha256": "ad523015d0478f7f2d1927799355382598ee489cd250bdad283e0b18db6dec88",
+        "mse_normalized": 1.4011281728744507,
+        "mean_relative_l2": 1.1573764085769653,
+        "worst_field_relative_l2": 1.5285290479660034,
+        "per_field_relative_l2": {"CH4": 0.8018075823783875, "CO": 1.0304943323135376, "T": 0.8198255896568298, "U_1": 1.2805389165878296, "p": 1.5285290479660034}
+      },
+      {
+        "epoch": 20,
+        "report_sha256": "d148bd54e1ce728c4f7e8d3ce4df655bd121b46198ba2dda98984a50cb1a1129",
+        "mse_normalized": 0.708934485912323,
+        "mean_relative_l2": 0.8227688074111938,
+        "worst_field_relative_l2": 1.08425772190094,
+        "per_field_relative_l2": {"CH4": 0.43351832032203674, "CO": 0.7639756202697754, "T": 0.45252725481987, "U_1": 1.08425772190094, "p": 1.0127980709075928}
+      },
+      {
+        "epoch": 40,
+        "report_sha256": "d4e6d449c884ee706f769f98d2ef398ad237c823e61cd1d208dc0d75c538040a",
+        "mse_normalized": 0.6489332318305969,
+        "mean_relative_l2": 0.7852651476860046,
+        "worst_field_relative_l2": 1.0702863931655884,
+        "per_field_relative_l2": {"CH4": 0.4230313003063202, "CO": 0.745293915271759, "T": 0.4363759458065033, "U_1": 1.0702863931655884, "p": 0.910831868648529}
+      },
+      {
+        "epoch": 60,
+        "report_sha256": "25b4c6c17a3dc048c6441482506fdd9fa98a7a3ae7e76dd9b849372c61a7e24b",
+        "mse_normalized": 0.6511479020118713,
+        "mean_relative_l2": 0.7878817319869995,
+        "worst_field_relative_l2": 1.108059287071228,
+        "per_field_relative_l2": {"CH4": 0.4116548001766205, "CO": 0.7245678305625916, "T": 0.42845413088798523, "U_1": 1.108059287071228, "p": 0.9050040245056152}
+      },
+      {
+        "epoch": 100,
+        "report_sha256": "38fae5d632fecc64ffd94109e3f668c84a88ea03e9037f1800b8ab15ed0bc67d",
+        "mse_normalized": 0.5807672142982483,
+        "mean_relative_l2": 0.7440519332885742,
+        "worst_field_relative_l2": 1.0300483703613281,
+        "per_field_relative_l2": {"CH4": 0.4122498631477356, "CO": 0.7250792980194092, "T": 0.4284592568874359, "U_1": 1.0300483703613281, "p": 0.8217234015464783}
+      },
+      {
+        "epoch": 150,
+        "report_sha256": "7f477b7b40354c731e9cc3bdddbbabd4b097de2627ba650b654e3c25d4574f61",
+        "mse_normalized": 0.47172197699546814,
+        "mean_relative_l2": 0.6679641008377075,
+        "worst_field_relative_l2": 0.9327558875083923,
+        "per_field_relative_l2": {"CH4": 0.3916414678096771, "CO": 0.687964916229248, "T": 0.4038792550563812, "U_1": 0.9327558875083923, "p": 0.6763716340065002}
+      },
+      {
+        "epoch": 200,
+        "report_sha256": "0d076da98a9b3a28b2f9dd5b9f09607fa97fa487df8482da6d7a77772b4aa0ec",
+        "mse_normalized": 0.38691291213035583,
+        "mean_relative_l2": 0.6048169136047363,
+        "worst_field_relative_l2": 0.8338398337364197,
+        "per_field_relative_l2": {"CH4": 0.3605515956878662, "CO": 0.6558784246444702, "T": 0.37400203943252563, "U_1": 0.8338398337364197, "p": 0.5860558748245239}
+      }
+    ]
+  },
   "original_b128_smoke": {
     "device": "cuda:0",
     "batch_size": 128,
@@ -203,6 +328,8 @@
     "Adaptive scaling also failed safely at step 366 after exhausting float32 scales; it was diagnostic rather than the final protocol.",
     "The root cause was identity normalization on raw physical fields: pressure dominated the loss and raw temperature destabilized sensor attention. Verified downstream chronological-train mean/std normalization is now identical for A/B/C.",
     "A 500-step normalized smoke passed the failure horizon with ordinary scale-1 backward, finite loss/gradients, and zero retries.",
+    "The fresh seed-42 formal run completed all 200 epochs and 40,000 optimizer steps with every recorded loss/gradient finite, scale 1, and zero backward retries.",
+    "Fixed-manifest reports at epochs 1/20/40/60/100/150/200 use the same sensor-manifest digest and query-index hash; mean relative L2 improved from 1.15738 to 0.60482.",
     "Arm-A remains the un-migrated legacy implementation; no GL_rbf_CQ source was added."
   ]
 }

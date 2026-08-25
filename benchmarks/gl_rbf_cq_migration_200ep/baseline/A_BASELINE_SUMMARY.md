@@ -2,9 +2,11 @@
 
 ## Freeze status
 
-This baseline is frozen before any portable `GL_rbf_CQ` migration. The
-benchmark branch is `validation/proj-multifield-gl-rbf-cq`; the pre-migration
-commit is recorded in `A_performance.json`. The exact B128/Q4096 diagnostic
+This baseline is frozen before any portable `GL_rbf_CQ` migration. The fresh
+seed-42 formal run at source HEAD `326c02129f6481781fe71456acb1e638d11830c3`
+completed all 200 epochs and 40,000 optimizer steps. Its exact run directory is
+`Cases/turbulent_combustion/runs/gl_rbf_cq_migration_200ep_A_legacy_gl_rbf_enh/20260825T054028Z_0c41ff4a`.
+The exact B128/Q4096 diagnostic
 smoke at the originally requested B128/Q4096 reached CUDA OOM during backward
 on GPU 0. An allocator-identical retry also requested 96 GiB; expandable
 segments were tested and fragmentation was ruled out. Per the authorized
@@ -83,14 +85,53 @@ starts from seed 42.
 - Training preview is disabled; immutable checkpoints are saved at epochs
   `1, 20, 40, 60, 100, 150, 200`, and fixed-manifest evaluation is post-hoc.
 
+## Formal outcome
+
+- Status: `completed`, 40,000/40,000 steps; 4,778,118 trainable parameters.
+- Endpoint training loss: `0.3798768520`; endpoint integration normalized MSE:
+  `0.3130363226`.
+- Every one of the 40,000 recorded losses and gradient norms is finite.
+  Backward scale stayed at `1.0`, adaptive scaling remained disabled, and the
+  retry count was zero.
+- Recorded loss range: `0.3039245903--2.1097817421`; gradient-norm range:
+  `0.0768486428--41.5614932435`.
+- Epochs 2--200 averaged `59.72598 s` wall and `59.55917 s` training-only;
+  sampled steady-state steps averaged `0.297325 s`.
+- Peak CUDA allocation/reservation: `41,202,117,632` / `49,595,547,648` bytes.
+- Formal config source SHA-256: `9fb98efb8fafa56a58d358391e6bc8be6da0fd02ffee9f1ce24f9d22826d3996`;
+  resolved config SHA-256: `2c0a4ba9ec061e1397b57861284e63a3c20c12f95345290665ba678a08b8e035`;
+  dataset fingerprint: `8c49936567eced7ab94887c336b9b35aaf7ec70dea7479aee83434ff970455d5`.
+- Fixed validation sensor-manifest digest:
+  `2071583f79e30f17bc586d907da184b5c79dfc82c01b4d652ccf05652e2c2b6f`;
+  fixed query-index SHA-256:
+  `16c263270389ab8665563c1d6fdcab3c2f193df481eed2b2717b20dfe7b40a5a`.
+
+Fixed-manifest convergence uses the same 20 validation samples, T-only sensor
+pairs, Q4096 query indices, seed, and 32-step reconstruction at every milestone:
+
+| Epoch | normalized MSE | mean relative L2 | worst-field relative L2 |
+|---:|---:|---:|---:|
+| 1 | 1.401128 | 1.157376 | 1.528529 |
+| 20 | 0.708934 | 0.822769 | 1.084258 |
+| 40 | 0.648933 | 0.785265 | 1.070286 |
+| 60 | 0.651148 | 0.787882 | 1.108059 |
+| 100 | 0.580767 | 0.744052 | 1.030048 |
+| 150 | 0.471722 | 0.667964 | 0.932756 |
+| 200 | 0.386913 | 0.604817 | 0.833840 |
+
+The epoch-200 immutable checkpoint SHA-256 is
+`75f5dd07a0212a6b894753be72c29e71ab8db1dfcc1c3b9241890b7b27e7c53c`.
+Complete checkpoint, report, per-field relative-L2, timing, memory, and artifact
+hash evidence is recorded in `A_performance.json`.
+
 ## Structural differences from historical 0_demo GL_rbf_ENH
 
 The downstream `EnhancedGLRBFTopK` implementation remains the project-owned
 legacy implementation. It is not parameter-for-parameter substituted with the
 0_demo implementation and does not receive CQ, FiLM, measurement/support,
-EMA, persistent Top-K, or cached-K/V features. The actual parameter count and
-diagnostic evidence are recorded in `A_performance.json`; final timings and
-memory are added after the successful run.
+EMA, persistent Top-K, or cached-K/V features. The actual parameter count,
+diagnostic evidence, final timings, memory, and fixed-manifest convergence are
+recorded in `A_performance.json`.
 
 ## Evidence
 

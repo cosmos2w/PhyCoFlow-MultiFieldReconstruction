@@ -29,6 +29,7 @@ per-step/per-epoch timing and CUDA peak-memory evidence into each run's
 `metrics/` directory. It is disabled for all existing project configs.
 
 Arm-A evidence is frozen in `baseline/` before migration. The exact protocol
-smoke limitation and authorized B40 adjustment are recorded in
-`A_performance.json`; the formal B40 run artifacts are added there after
-completion.
+smoke limitation, authorized B40 adjustment, completed 200-epoch formal run,
+immutable checkpoint hashes, timing/memory telemetry, finite-gradient audit,
+and fixed-manifest convergence are recorded in `A_performance.json` and
+`A_BASELINE_SUMMARY.md`.
