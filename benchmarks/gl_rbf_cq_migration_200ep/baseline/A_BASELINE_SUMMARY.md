@@ -19,6 +19,13 @@ norm in float64 and rejecting genuinely non-finite gradients. The model, data,
 optimizer, learning rate, and configured clipping bound are unchanged; the
 formal run restarts from seed 42 at that commit.
 
+That restart passed the earlier boundary but safely stopped before the optimizer
+at step 1,259 when float32 backward itself became non-finite. Commit `cf44ffce`
+adds a common opt-in `2^-64` power-of-two backward scale and algebraically
+unscales it as part of the same global clip. The final clipped gradient is
+mathematically unchanged, and A/B/C use the identical safeguard. The next
+formal attempt again starts from seed 42 rather than either failed run.
+
 ## Model and protocol
 
 - Downstream model: `pointcloud_ffm` with `backbone: gl_rbf_enh`.

@@ -1,11 +1,11 @@
 {
   "arm": "A",
   "model": "pointcloud_ffm/gl_rbf_enh",
-  "formal_run_status": "ready_to_restart_from_seed_42",
+  "formal_run_status": "ready_to_restart_with_scaled_backward_from_seed_42",
   "branch": "validation/proj-multifield-gl-rbf-cq",
   "source_branch": "release/gl-rbf-cq-portable-prep",
   "source_commit": "a7992a5c462458d4689d2312491f0220cd0d4d1a",
-  "phase1_freeze_commit": "d101fe6f44ea40ee594ebe98b75a8cb689c2bcaa",
+  "phase1_freeze_commit": "cf44ffceba3c82058f2908975be263b765bdf3fd",
   "protocol": {
     "requested_batch_size": 128,
     "batch_size": 40,
@@ -28,6 +28,15 @@
     "contaminated_weights_reused": false,
     "generic_fix_commit": "d101fe6f44ea40ee594ebe98b75a8cb689c2bcaa",
     "fix": "shared float64 global-norm accumulation with finite-value enforcement; model, data, optimizer, learning rate, and gradient bound are unchanged"
+  },
+  "failed_formal_attempt_after_stable_norm": {
+    "run_dir": "Cases/turbulent_combustion/runs/gl_rbf_cq_migration_200ep_A_legacy_gl_rbf_enh/20260825T034922Z_b7748eab",
+    "last_completed_step": 1258,
+    "outcome": "genuinely_nonfinite_backward_rejected_before_optimizer",
+    "diagnosis": "stable float64 norm accumulation passed the prior failure point, then detected a non-finite float32 backward result before optimizer.step",
+    "contaminated_weights_reused": false,
+    "generic_fix_commit": "cf44ffceba3c82058f2908975be263b765bdf3fd",
+    "fix": "2^-64 power-of-two backward scaling with algebraically exact unscale/global clipping; identical for A/B/C"
   },
   "original_b128_smoke": {
     "device": "cuda:0",
@@ -91,6 +100,7 @@
     "The originally requested B128/Q4096 smoke OOMed; the authorized common B40 adjustment is recorded in PROTOCOL.yaml.",
     "B40 is the largest stable batch selected for identical A/B/C execution.",
     "The first B40 formal attempt exposed float32 gradient-norm overflow and was discarded; the restart begins from seed 42 after the generic stable-clipping fix.",
+    "The second attempt safely rejected a genuinely non-finite backward result at step 1259; the next seed-42 restart uses the common algebraically unscaled backward safeguard.",
     "Arm-A remains the un-migrated legacy implementation; no GL_rbf_CQ source was added."
   ]
 }
