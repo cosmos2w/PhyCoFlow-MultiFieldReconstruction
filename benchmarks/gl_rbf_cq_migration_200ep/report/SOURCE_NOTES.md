@@ -77,7 +77,7 @@ Successful delivery used:
 - Structural counts: 16 blocks, 1 chart, 2 tables, 0 metric cards, 0 custom-HTML blocks.
 - Source dialog / interaction: `not_verified` because no installed Chromium headless-shell executable was available. The packager did not download a browser.
 - Browser warning code: `browser_unavailable`.
-- Structural verification time: 8.2 ms; total successful delivery time: 101.4 ms.
+- Structural verification time: 6.8 ms; total successful delivery time: 99.8 ms.
 
 Pre-package and post-package QA:
 
@@ -94,7 +94,7 @@ Packaged file checksums:
 
 | File | SHA-256 | Bytes |
 | --- | --- | ---: |
-| `generate_report.py` | `afeb018cf11bc4785263a7eb121d930534ed220920e01c4aad542b1700b2207a` | 28,140 |
+| `generate_report.py` | `8378f6d4b34d2007d16c05774524e4c47f0a6d9c8b9d72414cbf1e62df39e8b0` | 28,138 |
 | `artifact.json` | `37b175de0f80c35310cfc446fb79378f4b57940934be22778c36cd635d34fe1a` | 36,639 |
 | `report.html` | `9b7404492f5f13ac299e87f34b484b603fb9bb94e280f5327ebafcfdabeb99eb` | 495,665 |
 

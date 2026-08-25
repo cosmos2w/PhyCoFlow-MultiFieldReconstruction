@@ -9,7 +9,6 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-
 REPORT_DIR = Path(__file__).resolve().parent
 BENCHMARK_DIR = REPORT_DIR.parent
 REPO_ROOT = REPORT_DIR.parents[3]
@@ -32,7 +31,7 @@ def load_json(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as handle:
         value = json.load(handle)
     if not isinstance(value, dict):
-        raise ValueError(f"Expected a JSON object in {path}")
+        raise TypeError(f"Expected a JSON object in {path}")
     return value
 
 
