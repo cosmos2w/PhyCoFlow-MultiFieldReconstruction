@@ -18,6 +18,12 @@ and must be reused for every post-hoc milestone evaluation. Its current
 checksum is `2071583f79e30f17bc586d907da184b5c79dfc82c01b4d652ccf05652e2c2b6f`;
 it persists both T-only sensor pairs and the shared Q4096 query indices.
 
+The common field normalizer is fit only on the downstream chronological train
+frames `0:8000` and stored in `downstream_train_normalization.json`. The
+artifact checksum is `b7e31a1497e8d8b76e0ac8c9e7744d202e52581050825bb299f0a8870c353a39`;
+the float32 `FieldNormalizer` digest is
+`50c5e65e563fee03f4c15df336e064753981f8555a06e7465a4722553b3746f1`.
+
 The opt-in `benchmark_telemetry` config section writes machine-readable
 per-step/per-epoch timing and CUDA peak-memory evidence into each run's
 `metrics/` directory. It is disabled for all existing project configs.

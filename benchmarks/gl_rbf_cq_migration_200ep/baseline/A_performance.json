@@ -1,11 +1,11 @@
 {
   "arm": "A",
   "model": "pointcloud_ffm/gl_rbf_enh",
-  "formal_run_status": "ready_to_restart_with_exact_rng_adaptive_backward_scaling_from_seed_42",
+  "formal_run_status": "ready_to_restart_with_verified_training_only_normalization_from_seed_42",
   "branch": "validation/proj-multifield-gl-rbf-cq",
   "source_branch": "release/gl-rbf-cq-portable-prep",
   "source_commit": "a7992a5c462458d4689d2312491f0220cd0d4d1a",
-  "phase1_freeze_commit": "35473774ef0a2e274059af0c6b632fde9b426bb2",
+  "phase1_freeze_commit": "26258a684cede37d68f80fdfe4da8882c806e593",
   "protocol": {
     "requested_batch_size": 128,
     "batch_size": 40,
@@ -13,7 +13,11 @@
     "sensor_count_range": [192, 384],
     "sensor_fields": ["T"],
     "seed": 42,
-    "epochs": 200
+    "epochs": 200,
+    "normalization_method": "mean_std",
+    "normalization_artifact_sha256": "b7e31a1497e8d8b76e0ac8c9e7744d202e52581050825bb299f0a8870c353a39",
+    "normalizer_digest": "50c5e65e563fee03f4c15df336e064753981f8555a06e7465a4722553b3746f1",
+    "backward_loss_scale": 1.0
   },
   "dataset_train_samples": 8000,
   "steps_per_epoch": 200,
@@ -97,6 +101,39 @@
     "peak_cuda_reserved_bytes": 49595547648,
     "contaminated_weights_reused": false
   },
+  "failed_formal_attempt_after_adaptive_scaling": {
+    "run_dir": "Cases/turbulent_combustion/runs/gl_rbf_cq_migration_200ep_A_legacy_gl_rbf_enh/20260825T051539Z_5efad87b",
+    "last_completed_step": 365,
+    "outcome": "all_float32_scales_exhausted_before_optimizer",
+    "last_finite_unscaled_gradient_norm": 1.1027628745372267e51,
+    "diagnosis": "raw physical-unit training made pressure dominate the loss and raw temperature drive the sensor-attention Jacobian; the next logical step overflowed even at 2^-149",
+    "contaminated_weights_reused": false
+  },
+  "raw_unit_root_cause": {
+    "raw_initial_loss": 2595780000.0,
+    "raw_initial_global_gradient_norm": 219442.0,
+    "raw_per_field_mse": [0.965, 0.987, 1810000.0, 1410.0, 12977000000.0],
+    "normalized_initial_loss": 2.13649,
+    "normalized_initial_global_gradient_norm": 1.27095,
+    "normalized_per_field_mse": [2.031, 2.18, 2.112, 2.03, 2.329],
+    "correction_commit": "26258a684cede37d68f80fdfe4da8882c806e593"
+  },
+  "normalized_full_scale_smoke": {
+    "run_dir": "Cases/turbulent_combustion/runs/gl_rbf_cq_migration_200ep_A_legacy_gl_rbf_enh/20260825T053538Z_0c41ff4a",
+    "status": "integration_truncated",
+    "completed_steps": 500,
+    "final_loss": 1.0299957991,
+    "final_gradient_norm": 11.2444497726,
+    "loss_range": [0.9379718304, 2.1097817421],
+    "gradient_norm_range": [0.0768486411, 22.9177328756],
+    "backward_loss_scale": 1.0,
+    "backward_retry_sum": 0,
+    "steady_state_epoch_seconds": 59.5931,
+    "steady_state_median_step_seconds": 0.295856,
+    "peak_cuda_allocated_bytes": 41202117632,
+    "peak_cuda_reserved_bytes": 49595547648,
+    "contaminated_weights_reused": false
+  },
   "original_b128_smoke": {
     "device": "cuda:0",
     "batch_size": 128,
@@ -163,7 +200,9 @@
     "The 2^-64 attempt safely stopped at step 938 when a scaled derivative overflowed; the next common A/B/C scale is 2^-120.",
     "The 2^-120 attempt safely stopped after epoch 44; the final float32-representable common scale is 2^-140.",
     "2^-140 underflowed completely; real-data calibration found an early-step boundary between 2^-130 and 2^-131, but the subsequent fixed 2^-130 run overflowed at step 219.",
-    "The common A/B/C controller now retries the identical RNG step at adjacent power-of-two scales and persists its current scale in checkpoints; a 250-step real-data smoke passed the fixed-scale failure boundary.",
+    "Adaptive scaling also failed safely at step 366 after exhausting float32 scales; it was diagnostic rather than the final protocol.",
+    "The root cause was identity normalization on raw physical fields: pressure dominated the loss and raw temperature destabilized sensor attention. Verified downstream chronological-train mean/std normalization is now identical for A/B/C.",
+    "A 500-step normalized smoke passed the failure horizon with ordinary scale-1 backward, finite loss/gradients, and zero retries.",
     "Arm-A remains the un-migrated legacy implementation; no GL_rbf_CQ source was added."
   ]
 }

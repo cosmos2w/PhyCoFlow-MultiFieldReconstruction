@@ -39,6 +39,9 @@ common:
   adaptive_backward_scaling: false
   backward_loss_scale_semantics: "Ordinary full-scale backward for A/B/C after verified downstream training-only mean/std normalization."
   normalization_artifact: downstream_train_normalization.json
+  normalization_artifact_sha256: b7e31a1497e8d8b76e0ac8c9e7744d202e52581050825bb299f0a8870c353a39
+  normalizer_digest: 50c5e65e563fee03f4c15df336e064753981f8555a06e7465a4722553b3746f1
+  normalization_fit: "Downstream chronological training frames 0:8000 only; population mean/std; shared HDF5 remains unmodified."
   deterministic: true
   fixed_validation_split: validation
   fixed_validation_samples: 20

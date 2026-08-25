@@ -44,14 +44,27 @@ boundary: `2^-130` was finite, while `2^-131` and `2^-132` underflowed. A
 seed-42 run at fixed `2^-130` nevertheless overflowed at step 219, showing that
 no observed fixed scale remained viable as gradient magnitude evolved.
 
-Commit `35473774` therefore replaces the fixed value with a common A/B/C
-adaptive numerical controller. It starts at `2^-128`, moves one exact power of
-two only after complete underflow or overflow, discards failed gradients, and
-restores the pre-forward CPU/CUDA RNG state before recomputing the logical
-step. Gradients are algebraically unscaled before the unchanged global clip,
-and the active scale is checkpointed for exact resume. A clean 250-step
-real-data GPU-0 smoke passed the prior fixed-scale failure boundary; its
-truncated weights are not reused. The formal run again starts from seed 42.
+Commit `35473774` tested an exact-RNG adaptive controller, but the corresponding
+formal run exhausted every float32 scale through `2^-149` at step 366. This
+proved end-of-loss scaling was treating a symptom rather than the cause.
+
+The root cause was the downstream dataset config's identity normalization.
+Pressure near `1.14e5` contributed about `1.30e10` per-field MSE, while raw
+temperature entered the sensor projection and four attention reinjections.
+The pressure-dominated loss stayed near `2.6e9` as the conditioning Jacobian
+grew beyond float32 range. A matched initial-batch probe reduced loss from
+`2.59578e9` to `2.13649` and global gradient norm from `2.19442e5` to `1.27095`
+when the fields were standardized.
+
+Commit `26258a68` adds a checksummed, downstream-owned normalizer artifact fit
+only on chronological training frames `0:8000`. It verifies dataset
+fingerprint, field order, method, training-split provenance, and checksum; the
+shared HDF5 is unchanged. A fresh 500-step B40/Q4096 GPU-0 smoke passed the
+prior failure horizon with ordinary scale-1 backward, loss falling from
+`2.10978` to `1.029996`, finite gradient norms in `[0.07685, 22.91773]`, and
+zero retries. Its truncated weights are not reused. This exact normalization
+and full-scale backward protocol is shared by A/B/C, and the formal run again
+starts from seed 42.
 
 ## Model and protocol
 
@@ -60,11 +73,13 @@ truncated weights are not reused. The formal run again starts from seed 42.
   heads, 4 latent blocks, top-k 32, field embedding 128, Fourier bands 32
   (max frequency 64), RFF features 256, RFF length scale 0.15.
 - Dataset/field order: downstream turbulent combustion `[CH4, CO, T, U_1, p]`;
-  coordinate dimension 2; existing normalization and split contracts.
+  coordinate dimension 2; downstream chronological split and verified
+  training-only mean/std normalization (artifact `b7e31a14`, normalizer digest
+  `50c5e65e`).
 - Sensors: random-uniform T-only, 192--384 valid sensors, seed 42.
 - Training: 200 epochs, batch size 40, query points 4096, lr 1e-4,
-  weight decay 1e-6, gradient clip 1.0, deterministic seed 42, exact-RNG
-  adaptive backward scaling initialized at `2^-128`.
+  weight decay 1e-6, gradient clip 1.0, deterministic seed 42, ordinary
+  scale-1 backward.
 - Training preview is disabled; immutable checkpoints are saved at epochs
   `1, 20, 40, 60, 100, 150, 200`, and fixed-manifest evaluation is post-hoc.
 
@@ -82,4 +97,5 @@ memory are added after the successful run.
 - Config: `../configs/A_legacy_gl_rbf_enh_200ep.yaml`
 - Protocol: `../PROTOCOL.yaml`
 - Fixed manifest: `../fixed_validation_manifest.json`
+- Normalization: `../downstream_train_normalization.json`
 - Diagnostic evidence: `A_performance.json` and `A_metrics.csv`
