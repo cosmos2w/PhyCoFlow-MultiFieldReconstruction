@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from typing import Any
 
@@ -234,13 +235,16 @@ def _validate_optimization_values(settings: Mapping[str, Any]) -> None:
         raise ValueError("optimization.weight_decay must be non-negative")
     if settings.get("grad_clip") is not None and float(settings["grad_clip"]) <= 0:
         raise ValueError("optimization.grad_clip must be positive when provided")
+    backward_loss_scale = float(settings.get("backward_loss_scale", 1.0))
+    if not math.isfinite(backward_loss_scale) or not 0 < backward_loss_scale <= 1:
+        raise ValueError("optimization.backward_loss_scale must be finite and in (0, 1]")
 
 
 def _validate_base_training(config: Mapping[str, Any]) -> None:
     optimization = _require_mapping(config, "optimization")
     _reject_unknown(
         optimization,
-        {"epochs", "batch_size", "lr", "weight_decay", "grad_clip"},
+        {"epochs", "batch_size", "lr", "weight_decay", "grad_clip", "backward_loss_scale"},
         "optimization",
     )
     _validate_optimization_values(optimization)
@@ -595,7 +599,7 @@ def _validate_direct_physics(config: Mapping[str, Any]) -> None:
     _validate_physics_settings(config["physics"])
     _reject_unknown(
         config["optimization"],
-        {"epochs", "batch_size", "lr", "weight_decay", "grad_clip"},
+        {"epochs", "batch_size", "lr", "weight_decay", "grad_clip", "backward_loss_scale"},
         "optimization",
     )
     _validate_optimization_values(config["optimization"])

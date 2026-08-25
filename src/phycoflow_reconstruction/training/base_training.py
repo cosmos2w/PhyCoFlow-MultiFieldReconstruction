@@ -92,6 +92,7 @@ def run_base_training(
 
     batch_size = int(config["optimization"].get("batch_size", 1))
     epochs = int(config["optimization"].get("epochs", 1))
+    backward_loss_scale = float(config["optimization"].get("backward_loss_scale", 1.0))
     steps_per_epoch = math.ceil(len(dataset) / batch_size)
     configured_steps = epochs * steps_per_epoch
     if start_step >= configured_steps:
@@ -191,10 +192,12 @@ def run_base_training(
         if not torch.isfinite(losses.total):
             raise FloatingPointError(f"non-finite loss at step {global_step}: {losses.total}")
         telemetry.start_phase("backward")
-        losses.total.backward()
+        (losses.total * backward_loss_scale).backward()
         telemetry.end_phase("backward")
         gradient_norm = stable_clip_grad_norm_(
-            model.parameters(), float(config["optimization"].get("grad_clip", 1.0))
+            model.parameters(),
+            float(config["optimization"].get("grad_clip", 1.0)),
+            gradient_scale=backward_loss_scale,
         )
         telemetry.start_phase("optimizer")
         optimizer.step()

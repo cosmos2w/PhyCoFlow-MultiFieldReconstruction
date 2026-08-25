@@ -33,6 +33,7 @@ optimization:
   lr: 1.0e-4
   weight_decay: 1.0e-6
   grad_clip: 1.0
+  backward_loss_scale: 5.421010862427522e-20  # 2^-64; unscaled before clipping
 runtime:
   seed: 42
   device: 'cuda:0'

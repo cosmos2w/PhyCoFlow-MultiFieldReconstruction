@@ -37,6 +37,21 @@ def test_stable_clip_handles_huge_finite_float32_gradients():
     assert float(clipped_norm) <= 1.0 + 1.0e-6
 
 
+def test_scaled_backward_avoids_overflow_and_unscales_before_clipping():
+    parameter = torch.nn.Parameter(torch.ones(4, dtype=torch.float32))
+    loss_scale = 2.0**-64
+    loss = ((parameter * 1.0e20) * 1.0e20).sum()
+
+    (loss * loss_scale).backward()
+    norm = stable_clip_grad_norm_([parameter], 1.0, gradient_scale=loss_scale)
+
+    assert torch.isfinite(norm)
+    assert float(norm) == pytest.approx(2.0e40, rel=1.0e-6)
+    assert torch.isfinite(parameter.grad).all()
+    clipped_norm = torch.linalg.vector_norm(parameter.grad.to(torch.float64))
+    assert float(clipped_norm) <= 1.0 + 1.0e-6
+
+
 @pytest.mark.parametrize("value", [float("inf"), float("nan")])
 def test_stable_clip_rejects_nonfinite_individual_gradients(value):
     parameter = torch.nn.Parameter(torch.zeros(2))

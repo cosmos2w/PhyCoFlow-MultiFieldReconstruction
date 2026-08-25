@@ -76,6 +76,7 @@ def run_direct_physics_training(
         config,
     )
     batch_size = int(config["optimization"].get("batch_size", 1))
+    backward_loss_scale = float(config["optimization"].get("backward_loss_scale", 1.0))
     steps_per_epoch = math.ceil(len(dataset) / batch_size)
     configured_steps = int(config["optimization"].get("epochs", 1)) * steps_per_epoch
     final_step = (
@@ -134,9 +135,11 @@ def run_direct_physics_training(
         losses = model.training_loss(batch)
         if not torch.isfinite(losses.total):
             raise FloatingPointError("direct-physics objective is non-finite")
-        losses.total.backward()
+        (losses.total * backward_loss_scale).backward()
         gradient_norm = stable_clip_grad_norm_(
-            model.parameters(), float(config["optimization"].get("grad_clip", 1.0))
+            model.parameters(),
+            float(config["optimization"].get("grad_clip", 1.0)),
+            gradient_scale=backward_loss_scale,
         )
         optimizer.step()
         row = {

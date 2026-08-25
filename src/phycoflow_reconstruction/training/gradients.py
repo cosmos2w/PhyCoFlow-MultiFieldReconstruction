@@ -13,6 +13,7 @@ def stable_clip_grad_norm_(
     parameters: Iterable[nn.Parameter] | nn.Parameter,
     max_norm: float,
     *,
+    gradient_scale: float = 1.0,
     error_if_nonfinite: bool = True,
 ) -> torch.Tensor:
     """Clip a global L2 gradient norm without float32 reduction overflow.
@@ -26,6 +27,9 @@ def stable_clip_grad_norm_(
     limit = float(max_norm)
     if not math.isfinite(limit) or limit < 0:
         raise ValueError("max_norm must be finite and non-negative")
+    scale = float(gradient_scale)
+    if not math.isfinite(scale) or scale <= 0:
+        raise ValueError("gradient_scale must be finite and positive")
     if isinstance(parameters, nn.Parameter):
         parameters = [parameters]
     gradients = [parameter.grad for parameter in parameters if parameter.grad is not None]
@@ -38,7 +42,7 @@ def stable_clip_grad_norm_(
         values = gradient.coalesce().values() if gradient.is_sparse else gradient
         contribution = values.detach().abs().to(dtype=torch.float64).square().sum()
         total_squared.add_(contribution.to(reference_device))
-    total_norm = total_squared.sqrt()
+    total_norm = total_squared.sqrt() / scale
 
     if not bool(torch.isfinite(total_norm)):
         if error_if_nonfinite:
@@ -47,7 +51,7 @@ def stable_clip_grad_norm_(
             )
         return total_norm
 
-    coefficient = (limit / (total_norm + 1.0e-6)).clamp(max=1.0)
+    coefficient = (limit / (total_norm + 1.0e-6)).clamp(max=1.0) / scale
     with torch.no_grad():
         for gradient in gradients:
             values = gradient._values() if gradient.is_sparse else gradient

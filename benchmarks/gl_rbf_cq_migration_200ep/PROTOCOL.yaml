@@ -35,6 +35,8 @@ common:
   learning_rate: 1.0e-4
   weight_decay: 1.0e-6
   grad_clip: 1.0
+  backward_loss_scale: 5.421010862427522e-20
+  backward_loss_scale_semantics: "Power-of-two numerical safeguard; gradients are algebraically unscaled before the common global clip. Identical for A/B/C."
   deterministic: true
   fixed_validation_split: validation
   fixed_validation_samples: 20
