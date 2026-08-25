@@ -5,6 +5,7 @@
   "branch": "validation/proj-multifield-gl-rbf-cq",
   "source_branch": "release/gl-rbf-cq-portable-prep",
   "source_commit": "a7992a5c462458d4689d2312491f0220cd0d4d1a",
+  "phase1_freeze_commit": "60c443bbbe32fbd945321f31dcb54f7f4a978c5c",
   "protocol": {
     "batch_size": 128,
     "query_points": 4096,
