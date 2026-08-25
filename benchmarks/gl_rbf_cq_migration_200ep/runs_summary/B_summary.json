@@ -1,0 +1,441 @@
+{
+  "schema_version": 1,
+  "benchmark": "gl_rbf_cq_migration_200ep",
+  "arm": "B",
+  "condition_attention_execution": "legacy_mha",
+  "run": {
+    "run_id": "20260825T094100Z_93b0b3f4",
+    "run_directory": "Cases/turbulent_combustion/runs/gl_rbf_cq_migration_200ep_B_gl_rbf_cq_legacy_mha/20260825T094100Z_93b0b3f4",
+    "experiment_name": "gl_rbf_cq_migration_200ep_B_gl_rbf_cq_legacy_mha",
+    "created_utc": "20260825T094100Z",
+    "stage": "base_training"
+  },
+  "launch": {
+    "command": "Cases/turbulent_combustion/run.py train-base --config ../../benchmarks/gl_rbf_cq_migration_200ep/configs/B_gl_rbf_cq_legacy_mha_200ep.yaml",
+    "launcher_prefix": "rtk env CUDA_VISIBLE_DEVICES=1 conda run -n phycoflow_env",
+    "working_directory": "Proj_MultiFieldReconstruction",
+    "command_file_sha256": "cb1dc46a094b8ab7f91bc3f6709b267e61adca2967d7c4d0d973b49a30b2e9f1",
+    "no_resume": true,
+    "no_max_steps": true,
+    "cuda_visible_devices": "1",
+    "logical_device": "cuda:0",
+    "physical_device": "GPU 1",
+    "launch_head": "603fcbf79d0e0dab6c7c84a22e67c5bab4ecc394"
+  },
+  "source": {
+    "source_branch": "release/gl-rbf-cq-portable-prep",
+    "validation_branch": "validation/proj-multifield-gl-rbf-cq",
+    "launch_commit": "603fcbf79d0e0dab6c7c84a22e67c5bab4ecc394",
+    "portable_adapter_commit": "b4d45fa7440a2173395e63df88f3117d86752601",
+    "model_name": "gl_rbf_cq",
+    "historical_backbone": "GL_rbf_ENH_CQ",
+    "public_model_name": "GL_rbf_CQ",
+    "neighbor_backend": "keops",
+    "sensor_attention_padding_mode": "full",
+    "reconstruction_execution_mode": "cached_streamed"
+  },
+  "configuration": {
+    "source_path": "benchmarks/gl_rbf_cq_migration_200ep/configs/B_gl_rbf_cq_legacy_mha_200ep.yaml",
+    "source_file_sha256": "adeee8c3111b5a9e24c91c0eeeedce4fd898556761a43c8eff08e655bd4f1663",
+    "semantic_sha256": "93b0b3f40bbeb05e194fc3eebfefc26c2007b53cec10ce7fe0dce7e71e0547fa",
+    "resolved_path": "Cases/turbulent_combustion/runs/gl_rbf_cq_migration_200ep_B_gl_rbf_cq_legacy_mha/20260825T094100Z_93b0b3f4/resolved_config.yaml",
+    "resolved_sha256": "f0c79cfd6c18d30256cd328ced27050360d025d14a29f87bdb87678d4ebdea76",
+    "requested_batch_size": 128,
+    "batch_size": 40,
+    "query_points": 4096,
+    "epochs": 200,
+    "steps_per_epoch": 200,
+    "learning_rate": 0.0001,
+    "weight_decay": 0.000001,
+    "grad_clip": 1.0,
+    "backward_loss_scale": 1.0,
+    "adaptive_backward_scaling": false,
+    "sensor_field": "T",
+    "sensor_count_range": [192, 384],
+    "seed": 42,
+    "train_query_microbatch_size": 2048,
+    "reuse_condition_context_across_query_microbatches": true,
+    "model_ema_enabled": true,
+    "model_ema_decay": 0.999,
+    "model_ema_eval": true,
+    "reconstruction_cache_level": "static_features"
+  },
+  "environment": {
+    "path": "Cases/turbulent_combustion/runs/gl_rbf_cq_migration_200ep_B_gl_rbf_cq_legacy_mha/20260825T094100Z_93b0b3f4/environment.json",
+    "sha256": "2f56d8d6dd1bdd94d7393bfaafa4f2008bd43113ea2c9dde464da0976ffb091b",
+    "python": "3.10.19",
+    "torch": "2.5.1+cu121",
+    "pykeops": "2.3",
+    "cuda_available": true,
+    "cuda_visible_devices": "1",
+    "cuda_devices": ["NVIDIA RTX 6000 Ada Generation"],
+    "git_commit": "603fcbf79d0e0dab6c7c84a22e67c5bab4ecc394",
+    "git_dirty_at_launch": true
+  },
+  "data_and_normalization": {
+    "dataset_path": "/home/wanglz/Desktop/src/PhyCoFlow/0_demo_TurbulentCombustion/Dataset/Merged_CH4COTU1P.h5",
+    "dataset_catalog_name": "Merged_CH4COTU1P.h5",
+    "dataset_fingerprint": "8c49936567eced7ab94887c336b9b35aaf7ec70dea7479aee83434ff970455d5",
+    "dataset_split": "train",
+    "split_strategy": "chronological_frames_80_10_10",
+    "training_data_strategy": "async_compact_cpu",
+    "training_dataset_logical_bytes": 8060000000,
+    "coordinate_dim": 2,
+    "grid_shape": [100, 403],
+    "field_order": ["CH4", "CO", "T", "U_1", "p"],
+    "normalization_method": "mean_std",
+    "normalization_stats_path": "benchmarks/gl_rbf_cq_migration_200ep/downstream_train_normalization.json",
+    "normalization_artifact_file_sha256": "77404844ea7698015fbe47d43ff89420d7827f0770505e11171111d7b1b05965",
+    "normalization_artifact_sha256": "b7e31a1497e8d8b76e0ac8c9e7744d202e52581050825bb299f0a8870c353a39",
+    "normalizer_digest": "50c5e65e563fee03f4c15df336e064753981f8555a06e7465a4722553b3746f1",
+    "normalization_fit": "population mean/std on chronological training frames 0:8000",
+    "run_normalization_pt_sha256": "412ab2cd247f7e26d83e74cc4c1c34b90bd79206602e4373fa5b1abe395e9f85"
+  },
+  "fixed_evaluation": {
+    "evaluation_directory": "Cases/turbulent_combustion/runs/gl_rbf_cq_migration_200ep_B_gl_rbf_cq_legacy_mha/20260825T094100Z_93b0b3f4/evaluation",
+    "split": "validation",
+    "max_samples": 20,
+    "query_points": 4096,
+    "generation_steps": 32,
+    "sensor_protocol": "random_uniform",
+    "sensor_field": "T",
+    "sensor_count_range": [192, 384],
+    "seed": 42,
+    "fixed_validation_manifest_path": "benchmarks/gl_rbf_cq_migration_200ep/fixed_validation_manifest.json",
+    "fixed_validation_manifest_file_sha256": "f2510f7dd76daaf15f61eab796d299d9ecb0c274e933609c2c21262fc66f3fd9",
+    "sensor_manifest_file_sha256": "f2510f7dd76daaf15f61eab796d299d9ecb0c274e933609c2c21262fc66f3fd9",
+    "sensor_manifest_sha256": "2071583f79e30f17bc586d907da184b5c79dfc82c01b4d652ccf05652e2c2b6f",
+    "query_indices_sha256": "16c263270389ab8665563c1d6fdcab3c2f193df481eed2b2717b20dfe7b40a5a",
+    "evaluator_resolved_config_sha256": "f0c79cfd6c18d30256cd328ced27050360d025d14a29f87bdb87678d4ebdea76"
+  },
+  "manifests": {
+    "run_manifest_path": "Cases/turbulent_combustion/runs/gl_rbf_cq_migration_200ep_B_gl_rbf_cq_legacy_mha/20260825T094100Z_93b0b3f4/run_manifest.json",
+    "run_manifest_sha256": "040f60e8c847125d9fb917464b7d24b0663d1801f8b4fd2d405ef542a269e84b",
+    "training_sensor_manifest_path": "Cases/turbulent_combustion/runs/gl_rbf_cq_migration_200ep_B_gl_rbf_cq_legacy_mha/20260825T094100Z_93b0b3f4/artifacts/training_sensor_manifest.json",
+    "training_sensor_manifest_file_sha256": "e1b0159b9f7e7d238edb8c7be33f8477b3cd36db9ffe5c2751e1e061917d446f",
+    "training_sensor_manifest_sha256": "4a3138fe6c59ff85e1133c513c3c7d5042d65751b0bcfa9135cfed73b4c32ddb",
+    "split_manifest_path": "Cases/turbulent_combustion/runs/gl_rbf_cq_migration_200ep_B_gl_rbf_cq_legacy_mha/20260825T094100Z_93b0b3f4/artifacts/split_manifest.json",
+    "split_manifest_sha256": "c293dca482540d47d9d4d4c07c30ecbd88f2f9e71995ec002f65befb0e79dc17"
+  },
+  "completion": {
+    "status": "completed",
+    "completed_utc": "2026-08-25T11:13:53.735803+00:00",
+    "global_step": 40000,
+    "configured_steps": 40000,
+    "epoch": 200,
+    "parameter_count": 5461817,
+    "trainable_parameter_count": 5461817,
+    "endpoint_evaluation_mse_normalized": 0.2698512077331543,
+    "endpoint_integration_mean_relative_l2": 0.5263785123825073,
+    "endpoint_integration_worst_field_relative_l2": 0.7459970116615295,
+    "endpoint_integration_per_field_relative_l2": {
+      "CH4": 0.33852148056030273,
+      "CO": 0.6754955649375916,
+      "T": 0.3484759032726288,
+      "U_1": 0.7459970116615295,
+      "p": 0.45062994956970215
+    },
+    "final_training_loss": 0.34524667263031006,
+    "final_gradient_norm": 3.412111499057761,
+    "best_metric_name": "training_loss",
+    "best_metric_value": 0.34524667263031006
+  },
+  "training_health": {
+    "history_rows": 40000,
+    "unique_steps": 40000,
+    "first_step": 1,
+    "last_step": 40000,
+    "all_losses_finite": true,
+    "all_gradient_norms_finite": true,
+    "nonzero_backward_retry_rows": 0,
+    "backward_retry_sum": 0,
+    "backward_retry_max": 0,
+    "non_unit_loss_scale_rows": 0,
+    "unique_backward_loss_scales": [1.0],
+    "loss_min": 0.26709309220314026,
+    "loss_min_step": 39195,
+    "loss_max": 2.0934629440307617,
+    "loss_max_step": 1,
+    "gradient_norm_min": 0.270298715434186,
+    "gradient_norm_min_step": 99,
+    "gradient_norm_max": 61.907912303433726,
+    "gradient_norm_max_step": 10444,
+    "milestones": {
+      "epoch_001": {
+        "step": 200,
+        "total": 1.3286761045455933,
+        "rectified_flow_mse": 1.3286761045455933,
+        "gradient_norm": 1.325694211717714,
+        "backward_loss_scale": 1.0,
+        "backward_retries": 0
+      },
+      "epoch_020": {
+        "step": 4000,
+        "total": 0.7242087125778198,
+        "rectified_flow_mse": 0.7242087125778198,
+        "gradient_norm": 4.722464672094079,
+        "backward_loss_scale": 1.0,
+        "backward_retries": 0
+      },
+      "epoch_040": {
+        "step": 8000,
+        "total": 0.5570085048675537,
+        "rectified_flow_mse": 0.5570085048675537,
+        "gradient_norm": 6.120634047392661,
+        "backward_loss_scale": 1.0,
+        "backward_retries": 0
+      },
+      "epoch_060": {
+        "step": 12000,
+        "total": 0.5695828199386597,
+        "rectified_flow_mse": 0.5695828199386597,
+        "gradient_norm": 10.019990080849011,
+        "backward_loss_scale": 1.0,
+        "backward_retries": 0
+      },
+      "epoch_100": {
+        "step": 20000,
+        "total": 0.4261608123779297,
+        "rectified_flow_mse": 0.4261608123779297,
+        "gradient_norm": 7.405840142817841,
+        "backward_loss_scale": 1.0,
+        "backward_retries": 0
+      },
+      "epoch_150": {
+        "step": 30000,
+        "total": 0.38984739780426025,
+        "rectified_flow_mse": 0.38984739780426025,
+        "gradient_norm": 3.7938380019828686,
+        "backward_loss_scale": 1.0,
+        "backward_retries": 0
+      },
+      "epoch_200": {
+        "step": 40000,
+        "total": 0.34524667263031006,
+        "rectified_flow_mse": 0.34524667263031006,
+        "gradient_norm": 3.412111499057761,
+        "backward_loss_scale": 1.0,
+        "backward_retries": 0
+      }
+    }
+  },
+  "ema": {
+    "enabled": true,
+    "decay": 0.999,
+    "evaluated_with_ema": true,
+    "checkpoint_num_updates": 40000,
+    "checkpoint_shadow_count": 148,
+    "checkpoint_averaged_parameter_count": 145
+  },
+  "checkpoint_hashes": {
+    "epoch_001": "0f370c891592d0ce63435b6d547b2e6debefe5005029dd5ff73359e6b4aa6da3",
+    "epoch_020": "13e0761d7dd536ddc381be8b9dc8113a19593b1f85ae596029fe24da7b9c804b",
+    "epoch_040": "dc4d497f13dc90dd1888e99d6bbbe81cda3a1a29891d4a50fed45da96bdfa310",
+    "epoch_060": "5c35b350e1ad4cc5b13220efd0d2625a33870350295b9890e90fd42bc94ca91b",
+    "epoch_100": "82f0eca992828263167f626ba9b34b92b122e608670c05cdc7cabf11cad74b8c",
+    "epoch_150": "8e21462ca42300b9dc13d0a729c47689083b33b85459f16028d86a44a5e5b8b4",
+    "epoch_200": "ed53f7e1c0c26918f06e67ce6a85c09af5d91ffb87eb11722fbf42979f51f255",
+    "best": "b1f6a266383bcbf9d0df4d8c960bbb6ea8d3e13d10d41ac9859187755e6a5b88",
+    "last": "85999fbd665095abd4b80738e1291736d2be291f81700ef209fad83e7088d7a3",
+    "latest": "85999fbd665095abd4b80738e1291736d2be291f81700ef209fad83e7088d7a3"
+  },
+  "artifact_hashes": {
+    "run_manifest.json": "040f60e8c847125d9fb917464b7d24b0663d1801f8b4fd2d405ef542a269e84b",
+    "status.json": "a7199c8c4f23ab257e4acd080f2bc9812b35d124e43acfcaa7cbf914034d5817",
+    "history.jsonl": "542aaa2121ccea2e6e182365e8c7a26395d4d528af0839e43e30bae1254b569a",
+    "benchmark_telemetry_epochs.csv": "51cf77bc6d5b090fa441b24400c559dcb2b7a6c29084c011010d4493c6ae103f",
+    "benchmark_telemetry.json": "c1ec8e75c7131028d5ba8acb0eb292405b173c8b5ca9e8f3d5cf9b8a9da804aa",
+    "integration.json": "08fbeb13171566ced4a477f55d7b6bd22d3c99da4d131e7b1013b4e8b0da5348",
+    "latest_checkpoint.json": "6238ea7604626a258b56a051ef84f81996f538d7f16eb02c1b76f7db5eeacbca"
+  },
+  "timing_and_memory": {
+    "formal_telemetry_path": "Cases/turbulent_combustion/runs/gl_rbf_cq_migration_200ep_B_gl_rbf_cq_legacy_mha/20260825T094100Z_93b0b3f4/metrics/benchmark_telemetry_epochs.csv",
+    "total_epoch_wall_time_s": 5493.435447585769,
+    "total_training_only_time_s": 5439.555563871749,
+    "all_epoch_wall_time_s": {
+      "mean": 27.467177237928844,
+      "median": 27.47263789223507
+    },
+    "steady_epochs_inclusive": [2, 200],
+    "steady_epoch_wall_time_s": {
+      "mean": 27.470796117390595,
+      "median": 27.472666741348803,
+      "min": 26.486003804951906,
+      "max": 28.449826461263
+    },
+    "steady_training_only_epoch_time_s": {
+      "mean": 27.20336053788606,
+      "median": 27.199936076067388,
+      "min": 26.228736399672925,
+      "max": 28.181850819848478
+    },
+    "steady_mean_step_time_s": {
+      "mean": 0.13481829410725502,
+      "median": 0.1336155364990234,
+      "min": 0.12930080718994139,
+      "max": 0.16616004943847654
+    },
+    "steady_median_step_time_s": {
+      "mean": 0.13333423058591296,
+      "median": 0.13323338317871095,
+      "min": 0.12915487670898437,
+      "max": 0.13987100219726561
+    },
+    "steady_phase_time_s_per_step": {
+      "forward_native_loss_mean": 0.04170344463616759,
+      "backward_mean": 0.06781858774118088,
+      "optimizer_mean": 0.013028186754006237,
+      "data_wait_mean": 0.0013371778975226846
+    },
+    "formal_peak_cuda_allocated_bytes": 6817773056,
+    "formal_peak_cuda_reserved_bytes": 7669284864
+  },
+  "endpoint_metrics": {
+    "training_endpoint": {
+      "scope": "training_endpoint",
+      "artifact": "Cases/turbulent_combustion/runs/gl_rbf_cq_migration_200ep_B_gl_rbf_cq_legacy_mha/20260825T094100Z_93b0b3f4/evaluation/integration.json",
+      "artifact_sha256": "08fbeb13171566ced4a477f55d7b6bd22d3c99da4d131e7b1013b4e8b0da5348",
+      "mse_normalized": 0.2698512077331543,
+      "mean_relative_l2": 0.5263785123825073,
+      "worst_field_relative_l2": 0.7459970116615295,
+      "observed_entry_mse_normalized": 0.0,
+      "unobserved_entry_mse_normalized": 0.27022987604141235,
+      "sensor_manifest_sha256": "4a3138fe6c59ff85e1133c513c3c7d5042d65751b0bcfa9135cfed73b4c32ddb",
+      "per_field_mse_normalized": {
+        "CH4": 0.11784745752811432,
+        "CO": 0.4535793364048004,
+        "T": 0.12450630962848663,
+        "U_1": 0.5319475531578064,
+        "p": 0.12137550115585327
+      },
+      "per_field_relative_l2": {
+        "CH4": 0.33852148056030273,
+        "CO": 0.6754955649375916,
+        "T": 0.3484759032726288,
+        "U_1": 0.7459970116615295,
+        "p": 0.45062994956970215
+      }
+    },
+    "fixed_validation_epoch_200": {
+      "scope": "validation",
+      "report_sha256": "5f17d9690cb434a73a15a37f87e6529a59ebe72678dec6e66dc99b371713f22e",
+      "mse_normalized": 0.3976334035396576,
+      "mean_relative_l2": 0.6146012544631958,
+      "worst_field_relative_l2": 0.8598926663398743,
+      "per_field_relative_l2": {
+        "CH4": 0.3764469623565674,
+        "CO": 0.6806980967521667,
+        "T": 0.38367125391960144,
+        "U_1": 0.8598926663398743,
+        "p": 0.5574448704719543
+      },
+      "per_field_mse_normalized": {
+        "CH4": 0.1409212201833725,
+        "CO": 0.49004149436950684,
+        "T": 0.13651052117347717,
+        "U_1": 0.8593740463256836,
+        "p": 0.36131981015205383
+      }
+    }
+  },
+  "fixed_manifest_convergence": [
+    {
+      "epoch": 1,
+      "report_sha256": "9268736706518ac9dfe19abc262612161eb38fee8daa8e739617e6e0b89afc7c",
+      "checkpoint_sha256": "0f370c891592d0ce63435b6d547b2e6debefe5005029dd5ff73359e6b4aa6da3",
+      "query_indices_sha256": "16c263270389ab8665563c1d6fdcab3c2f193df481eed2b2717b20dfe7b40a5a",
+      "sensor_manifest_sha256": "2071583f79e30f17bc586d907da184b5c79dfc82c01b4d652ccf05652e2c2b6f",
+      "mse_normalized": 1.7830718755722046,
+      "mean_relative_l2": 1.3083456754684448,
+      "worst_field_relative_l2": 1.390470027923584,
+      "per_field_relative_l2": {"CH4": 1.308752417564392, "CO": 1.390470027923584, "T": 0.9668111205101013, "U_1": 1.3552144765853882, "p": 1.3832118511199951},
+      "per_field_mse_normalized": {"CH4": 1.7064586877822876, "CO": 2.05454683303833, "T": 0.8673158884048462, "U_1": 2.0542397499084473, "p": 2.2327985763549805},
+      "evaluation_seconds": 0.15519369300454855,
+      "evaluation_peak_cuda_memory_bytes": 2994973696
+    },
+    {
+      "epoch": 20,
+      "report_sha256": "bdba6ff5b83f32608037e89eed3e294c7f6bd91d9fc4afefc567d355d369290a",
+      "checkpoint_sha256": "13e0761d7dd536ddc381be8b9dc8113a19593b1f85ae596029fe24da7b9c804b",
+      "query_indices_sha256": "16c263270389ab8665563c1d6fdcab3c2f193df481eed2b2717b20dfe7b40a5a",
+      "sensor_manifest_sha256": "2071583f79e30f17bc586d907da184b5c79dfc82c01b4d652ccf05652e2c2b6f",
+      "mse_normalized": 0.6936033368110657,
+      "mean_relative_l2": 0.8150149583816528,
+      "worst_field_relative_l2": 1.1463632583618164,
+      "per_field_relative_l2": {"CH4": 0.4452036917209625, "CO": 0.7713205218315125, "T": 0.44683176279067993, "U_1": 1.1463632583618164, "p": 0.9133813977241516},
+      "per_field_mse_normalized": {"CH4": 0.19487649202346802, "CO": 0.6297113299369812, "T": 0.18354324996471405, "U_1": 1.495599389076233, "p": 0.9642869830131531},
+      "evaluation_seconds": 0.149125418625772,
+      "evaluation_peak_cuda_memory_bytes": 2994973696
+    },
+    {
+      "epoch": 40,
+      "report_sha256": "6fcca7707193ae088c3cd6396a8893c614d3c558e13c67aafea45e031dc0c658",
+      "checkpoint_sha256": "dc4d497f13dc90dd1888e99d6bbbe81cda3a1a29891d4a50fed45da96bdfa310",
+      "query_indices_sha256": "16c263270389ab8665563c1d6fdcab3c2f193df481eed2b2717b20dfe7b40a5a",
+      "sensor_manifest_sha256": "2071583f79e30f17bc586d907da184b5c79dfc82c01b4d652ccf05652e2c2b6f",
+      "mse_normalized": 0.5955392122268677,
+      "mean_relative_l2": 0.7536048889160156,
+      "worst_field_relative_l2": 1.0812605619430542,
+      "per_field_relative_l2": {"CH4": 0.42115306854248047, "CO": 0.7430922389030457, "T": 0.4277150630950928, "U_1": 1.0812605619430542, "p": 0.7757708430290222},
+      "per_field_mse_normalized": {"CH4": 0.1742449700832367, "CO": 0.5841596722602844, "T": 0.16797521710395813, "U_1": 1.3565763235092163, "p": 0.6947397589683533},
+      "evaluation_seconds": 0.1520955078303814,
+      "evaluation_peak_cuda_memory_bytes": 2994973696
+    },
+    {
+      "epoch": 60,
+      "report_sha256": "c8f1b7ba434db96c094bbdab21a6b8e2a365d8bdac48053a62ff0776f30f9f04",
+      "checkpoint_sha256": "5c35b350e1ad4cc5b13220efd0d2625a33870350295b9890e90fd42bc94ca91b",
+      "query_indices_sha256": "16c263270389ab8665563c1d6fdcab3c2f193df481eed2b2717b20dfe7b40a5a",
+      "sensor_manifest_sha256": "2071583f79e30f17bc586d907da184b5c79dfc82c01b4d652ccf05652e2c2b6f",
+      "mse_normalized": 0.5711395144462585,
+      "mean_relative_l2": 0.736037015914917,
+      "worst_field_relative_l2": 1.0428354740142822,
+      "per_field_relative_l2": {"CH4": 0.4089422821998596, "CO": 0.7336324453353882, "T": 0.4175601005554199, "U_1": 1.0428354740142822, "p": 0.7705885171890259},
+      "per_field_mse_normalized": {"CH4": 0.16443417966365814, "CO": 0.5682402849197388, "T": 0.16028566658496857, "U_1": 1.2751007080078125, "p": 0.6876365542411804},
+      "evaluation_seconds": 0.15068370010703802,
+      "evaluation_peak_cuda_memory_bytes": 2994973696
+    },
+    {
+      "epoch": 100,
+      "report_sha256": "ef53827363f17ac96bac42d18f079ac8b9a2ca6d6f14427224ccc557a3dbdfe4",
+      "checkpoint_sha256": "82f0eca992828263167f626ba9b34b92b122e608670c05cdc7cabf11cad74b8c",
+      "query_indices_sha256": "16c263270389ab8665563c1d6fdcab3c2f193df481eed2b2717b20dfe7b40a5a",
+      "sensor_manifest_sha256": "2071583f79e30f17bc586d907da184b5c79dfc82c01b4d652ccf05652e2c2b6f",
+      "mse_normalized": 0.5055631399154663,
+      "mean_relative_l2": 0.6935161352157593,
+      "worst_field_relative_l2": 0.9819826483726501,
+      "per_field_relative_l2": {"CH4": 0.3998636305332184, "CO": 0.7210850715637207, "T": 0.4079791009426117, "U_1": 0.9819826483726501, "p": 0.6845073699951172},
+      "per_field_mse_normalized": {"CH4": 0.15759435296058655, "CO": 0.5493525862693787, "T": 0.1531621813774109, "U_1": 1.1183208227157593, "p": 0.5493859648704529},
+      "evaluation_seconds": 0.1510196579620242,
+      "evaluation_peak_cuda_memory_bytes": 2994973696
+    },
+    {
+      "epoch": 150,
+      "report_sha256": "e91dce1e48aeb408ab7a9e0897dfbfb39a0e128930b6740aa2581fe63448eb82",
+      "checkpoint_sha256": "8e21462ca42300b9dc13d0a729c47689083b33b85459f16028d86a44a5e5b8b4",
+      "query_indices_sha256": "16c263270389ab8665563c1d6fdcab3c2f193df481eed2b2717b20dfe7b40a5a",
+      "sensor_manifest_sha256": "2071583f79e30f17bc586d907da184b5c79dfc82c01b4d652ccf05652e2c2b6f",
+      "mse_normalized": 0.45106595754623413,
+      "mean_relative_l2": 0.6533840298652649,
+      "worst_field_relative_l2": 0.9377381205558777,
+      "per_field_relative_l2": {"CH4": 0.39121127128601074, "CO": 0.6978244185447693, "T": 0.3984847068786621, "U_1": 0.9377381205558777, "p": 0.5930869579315186},
+      "per_field_mse_normalized": {"CH4": 0.15120862424373627, "CO": 0.5146250128746033, "T": 0.14647160470485687, "U_1": 1.0309289693832397, "p": 0.4120955169200897},
+      "evaluation_seconds": 0.15153784677386284,
+      "evaluation_peak_cuda_memory_bytes": 2994973696
+    },
+    {
+      "epoch": 200,
+      "report_sha256": "5f17d9690cb434a73a15a37f87e6529a59ebe72678dec6e66dc99b371713f22e",
+      "checkpoint_sha256": "ed53f7e1c0c26918f06e67ce6a85c09af5d91ffb87eb11722fbf42979f51f255",
+      "query_indices_sha256": "16c263270389ab8665563c1d6fdcab3c2f193df481eed2b2717b20dfe7b40a5a",
+      "sensor_manifest_sha256": "2071583f79e30f17bc586d907da184b5c79dfc82c01b4d652ccf05652e2c2b6f",
+      "mse_normalized": 0.3976334035396576,
+      "mean_relative_l2": 0.6146012544631958,
+      "worst_field_relative_l2": 0.8598926663398743,
+      "per_field_relative_l2": {"CH4": 0.3764469623565674, "CO": 0.6806980967521667, "T": 0.38367125391960144, "U_1": 0.8598926663398743, "p": 0.5574448704719543},
+      "per_field_mse_normalized": {"CH4": 0.1409212201833725, "CO": 0.49004149436950684, "T": 0.13651052117347717, "U_1": 0.8593740463256836, "p": 0.36131981015205383},
+      "evaluation_seconds": 0.14737319573760033,
+      "evaluation_peak_cuda_memory_bytes": 2994973696
+    }
+  ]
+}
