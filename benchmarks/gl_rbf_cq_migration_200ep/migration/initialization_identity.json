@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "benchmark": "gl_rbf_cq_migration_200ep",
+  "gate": "B/C seeded initialization identity",
+  "protocol": {
+    "seed": 42,
+    "coordinate_dim": 2,
+    "field_order": ["CH4", "CO", "T", "U_1", "p"],
+    "query_points": 4096,
+    "sensor_fields": ["T"],
+    "sensor_count_range": [192, 384],
+    "sensor_attention_padding_mode": "full",
+    "neighbor_backend": "keops"
+  },
+  "configs": {
+    "B": {
+      "path": "configs/B_gl_rbf_cq_legacy_mha_200ep.yaml",
+      "condition_attention_execution": "legacy_mha",
+      "sha256": "adeee8c3111b5a9e24c91c0eeeedce4fd898556761a43c8eff08e655bd4f1663"
+    },
+    "C": {
+      "path": "configs/C_gl_rbf_cq_cached_kv_200ep.yaml",
+      "condition_attention_execution": "cached_kv",
+      "sha256": "4d1c34461e34bf9d418aa03d61cdeb7b3afbd6cde02d78b029c4fce4ccf28922"
+    }
+  },
+  "state": {
+    "state_key_count": 148,
+    "state_schema_sha256": "8ff1ad6f006de382641a14813d74422a41a17b1b12340c6be526871b83254596",
+    "B_state_sha256": "c80df4b84d3c1b992510da6d7ada6e274ebbde133890cbeb980e56dc92e1978c",
+    "C_state_sha256": "c80df4b84d3c1b992510da6d7ada6e274ebbde133890cbeb980e56dc92e1978c",
+    "identical": true
+  },
+  "environment": {
+    "device": "cpu",
+    "dtype": "torch.float32",
+    "initialization": "torch.manual_seed(42) immediately before each build"
+  }
+}

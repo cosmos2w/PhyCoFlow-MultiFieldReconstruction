@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -16,12 +18,25 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 BENCHMARK_ROOT = PROJECT_ROOT / "benchmarks" / "gl_rbf_cq_migration_200ep"
 CONFIG_B = BENCHMARK_ROOT / "configs" / "B_gl_rbf_cq_legacy_mha_200ep.yaml"
 CONFIG_C = BENCHMARK_ROOT / "configs" / "C_gl_rbf_cq_cached_kv_200ep.yaml"
+INIT_EVIDENCE = BENCHMARK_ROOT / "migration" / "initialization_identity.json"
 
 
 def _load(path: Path) -> dict:
     config = yaml.safe_load(path.read_text())
     assert isinstance(config, dict)
     return config
+
+
+def _state_digest(model, *, include_values: bool) -> str:
+    digest = hashlib.sha256()
+    for name, value in model.state_dict().items():
+        digest.update(name.encode())
+        digest.update(b"\0")
+        digest.update(str(value.dtype).encode())
+        digest.update(str(tuple(value.shape)).encode())
+        if include_values:
+            digest.update(value.detach().cpu().contiguous().numpy().tobytes())
+    return digest.hexdigest()
 
 
 def _field_sample(index: int, *, n_points: int = 512) -> FieldSample:
@@ -54,28 +69,72 @@ def _batch_from_config(config: dict, samples: list[FieldSample]) -> ObservationB
     return build_observation_batch(samples, protocol, query_points=128)
 
 
+def _assert_nested_equal(left, right) -> None:
+    if isinstance(left, torch.Tensor) or isinstance(right, torch.Tensor):
+        assert isinstance(left, torch.Tensor) and isinstance(right, torch.Tensor)
+        assert torch.equal(left, right)
+        return
+    if isinstance(left, dict) or isinstance(right, dict):
+        assert isinstance(left, dict) and isinstance(right, dict)
+        assert left.keys() == right.keys()
+        for key in left:
+            _assert_nested_equal(left[key], right[key])
+        return
+    if isinstance(left, (tuple, list)) or isinstance(right, (tuple, list)):
+        assert isinstance(left, type(right)) and len(left) == len(right)
+        for left_item, right_item in zip(left, right):
+            _assert_nested_equal(left_item, right_item)
+        return
+    assert left == right
+
+
 def test_b_c_sensor_batches_and_rng_draws_are_identical():
     samples = [_field_sample(index) for index in range(3)]
-    first = _batch_from_config(_load(CONFIG_B), samples)
-    second = _batch_from_config(_load(CONFIG_C), samples)
-    assert first.sample_ids == second.sample_ids
+    config_b = _load(CONFIG_B)
+    config_c = _load(CONFIG_C)
+    portable = pytest.importorskip("phycoflow_pointcloud")
 
-    pairs = (
-        (first.obs_coords, second.obs_coords),
-        (first.obs_values, second.obs_values),
-        (first.obs_field_ids, second.obs_field_ids),
-        (first.obs_valid_mask, second.obs_valid_mask),
-        (first.query_coords, second.query_coords),
-        (first.query_valid_mask, second.query_valid_mask),
-        (first.target_fields, second.target_fields),
-        (first.obs_indices, second.obs_indices),
-    )
-    for left, right in pairs:
-        assert left is not None and right is not None
-        assert torch.equal(left, right)
+    portable_config_b = copy.deepcopy(config_b["model"])
+    portable_config_c = copy.deepcopy(config_c["model"])
+    for portable_config in (portable_config_b, portable_config_c):
+        portable_config.pop("name", None)
+        portable_config["model_name"] = "GL_rbf_CQ"
+        portable_config["coord_dim"] = 2
+    torch.manual_seed(42)
+    arm_b = portable.build_pointcloud_model(portable_config_b, n_fields=5, device="cpu")
+    torch.manual_seed(42)
+    arm_c = portable.build_pointcloud_model(portable_config_c, n_fields=5, device="cpu")
 
-    valid_counts = first.obs_valid_mask.sum(dim=1)
-    assert torch.all((valid_counts >= 192) & (valid_counts <= 384))
+    for batch_samples in (samples, samples[:2], samples[1:]):
+        first = _batch_from_config(config_b, batch_samples)
+        second = _batch_from_config(config_c, batch_samples)
+        assert first.sample_ids == second.sample_ids
+
+        pairs = (
+            (first.obs_coords, second.obs_coords),
+            (first.obs_values, second.obs_values),
+            (first.obs_field_ids, second.obs_field_ids),
+            (first.obs_valid_mask, second.obs_valid_mask),
+            (first.query_coords, second.query_coords),
+            (first.query_valid_mask, second.query_valid_mask),
+            (first.target_fields, second.target_fields),
+            (first.obs_indices, second.obs_indices),
+        )
+        for left, right in pairs:
+            assert left is not None and right is not None
+            assert torch.equal(left, right)
+        _assert_nested_equal(first.metadata, second.metadata)
+        assert torch.equal(first.metadata["query_indices"], second.metadata["query_indices"])
+
+        torch.manual_seed(6000 + len(batch_samples))
+        bridge_b = arm_b.prepare_training_bridge(first.target_fields, first.query_coords)
+        torch.manual_seed(6000 + len(batch_samples))
+        bridge_c = arm_c.prepare_training_bridge(second.target_fields, second.query_coords)
+        for key in ("x0", "t", "x_t", "target"):
+            torch.testing.assert_close(bridge_b[key], bridge_c[key], rtol=0, atol=0)
+
+        valid_counts = first.obs_valid_mask.sum(dim=1)
+        assert torch.all((valid_counts >= 192) & (valid_counts <= 384))
 
 
 def _portable_core(model):
@@ -140,7 +199,7 @@ def test_adapter_and_portable_core_forward_loss_gradient_equality():
     portable_model = portable.build_pointcloud_model(
         portable_config, n_fields=5, device="cpu"
     )
-    portable_model.model.load_state_dict(core.state_dict(), strict=True)
+    portable_model.load_state_dict(adapter.state_dict(), strict=True)
 
     batch = _adapter_batch()
     state = batch.target_fields.detach().clone()
@@ -183,6 +242,34 @@ def test_adapter_and_portable_core_forward_loss_gradient_equality():
                 adapter_gradient, portable_parameter.grad, rtol=0, atol=0
             )
 
+    adapter.zero_grad(set_to_none=True)
+    portable_model.zero_grad(set_to_none=True)
+    torch.manual_seed(20260825)
+    adapter_loss = adapter.training_loss(batch)
+    torch.manual_seed(20260825)
+    portable_loss, _ = portable.rectified_flow_loss(
+        portable_model,
+        x1=batch.target_fields,
+        coords=batch.query_coords,
+        obs_coords=batch.obs_coords,
+        obs_values=batch.obs_values,
+        obs_mask=batch.obs_valid_mask,
+        obs_field_ids=batch.obs_field_ids,
+        obs_indices=batch.obs_indices,
+    )
+    torch.testing.assert_close(adapter_loss.total, portable_loss, rtol=0, atol=0)
+    adapter_loss.total.backward()
+    portable_loss.backward()
+    adapter_parameters = dict(adapter.named_parameters())
+    portable_parameters = dict(portable_model.named_parameters())
+    assert adapter_parameters.keys() == portable_parameters.keys()
+    for name in adapter_parameters:
+        adapter_gradient = adapter_parameters[name].grad
+        portable_gradient = portable_parameters[name].grad
+        assert (adapter_gradient is None) == (portable_gradient is None)
+        if adapter_gradient is not None:
+            torch.testing.assert_close(adapter_gradient, portable_gradient, rtol=0, atol=0)
+
 
 def test_b_c_actual_configs_have_identical_seeded_initial_state():
     pytest.importorskip("phycoflow_reconstruction.models.flows.gl_rbf_cq")
@@ -208,6 +295,16 @@ def test_b_c_actual_configs_have_identical_seeded_initial_state():
     assert arm_b.state_dict().keys() == arm_c.state_dict().keys()
     for key in arm_b.state_dict():
         torch.testing.assert_close(arm_b.state_dict()[key], arm_c.state_dict()[key], rtol=0, atol=0)
+    evidence = json.loads(INIT_EVIDENCE.read_text())
+    assert evidence["state"]["state_key_count"] == len(arm_b.state_dict())
+    assert evidence["state"]["state_schema_sha256"] == _state_digest(
+        arm_b, include_values=False
+    )
+    assert evidence["state"]["B_state_sha256"] == _state_digest(arm_b, include_values=True)
+    assert evidence["state"]["C_state_sha256"] == _state_digest(arm_c, include_values=True)
+    assert evidence["state"]["B_state_sha256"] == evidence["state"]["C_state_sha256"]
+    assert evidence["configs"]["B"]["sha256"] == hashlib.sha256(CONFIG_B.read_bytes()).hexdigest()
+    assert evidence["configs"]["C"]["sha256"] == hashlib.sha256(CONFIG_C.read_bytes()).hexdigest()
 
 
 def test_adapter_ema_lifecycle_is_generic_and_resumable():

@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "benchmark": "gl_rbf_cq_migration_200ep",
+  "status": "passed",
+  "scope": "portable core plus downstream adapter gates; no formal training run",
+  "test_command": "PYTHONPATH=src conda run -n phycoflow_env pytest -q tests/test_gl_rbf_cq_configs.py tests/test_gl_rbf_cq_portable_gates.py tests/test_gl_rbf_cq_downstream_gates.py",
+  "gate_groups": {
+    "isolated_import": "passed",
+    "synthetic_forward_backward_2d_3d_f5_other_and_padding": "passed",
+    "legacy_cached_state_and_kv_projection_4_vs_1": "passed",
+    "query_microbatch_loss_and_gradient_equivalence": "passed",
+    "persistent_topk_zero_post_build_knn": "passed",
+    "ema_save_load_resume_and_evaluation_selection": "passed",
+    "adapter_core_seeded_rf_loss_and_every_gradient": "passed",
+    "b_c_seeded_state_hash": "passed",
+    "b_c_data_rng_metadata_query_identity_and_rf_bridge": "passed"
+  },
+  "evidence": {
+    "initialization_identity": "migration/initialization_identity.json",
+    "fixed_validation_manifest": "../fixed_validation_manifest.json",
+    "fixed_validation_manifest_sha256": "2071583f79e30f17bc586d907da184b5c79dfc82c01b4d652ccf05652e2c2b6f"
+  }
+}

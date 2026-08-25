@@ -30,7 +30,7 @@ def _small_core_config(coord_dim: int, execution: str = "cached_kv") -> dict:
         "latent_dim": 16,
         "num_latents": 8,
         "num_heads": 4,
-        "num_latent_blocks": 2,
+        "num_latent_blocks": 4,
         "ff_mult": 2,
         "attn_dropout": 0.0,
         "mlp_dropout": 0.0,
@@ -192,7 +192,7 @@ def test_legacy_and_cached_initial_state_identity_and_kv_projection_counts():
         )
     assert torch.isfinite(legacy_out).all() and torch.isfinite(cached_out).all()
     assert cached.model.input_cross_attn.kv_projection_calls == 1
-    assert legacy.model.input_cross_attn.kv_projection_calls > cached.model.input_cross_attn.kv_projection_calls
+    assert legacy.model.input_cross_attn.kv_projection_calls == 4
 
 
 def test_query_microbatch_loss_and_gradients_match_monolithic():
