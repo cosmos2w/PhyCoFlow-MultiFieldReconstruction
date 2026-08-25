@@ -38,6 +38,12 @@ the lower end of exactly representable float32 powers of two, with unscale and
 clip multiplication performed in float64. The new run again starts from seed
 42; no prior weights are reused.
 
+The `2^-140` attempt was rejected after all gradients through step 290 were
+zero. Short real-data B40/Q4096 calibrations then established the actual
+float32 boundary: `2^-130` is finite, while `2^-131` and `2^-132` underflow.
+The formal common A/B/C scale is therefore `2^-130`, the smallest viable exact
+power of two. The next run again starts from seed 42.
+
 ## Model and protocol
 
 - Downstream model: `pointcloud_ffm` with `backbone: gl_rbf_enh`.

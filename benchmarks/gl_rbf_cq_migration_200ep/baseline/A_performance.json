@@ -1,7 +1,7 @@
 {
   "arm": "A",
   "model": "pointcloud_ffm/gl_rbf_enh",
-  "formal_run_status": "ready_to_restart_with_2^-140_scaled_backward_from_seed_42",
+  "formal_run_status": "ready_to_restart_with_calibrated_2^-130_scaled_backward_from_seed_42",
   "branch": "validation/proj-multifield-gl-rbf-cq",
   "source_branch": "release/gl-rbf-cq-portable-prep",
   "source_commit": "a7992a5c462458d4689d2312491f0220cd0d4d1a",
@@ -56,6 +56,25 @@
     "contaminated_weights_reused": false,
     "preserved_milestones": [1, 20, 40],
     "next_safeguard": "2^-140 exact power-of-two scale with float64 unscale multiplication"
+  },
+  "rejected_2^-140_underflow_attempt": {
+    "run_dir": "Cases/turbulent_combustion/runs/gl_rbf_cq_migration_200ep_A_legacy_gl_rbf_enh/20260825T045541Z_6086ff97",
+    "stopped_step": 290,
+    "outcome": "complete_gradient_underflow",
+    "gradient_norm_all_steps": 0.0,
+    "optimizer_updates_meaningful": false,
+    "contaminated_weights_reused": false
+  },
+  "real_data_backward_scale_calibration": {
+    "batch_size": 40,
+    "query_points": 4096,
+    "sensor_protocol": "T-only 192-384",
+    "2^-128_step1_norm": 240151.20517937554,
+    "2^-130_step1_norm": 316861.14924366126,
+    "2^-131_step1_norm": 0.0,
+    "2^-132_step1_norm": 0.0,
+    "selected_scale": "2^-130",
+    "selection_reason": "smallest exact power-of-two scale with a nonzero real-data gradient"
   },
   "original_b128_smoke": {
     "device": "cuda:0",
@@ -122,6 +141,7 @@
     "The second attempt safely rejected a genuinely non-finite backward result at step 1259; the next seed-42 restart uses the common algebraically unscaled backward safeguard.",
     "The 2^-64 attempt safely stopped at step 938 when a scaled derivative overflowed; the next common A/B/C scale is 2^-120.",
     "The 2^-120 attempt safely stopped after epoch 44; the final float32-representable common scale is 2^-140.",
+    "2^-140 underflowed completely; real-data calibration selected 2^-130 as the smallest viable common scale.",
     "Arm-A remains the un-migrated legacy implementation; no GL_rbf_CQ source was added."
   ]
 }

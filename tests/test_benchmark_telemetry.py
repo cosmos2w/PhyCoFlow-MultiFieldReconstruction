@@ -34,7 +34,7 @@ def test_arm_a_config_matches_historical_scale_and_common_protocol():
         "lr": 1.0e-4,
         "weight_decay": 1.0e-6,
         "grad_clip": 1.0,
-        "backward_loss_scale": 7.174648137343064e-43,
+        "backward_loss_scale": 7.346839692639297e-40,
     }
     assert config["observations"]["fields"] == {"T": {"count_min": 192, "count_max": 384}}
 
