@@ -664,18 +664,55 @@ def validate_config(config: Mapping[str, Any]) -> None:
     model = config["model"]
     if not isinstance(model, Mapping) or not model.get("name"):
         raise ValueError("model.name is required")
-    if model.get("name") == "pointcloud_ffm":
+    model_name = str(model.get("name")).lower()
+    if model_name == "pointcloud_ffm":
         backbone = model.get("backbone", "gl_rbf_enh")
         if backbone not in {"gl_rbf_enh", "fno"}:
             raise ValueError("new PointCloudFFM supports only gl_rbf_enh or fno")
         if backbone == "gl_rbf_enh" and model.get("gather_mode", "topk_rbf") != "topk_rbf":
             raise ValueError("new GL_rbf_ENH supports only gather_mode=topk_rbf")
-    if stage == "base_training" and model.get("name") == "pinn":
+    elif model_name == "gl_rbf_cq":
+        backbone = str(model.get("backbone", "GL_rbf_ENH_CQ")).lower()
+        if backbone != "gl_rbf_enh_cq":
+            raise ValueError("gl_rbf_cq requires backbone=GL_rbf_ENH_CQ")
+        execution = str(model.get("condition_attention_execution", "cached_kv"))
+        if execution not in {"legacy_mha", "cached_kv"}:
+            raise ValueError(
+                "gl_rbf_cq condition_attention_execution must be legacy_mha or cached_kv"
+            )
+        if model.get("sensor_attention_padding_mode", "full") != "full":
+            raise ValueError("gl_rbf_cq requires sensor_attention_padding_mode=full")
+        if str(model.get("gather_mode", "topk_rbf_glres")) != "topk_rbf_glres":
+            raise ValueError("gl_rbf_cq requires gather_mode=topk_rbf_glres")
+        for key in (
+            "gather_topk",
+            "gather_query_chunk_size",
+            "train_query_microbatch_size",
+            "reconstruction_query_chunk_size",
+            "cq_query_dim",
+            "cq_readout_rank",
+            "cq_readout_heads",
+        ):
+            if key in model and int(model[key]) < 1:
+                raise ValueError(f"model.{key} must be positive")
+        query_dim = int(model.get("cq_query_dim", 128))
+        query_heads = int(model.get("cq_readout_heads", 4))
+        readout_rank = int(model.get("cq_readout_rank", 64))
+        if query_dim % query_heads != 0:
+            raise ValueError("model.cq_query_dim must be divisible by cq_readout_heads")
+        if readout_rank % query_heads != 0:
+            raise ValueError("model.cq_readout_rank must be divisible by cq_readout_heads")
+        backend = str(model.get("neighbor_backend", "torch"))
+        if backend not in {"torch", "keops"}:
+            raise ValueError("model.neighbor_backend must be torch or keops")
+        if "model_ema_decay" in model and not 0.0 <= float(model["model_ema_decay"]) < 1.0:
+            raise ValueError("model.model_ema_decay must be in [0, 1)")
+    if stage == "base_training" and model_name == "pinn":
         raise ValueError(
             "pinn is available only through direct_physics with a case PhysicsProvider"
         )
     if (
-        model.get("name") == "latent_fm"
+        model_name == "latent_fm"
         and int(model.get("stage", 1)) == 2
         and not model.get("stage1_checkpoint")
     ):
