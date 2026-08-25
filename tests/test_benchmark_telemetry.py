@@ -30,7 +30,7 @@ def test_arm_a_config_matches_historical_scale_and_common_protocol():
     assert config["model"]["query_points"] == 4096
     assert config["optimization"] == {
         "epochs": 200,
-        "batch_size": 128,
+        "batch_size": 40,
         "lr": 1.0e-4,
         "weight_decay": 1.0e-6,
         "grad_clip": 1.0,

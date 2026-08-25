@@ -27,7 +27,9 @@ common:
   sensor_fields: [T]
   sensor_count_range: [192, 384]
   seed: 42
-  batch_size: 128
+  requested_batch_size: 128
+  batch_size: 40
+  batch_size_adjustment: "B128 was authorized to reduce to the largest stable common batch after exact GPU0 OOM; B40 is used identically for A/B/C."
   query_points: 4096
   epochs: 200
   learning_rate: 1.0e-4

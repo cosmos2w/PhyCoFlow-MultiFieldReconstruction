@@ -87,7 +87,7 @@ def main() -> int:
     if device.type == "cuda":
         print(f"peak_cuda_allocated_bytes={torch.cuda.max_memory_allocated(device)}")
         print(f"peak_cuda_reserved_bytes={torch.cuda.max_memory_reserved(device)}")
-    print("steps_per_epoch_dataset_dependent=ceil(dataset_train_samples/128)")
+    print(f"steps_per_epoch_dataset_dependent=ceil(dataset_train_samples/{batch_size})")
     return 0
 
 

@@ -1,13 +1,14 @@
 {
   "arm": "A",
   "model": "pointcloud_ffm/gl_rbf_enh",
-  "formal_run_status": "blocked_before_launch",
+  "formal_run_status": "ready_to_launch",
   "branch": "validation/proj-multifield-gl-rbf-cq",
   "source_branch": "release/gl-rbf-cq-portable-prep",
   "source_commit": "a7992a5c462458d4689d2312491f0220cd0d4d1a",
   "phase1_freeze_commit": "60c443bbbe32fbd945321f31dcb54f7f4a978c5c",
   "protocol": {
-    "batch_size": 128,
+    "requested_batch_size": 128,
+    "batch_size": 40,
     "query_points": 4096,
     "sensor_count_range": [192, 384],
     "sensor_fields": ["T"],
@@ -15,11 +16,11 @@
     "epochs": 200
   },
   "dataset_train_samples": 8000,
-  "steps_per_epoch": 63,
-  "configured_steps": 12600,
+  "steps_per_epoch": 200,
+  "configured_steps": 40000,
   "parameter_count": 4778118,
   "trainable_parameter_count": 4778118,
-  "exact_protocol_smoke": {
+  "original_b128_smoke": {
     "device": "cuda:0",
     "batch_size": 128,
     "query_points": 4096,
@@ -40,6 +41,18 @@
     "protocol_changed": false
   },
   "controlled_diagnostic_smoke": [
+    {
+      "device": "cuda:0",
+      "batch_size": 40,
+      "query_points": 4096,
+      "sensor_count": 384,
+      "step_seconds": 0.286309,
+      "forward_native_loss_seconds": 0.057395,
+      "backward_seconds": 0.227096,
+      "optimizer_seconds": 0.001619,
+      "peak_cuda_allocated_bytes": 41183916544,
+      "peak_cuda_reserved_bytes": 48375005184
+    },
     {
       "device": "cuda:0",
       "batch_size": 8,
@@ -66,8 +79,8 @@
     }
   ],
   "notes": [
-    "The exact B128/Q4096 smoke is a launch gate; no Arm-A formal run was started.",
-    "No scientific benchmark setting was reduced or changed to work around OOM.",
+    "The originally requested B128/Q4096 smoke OOMed; the authorized common B40 adjustment is recorded in PROTOCOL.yaml.",
+    "B40 is the largest stable batch selected for identical A/B/C execution.",
     "Arm-A remains the un-migrated legacy implementation; no GL_rbf_CQ source was added."
   ]
 }

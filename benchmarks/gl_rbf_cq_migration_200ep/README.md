@@ -10,8 +10,10 @@ latents, 8 heads, 4 latent blocks, top-k 32, field embedding width 128, 32
 Fourier bands, and 256 RFF features. It does not use any GL_rbf_CQ feature.
 
 All arms share the downstream dataset, field order, normalization, trainer,
-optimizer, seed 42, B128/Q4096, and T-only random-uniform 192--384 sensor
-protocol. `fixed_validation_manifest.json` is generated before the Arm-A run
+optimizer, seed 42, B40/Q4096, and T-only random-uniform 192--384 sensor
+protocol. The originally requested B128 setting OOMed during backward on the
+48-GiB GPU; the authorized largest stable common batch is B40 for A/B/C.
+`fixed_validation_manifest.json` is generated before the Arm-A run
 and must be reused for every post-hoc milestone evaluation. Its current
 checksum is `2071583f79e30f17bc586d907da184b5c79dfc82c01b4d652ccf05652e2c2b6f`;
 it persists both T-only sensor pairs and the shared Q4096 query indices.
@@ -21,5 +23,6 @@ per-step/per-epoch timing and CUDA peak-memory evidence into each run's
 `metrics/` directory. It is disabled for all existing project configs.
 
 Arm-A evidence is frozen in `baseline/` before migration. The exact protocol
-smoke limitation is recorded in `A_performance.json`; a formal run must not be
-started without resolving the documented B128/Q4096 GPU-memory gate.
+smoke limitation and authorized B40 adjustment are recorded in
+`A_performance.json`; the formal B40 run artifacts are added there after
+completion.

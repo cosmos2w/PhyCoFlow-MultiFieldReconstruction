@@ -5,10 +5,11 @@
 This baseline is frozen before any portable `GL_rbf_CQ` migration. The
 benchmark branch is `validation/proj-multifield-gl-rbf-cq`; the pre-migration
 commit is recorded in `A_performance.json`. The exact B128/Q4096 diagnostic
-smoke reached CUDA OOM during backward on GPU 0, so no formal 200-epoch run
-was launched and no benchmark setting was silently reduced. An allocator-
-identical retry also requested 96 GiB; expandable segments were tested and
-fragmentation was ruled out.
+smoke at the originally requested B128/Q4096 reached CUDA OOM during backward
+on GPU 0. An allocator-identical retry also requested 96 GiB; expandable
+segments were tested and fragmentation was ruled out. Per the authorized
+benchmark adjustment, the largest stable common batch is B40; A/B/C all use
+B40/Q4096 and no other scientific setting is reduced.
 
 ## Model and protocol
 
@@ -19,7 +20,7 @@ fragmentation was ruled out.
 - Dataset/field order: downstream turbulent combustion `[CH4, CO, T, U_1, p]`;
   coordinate dimension 2; existing normalization and split contracts.
 - Sensors: random-uniform T-only, 192--384 valid sensors, seed 42.
-- Training: 200 epochs, batch size 128, query points 4096, lr 1e-4,
+- Training: 200 epochs, batch size 40, query points 4096, lr 1e-4,
   weight decay 1e-6, gradient clip 1.0, deterministic seed 42.
 - Training preview is disabled; immutable checkpoints are saved at epochs
   `1, 20, 40, 60, 100, 150, 200`, and fixed-manifest evaluation is post-hoc.
