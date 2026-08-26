@@ -211,6 +211,6 @@ def test_combined_demo50_template_satisfies_strict_config_contract():
     project = Path(__file__).resolve().parents[1]
     config = load_config(
         project
-        / "Cases/turbulent_combustion/configs/posttrain/demo50_all_coherence.yaml"
+        / "cases/turbulent_combustion/configs/posttrain/demo50_all_coherence.yaml"
     )
     validate_config(config)

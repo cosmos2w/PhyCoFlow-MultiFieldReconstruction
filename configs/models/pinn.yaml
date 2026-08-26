@@ -1,0 +1,5 @@
+model:
+  name: pinn
+  hidden_dim: 64
+  fourier_bands: 8
+  physics_weight: 1.0

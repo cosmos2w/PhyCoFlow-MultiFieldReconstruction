@@ -1,0 +1,7 @@
+# Canonical CoordinateMLP architecture.  Case profiles own only scientific
+# overrides such as query count or a deliberately smaller smoke model.
+model:
+  name: coordinate_mlp
+  hidden_dim: 128
+  fourier_bands: 16
+  query_points: 4096

@@ -1,48 +1,70 @@
-# Local dataset payloads and links; only explanations are versioned.
-Dataset/**/*.h5
-Dataset/**/*.hdf5
-Dataset/**/*.pt
-Dataset/**/*.pth
-Dataset/**/*.npy
-Dataset/**/*.npz
-Dataset/**/cache/
+# Local scientific payloads. Keep catalog documentation and small source
+# fixtures trackable; ignore only payload locations and their caches.
+datasets/**/*.h5
+datasets/**/*.hdf5
+datasets/**/*.pt
+datasets/**/*.pth
+datasets/**/*.npy
+datasets/**/*.npz
+datasets/**/cache/
+datasets/**/generated/
+datasets/**/manifests/
 
-# All run products are local unless explicitly exported later.
-Cases/**/runs/
-Cases/**/manifests/
-*.pt
-*.pth
-*.csv
-*.json
-*.log
-*.png
-*.pdf
+# Local case runs, generated manifests, comparisons, and experiment profiles.
+cases/**/runs/
+cases/**/manifests/
+cases/**/comparisons/*.json
+cases/**/comparisons/*.csv
+cases/**/comparisons/*.html
+cases/**/comparisons/*.png
+cases/**/comparisons/*.md
+cases/**/configs/_experiments/
 
-# Python/editor caches.
+# Root-level run/checkpoint directories are local when used by ad-hoc tools.
+runs/
+checkpoints/
+
+# Benchmark reports and derived output. Protocols, configs, scripts, and
+# deliberately retained tiny fixtures remain source files.
+benchmarks/**/reports/
+benchmarks/**/generated/
+benchmarks/**/report/*.json
+benchmarks/**/report/*.csv
+benchmarks/**/report/*.html
+benchmarks/**/report/*.png
+benchmarks/**/report/*.svg
+benchmarks/**/report/*.pdf
+benchmarks/**/execution/*.json
+benchmarks/**/comparison/*.json
+benchmarks/**/comparison/*.csv
+benchmarks/**/comparison/*.html
+benchmarks/**/baseline/*.json
+benchmarks/**/baseline/*.csv
+benchmarks/**/runs_summary/
+
+# Exported figures and report directories are generated artifacts, not source.
+figures/
+reports/
+artifacts/
+
+# Python, test, editor, and build caches.
 __pycache__/
 *.py[cod]
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
 *.egg-info/
 build/
 dist/
+.venv/
+venv/
+.env
+.DS_Store
 
-# Canonical project and case configs are source files despite repository-wide
-# generated-YAML rules in the parent workspace.
-!configs/**/*.yaml
-!Cases/**/configs/**/*.yaml
-!Cases/**/configs/normalization/*.json
-!benchmarks/**/*.json
-!benchmarks/**/*.yaml
-!benchmarks/**/*.csv
-!figures/generated/**/*.svg
+# Local benchmark/experiment notes may be kept outside the tracked tree.
+local-experiments/
 
-# Researcher-specific experiment configs stay local. Canonical base, sensor,
-# post-training, direct-training, and template configs remain versioned.
-Cases/**/configs/_experiments/
-
+# Optional historical source retained only for local compatibility checks.
 LegacyCoherence/
-UpdatePlans/
-
-ProjectCreate.md
-UPSTREAM.md

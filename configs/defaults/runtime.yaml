@@ -1,4 +1,12 @@
-seed: 42
-device: cuda:0
-num_workers: 0
-deterministic: true
+# Shared runtime defaults used by every base-training launch profile.
+runtime:
+  seed: 42
+  device: cuda:0
+  deterministic: true
+  # The resident data path does not create DataLoader workers.  Case profiles
+  # that use the compact asynchronous path may raise this explicitly.
+  num_workers: 0
+  progress: true
+  plot_every_steps: 10
+  data_strategy: auto
+  vram_dataset_threshold_gb: 20

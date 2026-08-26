@@ -1,4 +1,17 @@
-split: test
-batch_size: 1
-max_samples: null
-generation_seed: 2026
+# Shared evaluation and training-preview defaults.  Case profiles can lower
+# preview cost without changing the model or dataset contract.
+evaluation:
+  split: validation
+  max_samples: 1
+  query_points: null
+  generation_steps: 8
+  seed: 2027
+  preview:
+    enabled: true
+    every_epochs: 25
+    split: validation
+    sample_index: 0
+    query_points: null
+    generation_steps: 8
+    seed: 2027
+    keep_history: false

@@ -1,9 +1,0 @@
-dataset:
-  path: ../../Dataset/brusselator/brusselator.h5
-  split: train
-  reconstruction_unit: snapshot
-  field_names: [u, v]
-  field_units: [dimensionless, dimensionless]
-  normalization: mean_std
-  time_stride: 1
-  benchmark_eligible: true

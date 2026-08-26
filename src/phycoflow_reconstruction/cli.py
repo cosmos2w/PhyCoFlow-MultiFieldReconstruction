@@ -289,5 +289,5 @@ def run_case_cli(case_name: str, case_dir: str | Path) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Use a case-local run.py entrypoint.")
     parser.parse_args()
-    parser.error("launch from Cases/<case>/run.py so case context is explicit")
+    parser.error("launch from cases/<case>/run.py so case context is explicit")
     return 2

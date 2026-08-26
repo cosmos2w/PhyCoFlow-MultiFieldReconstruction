@@ -1,0 +1,9 @@
+defaults:
+  - ../../../../configs/defaults/base_training.yaml
+  - ../dataset.yaml
+  - ../sensors/velocity_shared_random.yaml
+  - ../../../../configs/models/latent_fm_stage2.yaml
+case: kolmogorov
+optimization: {batch_size: 2}
+runtime: {num_workers: 4, data_strategy: auto}
+output: {experiment_name: latent_fm_stage2}

@@ -1,0 +1,9 @@
+defaults:
+  - ../../../../configs/defaults/base_training.yaml
+  - ../dataset.yaml
+  - ../sensors/u_only_random_variable.yaml
+  - ../../../../configs/models/latent_fm_stage2.yaml
+case: brusselator
+optimization: {batch_size: 4}
+runtime: {num_workers: 4, data_strategy: auto}
+output: {experiment_name: latent_fm_stage2}
