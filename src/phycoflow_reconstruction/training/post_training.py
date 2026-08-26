@@ -853,7 +853,6 @@ def run_post_training(
                 )
             )
         after_optimizer_step(model)
-        store.append_history(row)
         monitor.record(row, lr=optimizer.param_groups[0]["lr"])
         if checkpoint_manager.due_for_preview_or_checkpoint(global_step + 1, preview):
             # Keep the case artifacts and checkpoint family state at the same

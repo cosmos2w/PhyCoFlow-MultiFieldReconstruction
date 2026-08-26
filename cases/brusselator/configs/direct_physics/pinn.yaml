@@ -1,20 +1,39 @@
+# Direct-physics profile: model, physical residuals, and training controls.
+
+# Composition order; later files override earlier defaults.
 defaults:
   - ../../../../configs/defaults/base_training.yaml
   - ../dataset.yaml
   - ../sensors/u_only_random.yaml
   - ../../../../configs/models/pinn.yaml
-stage: direct_physics
+
+# Run identity. Choices: base_training | post_training | direct_physics.
+stage: direct_physics  # choices: base_training | post_training | direct_physics
 case: brusselator
+
+# Model family and architecture settings.
 model: {physics_weight: 1.0}
+
+# Physical provider, derivative source, and residual weights.
 physics:
   provider: brusselator_periodic
   domain_length: 20.0
-  temporal_derivative_source: paired_finite_difference
+  temporal_derivative_source: paired_finite_difference  # choices: paired_finite_difference
   weights: {pde_u: 1.0, pde_v: 1.0, positivity: 0.01}
+
+# Training duration, batch sizing, optimizer, and gradient controls.
 optimization: {epochs: 1, batch_size: 1, lr: 1.0e-4, weight_decay: 0.0, grad_clip: 1.0}
+
+# Reproducibility and execution. data_strategy choices: auto | vram | async_cpu.
 runtime: {seed: 42, device: 'cuda:0', deterministic: true, num_workers: 0}
+
+# Validation and preview policy. split choices: train | validation | test.
 evaluation:
   generation_steps: 1
   preview: {enabled: true, every_epochs: 1, split: validation, sample_index: 0, query_points: null, generation_steps: 1, seed: 2027, keep_history: false}
+
+# Checkpoint enablement and save cadence.
 checkpointing: {enabled: true, every_epochs: 1, save_epoch_one: true}
+
+# Stable experiment identifier used for the run directory.
 output: {experiment_name: phase8_brusselator_direct_pinn}

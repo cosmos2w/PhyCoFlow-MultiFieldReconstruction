@@ -154,7 +154,6 @@ def run_direct_physics_training(
                 "gradient_norm": float(torch.as_tensor(gradient_norm).cpu()),
                 **{name: float(value.detach().cpu()) for name, value in losses.components.items()},
             }
-        store.append_history(row)
         monitor.record(row, lr=optimizer.param_groups[0]["lr"])
         if checkpoint_manager.due_for_preview_or_checkpoint(step + 1, preview):
             checkpoint_manager.save(

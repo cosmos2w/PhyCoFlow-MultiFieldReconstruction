@@ -1,23 +1,39 @@
+# Coherence template: compute budget, target source, and enabled components.
+
+# Composition order; later files override earlier defaults.
 defaults:
   - global_distribution_demo50.yaml
 
+# Coherence schedule, compute budget, and statistical families.
 coherence:
+
+  # Coherence minibatch and query set. query_policy choices: random_per_sample | fixed_shared.
   compute_budget:
     batch_size: 4
     point_count: 4096
-    query_policy: fixed_shared
+    query_policy: fixed_shared  # choices: random_per_sample | fixed_shared
     query_seed: 100045
+
+  # Enabled families: global_distribution | cross_spectrum | topology.
   families:
+
+    # Marginal, mutual, and cross-field distribution constraints.
     global_distribution:
       weight: 1.0
+
+    # Graph-spectrum alignment for configured field pairs.
     cross_spectrum:
       enabled: true
       weight: 1.0
-      target_use: paired_supervised
-      units: model_units
+      target_use: paired_supervised  # choices: training_reference | paired_supervised
+      units: model_units  # choices: model_units | physical_units
       fields: [CO, T, U_0, U_1, p]
       pairs: [[CO, T], [T, U_0], [T, U_1], [U_0, U_1]]
+
+      # Reference target cache; required for training_reference targets.
       reference_bank: {enabled: false}
+
+      # Graph construction and retained spectral bands.
       graph:
         k_neighbors: 16
         sigma: null
@@ -25,29 +41,41 @@ coherence:
         exclude_zero: true
         bands: [low, mid, high]
       eps: 1.0e-8
+
+      # Component enablement and relative weights.
       components:
         same_frequency: {enabled: true, weight: 1.0}
         cross_frequency: {enabled: true, weight: 1.0}
         band_energy: {enabled: false, weight: 0.0}
+
+    # Level-set topology alignment.
     topology:
       enabled: true
       weight: 1.0
-      target_use: paired_supervised
-      units: model_units
+      target_use: paired_supervised  # choices: training_reference | paired_supervised
+      units: model_units  # choices: model_units | physical_units
       fields: [CO, T]
+
+      # Reference target cache; required for training_reference targets.
       reference_bank: {enabled: false}
+
+      # Topology grid and neighborhood geometry.
       geometry:
         grid_shape: [32, 128]
         axes: [0, 1]
         neighbors: 4
         power: 2.0
         periodic: false
+
+      # Filtration levels. direction choices: superlevel | sublevel.
       filtration:
         quantiles: [0.10, 0.25, 0.40, 0.50, 0.60, 0.75, 0.90]
         dimensions: [0, 1]
         directions: [superlevel, sublevel]
         sharpness: 12.0
         smoothing_sigma: 0.8
+
+      # Component enablement and relative weights.
       components:
         self: {enabled: true, weight: 1.0}
         mutual:

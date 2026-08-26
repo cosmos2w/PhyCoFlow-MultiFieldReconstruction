@@ -1,11 +1,22 @@
+# Post-training profile: source model, objectives, rollout, and execution settings.
+
+# Composition order; later files override earlier defaults.
 defaults: [global_distribution_reference.yaml]
 
+# Coherence schedule, compute budget, and statistical families.
 coherence:
+
+  # Enabled families: global_distribution | cross_spectrum | topology.
   families:
+
+    # Marginal, mutual, and cross-field distribution constraints.
     global_distribution:
-      target_use: paired_supervised
+      target_use: paired_supervised  # choices: training_reference | paired_supervised
+
+      # Reference target cache; required for training_reference targets.
       reference_bank:
         enabled: false
 
+# Stable experiment identifier used for the run directory.
 output:
   experiment_name: pointcloud_ffm_global_distribution_paired

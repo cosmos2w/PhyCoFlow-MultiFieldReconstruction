@@ -33,7 +33,7 @@ def _format_duration(seconds: float) -> str:
 
 
 class TrainingMonitor:
-    """Report optimizer progress and refresh a compact diagnostic loss plot."""
+    """Report batch progress and persist compact epoch-level loss diagnostics."""
 
     def __init__(
         self,
@@ -54,11 +54,20 @@ class TrainingMonitor:
         self.configured_steps = int(configured_steps)
         self.steps_per_epoch = max(1, int(steps_per_epoch))
         self.total_epochs = max(1, math.ceil(self.configured_steps / self.steps_per_epoch))
-        self.plot_every_steps = max(1, int(plot_every_steps))
+        # Keep the established config key for compatibility, but interpret its
+        # value as an epoch interval.  History and plots should scale with the
+        # number of epochs, not with potentially millions of optimizer steps.
+        self.plot_every_epochs = max(1, int(plot_every_steps))
         self.description = str(description)
         self.enabled = bool(enabled)
         self._steps: dict[str, list[int]] = defaultdict(list)
         self._values: dict[str, list[float]] = defaultdict(list)
+        self._epoch_sums: dict[str, float] = defaultdict(float)
+        self._epoch_counts: dict[str, int] = defaultdict(int)
+        self._epoch_latest: dict[str, Any] = {}
+        self._epoch_batch_count_seen = 0
+        self._last_step: int | None = None
+        self._last_epoch: int | None = None
         self._plot_available = True
         self._load_existing_history()
         self.active_epoch = int(start_step) // self.steps_per_epoch + 1
@@ -108,11 +117,47 @@ class TrainingMonitor:
         """Express completed optimizer batches as fractional training epochs."""
         return [step / self.steps_per_epoch for step in steps]
 
-    def record(self, row: Mapping[str, Any], *, lr: float | None = None) -> None:
-        """Record one already-persisted history row and update live diagnostics."""
+    def _accumulate_epoch(self, row: Mapping[str, Any]) -> None:
+        self._epoch_batch_count_seen += 1
+        for key, value in row.items():
+            if key == "step":
+                continue
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                self._epoch_sums[key] += float(value)
+                self._epoch_counts[key] += 1
+            else:
+                self._epoch_latest[key] = value
+
+    def _flush_epoch(self, *, epoch: int, step: int) -> dict[str, Any]:
+        batches = self._epoch_batch_count_seen
+        if batches < 1:
+            raise RuntimeError("cannot flush an empty training-history epoch")
+        row = {
+            "step": int(step),
+            "epoch": int(epoch),
+            "batches": int(batches),
+            "epoch_complete": batches == self._epoch_batch_count(epoch),
+            **{
+                key: value / self._epoch_counts[key]
+                for key, value in self._epoch_sums.items()
+            },
+            **self._epoch_latest,
+        }
+        with self.history_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(row, sort_keys=True) + "\n")
         self._capture(row)
+        self._epoch_sums.clear()
+        self._epoch_counts.clear()
+        self._epoch_latest.clear()
+        self._epoch_batch_count_seen = 0
+        return row
+
+    def record(self, row: Mapping[str, Any], *, lr: float | None = None) -> None:
+        """Update batch progress and persist one mean row at each epoch boundary."""
         step = int(row["step"])
         epoch = (max(step, 1) - 1) // self.steps_per_epoch + 1
+        self._last_step = step
+        self._last_epoch = epoch
         if epoch != self.active_epoch:
             self.progress.close()
             self.active_epoch = epoch
@@ -137,8 +182,12 @@ class TrainingMonitor:
             postfix["lr"] = f"{float(lr):.3e}"
         self.progress.set_postfix(postfix, refresh=False)
         self.progress.update(increment)
-        if step == 1 or step % self.plot_every_steps == 0 or step == self.final_step:
-            self._plot()
+        self._accumulate_epoch(row)
+        epoch_finished = batch_in_epoch == self._epoch_batch_count(epoch)
+        if epoch_finished or step == self.final_step:
+            self._flush_epoch(epoch=epoch, step=step)
+            if epoch == 1 or epoch % self.plot_every_epochs == 0 or step == self.final_step:
+                self._plot()
         if batch_in_epoch == self._epoch_batch_count(epoch) and step < self.final_step:
             self.progress.close()
             self.active_epoch = epoch + 1
@@ -190,5 +239,8 @@ class TrainingMonitor:
 
     def close(self) -> None:
         """Write the latest figure and leave a completed terminal progress line."""
+        if self._epoch_batch_count_seen:
+            assert self._last_epoch is not None and self._last_step is not None
+            self._flush_epoch(epoch=self._last_epoch, step=self._last_step)
         self._plot()
         self.progress.close()

@@ -1,8 +1,19 @@
+# Observation template: sampling protocol and per-field sensor budget.
+
+# Sensor sampling. protocol choices: random_uniform | structured_stride | uniform_spacetime_stride.
 observations:
-  protocol: uniform_spacetime_stride
+
+  # Sampling mode. Choices: random_uniform | structured_stride | uniform_spacetime_stride.
+  protocol: uniform_spacetime_stride  # choices: random_uniform | structured_stride | uniform_spacetime_stride
   seed: 42
+
+  # Structured temporal/spatial stride and phase.
   temporal_downsample_ratio: 4
+
+  # Structured spatial stride and phase.
   spatial_downsample_ratio: 4
   phase: 0
+
+  # Per-field fixed count or inclusive count range.
   fields:
     u: {count: 6464}

@@ -1,4 +1,7 @@
+# Reusable model defaults; case files should override only case-specific values.
+
+# Model family and architecture settings.
 model:
   name: latent_fm
-  stage: 1
+  stage: 1  # choices: 1 | 2
   latent_channels: 16

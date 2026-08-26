@@ -1,12 +1,20 @@
+# Post-training profile: source model, objectives, rollout, and execution settings.
+
+# Composition order; later files override earlier defaults.
 defaults: [../coherence/all_three_demo50.yaml]
 
-stage: post_training
+# Run identity. Choices: base_training | post_training | direct_physics.
+stage: post_training  # choices: base_training | post_training | direct_physics
 case: turbulent_combustion
+
+# Source checkpoint selection for post-training.
 source_run: ../../../0_demo_TurbulentCombustion/Save_TrainedModel/ffm_tc_pointcloud_DemoN50_20260706_084857
 source_checkpoint: best.pt
 inherit_base_config: true
+
+# Source adapter. kind choices: native_run | legacy_demo50.
 source:
-  kind: legacy_demo50
+  kind: legacy_demo50  # choices: native_run | legacy_demo50
   allow_integration_source: false
   channel_mapping:
     - {channel: 0, checkpoint_label: CH4, dataset_field: CO}
@@ -15,43 +23,67 @@ source:
     - {channel: 3, checkpoint_label: U_1, dataset_field: U_1}
     - {channel: 4, checkpoint_label: p, dataset_field: p}
 
+# Dataset source, representation, field schema, and normalization.
 dataset:
+
+  # Data source and split selection.
   path: ../../datasets/turbulent_combustion/Merged_COTU0U1P.h5
-  split: train
-  reconstruction_unit: snapshot
+  split: train  # choices: train | validation | test
+
+  # Sample representation. Choices: snapshot | space_time_trajectory.
+  reconstruction_unit: snapshot  # choices: snapshot | space_time_trajectory
+
+  # Field schema; units align positionally with names.
   field_names: [CO, T, U_0, U_1, p]
   field_units: [unknown, unknown, unknown, unknown, unknown]
-  normalization: none
+
+  # Scaling. Choices: none | mean_std | robust_99.
+  normalization: none  # choices: none | mean_std | robust_99
+
+  # Coordinate and logical-grid geometry.
   coordinate_dim: 3
+
+  # Temporal sampling and benchmark eligibility.
   time_stride: 1
   benchmark_eligible: true
 
+# Model family and architecture settings.
 model:
   name: legacy_demo50
   query_points: 4096
 
+# Sensor sampling. protocol choices: random_uniform | structured_stride | uniform_spacetime_stride.
 observations:
-  protocol: random_uniform
+
+  # Sampling mode. Choices: random_uniform | structured_stride | uniform_spacetime_stride.
+  protocol: random_uniform  # choices: random_uniform | structured_stride | uniform_spacetime_stride
   seed: 42
+
+  # Per-field fixed count or inclusive count range.
   fields:
     U_0: {count: 256}
 
+# Enabled loss terms and their relative weights.
 objectives:
   data_retention: {enabled: true, weight: 0.1}
   coherence: {enabled: true, weight: 1.0}
 
+# Differentiable rollout. solver choices: euler | heun.
 rollout: {steps: 2, solver: euler}
 
+# Observation enforcement. mode choices: none | hard | endpoint | endpoint_smooth.
 observation_consistency:
-  mode: endpoint_smooth
+  mode: endpoint_smooth  # choices: none | hard | endpoint | endpoint_smooth
   strength: 1.0
   sigma: 0.05
   schedule_power: 2.0
   final_clamp: true
   chunk_size: 2048
 
+# Trainable scope. Choices: full_model | named_modules.
 trainable: {scope: full_model}
 
+# Training duration, batch sizing, optimizer, and gradient controls.
 optimization:
   epochs: 10000
   batch_size: 4
@@ -59,22 +91,24 @@ optimization:
   lr: 5.0e-5
   weight_decay: 1.0e-6
   grad_clip: 1.0
-  gradient_balance: config
-  config_missing_behavior: error
+  gradient_balance: config  # choices: weighted_sum | config
+  config_missing_behavior: error  # choices: error | weighted_sum
   config_data_grad_scale: 1.0
   config_coherence_grad_scale: 1.0
 
+# Reproducibility and execution. data_strategy choices: auto | vram | async_cpu.
 runtime:
   seed: 42
-  device: cuda:0
+  device: cuda:0  # choices: cpu | cuda[:index]
   deterministic: true
   num_workers: 0
-  data_strategy: auto
+  data_strategy: auto  # choices: auto | vram | async_cpu
   progress: true
-  plot_every_steps: 10
+  plot_every_steps: 10  # redraw loss_history.png every 10 epochs
 
+# Validation and preview policy. split choices: train | validation | test.
 evaluation:
-  split: validation
+  split: validation  # choices: train | validation | test
   max_samples: 4
   query_points: 4096
   generation_steps: 2
@@ -82,14 +116,16 @@ evaluation:
   preview:
     enabled: false
     every_epochs: 1
-    split: validation
+    split: validation  # choices: train | validation | test
     sample_index: 0
     query_points: null
     generation_steps: 2
     seed: 2027
     keep_history: false
 
+# Checkpoint enablement and save cadence.
 checkpointing: {enabled: true, every_epochs: 5, save_epoch_one: true}
 
+# Stable experiment identifier used for the run directory.
 output:
   experiment_name: demo50_all_coherence_posttrain

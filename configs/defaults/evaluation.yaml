@@ -1,7 +1,9 @@
 # Shared evaluation and training-preview defaults.  Case profiles can lower
 # preview cost without changing the model or dataset contract.
+
+# Validation and preview policy. split choices: train | validation | test.
 evaluation:
-  split: validation
+  split: validation  # choices: train | validation | test
   max_samples: 1
   query_points: null
   generation_steps: 8
@@ -9,7 +11,7 @@ evaluation:
   preview:
     enabled: true
     every_epochs: 25
-    split: validation
+    split: validation  # choices: train | validation | test
     sample_index: 0
     query_points: null
     generation_steps: 8

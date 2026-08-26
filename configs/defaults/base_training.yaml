@@ -1,10 +1,15 @@
 # Active common source for all modern base-training profiles.
+
+# Composition order; later files override earlier defaults.
 defaults:
   - runtime.yaml
   - evaluation.yaml
   - checkpointing.yaml
 
-stage: base_training
+# Run identity. Choices: base_training | post_training | direct_physics.
+stage: base_training  # choices: base_training | post_training | direct_physics
+
+# Training duration, batch sizing, optimizer, and gradient controls.
 optimization:
   epochs: 200
   batch_size: 1

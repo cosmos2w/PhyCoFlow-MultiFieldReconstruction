@@ -1,13 +1,26 @@
+# Reusable model defaults; case files should override only case-specific values.
+
+# Model family and architecture settings.
 model:
+
+  # Model identity. name choices are the templates in configs/models/.
   name: pointcloud_ffm
-  backbone: gl_rbf_enh
-  gather_mode: topk_rbf
+  backbone: gl_rbf_enh  # choices for pointcloud_ffm: gl_rbf_enh | fno
+
+  # Local query gathering and neighbor search.
+  gather_mode: topk_rbf  # required for the gl_rbf_enh backbone
+
+  # Feature widths and field embeddings.
   hidden_dim: 128
+
+  # Latent attention capacity.
   latent_dim: 128
   num_latents: 32
   heads: 4
   latent_blocks: 2
   gather_topk: 16
   query_chunk_size: 2048
-  prior: rff
+  prior: rff  # choices: iid | rff
+
+  # Training query batching and context reuse.
   query_points: 4096

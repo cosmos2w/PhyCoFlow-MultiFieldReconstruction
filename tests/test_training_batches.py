@@ -220,7 +220,11 @@ def test_base_training_uses_resident_pipeline_on_physical_gpu_one(tmp_path):
     manifest = json.loads((run_dir / "run_manifest.json").read_text())
     history = (run_dir / "metrics" / "history.jsonl").read_text().splitlines()
     assert manifest["training_data_strategy"] == "vram_resident"
-    assert len(history) == 2
+    assert len(history) == 1
+    epoch_history = json.loads(history[0])
+    assert epoch_history["epoch"] == 1
+    assert epoch_history["batches"] == 2
+    assert epoch_history["epoch_complete"] is True
     preview = run_dir / "evaluation" / "training_preview"
     assert (run_dir / "checkpoints" / "last.pt").is_file()
     assert (run_dir / "checkpoints" / "latest.pt").is_symlink()

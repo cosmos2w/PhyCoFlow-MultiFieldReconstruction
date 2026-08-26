@@ -234,7 +234,6 @@ def run_base_training(
             "backward_retries": backward_retries,
             **{name: float(value.detach().cpu()) for name, value in losses.components.items()},
         }
-        store.append_history(row)
         monitor.record(row, lr=optimizer.param_groups[0]["lr"])
         if checkpoint_manager.due_for_preview_or_checkpoint(global_step + 1, preview):
             checkpoint_manager.save(

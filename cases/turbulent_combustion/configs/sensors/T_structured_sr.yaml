@@ -1,9 +1,18 @@
+# Observation template: sampling protocol and per-field sensor budget.
+
+# Sensor sampling. protocol choices: random_uniform | structured_stride | uniform_spacetime_stride.
 observations:
-  protocol: structured_stride
+
+  # Sampling mode. Choices: random_uniform | structured_stride | uniform_spacetime_stride.
+  protocol: structured_stride  # choices: random_uniform | structured_stride | uniform_spacetime_stride
   seed: 42
+
+  # Structured spatial stride and phase.
   spatial_downsample_ratio: 8
   phase: 0
   # Activate only after the case validates and records the 403x100 index map.
   requires_validated_grid_mapping: true
+
+  # Per-field fixed count or inclusive count range.
   fields:
     T: {count: 630}

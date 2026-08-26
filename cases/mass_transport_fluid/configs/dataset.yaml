@@ -1,13 +1,28 @@
+# Case dataset contract: source, representation, fields, scaling, and geometry.
+
+# Dataset source, representation, field schema, and normalization.
 dataset:
+
+  # Data source and split selection.
   path: ../../datasets/mass_transport_fluid/mass_transport_fluid_demo.h5
-  split: train
-  reconstruction_unit: snapshot
+  split: train  # choices: train | validation | test
+
+  # Sample representation. Choices: snapshot | space_time_trajectory.
+  reconstruction_unit: snapshot  # choices: snapshot | space_time_trajectory
+
+  # Field schema; units align positionally with names.
   field_names: [u_x, u_y, concentration]
   field_units: [m/s, m/s, mol/m^3]
-  normalization: robust_99
+
+  # Scaling. Choices: none | mean_std | robust_99.
+  normalization: robust_99  # choices: none | mean_std | robust_99
+
+  # Temporal sampling and benchmark eligibility.
   time_stride: 1
   benchmark_eligible: false
   allow_nonbenchmark: false
+
+  # Coordinate and logical-grid geometry.
   coordinate_dim: 2
   grid_shape: [32, 32]
   grid_mapping_verified: true

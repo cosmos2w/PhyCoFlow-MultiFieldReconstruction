@@ -1,5 +1,8 @@
+# Reusable model defaults; case files should override only case-specific values.
+
+# Model family and architecture settings.
 model:
   name: pointcloud_ffm
-  backbone: fno
-  prior: rff
+  backbone: fno  # choices for pointcloud_ffm: gl_rbf_enh | fno
+  prior: rff  # choices: iid | rff
   fno_hidden_channels: 32

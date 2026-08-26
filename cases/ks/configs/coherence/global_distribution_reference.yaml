@@ -1,13 +1,28 @@
+# Coherence template: compute budget, target source, and enabled components.
+
+# Coherence schedule, compute budget, and statistical families.
 coherence:
+
+  # Activation, cadence, and warmup.
   schedule: {start_epoch: 1, every_n_steps: 1, weight_warmup_epochs: 0, interval_rescale: false}
+
+  # Coherence minibatch and query set. query_policy choices: random_per_sample | fixed_shared.
   compute_budget: {batch_size: 2, point_count: 1024}
+
+  # Enabled families: global_distribution | cross_spectrum | topology.
   families:
+
+    # Marginal, mutual, and cross-field distribution constraints.
     global_distribution:
       enabled: true
-      target_use: training_reference
-      units: model_units
+      target_use: training_reference  # choices: training_reference | paired_supervised
+      units: model_units  # choices: model_units | physical_units
       fields: [u]
+
+      # Reference target cache; required for training_reference targets.
       reference_bank: {enabled: true, path: null, max_samples: 16, points_per_sample: 1024, seed: 1234}
+
+      # Component enablement and relative weights.
       components:
         self: {enabled: true, weight: 1.0}
         mutual: {enabled: false, weight: 0.0, directions: 16, seed: 1234}

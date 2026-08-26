@@ -203,7 +203,6 @@ def run_physics_post_training(
                 },
                 **gradient,
             }
-        store.append_history(row)
         monitor.record(row, lr=optimizer.param_groups[0]["lr"])
         if checkpoint_manager.due_for_preview_or_checkpoint(step + 1, preview):
             checkpoint_manager.save(

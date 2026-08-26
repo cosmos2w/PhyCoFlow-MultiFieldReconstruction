@@ -1,47 +1,68 @@
+# Post-training profile: source model, objectives, rollout, and execution settings.
+
+# Composition order; later files override earlier defaults.
 defaults:
   - ../dataset.yaml
   - ../sensors/u_only_random.yaml
   - ../coherence/global_distribution_reference.yaml
 
-stage: post_training
+# Run identity. Choices: base_training | post_training | direct_physics.
+stage: post_training  # choices: base_training | post_training | direct_physics
 case: brusselator
+
+# Source checkpoint selection for post-training.
 source_run: null
 source_checkpoint: last.pt
 inherit_base_config: true
+
+# Source adapter. kind choices: native_run | legacy_demo50.
 source:
-  kind: native_run
+  kind: native_run  # choices: native_run | legacy_demo50
   allow_integration_source: false
 
 # These sections are compatibility fallbacks. With inheritance enabled, the
 # source run's dataset/model/observations replace them before validation.
+
+# Model family and architecture settings.
 model:
   name: pointcloud_ffm
-  backbone: gl_rbf_enh
-  gather_mode: topk_rbf
+  backbone: gl_rbf_enh  # choices for pointcloud_ffm: gl_rbf_enh | fno
+  gather_mode: topk_rbf  # required for the gl_rbf_enh backbone
+
+# Sensor sampling. protocol choices: random_uniform | structured_stride | uniform_spacetime_stride.
 observations:
-  protocol: random_uniform
+
+  # Sampling mode. Choices: random_uniform | structured_stride | uniform_spacetime_stride.
+  protocol: random_uniform  # choices: random_uniform | structured_stride | uniform_spacetime_stride
   seed: 42
+
+  # Per-field fixed count or inclusive count range.
   fields: {u: {count: 128}}
 
+# Enabled loss terms and their relative weights.
 objectives:
   data_retention: {enabled: true, weight: 0.1}
   coherence: {enabled: true, weight: 1.0}
 
+# Differentiable rollout. solver choices: euler | heun.
 rollout:
   steps: 2
-  solver: euler
+  solver: euler  # choices: euler | heun
 
+# Observation enforcement. mode choices: none | hard | endpoint | endpoint_smooth.
 observation_consistency:
-  mode: endpoint_smooth
+  mode: endpoint_smooth  # choices: none | hard | endpoint | endpoint_smooth
   strength: 1.0
   sigma: 0.05
   schedule_power: 2.0
   final_clamp: true
   chunk_size: 4096
 
+# Trainable scope. Choices: full_model | named_modules.
 trainable:
-  scope: full_model
+  scope: full_model  # choices: full_model | named_modules
 
+# Training duration, batch sizing, optimizer, and gradient controls.
 optimization:
   epochs: 100
   batch_size: 2
@@ -49,24 +70,28 @@ optimization:
   lr: 5.0e-5
   weight_decay: 1.0e-6
   grad_clip: 1.0
-  gradient_balance: weighted_sum
-  config_missing_behavior: error
+  gradient_balance: weighted_sum  # choices: weighted_sum | config
+  config_missing_behavior: error  # choices: error | weighted_sum
 
+# Reproducibility and execution. data_strategy choices: auto | vram | async_cpu.
 runtime:
   seed: 42
-  device: cuda:0
+  device: cuda:0  # choices: cpu | cuda[:index]
   deterministic: true
   num_workers: 0
 
+# Validation and preview policy. split choices: train | validation | test.
 evaluation:
-  split: validation
+  split: validation  # choices: train | validation | test
   max_samples: 1
   query_points: 512
   generation_steps: 2
   seed: 2027
   preview: {enabled: true, every_epochs: 10, split: validation, sample_index: 0, query_points: null, generation_steps: 2, seed: 2027, keep_history: false}
 
+# Checkpoint enablement and save cadence.
 checkpointing: {enabled: true, every_epochs: 5, save_epoch_one: true}
 
+# Stable experiment identifier used for the run directory.
 output:
   experiment_name: pointcloud_ffm_global_distribution_reference

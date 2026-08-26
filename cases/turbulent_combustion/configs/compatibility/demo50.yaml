@@ -1,6 +1,9 @@
+# Legacy compatibility mapping retained for reproducible checkpoint loading.
+
+# Historical assets and channel mapping for strict compatibility.
 legacy:
   run_directory: ../../../0_demo_TurbulentCombustion/Save_TrainedModel/ffm_tc_pointcloud_DemoN50_20260706_084857
-  checkpoint: best.pt
+  checkpoint: best.pt  # choices: best.pt | last.pt
   dataset_path: ../../../0_demo_TurbulentCombustion/Dataset/Merged_COTU0U1P.h5
   channel_mapping:
     - {channel: 0, checkpoint_label: CH4, dataset_field: CO}
@@ -9,5 +12,6 @@ legacy:
     - {channel: 3, checkpoint_label: U_1, dataset_field: U_1}
     - {channel: 4, checkpoint_label: p, dataset_field: p}
 
+# Stable experiment identifier used for the run directory.
 output:
   manifest: manifests/demo50_compatibility.json

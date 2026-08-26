@@ -1,9 +1,22 @@
+# Case dataset contract: source, representation, fields, scaling, and geometry.
+
+# Dataset source, representation, field schema, and normalization.
 dataset:
+
+  # Data source and split selection.
   path: ../../datasets/brusselator/brusselator.h5
-  split: train
-  reconstruction_unit: snapshot
+  split: train  # choices: train | validation | test
+
+  # Sample representation. Choices: snapshot | space_time_trajectory.
+  reconstruction_unit: snapshot  # choices: snapshot | space_time_trajectory
+
+  # Field schema; units align positionally with names.
   field_names: [u, v]
   field_units: [dimensionless, dimensionless]
-  normalization: mean_std
+
+  # Scaling. Choices: none | mean_std | robust_99.
+  normalization: mean_std  # choices: none | mean_std | robust_99
+
+  # Temporal sampling and benchmark eligibility.
   time_stride: 1
   benchmark_eligible: true

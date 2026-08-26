@@ -1,12 +1,14 @@
 # Shared runtime defaults used by every base-training launch profile.
+
+# Reproducibility and execution. data_strategy choices: auto | vram | async_cpu.
 runtime:
   seed: 42
-  device: cuda:0
+  device: cuda:0  # choices: cpu | cuda[:index]
   deterministic: true
   # The resident data path does not create DataLoader workers.  Case profiles
   # that use the compact asynchronous path may raise this explicitly.
   num_workers: 0
   progress: true
-  plot_every_steps: 10
-  data_strategy: auto
+  plot_every_steps: 10  # redraw loss_history.png every 10 epochs
+  data_strategy: auto  # choices: auto | vram | async_cpu
   vram_dataset_threshold_gb: 20

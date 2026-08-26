@@ -1,9 +1,20 @@
+# Runnable case profile composed from shared defaults, data, sensors, and model settings.
+
+# Composition order; later files override earlier defaults.
 defaults:
   - ../../../../configs/defaults/base_training.yaml
   - ../dataset.yaml
   - ../sensors/u_only_random_variable.yaml
   - ../../../../configs/models/diffusion_pde.yaml
+
+# Case identity and case-local overrides.
 case: brusselator
+
+# Training duration, batch sizing, optimizer, and gradient controls.
 optimization: {batch_size: 4}
+
+# Reproducibility and execution. data_strategy choices: auto | vram | async_cpu.
 runtime: {num_workers: 4, data_strategy: auto}
+
+# Stable experiment identifier used for the run directory.
 output: {experiment_name: diffusion_pde_plain}

@@ -155,7 +155,7 @@ def _validate_common_sections(config: Mapping[str, Any]) -> None:
     if "progress" in runtime and not isinstance(runtime["progress"], bool):
         raise TypeError("runtime.progress must be boolean")
     if int(runtime.get("plot_every_steps", 10)) < 1:
-        raise ValueError("runtime.plot_every_steps must be positive")
+        raise ValueError("runtime.plot_every_steps must be a positive epoch interval")
     if runtime.get("data_strategy", "auto") not in {"auto", "vram", "async_cpu"}:
         raise ValueError("runtime.data_strategy must be auto, vram, or async_cpu")
     if float(runtime.get("vram_dataset_threshold_gb", 20.0)) <= 0:

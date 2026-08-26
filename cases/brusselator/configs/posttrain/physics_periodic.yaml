@@ -1,29 +1,62 @@
+# Post-training profile: source model, objectives, rollout, and execution settings.
+
+# Composition order; later files override earlier defaults.
 defaults:
   - ../dataset.yaml
   - ../sensors/u_only_random.yaml
-stage: post_training
+
+# Run identity. Choices: base_training | post_training | direct_physics.
+stage: post_training  # choices: base_training | post_training | direct_physics
 case: brusselator
+
+# Source checkpoint selection for post-training.
 source_run: null
 source_checkpoint: last.pt
 inherit_base_config: true
+
+# Source adapter. kind choices: native_run | legacy_demo50.
 source: {kind: native_run, allow_integration_source: true}
+
+# Model family and architecture settings.
 model: {name: coordinate_mlp}
+
+# Sensor sampling. protocol choices: random_uniform | structured_stride | uniform_spacetime_stride.
 observations: {protocol: random_uniform, seed: 42, fields: {u: {count: 128}}}
+
+# Physical provider, derivative source, and residual weights.
 physics:
   provider: brusselator_periodic
   domain_length: 20.0
-  temporal_derivative_source: paired_finite_difference
+  temporal_derivative_source: paired_finite_difference  # choices: paired_finite_difference
   weights: {pde_u: 1.0, pde_v: 1.0, positivity: 0.01}
+
+# Enabled loss terms and their relative weights.
 objectives:
   data_retention: {enabled: true, weight: 0.1}
   physics: {enabled: true, weight: 1.0}
+
+# Differentiable rollout. solver choices: euler | heun.
 rollout: {steps: 1, solver: euler}
+
+# Observation enforcement. mode choices: none | hard | endpoint | endpoint_smooth.
 observation_consistency: {mode: none, strength: 0.0, final_clamp: false}
+
+# Trainable scope. Choices: full_model | named_modules.
 trainable: {scope: full_model}
+
+# Training duration, batch sizing, optimizer, and gradient controls.
 optimization: {epochs: 1, batch_size: 1, lr: 5.0e-5, weight_decay: 0.0, grad_clip: 1.0, gradient_balance: weighted_sum}
+
+# Reproducibility and execution. data_strategy choices: auto | vram | async_cpu.
 runtime: {seed: 42, device: 'cuda:0', deterministic: true, num_workers: 0}
+
+# Validation and preview policy. split choices: train | validation | test.
 evaluation:
   generation_steps: 1
   preview: {enabled: true, every_epochs: 1, split: validation, sample_index: 0, query_points: null, generation_steps: 1, seed: 2027, keep_history: false}
+
+# Checkpoint enablement and save cadence.
 checkpointing: {enabled: true, every_epochs: 1, save_epoch_one: true}
+
+# Stable experiment identifier used for the run directory.
 output: {experiment_name: phase8_brusselator_physics_posttrain}

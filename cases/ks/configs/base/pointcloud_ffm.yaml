@@ -1,12 +1,17 @@
+# Runnable case profile composed from shared defaults, data, sensors, and model settings.
+
+# Composition order; later files override earlier defaults.
 defaults:
   - ../../../../configs/defaults/base_training.yaml
   - ../dataset.yaml
   - ../sensors/uniform_spacetime_sr.yaml
   - ../../../../configs/models/pointcloud_ffm_gl_rbf.yaml
 
-stage: base_training
+# Run identity. Choices: base_training | post_training | direct_physics.
+stage: base_training  # choices: base_training | post_training | direct_physics
 case: ks
 
+# Model family and architecture settings.
 model:
   # KS uses a deliberately compact case profile for its space-time contract.
   hidden_dim: 64
@@ -17,36 +22,41 @@ model:
   gather_topk: 8
   query_chunk_size: 2048
   query_points: 512
-  prior: rff
+  prior: rff  # choices: iid | rff
 
+# Training duration, batch sizing, optimizer, and gradient controls.
 optimization:
   epochs: 1
   batch_size: 1
   lr: 1.0e-4
   grad_clip: 1.0
 
+# Reproducibility and execution. data_strategy choices: auto | vram | async_cpu.
 runtime:
   seed: 42
-  device: cuda:0
+  device: cuda:0  # choices: cpu | cuda[:index]
   deterministic: true
   num_workers: 0
 
+# Validation and preview policy. split choices: train | validation | test.
 evaluation:
   generation_steps: 2
   preview:
     enabled: true
     every_epochs: 1
-    split: validation
+    split: validation  # choices: train | validation | test
     sample_index: 0
     query_points: null
     generation_steps: 2
     seed: 2027
     keep_history: false
 
+# Checkpoint enablement and save cadence.
 checkpointing:
   enabled: true
   every_epochs: 1
   save_epoch_one: true
 
+# Stable experiment identifier used for the run directory.
 output:
   experiment_name: phase4_ks_pointcloud
