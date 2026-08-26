@@ -15,6 +15,12 @@ from typing import Any
 from tqdm.auto import tqdm
 
 _LOSS_KEYS = ("total", "data_loss", "coherence_loss", "physics_loss")
+_LOSS_LABELS = {
+    "total": "total",
+    "data_loss": "data",
+    "coherence_loss": "coherence",
+    "physics_loss": "physics",
+}
 
 
 def _format_duration(seconds: float) -> str:
@@ -68,6 +74,8 @@ class TrainingMonitor:
         self._epoch_batch_count_seen = 0
         self._last_step: int | None = None
         self._last_epoch: int | None = None
+        self._pending_epoch_report: dict[str, Any] | None = None
+        self.last_epoch_report: dict[str, Any] | None = None
         self._plot_available = True
         self._load_existing_history()
         self.active_epoch = int(start_step) // self.steps_per_epoch + 1
@@ -152,8 +160,78 @@ class TrainingMonitor:
         self._epoch_batch_count_seen = 0
         return row
 
+    def _live_postfix(
+        self,
+        row: Mapping[str, Any],
+        *,
+        epoch: int,
+        epoch_estimate: float,
+        lr: float | None,
+    ) -> dict[str, str | int]:
+        postfix: dict[str, str | int] = {
+            "epochs_left": max(0, self.total_epochs - epoch),
+            "epoch_est": _format_duration(epoch_estimate),
+        }
+        for key in _LOSS_KEYS:
+            value = row.get(key)
+            if isinstance(value, (int, float)):
+                postfix[_LOSS_LABELS[key]] = f"{float(value):.4e}"
+        if lr is not None:
+            postfix["lr"] = f"{float(lr):.3e}"
+        return postfix
+
+    def _complete_pending_epoch(self, *, start_next: bool = True) -> None:
+        pending = self._pending_epoch_report
+        if pending is None:
+            return
+        wall_seconds = perf_counter() - float(pending["started_at"])
+        train_seconds = float(pending["train_seconds"])
+        batches = int(pending["batches"])
+        checkpoint_checked = bool(pending["checkpoint_checked"])
+        best_saved = bool(pending["best_checkpoint_saved"])
+        best_status = "saved" if best_saved else "unchanged" if checkpoint_checked else "not_checked"
+        summary = dict(pending["summary"])
+        report = {
+            "epoch": int(pending["epoch"]),
+            "step": int(pending["step"]),
+            "train_seconds": train_seconds,
+            "wall_seconds": wall_seconds,
+            "batches_per_second": batches / train_seconds if train_seconds > 0.0 else 0.0,
+            "best": best_status,
+            **{
+                key: float(summary[key])
+                for key in _LOSS_KEYS
+                if isinstance(summary.get(key), (int, float))
+            },
+        }
+        postfix: dict[str, str] = {
+            f"{_LOSS_LABELS[key]}_avg": f"{report[key]:.4e}"
+            for key in _LOSS_KEYS
+            if key in report
+        }
+        postfix.update(
+            {
+                "train": _format_duration(train_seconds),
+                "wall": _format_duration(wall_seconds),
+                "rate": f"{report['batches_per_second']:.2f}batch/s",
+                "best": best_status,
+            }
+        )
+        self.progress.set_postfix(postfix, refresh=True)
+        self.progress.close()
+        self.last_epoch_report = report
+        self._pending_epoch_report = None
+
+        if start_next and int(pending["step"]) < self.final_step:
+            self.active_epoch = int(pending["epoch"]) + 1
+            self.progress = self._new_epoch_bar(self.active_epoch, initial=0)
+
     def record(self, row: Mapping[str, Any], *, lr: float | None = None) -> None:
         """Update batch progress and persist one mean row at each epoch boundary."""
+        # Be defensive for callers outside the built-in trainers: an epoch
+        # report that was not explicitly finished is emitted as not checked
+        # before the next batch starts.
+        self._complete_pending_epoch()
         step = int(row["step"])
         epoch = (max(step, 1) - 1) // self.steps_per_epoch + 1
         self._last_step = step
@@ -171,27 +249,42 @@ class TrainingMonitor:
             if self._epoch_observed_batches
             else 0.0
         )
-        primary_key = next((key for key in _LOSS_KEYS if key in row), None)
-        postfix: dict[str, str | int] = {
-            "epochs_left": max(0, self.total_epochs - epoch),
-            "epoch_est": _format_duration(epoch_estimate),
-        }
-        if primary_key is not None:
-            postfix[primary_key] = f"{float(row[primary_key]):.4e}"
-        if lr is not None:
-            postfix["lr"] = f"{float(lr):.3e}"
-        self.progress.set_postfix(postfix, refresh=False)
+        self.progress.set_postfix(
+            self._live_postfix(row, epoch=epoch, epoch_estimate=epoch_estimate, lr=lr),
+            refresh=False,
+        )
         self.progress.update(increment)
         self._accumulate_epoch(row)
         epoch_finished = batch_in_epoch == self._epoch_batch_count(epoch)
         if epoch_finished or step == self.final_step:
-            self._flush_epoch(epoch=epoch, step=step)
+            train_seconds = perf_counter() - self._epoch_started
+            summary = self._flush_epoch(epoch=epoch, step=step)
             if epoch == 1 or epoch % self.plot_every_epochs == 0 or step == self.final_step:
                 self._plot()
-        if batch_in_epoch == self._epoch_batch_count(epoch) and step < self.final_step:
-            self.progress.close()
-            self.active_epoch = epoch + 1
-            self.progress = self._new_epoch_bar(self.active_epoch, initial=0)
+            self._pending_epoch_report = {
+                "epoch": epoch,
+                "step": step,
+                "batches": self._epoch_observed_batches,
+                "started_at": self._epoch_started,
+                "train_seconds": train_seconds,
+                "summary": summary,
+                "checkpoint_checked": False,
+                "best_checkpoint_saved": False,
+            }
+
+    def finish_step(
+        self,
+        *,
+        checkpoint_checked: bool = False,
+        best_checkpoint_saved: bool = False,
+    ) -> None:
+        """Finalize an epoch line after its optional validation/checkpoint work."""
+        if self._pending_epoch_report is None:
+            return
+        self._pending_epoch_report["checkpoint_checked"] |= bool(checkpoint_checked)
+        self._pending_epoch_report["best_checkpoint_saved"] |= bool(best_checkpoint_saved)
+        if int(self._pending_epoch_report["step"]) < self.final_step:
+            self._complete_pending_epoch()
 
     def _plot(self) -> None:
         if not self._plot_available or not any(self._values.values()):
@@ -237,10 +330,31 @@ class TrainingMonitor:
         plt.close(figure)
         os.replace(temporary, self.plot_path)
 
-    def close(self) -> None:
+    def close(
+        self,
+        *,
+        checkpoint_checked: bool = False,
+        best_checkpoint_saved: bool = False,
+    ) -> None:
         """Write the latest figure and leave a completed terminal progress line."""
         if self._epoch_batch_count_seen:
             assert self._last_epoch is not None and self._last_step is not None
-            self._flush_epoch(epoch=self._last_epoch, step=self._last_step)
+            summary = self._flush_epoch(epoch=self._last_epoch, step=self._last_step)
+            self._pending_epoch_report = {
+                "epoch": self._last_epoch,
+                "step": self._last_step,
+                "batches": self._epoch_observed_batches,
+                "started_at": self._epoch_started,
+                "train_seconds": perf_counter() - self._epoch_started,
+                "summary": summary,
+                "checkpoint_checked": False,
+                "best_checkpoint_saved": False,
+            }
+        if self._pending_epoch_report is not None:
+            self._pending_epoch_report["checkpoint_checked"] |= bool(checkpoint_checked)
+            self._pending_epoch_report["best_checkpoint_saved"] |= bool(best_checkpoint_saved)
         self._plot()
-        self.progress.close()
+        if self._pending_epoch_report is not None:
+            self._complete_pending_epoch(start_next=False)
+        else:
+            self.progress.close()

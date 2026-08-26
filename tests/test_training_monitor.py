@@ -22,7 +22,8 @@ def test_monitor_loads_history_and_updates_loss_figure(tmp_path):
     assert not (metrics / "history.jsonl").exists()
     monitor.record({"step": 2, "total": 1.0, "coherence_loss": 4.0}, lr=1.0e-4)
     assert monitor._epoch_coordinates([1, 2, 3, 4]) == [0.5, 1.0, 1.5, 2.0]
-    monitor.close()
+    monitor.finish_step(checkpoint_checked=True, best_checkpoint_saved=True)
+    monitor.close(checkpoint_checked=True, best_checkpoint_saved=True)
 
     history = json.loads((metrics / "history.jsonl").read_text())
     assert history == {
@@ -34,6 +35,12 @@ def test_monitor_loads_history_and_updates_loss_figure(tmp_path):
         "coherence_loss": 4.0,
     }
     assert (tmp_path / "loss_history.png").stat().st_size > 0
+    assert monitor.last_epoch_report is not None
+    assert monitor.last_epoch_report["total"] == 2.0
+    assert monitor.last_epoch_report["coherence_loss"] == 4.0
+    assert monitor.last_epoch_report["best"] == "saved"
+    assert monitor.last_epoch_report["train_seconds"] >= 0.0
+    assert monitor.last_epoch_report["wall_seconds"] >= monitor.last_epoch_report["train_seconds"]
 
 
 def test_monitor_resets_progress_at_each_epoch(tmp_path):
@@ -56,6 +63,10 @@ def test_monitor_resets_progress_at_each_epoch(tmp_path):
 
     monitor.record({"step": 2, "total": 1.5})
     monitor.record({"step": 3, "total": 1.0})
+    monitor.finish_step(checkpoint_checked=True, best_checkpoint_saved=False)
+    assert monitor.last_epoch_report is not None
+    assert monitor.last_epoch_report["best"] == "unchanged"
+    assert monitor.last_epoch_report["total"] == 1.5
     monitor.record({"step": 4, "total": 0.8})
     assert monitor.active_epoch == 2
     assert monitor.progress.total == 3
@@ -80,6 +91,7 @@ def test_plot_interval_is_measured_in_epochs(tmp_path):
 
     for step in range(1, 13):
         monitor.record({"step": step, "total": float(step)})
+        monitor.finish_step()
 
     assert plotted_at == [3, 9, 12]
     history = [

@@ -153,10 +153,11 @@ def run_direct_physics_training(
                 "total": float(losses.total.detach().cpu()),
                 "gradient_norm": float(torch.as_tensor(gradient_norm).cpu()),
                 **{name: float(value.detach().cpu()) for name, value in losses.components.items()},
-            }
+        }
         monitor.record(row, lr=optimizer.param_groups[0]["lr"])
+        checkpoint_result = None
         if checkpoint_manager.due_for_preview_or_checkpoint(step + 1, preview):
-            checkpoint_manager.save(
+            checkpoint_result = checkpoint_manager.save(
                 _direct_checkpoint_payload(
                     model,
                     optimizer,
@@ -170,8 +171,13 @@ def run_direct_physics_training(
                 global_step=step + 1,
                 fallback_metric=row["total"],
             )
+        monitor.finish_step(
+            checkpoint_checked=checkpoint_result is not None,
+            best_checkpoint_saved=(
+                checkpoint_result is not None and checkpoint_result[1] is not None
+            ),
+        )
         last_batch, last_losses = batch, losses
-    monitor.close()
     batch_source.close()
     if last_batch is None or last_losses is None:
         raise ValueError("direct-physics training performed no update")
@@ -207,10 +213,16 @@ def run_direct_physics_training(
     )
     if saved is None:
         raise RuntimeError("final checkpoint save was unexpectedly skipped")
-    last_path, _ = saved
+    last_path, saved_best_path = saved
+    best_checkpoint_saved = saved_best_path is not None
     best_path = store.run_dir / "checkpoints" / "best.pt"
     if not best_path.is_file():
         best_path = store.save_checkpoint("best", payload)
+        best_checkpoint_saved = True
+    monitor.close(
+        checkpoint_checked=True,
+        best_checkpoint_saved=best_checkpoint_saved,
+    )
     preview.close()
     store.update_manifest(
         checkpoint_hashes={

@@ -202,10 +202,11 @@ def run_physics_post_training(
                     for name, value in physics_loss.components.items()
                 },
                 **gradient,
-            }
+        }
         monitor.record(row, lr=optimizer.param_groups[0]["lr"])
+        checkpoint_result = None
         if checkpoint_manager.due_for_preview_or_checkpoint(step + 1, preview):
-            checkpoint_manager.save(
+            checkpoint_result = checkpoint_manager.save(
                 _physics_post_checkpoint_payload(
                     model,
                     optimizer,
@@ -220,8 +221,13 @@ def run_physics_post_training(
                 global_step=step + 1,
                 fallback_metric=row["physics_loss"],
             )
+        monitor.finish_step(
+            checkpoint_checked=checkpoint_result is not None,
+            best_checkpoint_saved=(
+                checkpoint_result is not None and checkpoint_result[1] is not None
+            ),
+        )
         last_physics = physics_loss.total
-    monitor.close()
     batch_source.close()
     after = _evaluate(model, physics, evaluation_batch, dataset.field_names, config, seed + 99)
     store.write_json("evaluation/after.json", after)
@@ -244,10 +250,16 @@ def run_physics_post_training(
     )
     if saved is None:
         raise RuntimeError("final checkpoint save was unexpectedly skipped")
-    last_path, _ = saved
+    last_path, saved_best_path = saved
+    best_checkpoint_saved = saved_best_path is not None
     best_path = store.run_dir / "checkpoints" / "best.pt"
     if not best_path.is_file():
         best_path = store.save_checkpoint("best", payload)
+        best_checkpoint_saved = True
+    monitor.close(
+        checkpoint_checked=True,
+        best_checkpoint_saved=best_checkpoint_saved,
+    )
     preview.close()
     source_after = source_hashes(config)
     if source_after != source_before:

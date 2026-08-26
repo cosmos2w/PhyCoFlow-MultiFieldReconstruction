@@ -235,8 +235,9 @@ def run_base_training(
             **{name: float(value.detach().cpu()) for name, value in losses.components.items()},
         }
         monitor.record(row, lr=optimizer.param_groups[0]["lr"])
+        checkpoint_result = None
         if checkpoint_manager.due_for_preview_or_checkpoint(global_step + 1, preview):
-            checkpoint_manager.save(
+            checkpoint_result = checkpoint_manager.save(
                 _base_checkpoint_payload(
                     model,
                     optimizer,
@@ -256,8 +257,13 @@ def run_base_training(
                 global_step=global_step + 1,
                 fallback_metric=row["total"],
             )
+        monitor.finish_step(
+            checkpoint_checked=checkpoint_result is not None,
+            best_checkpoint_saved=(
+                checkpoint_result is not None and checkpoint_result[1] is not None
+            ),
+        )
         last_batch = batch
-    monitor.close()
     batch_source.close()
     telemetry.close()
 
@@ -320,10 +326,16 @@ def run_base_training(
     )
     if saved is None:
         raise RuntimeError("final checkpoint save was unexpectedly disabled")
-    last_checkpoint, _ = saved
+    last_checkpoint, saved_best_checkpoint = saved
+    best_checkpoint_saved = saved_best_checkpoint is not None
     best_checkpoint = store.run_dir / "checkpoints" / "best.pt"
     if not best_checkpoint.is_file():
         best_checkpoint = store.save_checkpoint("best", checkpoint)
+        best_checkpoint_saved = True
+    monitor.close(
+        checkpoint_checked=True,
+        best_checkpoint_saved=best_checkpoint_saved,
+    )
     preview.close()
     store.update_manifest(
         checkpoint_hashes={

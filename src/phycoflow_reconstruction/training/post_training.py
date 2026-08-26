@@ -854,6 +854,7 @@ def run_post_training(
             )
         after_optimizer_step(model)
         monitor.record(row, lr=optimizer.param_groups[0]["lr"])
+        checkpoint_result = None
         if checkpoint_manager.due_for_preview_or_checkpoint(global_step + 1, preview):
             # Keep the case artifacts and checkpoint family state at the same
             # recovery boundary.
@@ -861,7 +862,7 @@ def run_post_training(
                 name: store.save_artifact(f"{name}_family.pt", family.state_artifact())
                 for name, family in families.items()
             }
-            checkpoint_manager.save(
+            checkpoint_result = checkpoint_manager.save(
                 _post_checkpoint_payload(
                     model,
                     optimizer,
@@ -879,8 +880,13 @@ def run_post_training(
                 global_step=global_step + 1,
                 fallback_metric=row["data_loss"],
             )
+        monitor.finish_step(
+            checkpoint_checked=checkpoint_result is not None,
+            best_checkpoint_saved=(
+                checkpoint_result is not None and checkpoint_result[1] is not None
+            ),
+        )
 
-    monitor.close()
     batch_source.close()
 
     if device.type == "cuda":
@@ -923,10 +929,16 @@ def run_post_training(
     )
     if saved is None:
         raise RuntimeError("final checkpoint save was unexpectedly skipped")
-    last_path, _ = saved
+    last_path, saved_best_path = saved
+    best_checkpoint_saved = saved_best_path is not None
     best_path = store.run_dir / "checkpoints" / "best.pt"
     if not best_path.is_file():
         best_path = store.save_checkpoint("best", checkpoint_payload)
+        best_checkpoint_saved = True
+    monitor.close(
+        checkpoint_checked=True,
+        best_checkpoint_saved=best_checkpoint_saved,
+    )
     preview.close()
     source_hashes_after = source_hashes(config)
     if source_hashes_after != source_hashes_before:
