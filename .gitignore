@@ -41,5 +41,8 @@ dist/
 # post-training, direct-training, and template configs remain versioned.
 Cases/**/configs/_experiments/
 
+LegacyCoherence/
+UpdatePlans/
+
 ProjectCreate.md
 UPSTREAM.md
