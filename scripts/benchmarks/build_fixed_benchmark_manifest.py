@@ -8,7 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SRC = PROJECT_ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
@@ -33,7 +33,7 @@ def main() -> int:
     if args.min_count < 1 or args.max_count < args.min_count:
         raise ValueError("sensor count bounds are invalid")
 
-    case_dir = PROJECT_ROOT / "Cases" / args.case
+    case_dir = PROJECT_ROOT / "cases" / args.case
     config = args.config.resolve()
     output = args.output.resolve()
     command = [

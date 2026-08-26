@@ -1,41 +1,68 @@
-# GL_rbf_CQ downstream migration benchmark
+# GL-RBF/CQ execution protocol
 
-This directory contains the tracked protocol and Arm-A pre-migration inputs for
-the three-arm 200-epoch `Proj_MultiFieldReconstruction` benchmark. Large run
-directories and checkpoints remain under `Cases/turbulent_combustion/runs/`.
+This directory retains the reviewed protocol and recipes for comparing the
+legacy `pointcloud_ffm`/GL-RBF-enhanced path with the `gl_rbf_cq` path. It is a
+reproduction contract, not a checked-in run archive.
 
-The frozen comparison artifacts preserve the historical
-`0_demo_TurbulentCombustion/GL_rbf_CQ_UPDATE_GUIDE.md` path and checksum.
-Regenerating the comparison with `comparison/generate_comparison.py` therefore
-requires that optional local-only historical demo tree; normal project imports,
-training, and tests do not require it.
+## Scope
 
-Arm A is the corrected legacy `pointcloud_ffm`/`EnhancedGLRBFTopK` baseline. It
-uses only the historical capacity corrections: hidden/latent width 256, 128
-latents, 8 heads, 4 latent blocks, top-k 32, field embedding width 128, 32
-Fourier bands, and 256 RFF features. It does not use any GL_rbf_CQ feature.
+The three arms use the same turbulent-combustion field order, training-only
+normalization, T-only random-uniform sensor range (192--384), seed 42,
+B40/Q4096 training budget, optimizer settings, checkpoint milestones, and
+evaluation policy. Arm B uses legacy multi-head attention; Arm C uses cached
+K/V. Arm A is the existing project-owned GL-RBF-enhanced baseline and is not
+silently treated as the CQ architecture.
 
-All arms share the downstream dataset, field order, normalization, trainer,
-optimizer, seed 42, B40/Q4096, and T-only random-uniform 192--384 sensor
-protocol. The originally requested B128 setting OOMed during backward on the
-48-GiB GPU; the authorized largest stable common batch is B40 for A/B/C.
-`fixed_validation_manifest.json` is generated before the Arm-A run
-and must be reused for every post-hoc milestone evaluation. Its current
-checksum is `2071583f79e30f17bc586d907da184b5c79dfc82c01b4d652ccf05652e2c2b6f`;
-it persists both T-only sensor pairs and the shared Q4096 query indices.
+The authorized B40 common batch is part of the protocol: the originally
+requested B128 setting exhausted GPU 0 memory during backward. No long run is
+part of repository CI or the local smoke suite.
 
-The common field normalizer is fit only on the downstream chronological train
-frames `0:8000` and stored in `downstream_train_normalization.json`. The
-artifact checksum is `b7e31a1497e8d8b76e0ac8c9e7744d202e52581050825bb299f0a8870c353a39`;
-the float32 `FieldNormalizer` digest is
-`50c5e65e563fee03f4c15df336e064753981f8555a06e7465a4722553b3746f1`.
+## Tracked contract and recipes
 
-The opt-in `benchmark_telemetry` config section writes machine-readable
-per-step/per-epoch timing and CUDA peak-memory evidence into each run's
-`metrics/` directory. It is disabled for all existing project configs.
+- `PROTOCOL.yaml` records identities, scientific settings, resource adjustment,
+  normalization provenance, and required evidence.
+- `configs/` contains the three launch configurations used to reproduce the
+  arms. The configs reference the shared model/runtime implementation.
+- `comparison/generate_comparison.py` joins locally produced evidence into a
+  deterministic summary; its generated CSV/JSON outputs are ignored.
+- `execution/benchmark_execution.py` is an opt-in same-state GPU probe for
+  cached-K/V projection counts and resource/timing deltas.
+- `scripts/compute_training_normalization.py` produces the checked,
+  training-only normalization artifact when the local payload is available.
+- `downstream_train_normalization.json` and `migration/initialization_identity.json`
+  are small immutable contract fixtures consumed by compatibility tests.
 
-Arm-A evidence is frozen in `baseline/` before migration. The exact protocol
-smoke limitation, authorized B40 adjustment, completed 200-epoch formal run,
-immutable checkpoint hashes, timing/memory telemetry, finite-gradient audit,
-and fixed-manifest convergence are recorded in `A_performance.json` and
-`A_BASELINE_SUMMARY.md`.
+The historical run summaries, telemetry, fixed validation manifest, HTML/JSON
+reports, and milestone CSV are deliberately not tracked. Generate those into
+the ignored `generated/`, `reports/`, `execution/`, or local run directories
+when doing a formal investigation. Git history retains the earlier outputs.
+
+## Reproduction outline
+
+From the standalone repository root, after installing optional dependencies
+and linking the local turbulent-combustion payload:
+
+```bash
+python scripts/benchmarks/build_fixed_benchmark_manifest.py \
+  --config benchmarks/gl_rbf_cq_migration_200ep/configs/B_gl_rbf_cq_legacy_mha_200ep.yaml \
+  --output benchmarks/gl_rbf_cq_migration_200ep/generated/fixed_validation_manifest.json
+
+# Run the three case-local base-training commands with the protocol configs.
+# Keep checkpoints and telemetry under cases/turbulent_combustion/runs/.
+
+python benchmarks/gl_rbf_cq_migration_200ep/comparison/generate_comparison.py \
+  --output-dir benchmarks/gl_rbf_cq_migration_200ep/generated/comparison
+```
+
+The comparison generator requires the locally produced arm evidence named in
+its source. It validates hashes and matched sensor/query identities before
+writing output. The protocol's one-update checks are covered by the shared
+CPU contract tests; use the GPU-0 smoke script for quick model-level checks.
+
+## Interpretation
+
+Benchmark outputs from one seed, one dataset, or a resource-adjusted run are
+engineering/compatibility evidence rather than general scientific rankings.
+Report field order, normalization and sensor hashes, checkpoint choice, EMA
+selection, generation steps, device, and all declared caveats with any
+externally shared result.

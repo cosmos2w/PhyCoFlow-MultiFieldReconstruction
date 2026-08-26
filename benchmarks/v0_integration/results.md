@@ -1,4 +1,4 @@
-# Phase 8 integration release
+# One-update integration summary
 
 Matched one-update Brusselator checks on one validation trajectory. These rows demonstrate stage wiring, metric aggregation, and traceability; they are not tuned scientific performance estimates.
 

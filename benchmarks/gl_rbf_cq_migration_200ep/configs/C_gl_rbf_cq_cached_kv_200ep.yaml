@@ -1,5 +1,5 @@
 defaults:
-  - ../../../Cases/turbulent_combustion/configs/dataset.yaml
+  - ../../../cases/turbulent_combustion/configs/dataset.yaml
 
 stage: base_training
 case: turbulent_combustion

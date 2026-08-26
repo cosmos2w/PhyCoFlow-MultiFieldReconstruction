@@ -18,8 +18,7 @@ from time import perf_counter
 import torch
 
 PROJECT = Path(__file__).resolve().parents[3]
-REPO = PROJECT.parent
-CASE_DIR = PROJECT / "Cases" / "turbulent_combustion"
+CASE_DIR = PROJECT / "cases" / "turbulent_combustion"
 sys.path.insert(0, str(PROJECT / "src"))
 
 from phycoflow_reconstruction.cli import _load_case_config
@@ -294,7 +293,7 @@ def main() -> int:
         },
         "trace": {
             "git_head": subprocess.check_output(
-                ["git", "rev-parse", "HEAD"], cwd=REPO, text=True
+                ["git", "rev-parse", "HEAD"], cwd=PROJECT, text=True
             ).strip(),
             "config_sha256": {name: _file_hash(path) for name, path in CONFIGS.items()},
             "benchmark_script_sha256": _file_hash(Path(__file__)),

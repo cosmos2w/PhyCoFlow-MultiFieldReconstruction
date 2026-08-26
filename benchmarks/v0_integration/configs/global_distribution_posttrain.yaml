@@ -46,7 +46,7 @@ coherence:
           qmc: true
 stage: post_training
 case: brusselator
-source_run: /home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/Cases/brusselator/runs/phase4_final_coordinate_mlp/20260814T224525Z_2110739a
+source_run: null
 source_checkpoint: last.pt
 inherit_base_config: true
 source:
@@ -114,7 +114,7 @@ evaluation:
 output:
   experiment_name: phase6_coordinate_mlp_gpu1
 dataset:
-  path: /data/wanglz/PhyCoFlow/datagen/processed/brusselator.h5
+  path: ../../datasets/brusselator/brusselator.h5
   split: train
   reconstruction_unit: snapshot
   field_names:

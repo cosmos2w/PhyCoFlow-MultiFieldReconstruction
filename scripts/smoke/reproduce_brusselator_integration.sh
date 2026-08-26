@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "${project_dir}/Cases/brusselator"
+project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "${project_dir}/cases/brusselator"
+
+# This is the CPU integration smoke. Hide GPUs for the subprocesses so the
+# optional KeOps import does not try to build a CUDA cache for a CPU run.
+export CUDA_VISIBLE_DEVICES=""
 
 python run.py validate --config configs/base/coordinate_mlp.yaml
 run_dir="$(python run.py train-base \

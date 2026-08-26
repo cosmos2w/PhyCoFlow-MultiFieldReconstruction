@@ -16,12 +16,12 @@
     "B": {
       "path": "configs/B_gl_rbf_cq_legacy_mha_200ep.yaml",
       "condition_attention_execution": "legacy_mha",
-      "sha256": "adeee8c3111b5a9e24c91c0eeeedce4fd898556761a43c8eff08e655bd4f1663"
+      "sha256": "ec86d408db8ed8f637589346179322d6a7d2701eb0aad9e2888ed1090f0050c9"
     },
     "C": {
       "path": "configs/C_gl_rbf_cq_cached_kv_200ep.yaml",
       "condition_attention_execution": "cached_kv",
-      "sha256": "4d1c34461e34bf9d418aa03d61cdeb7b3afbd6cde02d78b029c4fce4ccf28922"
+      "sha256": "83039ea8e9e09af8485f112d4dcd97a65084f3204259fefe7ade0d296e43160d"
     }
   },
   "state": {
