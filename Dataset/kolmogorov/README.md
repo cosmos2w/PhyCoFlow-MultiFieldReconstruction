@@ -16,7 +16,7 @@ treated as a fourth reconstruction target.
 
 ## Source and local link
 
-- Repository-visible source: `datagen/data/processed/kolmogorov.h5`
+- Optional local-only source: `datagen/data/processed/kolmogorov.h5`
 - Local project payload: `Dataset/kolmogorov/kolmogorov.h5`
 - Source dataset ID: `kolmogorov_canonical`
 - Schema: `1.0`
@@ -30,7 +30,7 @@ From this directory, create the local-only relative link with:
 ln -s ../../../datagen/data/processed/kolmogorov.h5 kolmogorov.h5
 ```
 
-The source was generated and postprocessed by the repository's
+The source was generated and postprocessed by the separately retained local
 `datagen/4_navier_stokes/` workflow. Full generation parameters and the source
 raw directory are embedded in `metadata/json`. Before distributing the data,
 add the final citation and redistribution license supplied by the dataset

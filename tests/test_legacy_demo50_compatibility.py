@@ -31,12 +31,22 @@ RUN_DIR = (
     / "0_demo_TurbulentCombustion/Save_TrainedModel/ffm_tc_pointcloud_DemoN50_20260706_084857"
 )
 DATASET = REPOSITORY / "0_demo_TurbulentCombustion/Dataset/Merged_COTU0U1P.h5"
+LEGACY_SOURCE = REPOSITORY / "0_demo_TurbulentCombustion/src"
 MAPPING = [
     {"channel": index, "checkpoint_label": stale, "dataset_field": actual}
     for index, (stale, actual) in enumerate(
         zip(DEMO50_STALE_CHECKPOINT_FIELDS, DEMO50_DATASET_FIELDS)
     )
 ]
+
+
+def _require_optional_legacy_assets(*paths: Path) -> None:
+    missing = [str(path) for path in paths if not path.exists()]
+    if missing:
+        pytest.skip(
+            "optional local DemoN50 historical validation assets are absent: "
+            + ", ".join(missing)
+        )
 
 
 def test_demo50_requires_the_verified_field_mapping() -> None:
@@ -48,15 +58,15 @@ def test_demo50_requires_the_verified_field_mapping() -> None:
 
 def test_global_distribution_components_match_historical_demo_math() -> None:
     """The refactor changes taxonomy and state storage, not the three estimators."""
-    legacy_source = REPOSITORY / "0_demo_TurbulentCombustion/src"
-    sys.path.insert(0, str(legacy_source))
+    _require_optional_legacy_assets(LEGACY_SOURCE / "direct_coherence_loss.py")
+    sys.path.insert(0, str(LEGACY_SOURCE))
     try:
         from direct_coherence_loss import (  # type: ignore
             DirectCoherenceConfig,
             DirectGlobalCoherenceLoss,
         )
     finally:
-        sys.path.remove(str(legacy_source))
+        sys.path.remove(str(LEGACY_SOURCE))
 
     generator = torch.Generator().manual_seed(17)
     generated = torch.randn(2, 64, 5, generator=generator)
@@ -120,6 +130,14 @@ def test_global_distribution_components_match_historical_demo_math() -> None:
     reason="run explicitly on physical GPU 1 for Phase-4 release validation",
 )
 def test_demo50_fixed_seed_reconstruction_matches_legacy_source() -> None:
+    _require_optional_legacy_assets(
+        RUN_DIR / "args.json",
+        RUN_DIR / "run_config.yaml",
+        RUN_DIR / "best.pt",
+        RUN_DIR / "dataset_stats.pt",
+        DATASET,
+        LEGACY_SOURCE / "Model.py",
+    )
     if not torch.cuda.is_available():
         pytest.fail("legacy equivalence was requested but CUDA is unavailable")
     device = torch.device("cuda:0")
@@ -128,12 +146,11 @@ def test_demo50_fixed_seed_reconstruction_matches_legacy_source() -> None:
 
     # The reference class is imported only by this verification test. The new
     # compatibility module itself has no runtime dependency on the demo tree.
-    legacy_source = REPOSITORY / "0_demo_TurbulentCombustion/src"
-    sys.path.insert(0, str(legacy_source))
+    sys.path.insert(0, str(LEGACY_SOURCE))
     try:
         from Model import ConditionalPointHybridLocalGlobalRBF  # type: ignore
     finally:
-        sys.path.remove(str(legacy_source))
+        sys.path.remove(str(LEGACY_SOURCE))
     args = json.loads((RUN_DIR / "args.json").read_text())
     reference = (
         ConditionalPointHybridLocalGlobalRBF(

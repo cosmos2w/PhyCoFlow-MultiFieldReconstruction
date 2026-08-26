@@ -659,6 +659,14 @@ def load_legacy_demo50(
     """Load DemoN50 only after validating provenance, fields, and every state key."""
     if checkpoint not in {"best.pt", "last.pt"}:
         raise ValueError("DemoN50 checkpoint must be best.pt or last.pt")
+    # The positional mapping is a fixed part of the DemoN50 compatibility
+    # contract. Reject an invalid declaration before requiring optional local
+    # historical files; validate it again below against the loaded artifacts.
+    _validate_channel_mapping(
+        channel_mapping,
+        DEMO50_STALE_CHECKPOINT_FIELDS,
+        DEMO50_DATASET_FIELDS,
+    )
     run_directory = Path(run_directory).resolve()
     dataset_path = Path(dataset_path).resolve()
     required = {

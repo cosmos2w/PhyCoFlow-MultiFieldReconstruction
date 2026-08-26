@@ -4,6 +4,12 @@ This directory contains the tracked protocol and Arm-A pre-migration inputs for
 the three-arm 200-epoch `Proj_MultiFieldReconstruction` benchmark. Large run
 directories and checkpoints remain under `Cases/turbulent_combustion/runs/`.
 
+The frozen comparison artifacts preserve the historical
+`0_demo_TurbulentCombustion/GL_rbf_CQ_UPDATE_GUIDE.md` path and checksum.
+Regenerating the comparison with `comparison/generate_comparison.py` therefore
+requires that optional local-only historical demo tree; normal project imports,
+training, and tests do not require it.
+
 Arm A is the corrected legacy `pointcloud_ffm`/`EnhancedGLRBFTopK` baseline. It
 uses only the historical capacity corrections: hidden/latent width 256, 128
 latents, 8 heads, 4 latent blocks, top-k 32, field embedding width 128, 32

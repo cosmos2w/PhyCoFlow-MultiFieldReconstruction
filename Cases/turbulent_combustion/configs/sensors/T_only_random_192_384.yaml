@@ -1,0 +1,5 @@
+observations:
+  protocol: random_uniform
+  seed: 42
+  fields:
+    T: {count_min: 192, count_max: 384}

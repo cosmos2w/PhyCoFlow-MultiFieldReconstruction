@@ -1,0 +1,37 @@
+{
+  "version": "1",
+  "method": "mean_std",
+  "field_names": [
+    "CH4",
+    "CO",
+    "T",
+    "U_1",
+    "p"
+  ],
+  "offset": [
+    0.029344593383151388,
+    0.007126329339390661,
+    1118.6542980491274,
+    -3.4435703963787465,
+    114098.0480313681
+  ],
+  "scale": [
+    0.02669949230146129,
+    0.009478749933466651,
+    775.4280208967847,
+    37.221682140541866,
+    7144.0669885649895
+  ],
+  "dataset_fingerprint": "8c49936567eced7ab94887c336b9b35aaf7ec70dea7479aee83434ff970455d5",
+  "statistics_split": "train",
+  "split_strategy": "chronological_frames_80_10_10",
+  "trajectory_indices": [
+    0
+  ],
+  "frame_start": 0,
+  "frame_stop_exclusive": 8000,
+  "frame_stride": 1,
+  "sample_value_count_per_field": 322400000,
+  "variance_estimator": "population",
+  "artifact_sha256": "b7e31a1497e8d8b76e0ac8c9e7744d202e52581050825bb299f0a8870c353a39"
+}

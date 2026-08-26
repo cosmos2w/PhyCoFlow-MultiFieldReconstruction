@@ -31,6 +31,7 @@ dist/
 # generated-YAML rules in the parent workspace.
 !configs/**/*.yaml
 !Cases/**/configs/**/*.yaml
+!Cases/**/configs/normalization/*.json
 !benchmarks/**/*.json
 !benchmarks/**/*.yaml
 !benchmarks/**/*.csv

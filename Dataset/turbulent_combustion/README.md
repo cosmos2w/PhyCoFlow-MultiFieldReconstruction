@@ -18,10 +18,12 @@ therefore use saved frame order/index. The loader preserves the raw stored time
 and does not silently rewrite it; any future corrected physical-time axis must
 be a documented case transform derived from verified segment provenance.
 
-Local links target `../../../0_demo_TurbulentCombustion/Dataset/`. The files do
-not contain complete modern provenance, units, or checksums; this limitation is
-recorded by validation rather than guessed. Dataset statistics must come from
-the training frames or a verified legacy checkpoint/sidecar.
+Local links target `../../../0_demo_TurbulentCombustion/Dataset/`. That
+historical demo tree is optional local-only material and is not shipped with
+this branch. The files do not contain complete modern provenance, units, or
+checksums; this limitation is recorded by validation rather than guessed.
+Dataset statistics must come from the training frames or a verified legacy
+checkpoint/sidecar.
 
 Demo 50 uses `Merged_COTU0U1P.h5`. Its checkpoint contains stale field-name
 metadata, so compatibility requires the explicit `CO,T,U_0,U_1,p` mapping.

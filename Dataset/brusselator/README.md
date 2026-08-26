@@ -9,8 +9,9 @@ dimensionless fields `u, v` on a 192 by 192 domain of length 20.
 - Schema: `1.0`
 - SHA-256: `973907181a043471a2bdd40e11596a3403b966fa44af7c7dc8b50a611655fdac`
 
-The source is the canonical generator under `datagen/3_brusselator/`; metadata
-and training-only mean/std are embedded. The local link targets
+The source is the canonical generator retained locally under
+`datagen/3_brusselator/`; that generator tree is optional local-only material
+on this branch. Metadata and training-only mean/std are embedded. The local link targets
 `../../../datagen/data/processed/brusselator.h5`.
 
 The primary task infers the full `u,v` state from sparse `u` and includes the

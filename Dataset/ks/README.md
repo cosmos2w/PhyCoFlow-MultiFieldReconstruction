@@ -14,4 +14,5 @@ The reconstruction unit is the complete `[401,256,1]` saved space-time state.
 The default observation keeps every fourth time and space point independently
 and asks the model to reconstruct all omitted points. This is interpolation,
 not future forecasting. The local link targets
-`../../../datagen/data/processed/ks.h5`.
+`../../../datagen/data/processed/ks.h5`; the root `datagen/` tree is optional
+local-only material and is not shipped with this branch.

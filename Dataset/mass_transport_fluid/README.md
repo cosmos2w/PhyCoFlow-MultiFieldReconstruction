@@ -14,4 +14,6 @@ integration fixture, not a formal benchmark.
 It validates physical units, robust offset/99th-percentile normalization,
 auxiliary data, boundaries, and visualizations. Formal comparisons require a
 larger named production variant. The local link targets
-`../../../datagen/data/processed/mass_transport_fluid_demo.h5`.
+`../../../datagen/data/processed/mass_transport_fluid_demo.h5`; the root
+`datagen/` tree is optional local-only material and is not shipped with this
+branch.

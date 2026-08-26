@@ -12,10 +12,8 @@ from pathlib import Path
 
 import pytest
 import torch
-import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEMO_ROOT = PROJECT_ROOT.parent / "0_demo_TurbulentCombustion"
 
 
 def _small_core_config(coord_dim: int, execution: str = "cached_kv") -> dict:
@@ -84,13 +82,10 @@ def _core_inputs(coord_dim: int, n_fields: int, *, query_count: int = 17) -> dic
     }
 
 
-def test_declared_portable_package_imports_in_isolation(tmp_path: Path):
-    manifest = yaml.safe_load((DEMO_ROOT / "GL_rbf_CQ_RELEASE_MANIFEST.yaml").read_text())
-    for relative in manifest["portable_core_files"]:
-        source = DEMO_ROOT / relative
-        destination = tmp_path / relative
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, destination)
+def test_portable_package_imports_in_isolation(tmp_path: Path):
+    source = PROJECT_ROOT / "src" / "phycoflow_pointcloud"
+    destination = tmp_path / "src" / "phycoflow_pointcloud"
+    shutil.copytree(source, destination)
 
     script = r'''
 import json

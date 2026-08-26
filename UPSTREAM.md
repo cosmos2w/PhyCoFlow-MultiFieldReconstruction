@@ -18,21 +18,26 @@ must update this file and rerun model-contract and real-case integration checks.
 | [PhyCoFlowModel Cross-Spectral Coherence](https://github.com/ctrl-is/PhyCoFlowModel-Cross-Spectral-Coherence) | `add1b1a6422c` | MIT | Scientific/source reference for the normalized graph-Laplacian basis, same-frequency coherence, and cross-band energy-coupling estimators. The integrated adapter adds project contracts, fixed-geometry hashes, vectorization, validation, and artifacts. |
 | [PhyCoFlow topology development](https://github.com/jachen25/PhyCoFlow_dev/tree/main/src) | `ab49ea37a` | Project-supervised contribution | Scientific/source reference for exact-forward straight-through Betti curves and fibered multi-field filtrations. The integrated v1 extracts the active definitions into the common geometry/runtime contract and excludes case physics and retired modes. |
 
-## Repository-local compatibility source
+## Optional local historical compatibility source
 
 `models/compatibility/legacy_tc_demo50.py` is a focused extraction of the
 architecture and RF/RFF behavior required by
 `0_demo_TurbulentCombustion/Save_TrainedModel/ffm_tc_pointcloud_DemoN50_20260706_084857`.
 It has no runtime import from the demo, is absent from the new-model registry,
 and is accepted only after strict key/shape loading and fixed-seed equivalence
-against the repository-local historical implementation. `pykeops==2.3` is
-pinned solely for that checkpoint's original neighbor-search path.
+against the historical implementation. The extracted compatibility code remains
+tracked inside `Proj_MultiFieldReconstruction`; the old demo tree is now an
+optional local-only reference and is not tracked on this validation branch.
+Live historical equivalence validation requires that separately retained local
+source tree, checkpoint, and dataset. `pykeops==2.3` is pinned solely for that
+checkpoint's original neighbor-search path.
 
 The Phase-5 `global_distribution` estimators and endpoint-consistency behavior
-are focused, typed refactors of repository-local
+are focused, typed refactors of the optional local historical source
 `0_demo_TurbulentCombustion/src/{coherence_dist.py,direct_coherence_loss.py,obs_consistency.py}`.
 They have no runtime import from the demo. A compatibility test compares every
-refactored component numerically with the historical implementation.
+refactored component numerically when that local source is available; clean
+checkouts skip this optional historical comparison explicitly.
 
 `conflictfree==0.1.8` is an optional post-training dependency used only when
 `optimization.gradient_balance: config` is selected. Weighted-sum training
