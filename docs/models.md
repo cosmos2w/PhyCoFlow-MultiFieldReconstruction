@@ -7,6 +7,27 @@ data-driven or equation-based physical constraints modify a trained model.
 The limitations listed here describe the current implementation and are
 intended to guide later model updates.
 
+## Registry and capabilities at a glance
+
+| Registry name | Family | Native objective | Reconstruction/stage notes |
+|---|---|---|---|
+| `coordinate_mlp` | deterministic point | masked field MSE | direct query prediction |
+| `mlp_rbf` | deterministic point | masked field MSE | local RBF value/support features |
+| `deeponet` | deterministic point | masked field MSE | sparse branch + coordinate trunk |
+| `senseiver` | deterministic point | masked field MSE | latent sparse attention |
+| `geofno` | grid operator | masked field MSE | optional `neuraloperator` dependency |
+| `diffusion_pde` | grid generative | noise-prediction MSE | deterministic DDIM-style sampling |
+| `latent_fm` | latent generative | autoencoder / latent flow | Stage 1 prerequisite, Stage 2 source |
+| `pointcloud_ffm` | point rectified flow | velocity MSE | `gl_rbf_enh` or optional FNO backbone |
+| `gl_rbf_cq` | point rectified flow | velocity MSE | cached-K/V, EMA, coherence-ready |
+| `pinn` | physics-informed point | data + case PDE loss | direct physics route only |
+
+All adapters consume the common `ObservationBatch` and return a
+`ReconstructionBatch`; the shared trainer therefore does not need a model-
+specific loop. A model that supports post-training must advertise that stage
+in its `ModelCapabilities`. The historical Demo50 adapter is intentionally
+outside this modern registry table and lives under `models/compatibility/`.
+
 ## 1. Reconstruction problem and notation
 
 For sample $b$, let the complete normalized physical state be
@@ -347,7 +368,7 @@ $$
 \mathcal L_{\mathrm{diff}}
 =\mathbb E_{t,\boldsymbol\epsilon}
 \left[
-\lVert\widehat{\boldsymbol\epsilon}_\theta-oldsymbol\epsilon\rVert_2^2
+\lVert\widehat{\boldsymbol\epsilon}_\theta-\boldsymbol\epsilon\rVert_2^2
 \right].
 $$
 
