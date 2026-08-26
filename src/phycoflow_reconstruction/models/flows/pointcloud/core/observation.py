@@ -1,8 +1,7 @@
 import warnings
-from typing import Optional, Sequence
+from collections.abc import Sequence
 
 import torch
-
 
 OBS_CONSISTENCY_MODES = ("none", "default_hard", "endpoint", "endpoint_smooth")
 
@@ -18,8 +17,7 @@ def normalize_obs_consistency_mode(mode: str) -> str:
         return "default_hard"
     if mode not in OBS_CONSISTENCY_MODES:
         raise ValueError(
-            f"Unknown obs_consistency_mode={mode!r}. "
-            f"Expected one of {OBS_CONSISTENCY_MODES}."
+            f"Unknown obs_consistency_mode={mode!r}. Expected one of {OBS_CONSISTENCY_MODES}."
         )
     return mode
 
@@ -67,8 +65,11 @@ def build_pointwise_observation_maps(
     n_fields: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     value_map = torch.zeros(
-        coords.shape[0], coords.shape[1], int(n_fields),
-        device=coords.device, dtype=obs_values.dtype,
+        coords.shape[0],
+        coords.shape[1],
+        int(n_fields),
+        device=coords.device,
+        dtype=obs_values.dtype,
     )
     mask_map = torch.zeros_like(value_map)
     values = _obs_values_2d(obs_values)
@@ -169,7 +170,7 @@ def observation_consistency_metrics(
     obs_mask: torch.Tensor,
     obs_indices: torch.Tensor,
     obs_field_ids: torch.Tensor,
-    field_names: Optional[Sequence[str]] = None,
+    field_names: Sequence[str] | None = None,
     eps: float = 1e-12,
 ) -> dict:
     """Compute relative L2 SenConsis metrics only."""

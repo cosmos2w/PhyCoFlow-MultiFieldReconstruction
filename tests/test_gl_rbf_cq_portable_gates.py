@@ -67,9 +67,7 @@ def _core_inputs(coord_dim: int, n_fields: int, *, query_count: int = 17) -> dic
     first = torch.linspace(0, query_count - 1, 6).round().to(torch.long)
     second = (first + 1).remainder(query_count)
     obs_indices = torch.stack((first, second))
-    obs_mask = torch.tensor(
-        [[1, 1, 1, 1, 1, 1], [1, 1, 1, 1, 0, 0]], dtype=torch.bool
-    )
+    obs_mask = torch.tensor([[1, 1, 1, 1, 1, 1], [1, 1, 1, 1, 0, 0]], dtype=torch.bool)
     obs_field_ids = torch.arange(6).remainder(n_fields).repeat(2, 1)
     return {
         "x1": torch.randn(2, query_count, n_fields, generator=generator),
@@ -82,18 +80,32 @@ def _core_inputs(coord_dim: int, n_fields: int, *, query_count: int = 17) -> dic
     }
 
 
-def test_portable_package_imports_in_isolation(tmp_path: Path):
-    source = PROJECT_ROOT / "src" / "phycoflow_pointcloud"
-    destination = tmp_path / "src" / "phycoflow_pointcloud"
+def test_pointcloud_core_imports_in_isolation(tmp_path: Path):
+    source = PROJECT_ROOT / "src" / "phycoflow_reconstruction" / "models" / "flows" / "pointcloud"
+    destination = tmp_path / "src" / "phycoflow_reconstruction" / "models" / "flows" / "pointcloud"
     shutil.copytree(source, destination)
 
-    script = r'''
+    script = r"""
 import json
+import pathlib
 import sys
+import types
 import torch
 
 sys.modules["pykeops"] = None
-from phycoflow_pointcloud import build_pointcloud_model
+# Load the canonical point-cloud package below namespace stubs so this test
+# exercises the tensor core without importing the project's full model
+# registry (and its optional operator dependencies).
+_pointcloud = pathlib.Path.cwd() / "src" / "phycoflow_reconstruction" / "models" / "flows" / "pointcloud"
+for _name, _path in (
+    ("phycoflow_reconstruction", _pointcloud.parents[2]),
+    ("phycoflow_reconstruction.models", _pointcloud.parents[1]),
+    ("phycoflow_reconstruction.models.flows", _pointcloud.parents[0]),
+):
+    _module = types.ModuleType(_name)
+    _module.__path__ = [str(_path)]
+    sys.modules[_name] = _module
+from phycoflow_reconstruction.models.flows.pointcloud import build_pointcloud_model
 
 config = {
     "model_name": "GL_rbf_CQ", "backbone": "GL_rbf_ENH_CQ", "coord_dim": 2,
@@ -119,7 +131,7 @@ forbidden = ["Model", "helpers", "_legacy_model_full", "train_pointcloud_ffm", "
 assert not any(name in sys.modules for name in forbidden)
 assert tuple(out.shape) == (1, 9, 3)
 print(json.dumps({"shape": list(out.shape), "module": model.model.__class__.__module__}))
-'''
+"""
     environment = dict(os.environ)
     environment["PYTHONPATH"] = str(tmp_path / "src")
     result = subprocess.run(
@@ -136,7 +148,7 @@ print(json.dumps({"shape": list(out.shape), "module": model.model.__class__.__mo
 
 @pytest.mark.parametrize(("coord_dim", "n_fields"), [(2, 2), (3, 5)])
 def test_portable_core_forward_backward_and_padding(coord_dim: int, n_fields: int):
-    portable = pytest.importorskip("phycoflow_pointcloud")
+    portable = pytest.importorskip("phycoflow_reconstruction.models.flows.pointcloud")
     torch.manual_seed(301 + coord_dim + n_fields)
     model = portable.build_pointcloud_model(
         _small_core_config(coord_dim), n_fields=n_fields, device="cpu"
@@ -160,7 +172,7 @@ def test_portable_core_forward_backward_and_padding(coord_dim: int, n_fields: in
 
 
 def test_legacy_and_cached_initial_state_identity_and_kv_projection_counts():
-    portable = pytest.importorskip("phycoflow_pointcloud")
+    portable = pytest.importorskip("phycoflow_reconstruction.models.flows.pointcloud")
     values = _core_inputs(2, 5)
     torch.manual_seed(991)
     legacy = portable.build_pointcloud_model(
@@ -172,18 +184,30 @@ def test_legacy_and_cached_initial_state_identity_and_kv_projection_counts():
     )
     assert legacy.state_dict().keys() == cached.state_dict().keys()
     for key in legacy.state_dict():
-        torch.testing.assert_close(legacy.state_dict()[key], cached.state_dict()[key], rtol=0, atol=0)
+        torch.testing.assert_close(
+            legacy.state_dict()[key], cached.state_dict()[key], rtol=0, atol=0
+        )
 
     legacy.model.input_cross_attn.reset_execution_counters()
     cached.model.input_cross_attn.reset_execution_counters()
     with torch.no_grad():
         legacy_out = legacy.model(
-            torch.tensor([0.2, 0.8]), values["x1"], values["coords"], values["obs_coords"],
-            values["obs_values"], values["obs_mask"], values["obs_field_ids"],
+            torch.tensor([0.2, 0.8]),
+            values["x1"],
+            values["coords"],
+            values["obs_coords"],
+            values["obs_values"],
+            values["obs_mask"],
+            values["obs_field_ids"],
         )
         cached_out = cached.model(
-            torch.tensor([0.2, 0.8]), values["x1"], values["coords"], values["obs_coords"],
-            values["obs_values"], values["obs_mask"], values["obs_field_ids"],
+            torch.tensor([0.2, 0.8]),
+            values["x1"],
+            values["coords"],
+            values["obs_coords"],
+            values["obs_values"],
+            values["obs_mask"],
+            values["obs_field_ids"],
         )
     assert torch.isfinite(legacy_out).all() and torch.isfinite(cached_out).all()
     assert cached.model.input_cross_attn.kv_projection_calls == 1
@@ -191,7 +215,7 @@ def test_legacy_and_cached_initial_state_identity_and_kv_projection_counts():
 
 
 def test_query_microbatch_loss_and_gradients_match_monolithic():
-    portable = pytest.importorskip("phycoflow_pointcloud")
+    portable = pytest.importorskip("phycoflow_reconstruction.models.flows.pointcloud")
     values = _core_inputs(2, 5)
     torch.manual_seed(710)
     full = portable.build_pointcloud_model(_small_core_config(2), n_fields=5, device="cpu")
@@ -219,7 +243,7 @@ def test_query_microbatch_loss_and_gradients_match_monolithic():
 
 
 def test_persistent_topk_reconstruction_adds_zero_knn_calls():
-    portable = pytest.importorskip("phycoflow_pointcloud")
+    portable = pytest.importorskip("phycoflow_reconstruction.models.flows.pointcloud")
     values = _core_inputs(3, 3)
     model = portable.build_pointcloud_model(_small_core_config(3), n_fields=3, device="cpu").eval()
     original = model.model._get_topk_neighbors
@@ -261,7 +285,7 @@ def test_persistent_topk_reconstruction_adds_zero_knn_calls():
 
 
 def test_ema_save_load_resume_and_evaluation_selection():
-    portable = pytest.importorskip("phycoflow_pointcloud")
+    portable = pytest.importorskip("phycoflow_reconstruction.models.flows.pointcloud")
     values = _core_inputs(2, 3, query_count=13)
     torch.manual_seed(817)
     model = portable.build_pointcloud_model(_small_core_config(2), n_fields=3, device="cpu")
@@ -300,8 +324,7 @@ def test_ema_save_load_resume_and_evaluation_selection():
     live_state = {key: value.detach().clone() for key, value in resumed.state_dict().items()}
     with resumed_ema.average_parameters(resumed):
         assert any(
-            not torch.equal(value, live_state[key])
-            for key, value in resumed.state_dict().items()
+            not torch.equal(value, live_state[key]) for key, value in resumed.state_dict().items()
         )
     for key, value in resumed.state_dict().items():
         torch.testing.assert_close(value, live_state[key], rtol=0, atol=0)

@@ -7,13 +7,13 @@ from typing import Any
 
 import torch
 
-from .portable_core import (
+from ..core.portable_core import (
     ConditionalPointHybridLocalGlobalRBF,
     ConditionalPointHybridLocalGlobalRBFCQ,
     PointCloudFFM,
 )
-from ..config import resolve_model_identity
-from ..priors import IIDGaussianPrior, RFFGaussianPrior
+from ..core.priors import IIDGaussianPrior, RFFGaussianPrior
+from .config import resolve_model_identity
 
 
 def _get(config: Mapping[str, Any], key: str, default: Any) -> Any:
@@ -36,9 +36,7 @@ def build_pointcloud_model(
     """
     if isinstance(model_name_or_config, Mapping):
         if config is not None:
-            raise TypeError(
-                "Pass either a config mapping or (model_name, config), not both."
-            )
+            raise TypeError("Pass either a config mapping or (model_name, config), not both.")
         resolved = dict(model_name_or_config)
     else:
         resolved = dict(config or {})
@@ -52,9 +50,7 @@ def build_pointcloud_model(
         resolved, "sensor_coord_encoding", "fourier" if enhanced else "raw"
     )
     latent_sensor_reinject = bool(_get(resolved, "latent_sensor_reinject", enhanced))
-    glres_scale_init = float(
-        _get(resolved, "glres_scale_init", 1.0e-2 if enhanced else 0.0)
-    )
+    glres_scale_init = float(_get(resolved, "glres_scale_init", 1.0e-2 if enhanced else 0.0))
 
     prior_name = str(_get(resolved, "prior", "rff"))
     if prior_name not in {"iid", "rff"}:
@@ -105,10 +101,7 @@ def build_pointcloud_model(
             _get(resolved, "sensor_attention_padding_mode", "full")
         ),
         "sensor_attention_buckets": tuple(
-            int(value)
-            for value in _get(
-                resolved, "sensor_attention_buckets", [256, 320, 384]
-            )
+            int(value) for value in _get(resolved, "sensor_attention_buckets", [256, 320, 384])
         ),
         "glres_scale_init": glres_scale_init,
     }
@@ -122,18 +115,12 @@ def build_pointcloud_model(
             cq_readout_heads=int(_get(resolved, "cq_readout_heads", 4)),
             cq_global_scale_init=float(_get(resolved, "cq_global_scale_init", 1.0)),
             cq_local_scale_init=float(_get(resolved, "cq_local_scale_init", 1.0)),
-            cq_readout_scale_init=float(
-                _get(resolved, "cq_readout_scale_init", 1.0e-2)
-            ),
-            cq_time_conditioning=str(
-                _get(resolved, "cq_time_conditioning", "scalar_concat")
-            ),
+            cq_readout_scale_init=float(_get(resolved, "cq_readout_scale_init", 1.0e-2)),
+            cq_time_conditioning=str(_get(resolved, "cq_time_conditioning", "scalar_concat")),
             cq_time_embed_dim=int(_get(resolved, "cq_time_embed_dim", 128)),
             cq_time_max_period=float(_get(resolved, "cq_time_max_period", 10000.0)),
             cq_time_film_zero_init=bool(_get(resolved, "cq_time_film_zero_init", True)),
-            cq_measurement_support_mode=str(
-                _get(resolved, "cq_measurement_support_mode", "none")
-            ),
+            cq_measurement_support_mode=str(_get(resolved, "cq_measurement_support_mode", "none")),
             cq_measurement_support_normalize=bool(
                 _get(resolved, "cq_measurement_support_normalize", True)
             ),
@@ -156,6 +143,6 @@ def build_pointcloud_model(
             ),
             enhanced_head_norm=bool(_get(resolved, "enhanced_head_norm", enhanced)),
         )
-    return PointCloudFFM(
-        backbone, prior, sigma_min=float(_get(resolved, "sigma_min", 1.0e-4))
-    ).to(torch.device(device))
+    return PointCloudFFM(backbone, prior, sigma_min=float(_get(resolved, "sigma_min", 1.0e-4))).to(
+        torch.device(device)
+    )

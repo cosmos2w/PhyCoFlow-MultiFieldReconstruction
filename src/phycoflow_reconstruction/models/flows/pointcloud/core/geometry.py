@@ -6,8 +6,9 @@ This helper deliberately delegates neighbor search to the backbone's existing
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any
 
 import torch
 
@@ -133,7 +134,7 @@ def build_persistent_topk_geometry_cache(
             f"topk_rbf_glres, got {gather_mode!r}."
         )
 
-    gather_topk = int(getattr(backbone, "gather_topk"))
+    gather_topk = int(backbone.gather_topk)
     k = min(gather_topk, int(obs_coords.shape[1]))
     chunk_size = max(1, int(chunk_size))
 
@@ -216,7 +217,7 @@ def validate_persistent_topk_geometry_cache(
     c = cache.as_mapping() if isinstance(cache, PersistentTopKGeometryCache) else cache
 
     gather_mode = str(getattr(backbone, "gather_mode", ""))
-    gather_topk = int(getattr(backbone, "gather_topk"))
+    gather_topk = int(backbone.gather_topk)
     k = min(gather_topk, int(obs_coords.shape[1]))
 
     expected = {
@@ -268,7 +269,9 @@ def validate_persistent_topk_geometry_cache(
     )
     for name, tensor, shape, dtype in tensor_checks:
         if not isinstance(tensor, torch.Tensor):
-            raise ValueError(f"Persistent geometry cache {name} is not a tensor.")
+            raise ValueError(  # noqa: TRY004 - preserve the historical error contract
+                f"Persistent geometry cache {name} is not a tensor."
+            )
         if tuple(tensor.shape) != shape:
             raise ValueError(
                 f"Persistent geometry cache {name} has shape {tuple(tensor.shape)}, "

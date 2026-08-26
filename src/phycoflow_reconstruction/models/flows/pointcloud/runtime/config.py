@@ -54,7 +54,12 @@ def resolve_model_identity(config: Mapping[str, Any]) -> PublicModelIdentity:
 
 
 def project_root() -> Path:
-    return Path(__file__).resolve().parents[2]
+    """Return the repository root containing the active ``pyproject.toml``."""
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "pyproject.toml").is_file():
+            return parent
+    # Keep a deterministic fallback for source snapshots that omit metadata.
+    return Path(__file__).resolve().parents[6]
 
 
 def load_public_config(
@@ -76,9 +81,7 @@ def load_public_config(
         raise TypeError(f"Expected a YAML mapping in {config_path}.")
     config = dict(loaded)
     if overrides:
-        config.update(
-            {key: value for key, value in overrides.items() if value is not None}
-        )
+        config.update({key: value for key, value in overrides.items() if value is not None})
     identity = resolve_model_identity(config)
     config["model_name"] = identity.public_name
     config["backbone"] = identity.internal_backbone
@@ -91,8 +94,6 @@ def load_public_config(
             value = config.get(key)
             if value:
                 candidate = Path(str(value)).expanduser()
-                config[key] = str(
-                    candidate if candidate.is_absolute() else base / candidate
-                )
+                config[key] = str(candidate if candidate.is_absolute() else base / candidate)
     config["config_source"] = str(config_path)
     return config

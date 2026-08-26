@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Optional, Protocol
+from typing import Any, Protocol
 
 import torch
 
@@ -40,7 +40,7 @@ def reconstruct_from_tensors(
     obs_values: torch.Tensor,
     obs_mask: torch.Tensor,
     obs_field_ids: torch.Tensor,
-    obs_indices: Optional[torch.Tensor] = None,
+    obs_indices: torch.Tensor | None = None,
     config: ReconstructionConfig | None = None,
     geometry_cache: Any = None,
 ) -> torch.Tensor:

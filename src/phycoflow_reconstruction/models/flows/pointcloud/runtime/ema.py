@@ -1,11 +1,11 @@
 """Checkpointable exponential moving average for PointCloudFFM training."""
 
 from collections import OrderedDict
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from typing import Dict, Iterator, Mapping
 
 import torch
-import torch.nn as nn
+from torch import nn
 
 
 class ModelEMA:
@@ -16,8 +16,7 @@ class ModelEMA:
             raise ValueError(f"EMA decay must be in [0, 1), got {decay}.")
         self.decay = float(decay)
         self.averaged_parameter_names = tuple(
-            name for name, parameter in model.named_parameters()
-            if parameter.requires_grad
+            name for name, parameter in model.named_parameters() if parameter.requires_grad
         )
         self.num_updates = 0
         self.shadow = self._clone_model_state(model)
@@ -31,14 +30,15 @@ class ModelEMA:
     @torch.no_grad()
     def update(self, model: nn.Module) -> None:
         averaged_names = {
-            name for name, parameter in model.named_parameters()
-            if parameter.requires_grad
+            name for name, parameter in model.named_parameters() if parameter.requires_grad
         }
         if averaged_names != set(self.averaged_parameter_names):
             raise RuntimeError("EMA trainable parameter names changed after EMA creation.")
         live = model.state_dict()
         if live.keys() != self.shadow.keys():
-            raise RuntimeError("EMA/model state keys differ; architecture changed after EMA creation.")
+            raise RuntimeError(
+                "EMA/model state keys differ; architecture changed after EMA creation."
+            )
         for name, value in live.items():
             target = self.shadow[name]
             source = value.detach().to(device=target.device)
@@ -52,7 +52,7 @@ class ModelEMA:
     def copy_to(self, model: nn.Module) -> None:
         model.load_state_dict(self.shadow, strict=True)
 
-    def state_dict(self) -> Dict[str, object]:
+    def state_dict(self) -> dict[str, object]:
         return {
             "decay": self.decay,
             "averaged_parameter_names": list(self.averaged_parameter_names),
@@ -65,10 +65,10 @@ class ModelEMA:
     def load_state_dict(self, state: Mapping[str, object]) -> None:
         shadow = state.get("shadow")
         if not isinstance(shadow, Mapping):
-            raise ValueError("EMA checkpoint is missing a shadow state mapping.")
-        averaged_names = tuple(
-            state.get("averaged_parameter_names", self.averaged_parameter_names)
-        )
+            raise ValueError(  # noqa: TRY004 - preserve the historical error contract
+                "EMA checkpoint is missing a shadow state mapping."
+            )
+        averaged_names = tuple(state.get("averaged_parameter_names", self.averaged_parameter_names))
         if set(averaged_names) != set(self.averaged_parameter_names):
             missing = sorted(set(self.averaged_parameter_names) - set(averaged_names))
             unexpected = sorted(set(averaged_names) - set(self.averaged_parameter_names))

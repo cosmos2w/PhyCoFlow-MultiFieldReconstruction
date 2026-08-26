@@ -25,22 +25,16 @@ def resolve_checkpoint_state(
     if isinstance(checkpoint, dict) and "model" in checkpoint:
         if prefer_ema is None:
             prefer_ema = bool(
-                checkpoint.get(
-                    "model_ema_eval", checkpoint.get("model_ema_enabled", False)
-                )
+                checkpoint.get("model_ema_eval", checkpoint.get("model_ema_enabled", False))
             )
         use_ema = bool(prefer_ema and "model_ema" in checkpoint)
         if use_ema:
             ema_state = checkpoint["model_ema"]
             state_dict = (
-                ema_state.get("shadow", ema_state)
-                if isinstance(ema_state, dict)
-                else ema_state
+                ema_state.get("shadow", ema_state) if isinstance(ema_state, dict) else ema_state
             )
             averaged_names = (
-                ema_state.get("averaged_parameter_names")
-                if isinstance(ema_state, dict)
-                else None
+                ema_state.get("averaged_parameter_names") if isinstance(ema_state, dict) else None
             )
             live_state = checkpoint["model"]
             if averaged_names is not None:
@@ -76,6 +70,4 @@ def checkpoint_model_state(
     model: nn.Module | None = None,
 ):
     """Historical state-only API retained for old imports and scripts."""
-    return resolve_checkpoint_state(
-        checkpoint, prefer_ema=prefer_ema, model=model
-    ).state_dict
+    return resolve_checkpoint_state(checkpoint, prefer_ema=prefer_ema, model=model).state_dict

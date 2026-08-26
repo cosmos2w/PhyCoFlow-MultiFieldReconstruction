@@ -1,6 +1,5 @@
-"""Point-cloud RF adapters and their enhanced GL-RBF flow backbones."""
+"""Flow models, with point-cloud implementations under the canonical namespace."""
 
-from .gl_rbf_cq import GL_rbf_CQ, GLRbfCQ
-from .pointcloud_ffm import PointCloudFFM
+from .pointcloud.adapters import GL_rbf_CQ, GLRbfCQ, PointCloudFFM
 
 __all__ = ["GLRbfCQ", "GL_rbf_CQ", "PointCloudFFM"]
