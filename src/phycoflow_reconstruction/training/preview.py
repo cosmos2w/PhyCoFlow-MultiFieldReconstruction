@@ -17,18 +17,8 @@ from ..data.factory import open_field_dataset
 from ..data.sensor_protocols import build_observation_batch
 from ..evaluation import reconstruction_metrics
 from .common import sensor_protocol_from_config
-from .model_lifecycle import (
-    add_training_aux_state,
-    evaluation_weight_context,
-    load_training_aux_state,
-)
-from .run_store import (
-    RunStore,
-    checkpoint_model_state,
-    file_sha256,
-    load_model_state_strict,
-    load_project_checkpoint,
-)
+from .model_lifecycle import evaluation_weight_context
+from .run_store import RunStore
 
 
 def _physical_observations(batch: ObservationBatch, normalizer) -> torch.Tensor:
@@ -192,7 +182,7 @@ def render_preview_payload(
 
 
 class TrainingReconstructionPreview:
-    """Reload a periodic checkpoint and refresh one fixed validation preview."""
+    """Run cheap validation loss and qualitative reconstruction independently."""
 
     def __init__(
         self,
@@ -203,7 +193,7 @@ class TrainingReconstructionPreview:
         device: torch.device,
     ) -> None:
         settings = config.get("evaluation", {}).get("preview", {})
-        self.enabled = bool(settings.get("enabled", False))
+        self.enabled = bool(settings.get("enabled", True))
         self.store = store
         self.steps_per_epoch = max(1, int(steps_per_epoch))
         self.device = device
@@ -240,44 +230,86 @@ class TrainingReconstructionPreview:
                 config.get("evaluation", {}).get("generation_steps", 2),
             )
         )
-        self.every_epochs = int(settings.get("every_epochs", 10))
+        legacy_every = int(settings.get("every_epochs", 10))
+        self.loss_every_epochs = int(settings.get("loss_every_epochs", legacy_every))
+        self.reconstruct_every_epochs = int(
+            settings.get("reconstruct_every_epochs", legacy_every)
+        )
         self.keep_history = bool(settings.get("keep_history", False))
+        self.last_validation_report: dict[str, Any] | None = None
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-    def due(self, global_step: int) -> bool:
+    def _epoch_due(self, global_step: int, every_epochs: int) -> bool:
         if not self.enabled or global_step % self.steps_per_epoch:
             return False
         epoch = global_step // self.steps_per_epoch
-        return epoch == 1 or epoch % self.every_epochs == 0
+        return epoch % every_epochs == 0
 
-    def update(
+    def due_loss(self, global_step: int) -> bool:
+        """Return whether the fixed validation loss is due."""
+        return self._epoch_due(global_step, self.loss_every_epochs)
+
+    def due_reconstruction(self, global_step: int) -> bool:
+        """Return whether the qualitative reconstruction is due."""
+        return self._epoch_due(global_step, self.reconstruct_every_epochs)
+
+    def due(self, global_step: int) -> bool:
+        """Return whether either independent validation action is due."""
+        return self.due_loss(global_step) or self.due_reconstruction(global_step)
+
+    def _validation_loss(
         self,
         model: torch.nn.Module,
         *,
         global_step: int,
-        force: bool = False,
-        checkpoint_path: Path | None = None,
-    ) -> dict[str, Any] | None:
-        if not self.enabled or (not force and not self.due(global_step)):
-            return None
-        assert self.dataset is not None and self.batch is not None
-        if checkpoint_path is None:
-            checkpoint_payload = {
-                "model": checkpoint_model_state(model),
-                "global_step": int(global_step),
-                "config_sha256": self.store.config_hash,
-                "purpose": "qualitative_training_preview",
-            }
-            checkpoint_path = self.store.save_checkpoint(
-                "preview_latest",
-                add_training_aux_state(checkpoint_payload, model),
-            )
-        checkpoint = load_project_checkpoint(checkpoint_path)
-        load_model_state_strict(model, checkpoint["model"])
-        load_training_aux_state(model, checkpoint)
+    ) -> dict[str, Any]:
+        assert self.batch is not None
         was_training = model.training
         model.eval()
-        seed = int(self.settings.get("seed", 2027)) + int(global_step)
+        seed = int(self.settings.get("seed", 2027))
+        device_indices = [self.device.index or 0] if self.device.type == "cuda" else []
+        with (
+            torch.random.fork_rng(devices=device_indices),
+            evaluation_weight_context(model),
+            # Physics-informed losses may require coordinate derivatives even
+            # during evaluation. No backward pass is performed, so parameter
+            # gradients remain untouched while the temporary graph is freed.
+            torch.enable_grad(),
+        ):
+            torch.manual_seed(seed)
+            losses = model.training_loss(self.batch)
+        if was_training:
+            model.train()
+        total = float(losses.total.detach().cpu())
+        components = {
+            name: float(value.detach().cpu())
+            for name, value in losses.components.items()
+        }
+        report = {
+            "global_step": int(global_step),
+            "training_epoch": global_step / self.steps_per_epoch,
+            "sample_id": self.batch.sample_ids[0],
+            "seed": seed,
+            "loss": total,
+            "components": components,
+        }
+        self.store.write_json(
+            "evaluation/training_preview/latest_validation.json",
+            report,
+        )
+        self.store.update_manifest(training_validation=report)
+        return report
+
+    def _reconstruct(
+        self,
+        model: torch.nn.Module,
+        *,
+        global_step: int,
+    ) -> dict[str, Any]:
+        assert self.dataset is not None and self.batch is not None
+        was_training = model.training
+        model.eval()
+        seed = int(self.settings.get("seed", 2027))
         with evaluation_weight_context(model), torch.no_grad():
             generator = torch.Generator(device=self.device).manual_seed(seed)
             reconstruction = model.reconstruct(
@@ -339,9 +371,9 @@ class TrainingReconstructionPreview:
             "global_step": int(global_step),
             "training_epoch": epoch,
             "sample_id": self.batch.sample_ids[0],
-            "checkpoint": str(checkpoint_path.relative_to(self.store.run_dir)),
-            "checkpoint_sha256": file_sha256(checkpoint_path),
+            "weight_source": "configured_evaluation_weights",
             "generation_steps": self.generation_steps,
+            "seed": seed,
             "metrics": metrics,
             "figures": {
                 path.suffix.removeprefix("."): str(path.relative_to(self.store.run_dir))
@@ -354,11 +386,11 @@ class TrainingReconstructionPreview:
         contract = self.output_dir / "figure_contract.md"
         contract.write_text(
             "# Training reconstruction preview\n\n"
-            "- **Claim:** qualitative sparse-reconstruction quality of the latest saved "
-            "training checkpoint.\n"
-            f"- **Checkpoint:** `{report['checkpoint']}`\n"
+            "- **Claim:** qualitative sparse-reconstruction quality of the configured "
+            "evaluation weights.\n"
+            f"- **Training epoch:** `{epoch:.3f}`\n"
             f"- **Sample:** `{report['sample_id']}` from the configured preview split.\n"
-            "- **Panels:** physical target, checkpoint reconstruction, and absolute error; "
+            "- **Panels:** physical target, reconstruction, and absolute error; "
             "each error panel reports its field-wise relative L2 error, and white circles "
             "mark conditioned sensors.\n"
             f"- **Metrics:** `{report_path.name}`; reusable arrays: `{npz_path.name}`.\n"
@@ -372,6 +404,32 @@ class TrainingReconstructionPreview:
                 shutil.copy2(path, history / path.name)
         self.store.update_manifest(training_preview=report)
         return report
+
+    def update(
+        self,
+        model: torch.nn.Module,
+        *,
+        global_step: int,
+        force: bool = False,
+        checkpoint_path: Path | None = None,
+    ) -> dict[str, Any] | None:
+        del checkpoint_path  # retained as a source-compatible keyword
+        self.last_validation_report = None
+        if not self.enabled or (not force and not self.due(global_step)):
+            return None
+        assert self.dataset is not None and self.batch is not None
+        validation = (
+            self._validation_loss(model, global_step=global_step)
+            if force or self.due_loss(global_step)
+            else None
+        )
+        self.last_validation_report = validation
+        reconstruction = (
+            self._reconstruct(model, global_step=global_step)
+            if force or self.due_reconstruction(global_step)
+            else None
+        )
+        return {"validation": validation, "reconstruction": reconstruction}
 
     def close(self) -> None:
         if self.dataset is not None:

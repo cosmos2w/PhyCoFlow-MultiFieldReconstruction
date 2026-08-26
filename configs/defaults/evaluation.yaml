@@ -1,5 +1,4 @@
-# Shared evaluation and training-preview defaults.  Case profiles can lower
-# preview cost without changing the model or dataset contract.
+# Shared validation-loss and reconstruction-preview defaults.
 
 # Validation and preview policy. split choices: train | validation | test.
 evaluation:
@@ -9,8 +8,9 @@ evaluation:
   generation_steps: 8
   seed: 2027
   preview:
-    enabled: true
-    every_epochs: 25
+    enabled: true  # mandatory fixed validation monitor during training
+    loss_every_epochs: 10  # cheap validation objective; also updates loss_history.png
+    reconstruct_every_epochs: 500  # expensive qualitative reconstruction artifacts
     split: validation  # choices: train | validation | test
     sample_index: 0
     query_points: null

@@ -880,8 +880,12 @@ def run_post_training(
                 global_step=global_step + 1,
                 fallback_metric=row["data_loss"],
             )
+        if checkpoint_result is not None:
+            monitor.record_validation(checkpoint_manager.last_validation_report)
         monitor.finish_step(
-            checkpoint_checked=checkpoint_result is not None,
+            checkpoint_checked=(
+                checkpoint_result is not None and checkpoint_manager.last_best_checked
+            ),
             best_checkpoint_saved=(
                 checkpoint_result is not None and checkpoint_result[1] is not None
             ),
@@ -930,6 +934,9 @@ def run_post_training(
     if saved is None:
         raise RuntimeError("final checkpoint save was unexpectedly skipped")
     last_path, saved_best_path = saved
+    if last_path is None:
+        raise RuntimeError("forced final save did not create last.pt")
+    monitor.record_validation(checkpoint_manager.last_validation_report)
     best_checkpoint_saved = saved_best_path is not None
     best_path = store.run_dir / "checkpoints" / "best.pt"
     if not best_path.is_file():
@@ -947,7 +954,6 @@ def run_post_training(
     store.update_manifest(
         checkpoint_hashes={
             "last": file_sha256(last_path),
-            "latest": file_sha256(last_path),
             "best": file_sha256(best_path),
         },
         source_hashes_after=source_hashes_after,

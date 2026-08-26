@@ -183,6 +183,8 @@ def _validate_common_sections(config: Mapping[str, Any]) -> None:
         {
             "enabled",
             "every_epochs",
+            "loss_every_epochs",
+            "reconstruct_every_epochs",
             "split",
             "sample_index",
             "query_points",
@@ -195,8 +197,18 @@ def _validate_common_sections(config: Mapping[str, Any]) -> None:
     for key in ("enabled", "keep_history"):
         if key in preview and not isinstance(preview[key], bool):
             raise TypeError(f"evaluation.preview.{key} must be boolean")
-    if int(preview.get("every_epochs", 10)) < 1:
-        raise ValueError("evaluation.preview.every_epochs must be positive")
+    for key, default in (
+        ("every_epochs", 10),
+        ("loss_every_epochs", 10),
+        ("reconstruct_every_epochs", 500),
+    ):
+        if int(preview.get(key, default)) < 1:
+            raise ValueError(f"evaluation.preview.{key} must be positive")
+    if (
+        {"loss_every_epochs", "reconstruct_every_epochs"} & set(preview)
+        and not bool(preview.get("enabled", True))
+    ):
+        raise ValueError("modern evaluation.preview validation monitoring must be enabled")
     if int(preview.get("sample_index", 0)) < 0:
         raise ValueError("evaluation.preview.sample_index must be non-negative")
     for key in ("query_points", "generation_steps"):

@@ -14,12 +14,13 @@ from typing import Any
 
 from tqdm.auto import tqdm
 
-_LOSS_KEYS = ("total", "data_loss", "coherence_loss", "physics_loss")
+_LOSS_KEYS = ("total", "data_loss", "coherence_loss", "physics_loss", "validation_loss")
 _LOSS_LABELS = {
     "total": "total",
     "data_loss": "data",
     "coherence_loss": "coherence",
     "physics_loss": "physics",
+    "validation_loss": "validation",
 }
 
 
@@ -55,6 +56,7 @@ class TrainingMonitor:
     ) -> None:
         self.run_dir = Path(run_dir)
         self.history_path = self.run_dir / "metrics" / "history.jsonl"
+        self.validation_history_path = self.run_dir / "metrics" / "validation_history.jsonl"
         self.plot_path = self.run_dir / "loss_history.png"
         self.final_step = int(final_step)
         self.configured_steps = int(configured_steps)
@@ -78,6 +80,7 @@ class TrainingMonitor:
         self.last_epoch_report: dict[str, Any] | None = None
         self._plot_available = True
         self._load_existing_history()
+        self._load_existing_validation_history()
         self.active_epoch = int(start_step) // self.steps_per_epoch + 1
         self._epoch_started = perf_counter()
         self._epoch_observed_batches = 0
@@ -109,6 +112,14 @@ class TrainingMonitor:
         if not self.history_path.exists():
             return
         with self.history_path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if line.strip():
+                    self._capture(json.loads(line))
+
+    def _load_existing_validation_history(self) -> None:
+        if not self.validation_history_path.exists():
+            return
+        with self.validation_history_path.open("r", encoding="utf-8") as handle:
             for line in handle:
                 if line.strip():
                     self._capture(json.loads(line))
@@ -285,6 +296,29 @@ class TrainingMonitor:
         self._pending_epoch_report["best_checkpoint_saved"] |= bool(best_checkpoint_saved)
         if int(self._pending_epoch_report["step"]) < self.final_step:
             self._complete_pending_epoch()
+
+    def record_validation(self, report: Mapping[str, Any] | None) -> None:
+        """Persist and plot a fixed validation loss without adding training-history rows."""
+        if report is None:
+            return
+        step = int(report["global_step"])
+        row = {
+            "step": step,
+            "epoch": float(report["training_epoch"]),
+            "validation_loss": float(report["loss"]),
+            "components": dict(report.get("components", {})),
+        }
+        with self.validation_history_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(row, sort_keys=True) + "\n")
+        self._capture(row)
+        if (
+            self._pending_epoch_report is not None
+            and int(self._pending_epoch_report["step"]) == step
+        ):
+            self._pending_epoch_report["summary"]["validation_loss"] = row[
+                "validation_loss"
+            ]
+        self._plot()
 
     def _plot(self) -> None:
         if not self._plot_available or not any(self._values.values()):

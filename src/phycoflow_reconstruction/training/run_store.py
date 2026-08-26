@@ -189,17 +189,6 @@ class RunStore:
         temporary = target.with_suffix(".pt.tmp")
         torch.save(dict(payload), temporary)
         os.replace(temporary, target)
-        if name == "last":
-            # `last.pt` remains the canonical resume name. `latest.pt` is a
-            # relative symlink so tools and users accustomed to either name
-            # see the same atomically replaced payload without duplicating a
-            # potentially multi-gigabyte checkpoint.
-            latest = target.with_name("latest.pt")
-            temporary_link = target.with_name(".latest.pt.tmp")
-            if os.path.lexists(temporary_link):
-                temporary_link.unlink()
-            temporary_link.symlink_to(target.name)
-            os.replace(temporary_link, latest)
         return target
 
     def load_checkpoint(self, name: str = "last") -> dict[str, Any]:

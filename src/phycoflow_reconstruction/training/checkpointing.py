@@ -15,7 +15,7 @@ from .run_store import RunStore, file_sha256
 
 
 class PeriodicCheckpointManager:
-    """Save resumable state and select best weights on a fixed preview sample."""
+    """Save periodic recovery/milestone state and validation-selected best weights."""
 
     def __init__(
         self,
@@ -27,7 +27,7 @@ class PeriodicCheckpointManager:
         settings = config.get("checkpointing", {})
         self.enabled = bool(settings.get("enabled", True))
         self.every_epochs = int(settings.get("every_epochs", 10))
-        self.save_epoch_one = bool(settings.get("save_epoch_one", True))
+        self.save_epoch_one = bool(settings.get("save_epoch_one", False))
         configured_epochs = settings.get("epochs")
         self.checkpoint_epochs = (
             frozenset(int(epoch) for epoch in configured_epochs)
@@ -36,22 +36,47 @@ class PeriodicCheckpointManager:
         )
         self.steps_per_epoch = max(1, int(steps_per_epoch))
         self.store = store
-        self.best_value = self._existing_best_value()
+        self.best_name, self.best_value = self._existing_best_metric()
+        self.last_validation_report: dict[str, Any] | None = None
+        self.last_best_checked = False
 
-    def _existing_best_value(self) -> float:
+    def _existing_best_metric(self) -> tuple[str, float]:
         manifest_path = self.store.run_dir / "run_manifest.json"
         if not manifest_path.is_file():
-            return math.inf
-        value = json.loads(manifest_path.read_text()).get("best_metric", {}).get("value")
-        return float(value) if value is not None else math.inf
+            return "validation_loss", math.inf
+        metric = json.loads(manifest_path.read_text()).get("best_metric", {})
+        value = metric.get("value")
+        return str(metric.get("name", "validation_loss")), (
+            float(value) if value is not None else math.inf
+        )
+
+    def _epoch(self, global_step: int) -> int | None:
+        if global_step % self.steps_per_epoch:
+            return None
+        return global_step // self.steps_per_epoch
+
+    def last_due(self, global_step: int) -> bool:
+        """Return whether the rolling recovery checkpoint should be refreshed."""
+        epoch = self._epoch(global_step)
+        if not self.enabled or epoch is None:
+            return False
+        return (self.save_epoch_one and epoch == 1) or epoch % self.every_epochs == 0
+
+    def milestone_due(self, global_step: int) -> bool:
+        """Return whether an immutable requested epoch checkpoint is due."""
+        epoch = self._epoch(global_step)
+        return (
+            self.enabled
+            and epoch is not None
+            and self.checkpoint_epochs is not None
+            and epoch in self.checkpoint_epochs
+        )
 
     def due(self, global_step: int) -> bool:
+        """Return whether any checkpoint file independent of validation is due."""
         if not self.enabled or global_step % self.steps_per_epoch:
             return False
-        epoch = global_step // self.steps_per_epoch
-        if self.checkpoint_epochs is not None:
-            return epoch in self.checkpoint_epochs
-        return (self.save_epoch_one and epoch == 1) or epoch % self.every_epochs == 0
+        return self.last_due(global_step) or self.milestone_due(global_step)
 
     def due_for_preview_or_checkpoint(
         self,
@@ -70,66 +95,62 @@ class PeriodicCheckpointManager:
         global_step: int,
         fallback_metric: float,
         force: bool = False,
-    ) -> tuple[Path, Path | None] | None:
-        """Atomically refresh last/latest and best when due or explicitly forced."""
+    ) -> tuple[Path | None, Path | None] | None:
+        """Refresh independently scheduled last, best, and milestone checkpoints."""
         # Disabling periodic saves must never suppress the terminal recovery
         # checkpoint. ``force`` is used by every trainer at normal/truncated
         # termination so a completed run is always evaluable and resumable.
-        milestone_due = self.due(global_step)
+        last_due = force or self.last_due(global_step)
+        milestone_due = self.milestone_due(global_step)
         if not force and not self.due_for_preview_or_checkpoint(global_step, preview):
             return None
 
         checkpoint = dict(payload)
         checkpoint["global_step"] = int(global_step)
-        # Save first, then deliberately reload these exact bytes for the fixed
-        # validation preview. This validates checkpoint readability while the
-        # originating process and model are still available.
-        last_path = self.store.save_checkpoint("last", checkpoint)
-        milestone_path = None
-        if milestone_due:
-            epoch = global_step // self.steps_per_epoch
-            milestone_path = self.store.save_checkpoint(f"epoch_{epoch:03d}", checkpoint)
         preview_report = preview.update(
             model,
             global_step=global_step,
             force=force,
-            checkpoint_path=last_path,
         )
+        validation_report = (
+            preview_report.get("validation") if preview_report is not None else None
+        )
+        self.last_validation_report = validation_report
         metric_name = "training_loss"
         metric_value = float(fallback_metric)
-        if preview_report is not None:
-            preview_metric = preview_report.get("metrics", {}).get("mse_normalized")
-            if preview_metric is not None:
-                metric_name = "preview_mse_normalized"
-                metric_value = float(preview_metric)
+        if validation_report is not None:
+            metric_name = "validation_loss"
+            metric_value = float(validation_report["loss"])
 
-        # When qualitative validation is enabled, `best.pt` is selected only
-        # at its configured validation cadence—not from incomparable training
-        # mini-batch losses between previews.
-        eligible_for_best = preview_report is not None or not preview.enabled
+        # Enabled modern runs select best only from the comparable fixed
+        # validation loss. The training-loss fallback remains solely for old
+        # configurations that explicitly disabled previews.
+        eligible_for_best = validation_report is not None or not preview.enabled
+        self.last_best_checked = eligible_for_best
         improved = (
             eligible_for_best
             and math.isfinite(metric_value)
             and metric_value < self.best_value
         )
         if improved:
+            self.best_name = metric_name
             self.best_value = metric_value
         checkpoint["checkpoint_metric"] = {
             "name": metric_name,
             "value": metric_value,
         }
         checkpoint["best_metric_value"] = self.best_value
-        checkpoint["best_metric_name"] = metric_name
-        # Keep the already validated `last.pt` bytes untouched so the preview
-        # report's checkpoint hash remains exact. Selection metadata lives in
-        # the run manifest and latest-checkpoint report; an improved best file
-        # also carries it in its payload.
+        checkpoint["best_metric_name"] = self.best_name
+        last_path = self.store.save_checkpoint("last", checkpoint) if last_due else None
+        milestone_path = None
+        if milestone_due:
+            epoch = global_step // self.steps_per_epoch
+            milestone_path = self.store.save_checkpoint(f"epoch_{epoch:03d}", checkpoint)
         best_path = self.store.save_checkpoint("best", checkpoint) if improved else None
 
-        checkpoint_hashes = {
-            "last": file_sha256(last_path),
-            "latest": file_sha256(last_path),
-        }
+        checkpoint_hashes = {}
+        if last_path is not None:
+            checkpoint_hashes["last"] = file_sha256(last_path)
         if milestone_path is not None:
             checkpoint_hashes[f"epoch_{global_step // self.steps_per_epoch:03d}"] = file_sha256(
                 milestone_path
@@ -143,19 +164,28 @@ class PeriodicCheckpointManager:
         )
         if isinstance(existing_hashes, Mapping):
             checkpoint_hashes = {**existing_hashes, **checkpoint_hashes}
-        self.store.update_manifest(
-            checkpoint_hashes=checkpoint_hashes,
-            latest_checkpoint_step=int(global_step),
-            latest_checkpoint_epoch=global_step / self.steps_per_epoch,
-            best_metric={"name": metric_name, "value": self.best_value},
-        )
+        manifest_details: dict[str, Any] = {
+            "checkpoint_hashes": checkpoint_hashes,
+            "best_metric": {"name": self.best_name, "value": self.best_value},
+        }
+        if last_path is not None:
+            manifest_details.update(
+                last_checkpoint_step=int(global_step),
+                last_checkpoint_epoch=global_step / self.steps_per_epoch,
+            )
+        self.store.update_manifest(**manifest_details)
+        existing_last = self.store.run_dir / "checkpoints" / "last.pt"
         self.store.write_json(
-            "evaluation/latest_checkpoint.json",
+            "evaluation/checkpoint_status.json",
             {
                 "global_step": int(global_step),
                 "training_epoch": global_step / self.steps_per_epoch,
-                "last": str(last_path.relative_to(self.store.run_dir)),
-                "latest": "checkpoints/latest.pt",
+                "last": (
+                    str(existing_last.relative_to(self.store.run_dir))
+                    if existing_last.is_file()
+                    else None
+                ),
+                "last_updated": last_path is not None,
                 "milestone": (
                     str(milestone_path.relative_to(self.store.run_dir))
                     if milestone_path is not None
@@ -167,6 +197,7 @@ class PeriodicCheckpointManager:
                     else None
                 ),
                 "selection_metric": {"name": metric_name, "value": metric_value},
+                "best_metric_name": self.best_name,
                 "best_metric_value": self.best_value,
                 "best_updated": improved,
             },
@@ -175,7 +206,11 @@ class PeriodicCheckpointManager:
             "running",
             global_step=int(global_step),
             checkpoint_epoch=global_step / self.steps_per_epoch,
-            latest_checkpoint=str(last_path.relative_to(self.store.run_dir)),
-            best_metric={"name": metric_name, "value": self.best_value},
+            last_checkpoint=(
+                str(existing_last.relative_to(self.store.run_dir))
+                if existing_last.is_file()
+                else None
+            ),
+            best_metric={"name": self.best_name, "value": self.best_value},
         )
         return last_path, best_path

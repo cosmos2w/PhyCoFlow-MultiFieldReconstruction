@@ -257,8 +257,12 @@ def run_base_training(
                 global_step=global_step + 1,
                 fallback_metric=row["total"],
             )
+        if checkpoint_result is not None:
+            monitor.record_validation(checkpoint_manager.last_validation_report)
         monitor.finish_step(
-            checkpoint_checked=checkpoint_result is not None,
+            checkpoint_checked=(
+                checkpoint_result is not None and checkpoint_manager.last_best_checked
+            ),
             best_checkpoint_saved=(
                 checkpoint_result is not None and checkpoint_result[1] is not None
             ),
@@ -327,6 +331,9 @@ def run_base_training(
     if saved is None:
         raise RuntimeError("final checkpoint save was unexpectedly disabled")
     last_checkpoint, saved_best_checkpoint = saved
+    if last_checkpoint is None:
+        raise RuntimeError("forced final save did not create last.pt")
+    monitor.record_validation(checkpoint_manager.last_validation_report)
     best_checkpoint_saved = saved_best_checkpoint is not None
     best_checkpoint = store.run_dir / "checkpoints" / "best.pt"
     if not best_checkpoint.is_file():
@@ -340,7 +347,6 @@ def run_base_training(
     store.update_manifest(
         checkpoint_hashes={
             "last": file_sha256(last_checkpoint),
-            "latest": file_sha256(last_checkpoint),
             "best": file_sha256(best_checkpoint),
         },
     )

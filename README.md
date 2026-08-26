@@ -219,6 +219,12 @@ Generated checkpoints, manifests, reports, previews, figures, caches, and
 histories stay under `cases/<case>/runs/` and are ignored by Git. Re-render a
 portable preview payload with:
 
+During training, the fixed validation objective and qualitative reconstruction
+use independent `evaluation.preview.loss_every_epochs` and
+`reconstruct_every_epochs` cadences. Validation loss is added to
+`loss_history.png` and selects `best.pt`; periodic recovery writes only
+`last.pt`, plus explicitly requested epoch checkpoints.
+
 ```bash
 python scripts/visualization/training_reconstruction_preview.py \
   --payload cases/<case>/runs/<experiment>/<run-id>/evaluation/training_preview/latest_reconstruction.npz

@@ -200,7 +200,8 @@ def test_base_training_uses_resident_pipeline_on_physical_gpu_one(tmp_path):
             "generation_steps": 1,
             "preview": {
                 "enabled": True,
-                "every_epochs": 1,
+                "loss_every_epochs": 10,
+                "reconstruct_every_epochs": 500,
                 "split": "validation",
                 "sample_index": 0,
                 "query_points": None,
@@ -227,18 +228,21 @@ def test_base_training_uses_resident_pipeline_on_physical_gpu_one(tmp_path):
     assert epoch_history["epoch_complete"] is True
     preview = run_dir / "evaluation" / "training_preview"
     assert (run_dir / "checkpoints" / "last.pt").is_file()
-    assert (run_dir / "checkpoints" / "latest.pt").is_symlink()
+    assert not (run_dir / "checkpoints" / "latest.pt").exists()
     assert (run_dir / "checkpoints" / "best.pt").is_file()
     checkpoint_report = json.loads(
-        (run_dir / "evaluation" / "latest_checkpoint.json").read_text()
+        (run_dir / "evaluation" / "checkpoint_status.json").read_text()
     )
     assert checkpoint_report["global_step"] == 2
-    assert checkpoint_report["latest"] == "checkpoints/latest.pt"
+    assert checkpoint_report["last"] == "checkpoints/last.pt"
     assert (preview / "latest_reconstruction.png").is_file()
     assert (preview / "latest_reconstruction.svg").is_file()
     assert (preview / "latest_reconstruction.pdf").is_file()
     assert (preview / "latest_reconstruction.npz").is_file()
     assert (preview / "figure_contract.md").is_file()
+    validation_metrics = json.loads((preview / "latest_validation.json").read_text())
+    assert validation_metrics["training_epoch"] == 1.0
+    assert validation_metrics["loss"] >= 0.0
     preview_metrics = json.loads((preview / "latest_metrics.json").read_text())
-    assert preview_metrics["checkpoint"] == "checkpoints/last.pt"
+    assert preview_metrics["weight_source"] == "configured_evaluation_weights"
     assert preview_metrics["training_epoch"] == 1.0

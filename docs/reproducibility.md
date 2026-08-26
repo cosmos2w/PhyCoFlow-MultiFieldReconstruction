@@ -49,7 +49,7 @@ large manifests, plots, or run summaries.
 
 ## Run lineage and external artifacts
 
-A run stores its resolved config, manifest, status, checkpoint aliases, and
+A run stores its resolved config, manifest, status, `last`/`best` checkpoints, and
 optional evaluation payloads under `cases/<case>/runs/`. Post-training stores
 the source run/checkpoint identity and hashes before and after refinement. The
 source checkpoint must remain immutable.

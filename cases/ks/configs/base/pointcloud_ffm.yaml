@@ -43,7 +43,8 @@ evaluation:
   generation_steps: 2
   preview:
     enabled: true
-    every_epochs: 1
+    loss_every_epochs: 10
+    reconstruct_every_epochs: 500
     split: validation  # choices: train | validation | test
     sample_index: 0
     query_points: null
@@ -54,8 +55,8 @@ evaluation:
 # Checkpoint enablement and save cadence.
 checkpointing:
   enabled: true
-  every_epochs: 1
-  save_epoch_one: true
+  every_epochs: 10
+  save_epoch_one: false
 
 # Stable experiment identifier used for the run directory.
 output:

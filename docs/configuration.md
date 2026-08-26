@@ -12,7 +12,7 @@ Use these locations for new settings:
 |---|---|---|
 | Shared runtime policy | `configs/defaults/` | device, workers, deterministic seed |
 | Shared optimization policy | `configs/defaults/base_training.yaml` | optimizer, clipping, batch defaults |
-| Evaluation/checkpoint policy | `configs/defaults/` | preview, checkpoint cadence |
+| Evaluation/checkpoint policy | `configs/defaults/` | validation loss, reconstruction, checkpoint cadence |
 | Generic architecture | `configs/models/` | width, depth, backbone, sampler |
 | Dataset contract | `cases/<case>/configs/dataset.yaml` | payload, fields, splits, normalization |
 | Sensors | `cases/<case>/configs/sensors/` | fields, counts, sampling seed |
@@ -58,6 +58,19 @@ python run.py train-base \
 Post-training configs should inherit the source run's dataset/model/
 observation contract where supported. The child config owns only its objective,
 rollout, trainable scope, reference policy, and output lineage.
+
+## Training validation and checkpoints
+
+Modern training profiles keep `evaluation.preview.enabled: true`. A fixed,
+seeded validation objective runs at `loss_every_epochs` and is plotted beside
+the training curves in `loss_history.png`; it does not run the generative
+reconstruction loop. Qualitative reconstruction figures and payloads run
+independently at `reconstruct_every_epochs`.
+
+Every fresh validation loss is compared with the run's best value and may
+replace `checkpoints/best.pt`. The rolling resumable `checkpoints/last.pt` is
+refreshed at `checkpointing.every_epochs`, while `checkpointing.epochs` adds
+immutable requested epoch files. There is no redundant `latest.pt` alias.
 
 ## Validation rules
 

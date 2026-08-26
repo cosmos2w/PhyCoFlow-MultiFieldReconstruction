@@ -136,7 +136,8 @@ def test_training_preview_config_is_strict():
     config["evaluation"] = {
         "preview": {
             "enabled": True,
-            "every_epochs": 5,
+            "loss_every_epochs": 10,
+            "reconstruct_every_epochs": 500,
             "split": "validation",
             "sample_index": 0,
             "query_points": None,
@@ -147,8 +148,13 @@ def test_training_preview_config_is_strict():
     }
     validate_config(config)
 
-    config["evaluation"]["preview"]["every_epochs"] = 0
-    with pytest.raises(ValueError, match="every_epochs"):
+    config["evaluation"]["preview"]["loss_every_epochs"] = 0
+    with pytest.raises(ValueError, match="loss_every_epochs"):
+        validate_config(config)
+
+    config["evaluation"]["preview"]["loss_every_epochs"] = 10
+    config["evaluation"]["preview"]["enabled"] = False
+    with pytest.raises(ValueError, match="must be enabled"):
         validate_config(config)
 
 

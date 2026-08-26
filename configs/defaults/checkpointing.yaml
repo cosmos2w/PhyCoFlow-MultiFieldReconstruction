@@ -1,8 +1,8 @@
-# Shared checkpoint lifecycle.  `last.pt` is the resumable checkpoint and
-# `latest.pt` is its local alias; named checkpoints remain case-run artifacts.
+# Shared checkpoint lifecycle: rolling `last.pt`, validation-selected `best.pt`,
+# and any explicitly requested immutable epoch checkpoints.
 
 # Checkpoint enablement and save cadence.
 checkpointing:
   enabled: true
-  every_epochs: 5
-  save_epoch_one: true
+  every_epochs: 10  # refresh the rolling last.pt recovery checkpoint
+  save_epoch_one: false  # set true only when an epoch-1 recovery file is required

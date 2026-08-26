@@ -22,6 +22,14 @@ def test_monitor_loads_history_and_updates_loss_figure(tmp_path):
     assert not (metrics / "history.jsonl").exists()
     monitor.record({"step": 2, "total": 1.0, "coherence_loss": 4.0}, lr=1.0e-4)
     assert monitor._epoch_coordinates([1, 2, 3, 4]) == [0.5, 1.0, 1.5, 2.0]
+    monitor.record_validation(
+        {
+            "global_step": 2,
+            "training_epoch": 1.0,
+            "loss": 2.5,
+            "components": {"data_mse": 2.5},
+        }
+    )
     monitor.finish_step(checkpoint_checked=True, best_checkpoint_saved=True)
     monitor.close(checkpoint_checked=True, best_checkpoint_saved=True)
 
@@ -38,9 +46,12 @@ def test_monitor_loads_history_and_updates_loss_figure(tmp_path):
     assert monitor.last_epoch_report is not None
     assert monitor.last_epoch_report["total"] == 2.0
     assert monitor.last_epoch_report["coherence_loss"] == 4.0
+    assert monitor.last_epoch_report["validation_loss"] == 2.5
     assert monitor.last_epoch_report["best"] == "saved"
     assert monitor.last_epoch_report["train_seconds"] >= 0.0
     assert monitor.last_epoch_report["wall_seconds"] >= monitor.last_epoch_report["train_seconds"]
+    validation_history = json.loads((metrics / "validation_history.jsonl").read_text())
+    assert validation_history["validation_loss"] == 2.5
 
 
 def test_monitor_resets_progress_at_each_epoch(tmp_path):

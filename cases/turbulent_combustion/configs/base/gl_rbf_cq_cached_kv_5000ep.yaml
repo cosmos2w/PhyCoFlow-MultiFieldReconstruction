@@ -42,9 +42,10 @@ evaluation:
   query_points: 4096
   generation_steps: 4
   seed: 2027
-  preview:  # On-the-fly validation and reconstruction
-    enabled: false
-    every_epochs: 500
+  preview:  # Validation loss and qualitative reconstruction have independent cadences.
+    enabled: true  # mandatory overfitting monitor
+    loss_every_epochs: 10  # cheap fixed validation loss; updates loss_history.png
+    reconstruct_every_epochs: 500  # expensive on-the-fly reconstruction artifacts
     split: validation  # choices: train | validation | test
     sample_index: 0
     query_points: 4096
@@ -55,9 +56,9 @@ evaluation:
 # Checkpoint enablement and save cadence.
 checkpointing:
   enabled: true
-  every_epochs: 500
+  every_epochs: 10  # refresh last.pt; every validation result can independently update best.pt
   epochs: [100, 500, 1000, 2000, 5000]
-  save_epoch_one: true
+  save_epoch_one: false
 
 # Optional benchmark timing and memory sampling.
 benchmark_telemetry:

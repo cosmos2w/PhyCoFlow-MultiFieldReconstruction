@@ -51,10 +51,10 @@ evaluation:
   query_points: 512
   generation_steps: 2
   seed: 2027
-  preview: {enabled: true, every_epochs: 1, split: validation, sample_index: 0, query_points: null, generation_steps: 2, seed: 2027, keep_history: false}
+  preview: {enabled: true, loss_every_epochs: 10, reconstruct_every_epochs: 500, split: validation, sample_index: 0, query_points: null, generation_steps: 2, seed: 2027, keep_history: false}
 
 # Checkpoint enablement and save cadence.
-checkpointing: {enabled: true, every_epochs: 1, save_epoch_one: true}
+checkpointing: {enabled: true, every_epochs: 10, save_epoch_one: false}
 
 # Stable experiment identifier used for the run directory.
 output: {experiment_name: phase7_combustion_global_distribution}
