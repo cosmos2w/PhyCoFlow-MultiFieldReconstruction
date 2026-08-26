@@ -1,0 +1,4 @@
+model:
+  name: latent_fm
+  stage: 1
+  latent_channels: 16

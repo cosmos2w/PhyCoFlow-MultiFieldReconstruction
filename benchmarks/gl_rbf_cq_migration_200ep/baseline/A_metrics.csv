@@ -1,6 +1,0 @@
-source,device,batch_size,query_points,sensor_count,outcome,step_seconds,forward_native_loss_seconds,backward_seconds,optimizer_seconds,peak_cuda_allocated_bytes,peak_cuda_reserved_bytes
-controlled_smoke,cuda:0,40,4096,384,completed,0.286309,0.057395,0.227096,0.001619,41183916544,48375005184
-controlled_smoke,cuda:0,8,4096,384,completed,0.064059,0.015182,0.047423,0.001231,8308785664,9969860608
-controlled_smoke,cuda:0,32,4096,384,completed,0.228475,0.045227,0.181704,0.001343,32964593152,39684407296
-original_b128_smoke,cuda:0,128,4096,384,cuda_oom,,,,,,
-allocator_identical_retry,cuda:0,128,4096,384,cuda_oom,,,,,,

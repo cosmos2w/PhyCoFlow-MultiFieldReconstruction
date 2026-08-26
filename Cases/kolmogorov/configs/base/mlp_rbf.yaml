@@ -1,8 +1,0 @@
-defaults: [plain_defaults.yaml]
-model:
-  name: mlp_rbf
-  hidden_dim: 128
-  rbf_sigma: 0.08
-  fourier_bands: 16
-  query_points: 4096
-output: {experiment_name: mlp_rbf_plain}

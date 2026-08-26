@@ -1,0 +1,13 @@
+# Active common source for all modern base-training profiles.
+defaults:
+  - runtime.yaml
+  - evaluation.yaml
+  - checkpointing.yaml
+
+stage: base_training
+optimization:
+  epochs: 200
+  batch_size: 1
+  lr: 1.0e-4
+  weight_decay: 1.0e-6
+  grad_clip: 1.0

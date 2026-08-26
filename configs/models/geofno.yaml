@@ -1,0 +1,5 @@
+model:
+  name: geofno
+  hidden_channels: 32
+  modes: [16, 16]
+  layers: 4

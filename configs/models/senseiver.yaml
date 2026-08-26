@@ -1,0 +1,7 @@
+model:
+  name: senseiver
+  width: 128
+  num_latents: 64
+  heads: 4
+  depth: 3
+  query_points: 4096

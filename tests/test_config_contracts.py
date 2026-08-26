@@ -17,12 +17,13 @@ from phycoflow_reconstruction.registry import Registry
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 BASE_CONFIGS = tuple(
     path
-    for path in sorted((PROJECT_ROOT / "Cases").glob("*/configs/base/*.yaml"))
-    if path.name not in {"plain_defaults.yaml", "latent_fm_stage2.yaml"}
+    for path in sorted((PROJECT_ROOT / "cases").glob("*/configs/base/*.yaml"))
+    if path.name != "latent_fm_stage2.yaml"
 )
 LATENT_STAGE2_TEMPLATES = tuple(
-    sorted((PROJECT_ROOT / "Cases").glob("*/configs/base/latent_fm_stage2.yaml"))
+    sorted((PROJECT_ROOT / "cases").glob("*/configs/base/latent_fm_stage2.yaml"))
 )
+SHARED_MODEL_CONFIGS = tuple(sorted((PROJECT_ROOT / "configs" / "models").glob("*.yaml")))
 
 
 def _base_config():
@@ -50,6 +51,59 @@ def test_stage_rejects_posttraining_keys():
 )
 def test_every_case_base_config_satisfies_the_strict_schema(path):
     validate_config(load_config(path))
+
+
+def test_shared_model_configs_are_the_single_architecture_source():
+    expected = {
+        "coordinate_mlp",
+        "mlp_rbf",
+        "deeponet",
+        "senseiver",
+        "geofno",
+        "diffusion_pde",
+        "latent_fm",
+        "pointcloud_ffm",
+        "gl_rbf_cq",
+        "pinn",
+    }
+    assert {load_config(path)["model"]["name"] for path in SHARED_MODEL_CONFIGS} == expected
+    assert all(set(load_config(path)) == {"model"} for path in SHARED_MODEL_CONFIGS)
+
+
+def test_case_dataset_catalog_uses_the_canonical_lowercase_root():
+    configs = tuple(sorted((PROJECT_ROOT / "cases").glob("*/configs/dataset.yaml")))
+    assert {path.parents[1].name for path in configs} == {
+        "brusselator",
+        "kolmogorov",
+        "ks",
+        "mass_transport_fluid",
+        "turbulent_combustion",
+    }
+    for path in configs:
+        dataset = load_config(path)["dataset"]
+        assert str(dataset["path"]).startswith("../../datasets/")
+        assert (path.parent / dataset["path"]).resolve().parent.name == path.parents[1].name
+
+
+def test_all_canonical_case_yaml_defaults_resolve():
+    paths = tuple(
+        sorted(
+            path
+            for path in (PROJECT_ROOT / "cases").glob("*/configs/**/*.yaml")
+            if "_experiments" not in path.parts
+        )
+    )
+    assert paths
+    assert all(load_config(path) for path in paths)
+
+
+def test_recursive_default_cycles_are_reported(tmp_path):
+    first = tmp_path / "first.yaml"
+    second = tmp_path / "second.yaml"
+    first.write_text("defaults: [second.yaml]\n", encoding="utf-8")
+    second.write_text("defaults: [first.yaml]\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="defaults cycle"):
+        load_config(first)
 
 
 @pytest.mark.parametrize("path", LATENT_STAGE2_TEMPLATES)

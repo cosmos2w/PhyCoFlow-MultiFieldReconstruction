@@ -1,21 +1,48 @@
 name: contracts
 
 on:
-  push:
   pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
 
 jobs:
-  unit-contracts:
+  cpu-contracts:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: {python-version: '3.11'}
-      - run: python -m pip install --upgrade pip
-      - run: python -m pip install -e '.[dev,operator]'
-      - run: ruff check src Cases tests scripts figures/scripts
-      - run: pytest
-      - run: >-
-          python scripts/aggregate_benchmark.py
-          --suite benchmarks/v0_integration/suite.yaml
-          --output /tmp/phase8_results.yaml
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install project and development dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -e ".[dev,operator,keops]"
+      - name: Lint permanent source
+        run: ruff check src tests scripts cases benchmarks
+      - name: Run CPU contract and unit tests
+        env:
+          CUDA_VISIBLE_DEVICES: ""
+        run: pytest
+      - name: Validate canonical case configuration composition
+        env:
+          PYTHONPATH: src
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          from phycoflow_reconstruction.config import load_config, validate_config
+
+          paths = sorted(Path("cases").glob("*/configs/base/*.yaml"))
+          paths = [path for path in paths if path.name != "latent_fm_stage2.yaml"]
+          for path in paths:
+              validate_config(load_config(path))
+          print(f"validated {len(paths)} canonical base configurations")
+          PY
+      - name: Check repository architecture
+        run: |
+          test ! -d src/phycoflow_pointcloud
+          ! git ls-files -z -- '*.py' | xargs -0 grep -nH 'phycoflow_pointcloud'

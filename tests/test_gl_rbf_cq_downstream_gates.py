@@ -92,7 +92,7 @@ def test_b_c_sensor_batches_and_rng_draws_are_identical():
     samples = [_field_sample(index) for index in range(3)]
     config_b = _load(CONFIG_B)
     config_c = _load(CONFIG_C)
-    portable = pytest.importorskip("phycoflow_pointcloud")
+    portable = pytest.importorskip("phycoflow_reconstruction.models.flows.pointcloud")
 
     portable_config_b = copy.deepcopy(config_b["model"])
     portable_config_c = copy.deepcopy(config_c["model"])
@@ -161,9 +161,7 @@ def _adapter_batch() -> ObservationBatch:
         obs_coords=torch.stack([coords[i, indices[i]] for i in range(2)]),
         obs_values=torch.randn(2, 6, 1, generator=generator),
         obs_field_ids=torch.arange(6).remainder(5).repeat(2, 1),
-        obs_valid_mask=torch.tensor(
-            [[1, 1, 1, 1, 1, 1], [1, 1, 1, 1, 0, 0]], dtype=torch.bool
-        ),
+        obs_valid_mask=torch.tensor([[1, 1, 1, 1, 1, 1], [1, 1, 1, 1, 0, 0]], dtype=torch.bool),
         query_coords=coords,
         query_valid_mask=torch.ones(2, 17, dtype=torch.bool),
         target_fields=values,
@@ -174,8 +172,10 @@ def _adapter_batch() -> ObservationBatch:
 
 
 def test_adapter_and_portable_core_forward_loss_gradient_equality():
-    pytest.importorskip("phycoflow_reconstruction.models.flows.gl_rbf_cq")
-    portable = pytest.importorskip("phycoflow_pointcloud")
+    pytest.importorskip(
+        "phycoflow_reconstruction.models.flows.pointcloud.adapters.gl_rbf_cq_adapter"
+    )
+    portable = pytest.importorskip("phycoflow_reconstruction.models.flows.pointcloud")
     from phycoflow_reconstruction.models import build_model
     from phycoflow_reconstruction.registry import MODEL_REGISTRY
 
@@ -196,9 +196,7 @@ def test_adapter_and_portable_core_forward_loss_gradient_equality():
     portable_config.pop("name", None)
     portable_config["model_name"] = "GL_rbf_CQ"
     portable_config["coord_dim"] = 2
-    portable_model = portable.build_pointcloud_model(
-        portable_config, n_fields=5, device="cpu"
-    )
+    portable_model = portable.build_pointcloud_model(portable_config, n_fields=5, device="cpu")
     portable_model.load_state_dict(adapter.state_dict(), strict=True)
 
     batch = _adapter_batch()
@@ -238,9 +236,7 @@ def test_adapter_and_portable_core_forward_loss_gradient_equality():
             assert adapter_gradient is None
         else:
             assert adapter_gradient is not None
-            torch.testing.assert_close(
-                adapter_gradient, portable_parameter.grad, rtol=0, atol=0
-            )
+            torch.testing.assert_close(adapter_gradient, portable_parameter.grad, rtol=0, atol=0)
 
     adapter.zero_grad(set_to_none=True)
     portable_model.zero_grad(set_to_none=True)
@@ -272,7 +268,9 @@ def test_adapter_and_portable_core_forward_loss_gradient_equality():
 
 
 def test_b_c_actual_configs_have_identical_seeded_initial_state():
-    pytest.importorskip("phycoflow_reconstruction.models.flows.gl_rbf_cq")
+    pytest.importorskip(
+        "phycoflow_reconstruction.models.flows.pointcloud.adapters.gl_rbf_cq_adapter"
+    )
     from phycoflow_reconstruction.models import build_model
     from phycoflow_reconstruction.registry import MODEL_REGISTRY
 
@@ -297,9 +295,7 @@ def test_b_c_actual_configs_have_identical_seeded_initial_state():
         torch.testing.assert_close(arm_b.state_dict()[key], arm_c.state_dict()[key], rtol=0, atol=0)
     evidence = json.loads(INIT_EVIDENCE.read_text())
     assert evidence["state"]["state_key_count"] == len(arm_b.state_dict())
-    assert evidence["state"]["state_schema_sha256"] == _state_digest(
-        arm_b, include_values=False
-    )
+    assert evidence["state"]["state_schema_sha256"] == _state_digest(arm_b, include_values=False)
     assert evidence["state"]["B_state_sha256"] == _state_digest(arm_b, include_values=True)
     assert evidence["state"]["C_state_sha256"] == _state_digest(arm_c, include_values=True)
     assert evidence["state"]["B_state_sha256"] == evidence["state"]["C_state_sha256"]
@@ -308,7 +304,9 @@ def test_b_c_actual_configs_have_identical_seeded_initial_state():
 
 
 def test_adapter_ema_lifecycle_is_generic_and_resumable():
-    pytest.importorskip("phycoflow_reconstruction.models.flows.gl_rbf_cq")
+    pytest.importorskip(
+        "phycoflow_reconstruction.models.flows.pointcloud.adapters.gl_rbf_cq_adapter"
+    )
     from phycoflow_reconstruction.models import build_model
     from phycoflow_reconstruction.registry import MODEL_REGISTRY
 

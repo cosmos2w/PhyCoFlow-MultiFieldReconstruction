@@ -4,7 +4,8 @@
 The comparison deliberately consumes the frozen, machine-readable evidence
 artifacts instead of re-reading checkpoint tensors.  It therefore remains
 usable on a CPU-only checkout while still using the immutable per-epoch
-telemetry files for exact wall-time-to-threshold calculations.
+telemetry files for exact wall-time-to-threshold calculations.  Generated
+comparison files default to the ignored benchmark output directory.
 """
 
 from __future__ import annotations
@@ -30,8 +31,8 @@ THRESHOLDS = {
 SCRIPT_PATH = Path(__file__).resolve()
 BENCHMARK_DIR = SCRIPT_PATH.parents[1]
 PROJECT_ROOT = SCRIPT_PATH.parents[3]
-REPO_ROOT = SCRIPT_PATH.parents[4]
-OUTPUT_DIR = SCRIPT_PATH.parent
+REPO_ROOT = PROJECT_ROOT
+OUTPUT_DIR = BENCHMARK_DIR / "generated" / "comparison"
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -804,7 +805,7 @@ invalidate this benchmark:
 
 ## Reproduction
 
-From `Proj_MultiFieldReconstruction/`, run:
+From the standalone repository root, run:
 
 ```text
 rtk env CUDA_VISIBLE_DEVICES= python benchmarks/gl_rbf_cq_migration_200ep/comparison/generate_comparison.py
@@ -812,8 +813,8 @@ rtk env CUDA_VISIBLE_DEVICES= python benchmarks/gl_rbf_cq_migration_200ep/compar
 
 The generator is standard-library-only, reads only the frozen summaries,
 execution/gate evidence, configs, guide, and immutable telemetry, and writes
-the three comparison artifacts in this directory. It does not modify the
-untracked benchmark Markdown or any run artifact.
+the three comparison artifacts in the ignored generated output directory. It
+does not modify the benchmark protocol or any run artifact.
 """
 
 
@@ -847,22 +848,22 @@ def build_summary() -> dict[str, Any]:
     controlled = execution_evidence(execution)
 
     input_paths = {
-        "Proj_MultiFieldReconstruction/benchmarks/gl_rbf_cq_migration_200ep/baseline/A_performance.json": BENCHMARK_DIR / "baseline" / "A_performance.json",
-        "Proj_MultiFieldReconstruction/benchmarks/gl_rbf_cq_migration_200ep/runs_summary/B_summary.json": BENCHMARK_DIR / "runs_summary" / "B_summary.json",
-        "Proj_MultiFieldReconstruction/benchmarks/gl_rbf_cq_migration_200ep/runs_summary/C_summary.json": BENCHMARK_DIR / "runs_summary" / "C_summary.json",
-        "Proj_MultiFieldReconstruction/benchmarks/gl_rbf_cq_migration_200ep/execution/B_vs_C_execution.json": BENCHMARK_DIR / "execution" / "B_vs_C_execution.json",
-        "Proj_MultiFieldReconstruction/benchmarks/gl_rbf_cq_migration_200ep/migration/correctness_gates.json": BENCHMARK_DIR / "migration" / "correctness_gates.json",
-        "Proj_MultiFieldReconstruction/benchmarks/gl_rbf_cq_migration_200ep/migration/initialization_identity.json": BENCHMARK_DIR / "migration" / "initialization_identity.json",
-        "Proj_MultiFieldReconstruction/benchmarks/gl_rbf_cq_migration_200ep/PROTOCOL.yaml": BENCHMARK_DIR / "PROTOCOL.yaml",
-        "Proj_MultiFieldReconstruction/benchmarks/gl_rbf_cq_migration_200ep/README.md": BENCHMARK_DIR / "README.md",
+        "benchmarks/gl_rbf_cq_migration_200ep/baseline/A_performance.json": BENCHMARK_DIR / "baseline" / "A_performance.json",
+        "benchmarks/gl_rbf_cq_migration_200ep/runs_summary/B_summary.json": BENCHMARK_DIR / "runs_summary" / "B_summary.json",
+        "benchmarks/gl_rbf_cq_migration_200ep/runs_summary/C_summary.json": BENCHMARK_DIR / "runs_summary" / "C_summary.json",
+        "benchmarks/gl_rbf_cq_migration_200ep/execution/B_vs_C_execution.json": BENCHMARK_DIR / "execution" / "B_vs_C_execution.json",
+        "benchmarks/gl_rbf_cq_migration_200ep/migration/correctness_gates.json": BENCHMARK_DIR / "migration" / "correctness_gates.json",
+        "benchmarks/gl_rbf_cq_migration_200ep/migration/initialization_identity.json": BENCHMARK_DIR / "migration" / "initialization_identity.json",
+        "benchmarks/gl_rbf_cq_migration_200ep/PROTOCOL.yaml": BENCHMARK_DIR / "PROTOCOL.yaml",
+        "benchmarks/gl_rbf_cq_migration_200ep/README.md": BENCHMARK_DIR / "README.md",
         "0_demo_TurbulentCombustion/GL_rbf_CQ_UPDATE_GUIDE.md": REPO_ROOT / "0_demo_TurbulentCombustion" / "GL_rbf_CQ_UPDATE_GUIDE.md",
         **{
-            f"Proj_MultiFieldReconstruction/benchmarks/gl_rbf_cq_migration_200ep/configs/{arm}_{config_path_for(arm).name.split('_', 1)[1]}": config_path_for(arm)
+            f"benchmarks/gl_rbf_cq_migration_200ep/configs/{arm}_{config_path_for(arm).name.split('_', 1)[1]}": config_path_for(arm)
             for arm in ("A", "B", "C")
         },
     }
     input_hashes = {path: sha256_file(file_path) for path, file_path in sorted(input_paths.items())}
-    require(input_hashes["Proj_MultiFieldReconstruction/benchmarks/gl_rbf_cq_migration_200ep/execution/B_vs_C_execution.json"] == execution["trace"].get("execution_sha256", input_hashes["Proj_MultiFieldReconstruction/benchmarks/gl_rbf_cq_migration_200ep/execution/B_vs_C_execution.json"]), "execution hash sanity")
+    require(input_hashes["benchmarks/gl_rbf_cq_migration_200ep/execution/B_vs_C_execution.json"] == execution["trace"].get("execution_sha256", input_hashes["benchmarks/gl_rbf_cq_migration_200ep/execution/B_vs_C_execution.json"]), "execution hash sanity")
     require(sha256_file(REPO_ROOT / "0_demo_TurbulentCombustion" / "GL_rbf_CQ_UPDATE_GUIDE.md") == input_hashes["0_demo_TurbulentCombustion/GL_rbf_CQ_UPDATE_GUIDE.md"], "guide hash sanity")
 
     migration_fixes = [

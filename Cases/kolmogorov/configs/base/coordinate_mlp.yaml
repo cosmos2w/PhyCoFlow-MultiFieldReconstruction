@@ -1,7 +1,0 @@
-defaults: [plain_defaults.yaml]
-model:
-  name: coordinate_mlp
-  hidden_dim: 128
-  fourier_bands: 16
-  query_points: 4096
-output: {experiment_name: coordinate_mlp_plain}

@@ -1,4 +1,4 @@
-# Phase 8 integration audit
+# One-update integration audit
 
 This release verifies reproducible wiring, not converged model quality.
 
@@ -14,10 +14,11 @@ This release verifies reproducible wiring, not converged model quality.
   `suite.yaml`; the portable sensor manifest is checked against every row.
 - Claims: metric values demonstrate executable contracts only. They do not show
   superiority or physical validity after one update.
-- Code: the repository commit and a relevant-file hash snapshot are stored in
-  `results.yaml`. The release was prepared in a dirty worktree, so file hashes,
-  not the commit alone, identify the exact implemented paths.
-- Licenses/provenance: `UPSTREAM.md` records NeuralOperator (MIT), Senseiver
+- Code: the repository commit and relevant-file hash snapshot should be
+  recorded with any generated local report. The release was prepared in a
+  dirty worktree, so file hashes, not the commit alone, identify the exact
+  implemented paths.
+- Licenses/provenance: `docs/provenance.md` records NeuralOperator (MIT), Senseiver
   (BSD-3-Clause reference), DiffusionPDE (CC BY-NC-SA reference), DeepXDE
   (LGPL-2.1 reference), Meta Flow Matching (CC BY-NC reference), and the
   repository-local Demo50 extraction. No additional upstream code was added in

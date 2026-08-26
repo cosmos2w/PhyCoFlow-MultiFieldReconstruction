@@ -12,7 +12,7 @@ from phycoflow_reconstruction.data.normalization import FieldNormalizer
 
 
 def _physics_class():
-    path = Path(__file__).resolve().parents[1] / "Cases" / "brusselator" / "physics.py"
+    path = Path(__file__).resolve().parents[1] / "cases" / "brusselator" / "physics.py"
     spec = importlib.util.spec_from_file_location("phase7_brusselator_physics", path)
     module = importlib.util.module_from_spec(spec)
     assert spec and spec.loader

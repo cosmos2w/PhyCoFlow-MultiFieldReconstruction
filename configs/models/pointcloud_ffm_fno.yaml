@@ -1,0 +1,5 @@
+model:
+  name: pointcloud_ffm
+  backbone: fno
+  prior: rff
+  fno_hidden_channels: 32

@@ -1,0 +1,7 @@
+# Stage 2 intentionally remains incomplete until a stage-1 checkpoint is
+# selected.  Validation reports this one documented missing value.
+model:
+  name: latent_fm
+  stage: 2
+  latent_channels: 16
+  stage1_checkpoint: null

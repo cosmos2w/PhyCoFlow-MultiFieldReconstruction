@@ -11,7 +11,7 @@ from typing import Any
 
 REPORT_DIR = Path(__file__).resolve().parent
 BENCHMARK_DIR = REPORT_DIR.parent
-REPO_ROOT = REPORT_DIR.parents[3]
+REPO_ROOT = REPORT_DIR.parents[2]
 
 SOURCE_PATHS = {
     "arm_a": BENCHMARK_DIR / "baseline" / "A_performance.json",

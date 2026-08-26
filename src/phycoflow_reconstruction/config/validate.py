@@ -173,7 +173,7 @@ def _validate_common_sections(config: Mapping[str, Any]) -> None:
         "evaluation",
     )
     for key in ("max_samples", "query_points", "generation_steps"):
-        if key in evaluation and int(evaluation[key]) < 1:
+        if key in evaluation and evaluation[key] is not None and int(evaluation[key]) < 1:
             raise ValueError(f"evaluation.{key} must be positive")
     preview = evaluation.get("preview", {})
     if not isinstance(preview, Mapping):

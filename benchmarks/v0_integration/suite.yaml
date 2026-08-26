@@ -1,4 +1,4 @@
-release: Phase 8 integration release
+release: standalone integration release
 scope: >-
   Matched one-update Brusselator checks on one validation trajectory. These rows
   demonstrate stage wiring, metric aggregation, and traceability; they are not
@@ -10,7 +10,7 @@ claims:
   forbidden:
     - Ranking methods by the one-sample values below.
     - Reporting uncertainty or confidence intervals from one trajectory.
-frozen_sensor_manifest: benchmarks/v0_integration/brusselator_u128_validation.json
+frozen_sensor_manifest: benchmarks/v0_integration/generated/brusselator_u128_validation.json
 dataset_full_sha256: 973907181a043471a2bdd40e11596a3403b966fa44af7c7dc8b50a611655fdac
 code_files:
   - src/phycoflow_reconstruction/cli.py
@@ -26,7 +26,7 @@ code_files:
   - src/phycoflow_reconstruction/training/post_training.py
   - src/phycoflow_reconstruction/training/physics_post_training.py
   - src/phycoflow_reconstruction/training/direct_physics.py
-  - Cases/brusselator/physics.py
+  - cases/brusselator/physics.py
 entries:
   - id: plain_coordinate_mlp
     stage: base_training

@@ -9,7 +9,7 @@ from phycoflow_reconstruction.contracts import FieldSample
 from phycoflow_reconstruction.data.sensor_protocols import SensorProtocol, build_observation_batch
 
 PROJECT = Path(__file__).resolve().parents[1]
-CASE = PROJECT / "Cases" / "kolmogorov"
+CASE = PROJECT / "cases" / "kolmogorov"
 
 
 def _grid_sample() -> FieldSample:
@@ -38,10 +38,8 @@ def _grid_sample() -> FieldSample:
 
 def test_all_kolmogorov_base_configs_resolve_and_validate():
     configs = sorted((CASE / "configs" / "base").glob("*.yaml"))
-    assert len(configs) == 11
+    assert len(configs) == 10
     for path in configs:
-        if path.name == "plain_defaults.yaml":
-            continue
         overrides = (
             ["model.stage1_checkpoint=/tmp/immutable-stage1.pt"] if "stage2" in path.name else []
         )
