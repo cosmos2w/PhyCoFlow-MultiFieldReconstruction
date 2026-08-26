@@ -1,8 +1,11 @@
 name: contracts
 
 on:
-  push:
   pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
 
 jobs:
   cpu-contracts:
@@ -17,7 +20,7 @@ jobs:
           python-version: "3.11"
           cache: pip
       - name: Install project and development dependencies
-        run: python -m pip install --upgrade pip && python -m pip install -e ".[dev,operator]"
+        run: python -m pip install --upgrade pip && python -m pip install -e ".[dev,operator,keops]"
       - name: Lint permanent source
         run: ruff check src tests scripts cases benchmarks
       - name: Run CPU contract and unit tests
