@@ -19,6 +19,8 @@ def reconstruction_metrics(
     target: torch.Tensor,
     batch: ObservationBatch,
     field_names: Sequence[str],
+    *,
+    normalizer=None,
 ) -> dict[str, float | dict[str, float] | None]:
     squared = (prediction - target).square()
     valid = batch.query_valid_mask.unsqueeze(-1).expand_as(squared)
@@ -62,7 +64,7 @@ def reconstruction_metrics(
                     observed[batch_index, position, int(field)] = True
     observed &= valid
     unobserved = valid & ~observed
-    return {
+    report: dict[str, float | dict[str, float] | None] = {
         "mse_normalized": float(total.cpu()),
         "per_field_mse_normalized": per_field,
         "mean_relative_l2": float(sample_relative_l2.mean().cpu()),
@@ -75,3 +77,40 @@ def reconstruction_metrics(
             float(squared[unobserved].mean().cpu()) if unobserved.any() else None
         ),
     }
+    if normalizer is not None:
+        prediction_physical = normalizer.decode(prediction)
+        target_physical = normalizer.decode(target)
+        physical_squared = (prediction_physical - target_physical).square()
+        physical_error_sq = (physical_squared * valid_float.unsqueeze(-1)).sum(dim=(1, 2))
+        physical_target_sq = (
+            target_physical.square() * valid_float.unsqueeze(-1)
+        ).sum(dim=(1, 2))
+        physical_relative = torch.sqrt(
+            physical_error_sq
+            / physical_target_sq.clamp_min(torch.finfo(prediction.dtype).eps)
+        )
+        physical_field_error_sq = (
+            physical_squared * valid_float.unsqueeze(-1)
+        ).sum(dim=1)
+        physical_field_target_sq = (
+            target_physical.square() * valid_float.unsqueeze(-1)
+        ).sum(dim=1)
+        physical_field_relative = torch.sqrt(
+            physical_field_error_sq
+            / physical_field_target_sq.clamp_min(torch.finfo(prediction.dtype).eps)
+        )
+        report.update(
+            mse_physical=float(physical_squared[valid].mean().cpu()),
+            mean_relative_l2_physical=float(physical_relative.mean().cpu()),
+            per_field_mse_physical={
+                str(name): float(
+                    physical_squared[..., field][batch.query_valid_mask].mean().cpu()
+                )
+                for field, name in enumerate(field_names)
+            },
+            per_field_relative_l2_physical={
+                str(name): float(physical_field_relative[:, field].mean().cpu())
+                for field, name in enumerate(field_names)
+            },
+        )
+    return report

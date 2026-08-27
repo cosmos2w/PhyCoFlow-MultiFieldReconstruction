@@ -36,6 +36,9 @@ class PeriodicCheckpointManager:
         )
         self.steps_per_epoch = max(1, int(steps_per_epoch))
         self.store = store
+        self.selection_metric = str(
+            settings.get("selection_metric", "native_validation_loss")
+        )
         self.best_name, self.best_value = self._existing_best_metric()
         self.last_validation_report: dict[str, Any] | None = None
         self.last_best_checked = False
@@ -115,17 +118,25 @@ class PeriodicCheckpointManager:
         validation_report = (
             preview_report.get("validation") if preview_report is not None else None
         )
+        reconstruction_report = (
+            preview_report.get("reconstruction") if preview_report is not None else None
+        )
         self.last_validation_report = validation_report
         metric_name = "training_loss"
         metric_value = float(fallback_metric)
-        if validation_report is not None:
-            metric_name = "validation_loss"
-            metric_value = float(validation_report["loss"])
+        if self.selection_metric == "reconstruction_mse":
+            if reconstruction_report is not None:
+                metric_name = "fixed_validation_reconstruction_mse"
+                metric_value = float(reconstruction_report["metrics"]["mse_normalized"])
+            eligible_for_best = reconstruction_report is not None
+        else:
+            if validation_report is not None:
+                metric_name = "native_validation_loss"
+                metric_value = float(validation_report["loss"])
+            # The training-loss fallback remains solely for old configurations
+            # that explicitly disabled previews.
+            eligible_for_best = validation_report is not None or not preview.enabled
 
-        # Enabled modern runs select best only from the comparable fixed
-        # validation loss. The training-loss fallback remains solely for old
-        # configurations that explicitly disabled previews.
-        eligible_for_best = validation_report is not None or not preview.enabled
         self.last_best_checked = eligible_for_best
         improved = (
             eligible_for_best
@@ -147,6 +158,11 @@ class PeriodicCheckpointManager:
             epoch = global_step // self.steps_per_epoch
             milestone_path = self.store.save_checkpoint(f"epoch_{epoch:03d}", checkpoint)
         best_path = self.store.save_checkpoint("best", checkpoint) if improved else None
+        best_fidelity_path = (
+            self.store.save_checkpoint("best_fidelity", checkpoint)
+            if improved and self.selection_metric == "reconstruction_mse"
+            else None
+        )
 
         checkpoint_hashes = {}
         if last_path is not None:
@@ -158,6 +174,9 @@ class PeriodicCheckpointManager:
         existing_best = self.store.run_dir / "checkpoints" / "best.pt"
         if existing_best.is_file():
             checkpoint_hashes["best"] = file_sha256(existing_best)
+        existing_best_fidelity = self.store.run_dir / "checkpoints" / "best_fidelity.pt"
+        if existing_best_fidelity.is_file():
+            checkpoint_hashes["best_fidelity"] = file_sha256(existing_best_fidelity)
         manifest_path = self.store.run_dir / "run_manifest.json"
         existing_hashes = json.loads(manifest_path.read_text(encoding="utf-8")).get(
             "checkpoint_hashes", {}
@@ -196,10 +215,16 @@ class PeriodicCheckpointManager:
                     if existing_best.is_file()
                     else None
                 ),
+                "best_fidelity": (
+                    str(existing_best_fidelity.relative_to(self.store.run_dir))
+                    if existing_best_fidelity.is_file()
+                    else None
+                ),
                 "selection_metric": {"name": metric_name, "value": metric_value},
                 "best_metric_name": self.best_name,
                 "best_metric_value": self.best_value,
                 "best_updated": improved,
+                "best_fidelity_updated": best_fidelity_path is not None,
             },
         )
         self.store.set_status(

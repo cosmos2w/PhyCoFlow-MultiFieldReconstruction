@@ -77,7 +77,7 @@ def fixed_query_indices(
     """Build one CPU-selected point set shared by every sample and step."""
     query_count = point_count if query_points is None else min(int(query_points), point_count)
     if query_count == point_count:
-        return None
+        return torch.arange(point_count, dtype=torch.long)
     if query_count < 2:
         raise ValueError("fixed shared coherence queries require at least two points")
     generator = torch.Generator(device="cpu").manual_seed(int(seed))
