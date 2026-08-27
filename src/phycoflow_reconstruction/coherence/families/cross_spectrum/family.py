@@ -86,6 +86,8 @@ class CrossSpectrumFamily(nn.Module):
             raise ValueError("cross-spectrum graph bands must be non-empty and unique")
         self.geometry_sha256: str | None = None
         self.resolved_sigma: float | None = None
+        self.zero_mode_eigenvalue: float | None = None
+        self.first_retained_eigengap: float | None = None
         self.eps = float(config.get("eps", 1e-8))
         if self.eps <= 0:
             raise ValueError("cross_spectrum.eps must be positive")
@@ -159,6 +161,8 @@ class CrossSpectrumFamily(nn.Module):
             self.band_ids = basis.band_ids.to(coordinates.device)
             self.geometry_sha256 = basis.coordinate_sha256
             self.resolved_sigma = basis.sigma
+            self.zero_mode_eigenvalue = basis.zero_mode_eigenvalue
+            self.first_retained_eigengap = basis.first_retained_eigengap
         elif digest != self.geometry_sha256:
             raise ValueError("cross-spectrum coordinates changed after graph-basis construction")
         return self.eigenvectors.to(device=coordinates.device, dtype=dtype)
@@ -172,6 +176,33 @@ class CrossSpectrumFamily(nn.Module):
             generated = generated * scale + offset
             reference = reference * scale + offset
         return generated[..., self.field_ids], reference[..., self.field_ids]
+
+    def _same_frequency_epsilon_diagnostics(
+        self, coefficients: torch.Tensor
+    ) -> dict[str, float]:
+        auto = coefficients.abs().square().mean(dim=0)
+        denominator = torch.einsum("ki,kj->kij", auto, auto)
+        return {
+            "denominator_min": float(denominator.min().detach()),
+            "epsilon_dominated_fraction": float((denominator <= self.eps).float().mean()),
+        }
+
+    def _cross_frequency_epsilon_diagnostics(
+        self, energies: torch.Tensor
+    ) -> dict[str, float]:
+        centered = energies - energies.mean(dim=0, keepdim=True)
+        covariance = torch.einsum("bmi,bnj->mnij", centered, centered) / energies.shape[0]
+        variances = torch.stack(
+            [
+                torch.diagonal(covariance[index, index])
+                for index in range(covariance.shape[0])
+            ]
+        )
+        denominator = torch.einsum("mi,nj->mnij", variances, variances)
+        return {
+            "denominator_min": float(denominator.min().detach()),
+            "epsilon_dominated_fraction": float((denominator <= self.eps).float().mean()),
+        }
 
     def forward(
         self,
@@ -196,40 +227,102 @@ class CrossSpectrumFamily(nn.Module):
         coefficients_generated = graph_fourier(generated, basis)
         coefficients_reference = graph_fourier(reference, basis)
         results: dict[str, TermResult] = {}
+        component_diagnostics: dict[str, dict[str, Any]] = {}
         total = generated.sum() * 0.0
-        if "same_frequency" in self.component_weights:
+        if self.component_weights.get("same_frequency", 0.0) > 0:
             loss = pair_mean_square(
                 spectral_coherence(coefficients_generated, self.eps),
                 spectral_coherence(coefficients_reference, self.eps),
                 self.pairs,
             )
+            path = f"{self.family_name}.same_frequency.magnitude_squared"
+            weight = self.component_weights["same_frequency"]
             results[f"{self.family_name}.same_frequency.magnitude_squared"] = TermResult(
-                None, loss, diagnostics={"minimum_batch_size": 2}
+                None,
+                loss,
+                diagnostics={
+                    "minimum_batch_size": 2,
+                    "epsilon": self.eps,
+                    "generated": self._same_frequency_epsilon_diagnostics(
+                        coefficients_generated
+                    ),
+                    "reference": self._same_frequency_epsilon_diagnostics(
+                        coefficients_reference
+                    ),
+                },
             )
-            total = total + self.component_weights["same_frequency"] * loss
+            component_diagnostics[path] = {
+                "weight": weight,
+                "executed": True,
+                "raw_scalar_loss": float(loss.detach()),
+                "weighted_scalar_contribution": float((weight * loss).detach()),
+            }
+            total = total + weight * loss
         energies_generated = energies_reference = None
-        if "cross_frequency" in self.component_weights or "band_energy" in self.component_weights:
+        if self.component_weights.get("cross_frequency", 0.0) > 0 or self.component_weights.get(
+            "band_energy", 0.0
+        ) > 0:
             energies_generated = band_energies(coefficients_generated, self.band_ids)
             energies_reference = band_energies(coefficients_reference, self.band_ids)
-        if "cross_frequency" in self.component_weights:
+        if self.component_weights.get("cross_frequency", 0.0) > 0:
             assert energies_generated is not None and energies_reference is not None
             loss = off_diagonal_pair_mean_square(
                 normalized_cross_band_coupling(energies_generated, self.eps),
                 normalized_cross_band_coupling(energies_reference, self.eps),
                 self.pairs,
             )
-            results[f"{self.family_name}.cross_frequency.band_energy_coupling"] = TermResult(
-                None, loss, diagnostics={"minimum_batch_size": 3}
+            path = f"{self.family_name}.cross_frequency.band_energy_coupling"
+            weight = self.component_weights["cross_frequency"]
+            results[path] = TermResult(
+                None,
+                loss,
+                diagnostics={
+                    "minimum_batch_size": 3,
+                    "epsilon": self.eps,
+                    "generated": self._cross_frequency_epsilon_diagnostics(
+                        energies_generated
+                    ),
+                    "reference": self._cross_frequency_epsilon_diagnostics(
+                        energies_reference
+                    ),
+                },
             )
-            total = total + self.component_weights["cross_frequency"] * loss
-        if "band_energy" in self.component_weights:
+            component_diagnostics[path] = {
+                "weight": weight,
+                "executed": True,
+                "raw_scalar_loss": float(loss.detach()),
+                "weighted_scalar_contribution": float((weight * loss).detach()),
+            }
+            total = total + weight * loss
+        if self.component_weights.get("band_energy", 0.0) > 0:
             assert energies_generated is not None and energies_reference is not None
             loss = (
                 (energies_generated.mean(dim=0) + self.eps).log()
                 - (energies_reference.mean(dim=0) + self.eps).log()
             ).square().mean()
-            results[f"{self.family_name}.band_energy.log_power"] = TermResult(None, loss)
-            total = total + self.component_weights["band_energy"] * loss
+            path = f"{self.family_name}.band_energy.log_power"
+            weight = self.component_weights["band_energy"]
+            results[path] = TermResult(None, loss)
+            component_diagnostics[path] = {
+                "weight": weight,
+                "executed": True,
+                "raw_scalar_loss": float(loss.detach()),
+                "weighted_scalar_contribution": float((weight * loss).detach()),
+            }
+            total = total + weight * loss
+        component_paths = {
+            "same_frequency": f"{self.family_name}.same_frequency.magnitude_squared",
+            "cross_frequency": f"{self.family_name}.cross_frequency.band_energy_coupling",
+            "band_energy": f"{self.family_name}.band_energy.log_power",
+        }
+        for key, weight in self.component_weights.items():
+            if weight == 0.0:
+                component_diagnostics[component_paths[key]] = {
+                    "weight": 0.0,
+                    "executed": False,
+                    "raw_scalar_loss": None,
+                    "weighted_scalar_contribution": None,
+                }
         if not torch.isfinite(total):
             raise FloatingPointError("cross-spectrum family produced a non-finite cost")
         return FamilyResult(
@@ -245,8 +338,21 @@ class CrossSpectrumFamily(nn.Module):
                 "fields": self.field_names,
                 "pairs": self.pairs,
                 "bands": self.band_names,
+                "band_mode_ids": self.band_ids.detach().cpu().tolist(),
+                "eigenvalues": self.eigenvalues.detach().cpu().tolist(),
+                "exclude_zero": self.exclude_zero,
+                "zero_mode_eigenvalue": self.zero_mode_eigenvalue,
+                "first_retained_eigengap": self.first_retained_eigengap,
+                "minimum_retained_eigengap": (
+                    None
+                    if self.eigenvalues.numel() < 2
+                    else float(torch.diff(self.eigenvalues).min().detach())
+                ),
+                "resolved_sigma": self.resolved_sigma,
+                "epsilon": self.eps,
                 "geometry_sha256": self.geometry_sha256,
                 "component_weights": dict(self.component_weights),
+                "components": component_diagnostics,
             },
         )
 
@@ -265,6 +371,9 @@ class CrossSpectrumFamily(nn.Module):
             "units": self.units,
             "geometry_sha256": self.geometry_sha256,
             "resolved_sigma": self.resolved_sigma,
+            "zero_mode_eigenvalue": self.zero_mode_eigenvalue,
+            "first_retained_eigengap": self.first_retained_eigengap,
+            "exclude_zero": self.exclude_zero,
             "band_names": self.band_names,
             "state_dict": self.state_dict(),
         }
@@ -281,6 +390,8 @@ class CrossSpectrumFamily(nn.Module):
         self.band_ids = state["band_ids"].to(device)
         self.geometry_sha256 = artifact.get("geometry_sha256")
         self.resolved_sigma = artifact.get("resolved_sigma")
+        self.zero_mode_eigenvalue = artifact.get("zero_mode_eigenvalue")
+        self.first_retained_eigengap = artifact.get("first_retained_eigengap")
         if tuple(artifact.get("band_names", ())) != self.band_names:
             raise ValueError("cross-spectrum family artifact bands mismatch")
         self.load_state_dict(state, strict=True)

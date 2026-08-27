@@ -23,6 +23,23 @@ class RasterMap:
     grid_coordinates: torch.Tensor
     grid_shape: tuple[int, int]
     coordinate_sha256: str
+    periods: tuple[float, float] | None
+    diagnostics: dict[str, float | int]
+
+
+def _infer_period(values: np.ndarray, axis_name: str) -> float:
+    unique = np.unique(values)
+    if unique.size < 2:
+        raise ValueError(f"cannot infer topology period for {axis_name}: fewer than two coordinates")
+    gaps = np.diff(unique)
+    pitch = float(np.median(gaps))
+    tolerance = max(1e-10, abs(pitch) * 1e-5)
+    if pitch <= 0 or not np.allclose(gaps, pitch, rtol=1e-5, atol=tolerance):
+        raise ValueError(
+            f"cannot infer topology period for {axis_name}: projected coordinates are not an "
+            "approximately uniform endpoint-free lattice; configure geometry.periods"
+        )
+    return float(unique[-1] - unique[0] + pitch)
 
 
 def build_raster_map(
@@ -33,6 +50,8 @@ def build_raster_map(
     neighbors: int = 4,
     power: float = 2.0,
     periodic: bool = False,
+    periods: tuple[float, float] | None = None,
+    allow_projected_collisions: bool = False,
 ) -> RasterMap:
     """Precompute inverse-distance weights; gradients flow only through field values."""
     if coordinates.ndim != 2 or coordinates.shape[0] < 4:
@@ -43,13 +62,49 @@ def build_raster_map(
     if height < 2 or width < 2:
         raise ValueError("topology grid_shape must contain dimensions >=2")
     coords = coordinates.detach().to(device="cpu", dtype=torch.float64)[:, axes].numpy()
+    unique_coords = np.unique(coords, axis=0)
+    unique_count = int(unique_coords.shape[0])
+    collision_fraction = 1.0 - unique_count / float(coords.shape[0])
+    if unique_count != coords.shape[0] and not allow_projected_collisions:
+        raise ValueError(
+            "topology projection contains coordinate collisions; select physically unique axes "
+            "or explicitly set geometry.allow_projected_collisions=true"
+        )
+    nearest = cKDTree(unique_coords).query(unique_coords, k=2)[0][:, 1]
+    finite_nearest = nearest[np.isfinite(nearest)]
+    if not finite_nearest.size:
+        raise ValueError("topology projection has insufficient distinct coordinates")
     minimum = coords.min(axis=0)
     maximum = coords.max(axis=0)
     span = maximum - minimum
     if np.any(span <= 0):
         raise ValueError("topology axes must both have nonzero coordinate span")
-    y = np.linspace(minimum[1], maximum[1], height, endpoint=not periodic)
-    x = np.linspace(minimum[0], maximum[0], width, endpoint=not periodic)
+    resolved_periods: tuple[float, float] | None = None
+    if periodic:
+        if periods is None:
+            x_count = np.unique(coords[:, 0]).size
+            y_count = np.unique(coords[:, 1]).size
+            if unique_count != x_count * y_count:
+                raise ValueError(
+                    "cannot infer topology periods: projected coordinates do not form a complete "
+                    "endpoint-free Cartesian lattice; configure geometry.periods"
+                )
+            resolved_periods = (
+                _infer_period(coords[:, 0], "x"),
+                _infer_period(coords[:, 1], "y"),
+            )
+        else:
+            if len(periods) != 2 or any(not np.isfinite(value) or value <= 0 for value in periods):
+                raise ValueError("topology geometry.periods must contain two positive finite values")
+            resolved_periods = (float(periods[0]), float(periods[1]))
+        if any(resolved_periods[index] <= span[index] for index in range(2)):
+            raise ValueError("topology periodic periods must be greater than projected coordinate spans")
+    if periodic:
+        x = minimum[0] + np.arange(width) * resolved_periods[0] / width
+        y = minimum[1] + np.arange(height) * resolved_periods[1] / height
+    else:
+        x = np.linspace(minimum[0], maximum[0], width)
+        y = np.linspace(minimum[1], maximum[1], height)
     grid_y, grid_x = np.meshgrid(y, x, indexing="ij")
     grid = np.stack((grid_x, grid_y), axis=-1).reshape(-1, 2)
 
@@ -59,7 +114,12 @@ def build_raster_map(
         copies = []
         copy_ids = []
         for shift_x, shift_y in product((-1, 0, 1), repeat=2):
-            copies.append(coords + np.asarray((shift_x * span[0], shift_y * span[1])))
+            copies.append(
+                coords
+                + np.asarray(
+                    (shift_x * resolved_periods[0], shift_y * resolved_periods[1])
+                )
+            )
             copy_ids.append(source_ids)
         source = np.concatenate(copies, axis=0)
         source_ids = np.concatenate(copy_ids, axis=0)
@@ -81,6 +141,15 @@ def build_raster_map(
         grid_coordinates=torch.from_numpy(grid).float().reshape(height, width, 2),
         grid_shape=(height, width),
         coordinate_sha256=coordinate_digest(coordinates),
+        periods=resolved_periods,
+        diagnostics={
+            "point_count": int(coords.shape[0]),
+            "unique_projected_count": unique_count,
+            "collision_fraction": collision_fraction,
+            "nearest_spacing_min": float(finite_nearest.min()),
+            "nearest_spacing_median": float(np.median(finite_nearest)),
+            "nearest_spacing_max": float(finite_nearest.max()),
+        },
     )
 
 
