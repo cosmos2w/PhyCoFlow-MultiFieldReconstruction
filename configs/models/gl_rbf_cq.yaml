@@ -26,7 +26,7 @@ model:
   fourier_pe_max_freq: 64.0
 
   # Latent attention capacity.
-  latent_dim: 128
+  latent_dim: 256
   num_latents: 128
   num_heads: 8
   num_latent_blocks: 4
