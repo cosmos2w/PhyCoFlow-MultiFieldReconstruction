@@ -399,3 +399,58 @@ def test_target_free_posttraining_writes_child_and_preserves_source(tmp_path):
     assert before["coherence"]["target_use"] == "training_reference"
     assert history["coherence_reference_ids"]
     assert (child / "artifacts" / "coherence_reference.pt").is_file()
+    evaluation_manifest = json.loads(
+        (child / "artifacts" / "evaluation_sensor_manifest.json").read_text()
+    )
+    assert len(next(iter(evaluation_manifest["query_indices"].values()))) == 8
+
+
+def test_initial_family_calibration_is_fixed_hashed_and_restored_on_resume(tmp_path):
+    dataset_path = tmp_path / "fixture.h5"
+    _write_fixture(dataset_path)
+    case_dir = tmp_path / "case"
+    source_run = run_base_training(_base_config(dataset_path), case_dir=case_dir)
+    post = _post_config(dataset_path, source_run)
+    post["optimization"]["epochs"] = 3
+    post["coherence"]["family_balance"] = {
+        "mode": "initial_grad_norm",
+        "calibration_batches": 2,
+        "reference": "median",
+        "epsilon": 1.0e-12,
+        "scale_min": 0.01,
+        "scale_max": 100.0,
+        "max_batch_ratio": 100.0,
+        "seed": 811,
+    }
+    validate_config(post)
+
+    child = run_post_training(post, case_dir=case_dir, max_steps=1)
+    calibration_path = child / "artifacts" / "coherence_calibration.json"
+    calibration_hash = file_sha256(calibration_path)
+    calibration = json.loads(calibration_path.read_text())
+    first_checkpoint = torch.load(
+        child / "checkpoints" / "last.pt", map_location="cpu", weights_only=True
+    )
+
+    assert calibration["mode"] == "initial_grad_norm"
+    assert calibration["resolved_scales"] == {"global_distribution": 1.0}
+    assert len(calibration["calibration_batches"]) == 2
+    assert first_checkpoint["coherence_calibration_sha256"] == calibration_hash
+    assert first_checkpoint["family_scales"] == calibration["resolved_scales"]
+
+    none_post = _post_config(dataset_path, source_run)
+    none_post["optimization"]["epochs"] = 3
+    none_post["output"]["experiment_name"] = "child_none"
+    none_child = run_post_training(none_post, case_dir=case_dir, max_steps=1)
+    calibrated_history = json.loads((child / "metrics" / "history.jsonl").read_text())
+    none_history = json.loads((none_child / "metrics" / "history.jsonl").read_text())
+    assert calibrated_history["native_data_loss"] == none_history["native_data_loss"]
+
+    resumed = run_post_training(post, case_dir=case_dir, resume=child, max_steps=1)
+    resumed_checkpoint = torch.load(
+        resumed / "checkpoints" / "last.pt", map_location="cpu", weights_only=True
+    )
+    assert resumed == child
+    assert file_sha256(calibration_path) == calibration_hash
+    assert resumed_checkpoint["global_step"] == 2
+    assert resumed_checkpoint["family_scales"] == calibration["resolved_scales"]

@@ -22,6 +22,13 @@ _LOSS_LABELS = {
     "physics_loss": "physics",
     "validation_loss": "validation",
 }
+_LOSS_COLORS = {
+    "total": "tab:blue",
+    "data_loss": "tab:orange",
+    "coherence_loss": "tab:green",
+    "physics_loss": "tab:red",
+    "validation_loss": "tab:purple",
+}
 
 
 def _format_duration(seconds: float) -> str:
@@ -338,31 +345,78 @@ class TrainingMonitor:
             return
 
         plt.rcParams["svg.fonttype"] = "none"
-        figure, axis = plt.subplots(figsize=(9, 5.25))
-        plotted_values: list[float] = []
-        for key in _LOSS_KEYS:
-            values = self._values.get(key, [])
-            if not values:
-                continue
-            steps = self._steps[key]
-            stride = max(1, math.ceil(len(values) / 4000))
-            shown_epochs = self._epoch_coordinates(steps[::stride])
-            shown_values = values[::stride]
-            plotted_values.extend(shown_values)
-            axis.plot(shown_epochs, shown_values, linewidth=1.5, label=key)
-        axis.set_xlabel("Training epoch")
-        axis.set_xlim(left=0)
-        axis.set_ylabel("Loss")
-        axis.set_title(f"{self.description} loss history")
-        if plotted_values and all(value > 0.0 for value in plotted_values):
-            axis.set_yscale("log")
-        axis.grid(True, which="both", linestyle="--", alpha=0.35)
-        axis.legend(frameon=False)
-        figure.tight_layout()
+        figure = self._build_loss_figure(plt)
         temporary = self.plot_path.with_name(f".{self.plot_path.name}.tmp")
         figure.savefig(temporary, dpi=150, format="png")
         plt.close(figure)
         os.replace(temporary, self.plot_path)
+
+    def _shown_loss_series(self, key: str) -> tuple[list[float], list[float]]:
+        values = self._values[key]
+        steps = self._steps[key]
+        stride = max(1, math.ceil(len(values) / 4000))
+        return self._epoch_coordinates(steps[::stride]), values[::stride]
+
+    @staticmethod
+    def _style_loss_axis(axis, values: list[float]) -> None:
+        axis.set_xlim(left=0)
+        if values and all(value > 0.0 for value in values):
+            axis.set_yscale("log")
+        axis.grid(True, which="both", linestyle="--", alpha=0.35)
+
+    def _build_loss_figure(self, plt):
+        """Build one combined panel plus independently scaled term panels."""
+        available = [key for key in _LOSS_KEYS if self._values.get(key)]
+        individual_rows = math.ceil(len(available) / 2)
+        figure = plt.figure(
+            figsize=(12, 3.6 + 3.0 * individual_rows),
+            constrained_layout=True,
+        )
+        grid = figure.add_gridspec(
+            1 + individual_rows,
+            2,
+            height_ratios=[1.25, *([1.0] * individual_rows)],
+        )
+        combined = figure.add_subplot(grid[0, :])
+        combined_values: list[float] = []
+        series: dict[str, tuple[list[float], list[float]]] = {}
+        for key in available:
+            shown_epochs, shown_values = self._shown_loss_series(key)
+            series[key] = (shown_epochs, shown_values)
+            combined_values.extend(shown_values)
+            combined.plot(
+                shown_epochs,
+                shown_values,
+                color=_LOSS_COLORS[key],
+                linewidth=1.5,
+                label=_LOSS_LABELS[key],
+            )
+        combined.set_ylabel("Loss (shared scale)")
+        combined.set_title(f"{self.description} loss history — combined")
+        self._style_loss_axis(combined, combined_values)
+        combined.legend(frameon=False, ncol=min(3, len(available)))
+
+        for index, key in enumerate(available):
+            row = 1 + index // 2
+            column = index % 2
+            grid_cell = (
+                grid[row, :]
+                if index == len(available) - 1 and len(available) % 2
+                else grid[row, column]
+            )
+            axis = figure.add_subplot(grid_cell)
+            shown_epochs, shown_values = series[key]
+            axis.plot(
+                shown_epochs,
+                shown_values,
+                color=_LOSS_COLORS[key],
+                linewidth=1.5,
+            )
+            axis.set_xlabel("Training epoch")
+            axis.set_ylabel("Loss")
+            axis.set_title(f"{_LOSS_LABELS[key].capitalize()} loss — independent scale")
+            self._style_loss_axis(axis, shown_values)
+        return figure
 
     def close(
         self,

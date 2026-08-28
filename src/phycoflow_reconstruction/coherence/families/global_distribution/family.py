@@ -37,8 +37,8 @@ class GlobalDistributionFamily(nn.Module):
         self.target_use = str(config.get("target_use", "training_reference"))
         self.units = str(config.get("units", "model_units"))
         self.family_weight = float(config.get("weight", 1.0))
-        if self.family_weight < 0:
-            raise ValueError("global_distribution.weight must be non-negative")
+        if self.family_weight <= 0:
+            raise ValueError("global_distribution.weight must be positive")
         if self.target_use not in {"training_reference", "paired_supervised"}:
             raise ValueError(
                 "global_distribution.target_use must be training_reference or paired_supervised"
@@ -79,10 +79,23 @@ class GlobalDistributionFamily(nn.Module):
         if bool(mutual_settings.get("enabled", len(field_names) >= 2)):
             configured_pairs = mutual_settings.get("pairs")
             name_pairs = configured_pairs or list(combinations(field_names, 2))
+            normalized_pairs = [tuple(pair) for pair in name_pairs]
+            if any(len(pair) != 2 for pair in normalized_pairs):
+                raise ValueError("mutual field pairs must each contain exactly two fields")
+            if any(left == right for left, right in normalized_pairs):
+                raise ValueError("mutual field pairs must contain distinct fields")
+            canonical_pairs = [frozenset(pair) for pair in normalized_pairs]
+            if len(set(canonical_pairs)) != len(canonical_pairs):
+                raise ValueError("mutual field pairs must be unique regardless of order")
+            undeclared = sorted(
+                {name for pair in normalized_pairs for name in pair} - set(field_names)
+            )
+            if undeclared:
+                raise KeyError(
+                    f"mutual field pairs contain fields outside global-distribution fields: {undeclared}"
+                )
             pairs = []
-            for left, right in name_pairs:
-                if left not in lookup or right not in lookup:
-                    raise KeyError(f"unknown mutual field pair {(left, right)}")
+            for left, right in normalized_pairs:
                 pairs.append((lookup[left], lookup[right]))
             self.components_by_key["mutual_pairwise_swd"] = MutualPairwiseSWD(
                 pairs,
@@ -153,11 +166,28 @@ class GlobalDistributionFamily(nn.Module):
         generated, reference = self._in_declared_units(generated, reference)
         per_sample = generated.sum(dim=(1, 2)) * 0.0
         component_results: dict[str, TermResult] = {}
+        component_diagnostics: dict[str, dict[str, Any]] = {}
         for key, component in self.components_by_key.items():
-            result = component(generated, reference)
+            weight = self.component_weights[key]
             path = f"{self.family_name}.{component.spec.name}"
+            if weight == 0.0:
+                component_diagnostics[path] = {
+                    "weight": weight,
+                    "executed": False,
+                    "raw_scalar_loss": None,
+                    "weighted_scalar_contribution": None,
+                }
+                continue
+            result = component(generated, reference)
             component_results[path] = result
-            per_sample = per_sample + self.component_weights[key] * result.per_sample_cost
+            weighted_contribution = weight * result.scalar_loss
+            component_diagnostics[path] = {
+                "weight": weight,
+                "executed": True,
+                "raw_scalar_loss": float(result.scalar_loss.detach()),
+                "weighted_scalar_contribution": float(weighted_contribution.detach()),
+            }
+            per_sample = per_sample + weight * result.per_sample_cost
         if not torch.isfinite(per_sample).all():
             raise FloatingPointError("global-distribution family produced a non-finite cost")
         return FamilyResult(
@@ -171,6 +201,7 @@ class GlobalDistributionFamily(nn.Module):
                 "units": self.units,
                 "fields": self.field_names,
                 "component_weights": dict(self.component_weights),
+                "components": component_diagnostics,
             },
         )
 

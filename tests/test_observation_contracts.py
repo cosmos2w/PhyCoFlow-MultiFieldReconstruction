@@ -12,6 +12,7 @@ from phycoflow_reconstruction.data.manifest import (
     build_batch_from_manifest,
     manifest_from_batch,
 )
+from phycoflow_reconstruction.data.normalization import FieldNormalizer
 from phycoflow_reconstruction.data.sensor_protocols import SensorProtocol, build_observation_batch
 from phycoflow_reconstruction.evaluation.metrics import reconstruction_metrics
 from phycoflow_reconstruction.models import build_model
@@ -98,6 +99,33 @@ def test_reconstruction_metrics_include_mean_per_field_and_worst_relative_l2():
     assert report["mean_relative_l2"] is not None
     assert set(report["per_field_relative_l2"]) == {"a", "b"}
     assert report["worst_field_relative_l2"] >= max(report["per_field_relative_l2"].values()) - 1e-6
+
+
+def test_reconstruction_metrics_separate_normalized_and_physical_fidelity():
+    batch = build_observation_batch(
+        [_sample()], SensorProtocol(field_counts={"a": 2}, seed=3)
+    )
+    target = batch.target_fields
+    assert target is not None
+    normalizer = FieldNormalizer(
+        offset=torch.tensor([100.0, -50.0]),
+        scale=torch.tensor([2.0, 10.0]),
+        method="fixture",
+    )
+    report = reconstruction_metrics(
+        target + 1.0,
+        target,
+        batch,
+        ("a", "b"),
+        normalizer=normalizer,
+    )
+
+    assert report["mse_normalized"] == pytest.approx(1.0)
+    assert report["mse_physical"] != pytest.approx(report["mse_normalized"])
+    assert set(report["per_field_relative_l2_physical"]) == {"a", "b"}
+    assert report["mean_relative_l2_physical"] != pytest.approx(
+        report["mean_relative_l2"]
+    )
 
 
 def test_space_time_ratios_are_independent():

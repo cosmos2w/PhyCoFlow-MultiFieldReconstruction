@@ -28,6 +28,8 @@ class GraphBasis:
     coordinate_sha256: str
     sigma: float
     k_neighbors: int
+    zero_mode_eigenvalue: float
+    first_retained_eigengap: float | None
 
 
 def coordinate_digest(coordinates: torch.Tensor) -> str:
@@ -98,6 +100,10 @@ def build_graph_basis(
     order = np.argsort(eigenvalues)
     eigenvalues = eigenvalues[order]
     eigenvectors = eigenvectors[:, order]
+    zero_mode_eigenvalue = float(eigenvalues[0])
+    first_retained_eigengap = (
+        float(eigenvalues[1] - eigenvalues[0]) if exclude_zero and eigenvalues.size > 1 else None
+    )
     if exclude_zero:
         eigenvalues = eigenvalues[1:]
         eigenvectors = eigenvectors[:, 1:]
@@ -118,4 +124,6 @@ def build_graph_basis(
         coordinate_sha256=coordinate_digest(coordinates),
         sigma=resolved_sigma,
         k_neighbors=neighbors,
+        zero_mode_eigenvalue=zero_mode_eigenvalue,
+        first_retained_eigengap=first_retained_eigengap,
     )

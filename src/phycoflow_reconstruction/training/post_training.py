@@ -8,14 +8,19 @@ explicit for every route.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
+import random
+import statistics
+import warnings
 from collections.abc import Mapping
 from dataclasses import asdict
 from pathlib import Path
 from time import perf_counter
 from typing import Any
 
+import numpy as np
 import torch
 
 from ..coherence import ReferenceBank, build_enabled_families, fit_reference_bank
@@ -31,6 +36,12 @@ from ..data.training_batches import (
 from ..evaluation import reconstruction_metrics
 from ..utils.reproducibility import seed_everything
 from .checkpointing import PeriodicCheckpointManager
+from .coherence_calibration import (
+    gradient_diagnostics,
+    gradient_norm,
+    loss_gradients,
+    resolve_family_scales,
+)
 from .common import (
     iter_unique_batch_indices,
     sensor_protocol_from_config,
@@ -160,17 +171,12 @@ def _validate_reference_geometry(
     bank: ReferenceBank,
     query_ids: torch.Tensor | None,
     *,
-    step: int,
-    batch_size: int,
+    bank_rows: list[int],
 ) -> None:
     if not _requires_fixed_geometry(family):
         return
     if query_ids is None:
         raise TypeError(f"{family_name} requires serialized query indices")
-    bank_rows = [
-        (int(step) * int(batch_size) + offset) % bank.values.shape[0]
-        for offset in range(batch_size)
-    ]
     expected = bank.point_indices[bank_rows]
     if not torch.equal(expected, query_ids.detach().cpu()):
         raise ValueError(f"{family_name} training references do not share prediction geometry")
@@ -185,11 +191,14 @@ def _coherence_objective(
     *,
     step: int,
     generator: torch.Generator,
+    family_scales: Mapping[str, float] | None = None,
 ) -> tuple[FamilyResult, tuple[str, ...]]:
     compute = config["coherence"]["compute_budget"]
     selected = _slice_batch(batch, int(compute["batch_size"]))
     complete = selected
     selected = subset_query_batch(complete, int(compute["point_count"]), generator=generator)
+    if not bool(selected.query_valid_mask.all()):
+        raise ValueError("coherence requires every selected query_valid_mask entry to be true")
     # Dense targets are reference payloads only. They never enter a coherence
     # rollout, including explicitly paired-supervised structural losses.
     model_batch = complete if model.capabilities.structured_grid_required else selected
@@ -224,8 +233,13 @@ def _coherence_objective(
                 raise ValueError(
                     f"training_reference coherence family {family_name} requires a reference bank"
                 )
+            bank_rows = family_bank.selection_indices(
+                prediction.shape[0], step=step, current_sample_ids=selected.sample_ids,
+                strict_distinct=True,
+            )
             reference, reference_ids = family_bank.select(
-                prediction.shape[0], step=step, device=prediction.device, dtype=prediction.dtype
+                prediction.shape[0], step=step, device=prediction.device, dtype=prediction.dtype,
+                current_sample_ids=selected.sample_ids, strict_distinct=True,
             )
             if reference.shape[1] != prediction.shape[1]:
                 raise ValueError("reference-bank and coherence point counts differ")
@@ -235,8 +249,7 @@ def _coherence_objective(
                 family_module,
                 family_bank,
                 query_ids if isinstance(query_ids, torch.Tensor) else None,
-                step=step,
-                batch_size=prediction.shape[0],
+                bank_rows=bank_rows,
             )
         result = family_module(
             prediction,
@@ -247,9 +260,10 @@ def _coherence_objective(
         family_results[family_name] = result
         component_results.update(result.component_results)
         weight = float(getattr(family_module, "family_weight", 1.0))
-        scalar_loss = scalar_loss + weight * result.scalar_loss
+        calibration_scale = float((family_scales or {}).get(family_name, 1.0))
+        scalar_loss = scalar_loss + weight * calibration_scale * result.scalar_loss
         if result.per_sample_cost is not None:
-            per_sample_parts.append(weight * result.per_sample_cost)
+            per_sample_parts.append(weight * calibration_scale * result.per_sample_cost)
         reference_ids_all.extend(reference_ids)
     per_sample = (
         torch.stack(per_sample_parts).sum(dim=0)
@@ -265,7 +279,13 @@ def _coherence_objective(
             "families": {
                 name: {
                     "weight": float(getattr(families[name], "family_weight", 1.0)),
+                    "calibration_scale": float((family_scales or {}).get(name, 1.0)),
                     "scalar_loss": result.scalar_loss.detach(),
+                    "weighted_contribution": (
+                        float(getattr(families[name], "family_weight", 1.0))
+                        * float((family_scales or {}).get(name, 1.0))
+                        * result.scalar_loss.detach()
+                    ),
                     **result.diagnostics,
                 }
                 for name, result in family_results.items()
@@ -279,6 +299,298 @@ def _component_scalars(result: FamilyResult) -> dict[str, float]:
     return {
         path: float(component.scalar_loss.detach().cpu())
         for path, component in result.component_results.items()
+    }
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, torch.Tensor):
+        tensor = value.detach().cpu()
+        return float(tensor) if tensor.ndim == 0 else tensor.tolist()
+    if isinstance(value, Mapping):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return value
+
+
+def _component_reports(family, result: FamilyResult) -> dict[str, dict[str, Any]]:
+    reported = result.diagnostics.get("components", {})
+    output = {}
+    for path, component in result.component_results.items():
+        if path in reported:
+            inner_weight = float(reported[path]["weight"])
+        else:
+            matches = [
+                float(weight)
+                for key, weight in getattr(family, "component_weights", {}).items()
+                if f".{key}." in f".{path}." or path.startswith(f"{family.family_name}.{key}.")
+            ]
+            inner_weight = matches[0] if len(matches) == 1 else 1.0
+        raw = float(component.scalar_loss.detach().cpu())
+        output[path] = {
+            "raw_scalar": raw,
+            "inner_weight": inner_weight,
+            "weighted_contribution": inner_weight * raw,
+            "diagnostics": _json_safe(component.diagnostics),
+        }
+    return output
+
+
+def _family_scalar_report(result: FamilyResult) -> dict[str, float]:
+    payload: dict[str, float] = {}
+    for name, diagnostics in result.diagnostics.get("families", {}).items():
+        raw = float(diagnostics["scalar_loss"])
+        scale = float(diagnostics.get("calibration_scale", 1.0))
+        outer = float(diagnostics.get("weight", 1.0))
+        payload[f"coherence_family/{name}/raw"] = raw
+        payload[f"coherence_family/{name}/outer_weight"] = outer
+        payload[f"coherence_family/{name}/calibration_scale"] = scale
+        payload[f"coherence_family/{name}/weighted_contribution"] = outer * scale * raw
+    return payload
+
+
+def _query_digest(query_ids: torch.Tensor) -> str:
+    payload = query_ids.detach().to(device="cpu", dtype=torch.long).contiguous().numpy()
+    return hashlib.sha256(payload.tobytes()).hexdigest()
+
+
+def _median_nested_cosines(
+    records: list[Mapping[str, Any]], key: str
+) -> dict[str, Any]:
+    first = records[0][key]
+    if key == "data_family_cosines":
+        return {
+            name: float(statistics.median(record[key][name] for record in records))
+            for name in first
+        }
+    return {
+        left: {
+            right: float(
+                statistics.median(record[key][left][right] for record in records)
+            )
+            for right in first[left]
+        }
+        for left in first
+    }
+
+
+def _calibrate_family_balance(
+    model,
+    train_dataset: FieldDataset,
+    families: Mapping[str, Any],
+    banks: Mapping[str, ReferenceBank | None],
+    config: Mapping[str, Any],
+    *,
+    device: torch.device,
+    source_hashes_before: Mapping[str, str],
+) -> dict[str, Any]:
+    """Calibrate fixed family scales at the untouched source checkpoint."""
+    settings = dict(config["coherence"].get("family_balance", {}))
+    mode = str(settings.get("mode", "none"))
+    if mode == "none":
+        return {
+            "version": 1,
+            "mode": mode,
+            "settings": settings,
+            "source_checkpoint_sha256": source_hashes_before["checkpoint"],
+            "weight_identity": "live_training_weights",
+            "resolved_scales": {name: 1.0 for name in families},
+            "outer_weights": {
+                name: float(getattr(family, "family_weight", 1.0))
+                for name, family in families.items()
+            },
+            "calibration_batches": [],
+        }
+    if mode != "initial_grad_norm":
+        raise ValueError(f"unsupported family balance mode: {mode}")
+
+    count = int(settings.get("calibration_batches", 2))
+    calibration_seed = int(settings.get("seed", config["runtime"].get("seed", 42) + 700_001))
+    batch_size = int(config["optimization"].get("batch_size", 1))
+    index_generator = torch.Generator(device="cpu").manual_seed(calibration_seed)
+    sampled_indices = iter_unique_batch_indices(
+        len(train_dataset), count, batch_size, generator=index_generator
+    )
+    query_points = (
+        None
+        if model.capabilities.structured_grid_required
+        else int(config["coherence"]["compute_budget"]["point_count"])
+    )
+    batch_source = build_training_batch_source(
+        train_dataset,
+        sampled_indices,
+        config,
+        query_points=query_points,
+        device=device,
+        start_step=0,
+    )
+    parameters = tuple(parameter for parameter in model.parameters() if parameter.requires_grad)
+    if not parameters:
+        raise ValueError("family calibration selected no trainable parameters")
+    epsilon = float(settings.get("epsilon", 1.0e-12))
+    batch_records: list[dict[str, Any]] = []
+    started = perf_counter()
+    peak_before = torch.cuda.max_memory_allocated(device) if device.type == "cuda" else 0
+    torch_cpu_rng = torch.get_rng_state()
+    torch_cuda_rng = torch.cuda.get_rng_state_all() if device.type == "cuda" else []
+    python_rng = random.getstate()
+    numpy_rng = np.random.get_state()
+    try:
+        model.train()
+        for batch_index, batch in enumerate(batch_source):
+            data_loss = model.training_loss(batch).total
+            data_gradients = loss_gradients(data_loss, parameters)
+            family_gradients = {}
+            family_losses = {}
+            rollout_seed = calibration_seed + 1_000_003 + batch_index
+            for name, family in families.items():
+                result, _ = _coherence_objective(
+                    model,
+                    batch,
+                    {name: family},
+                    {name: banks[name]},
+                    config,
+                    step=batch_index,
+                    generator=torch.Generator(device=device).manual_seed(rollout_seed),
+                )
+                outer_weight = float(getattr(family, "family_weight", 1.0))
+                raw_loss = result.scalar_loss / outer_weight
+                family_losses[name] = float(raw_loss.detach())
+                family_gradients[name] = loss_gradients(raw_loss, parameters)
+            diagnostics = gradient_diagnostics(
+                data_gradients, family_gradients, epsilon=epsilon
+            )
+            selected = subset_query_batch(
+                _slice_batch(batch, int(config["coherence"]["compute_budget"]["batch_size"])),
+                int(config["coherence"]["compute_budget"]["point_count"]),
+                generator=torch.Generator(device=device).manual_seed(rollout_seed),
+            )
+            query_ids = selected.metadata.get("query_indices")
+            if not isinstance(query_ids, torch.Tensor):
+                raise TypeError("family calibration requires serialized query indices")
+            batch_records.append(
+                {
+                    "batch": batch_index,
+                    "sample_ids": list(selected.sample_ids),
+                    "query_digest": _query_digest(query_ids),
+                    "native_data_loss": float(data_loss.detach()),
+                    "family_losses": family_losses,
+                    **diagnostics,
+                }
+            )
+    finally:
+        batch_source.close()
+        torch.set_rng_state(torch_cpu_rng)
+        if device.type == "cuda":
+            torch.cuda.set_rng_state_all(torch_cuda_rng)
+        random.setstate(python_rng)
+        np.random.set_state(numpy_rng)
+    aggregate_norms, scales = resolve_family_scales(
+        [record["family_gradient_norms"] for record in batch_records], settings
+    )
+    aggregate_losses = {
+        name: float(
+            statistics.median(record["family_losses"][name] for record in batch_records)
+        )
+        for name in families
+    }
+    outer_weights = {
+        name: float(getattr(family, "family_weight", 1.0))
+        for name, family in families.items()
+    }
+    peak_after = torch.cuda.max_memory_allocated(device) if device.type == "cuda" else 0
+    reference_norm = float(statistics.median(aggregate_norms.values()))
+    epsilon = float(settings.get("epsilon", 1.0e-12))
+    unclipped_scales = {
+        name: reference_norm / max(norm, epsilon) for name, norm in aggregate_norms.items()
+    }
+    clipped_families = [
+        name
+        for name in families
+        if not math.isclose(scales[name], unclipped_scales[name], rel_tol=1.0e-12)
+    ]
+    return {
+        "version": 1,
+        "mode": mode,
+        "settings": settings,
+        "source_checkpoint_sha256": source_hashes_before["checkpoint"],
+        "weight_identity": "live_training_weights",
+        "configured_evaluation_weight_identity": (
+            "ema" if getattr(model, "_ema", None) is not None and getattr(model, "_ema_eval", False)
+            else "live"
+        ),
+        "sample_ids": [record["sample_ids"] for record in batch_records],
+        "query_digests": [record["query_digest"] for record in batch_records],
+        "source_family_losses": aggregate_losses,
+        "raw_family_gradient_norms": aggregate_norms,
+        "resolved_scales": scales,
+        "unclipped_scales": unclipped_scales,
+        "clipped_families": clipped_families,
+        "outer_weights": outer_weights,
+        "effective_weighted_gradient_norms": {
+            name: outer_weights[name] * scales[name] * aggregate_norms[name]
+            for name in families
+        },
+        "native_data_gradient_norm": float(
+            statistics.median(
+                record["native_data_gradient_norm"] for record in batch_records
+            )
+        ),
+        "family_family_cosines": _median_nested_cosines(
+            batch_records, "family_family_cosines"
+        ),
+        "data_family_cosines": _median_nested_cosines(
+            batch_records, "data_family_cosines"
+        ),
+        "calibration_seconds": perf_counter() - started,
+        "peak_cuda_memory_delta_bytes": max(0, peak_after - peak_before),
+        "seeds": {
+            "runtime": int(config["runtime"].get("seed", 42)),
+            "calibration": calibration_seed,
+            "rollout_first": calibration_seed + 1_000_003,
+        },
+        "calibration_batches": batch_records,
+    }
+
+
+def _sparse_family_gradient_diagnostics(
+    model,
+    batch: ObservationBatch,
+    data_loss: torch.Tensor,
+    combined_loss: torch.Tensor,
+    families: Mapping[str, Any],
+    banks: Mapping[str, ReferenceBank | None],
+    config: Mapping[str, Any],
+    *,
+    step: int,
+    rollout_seed: int,
+    device: torch.device,
+) -> dict[str, Any]:
+    parameters = tuple(parameter for parameter in model.parameters() if parameter.requires_grad)
+    epsilon = float(
+        config["coherence"].get("family_balance", {}).get("epsilon", 1.0e-12)
+    )
+    data_gradients = loss_gradients(data_loss, parameters, retain_graph=True)
+    combined_gradients = loss_gradients(combined_loss, parameters, retain_graph=True)
+    family_gradients = {}
+    family_losses = {}
+    for name, family in families.items():
+        result, _ = _coherence_objective(
+            model,
+            batch,
+            {name: family},
+            {name: banks[name]},
+            config,
+            step=step,
+            generator=torch.Generator(device=device).manual_seed(rollout_seed),
+        )
+        raw_loss = result.scalar_loss / float(getattr(family, "family_weight", 1.0))
+        family_losses[name] = float(raw_loss.detach())
+        family_gradients[name] = loss_gradients(raw_loss, parameters)
+    return {
+        "family_losses": family_losses,
+        **gradient_diagnostics(data_gradients, family_gradients, epsilon=epsilon),
+        "total_coherence_gradient_norm": gradient_norm(combined_gradients),
     }
 
 
@@ -364,6 +676,9 @@ def _evaluate(
     bank: ReferenceBank | Mapping[str, ReferenceBank | None] | None,
     field_names: tuple[str, ...],
     config: Mapping[str, Any],
+    *,
+    normalizer=None,
+    family_scales: Mapping[str, float] | None = None,
 ) -> dict[str, Any]:
     target = comparison_batch.target_fields
     if target is None:
@@ -401,7 +716,13 @@ def _evaluate(
         if complete_batch.query_coords.device.type == "cuda":
             torch.cuda.synchronize(complete_batch.query_coords.device)
         inference_seconds = perf_counter() - inference_started
-        metrics = reconstruction_metrics(prediction, target, comparison_batch, field_names)
+        metrics = reconstruction_metrics(
+            prediction,
+            target,
+            comparison_batch,
+            field_names,
+            normalizer=normalizer,
+        )
         families = dict(family) if isinstance(family, Mapping) else {family.family_name: family}
         banks = dict(bank) if isinstance(bank, Mapping) else {name: bank for name in families}
         family_payloads = {}
@@ -422,6 +743,8 @@ def _evaluate(
                     step=0,
                     device=prediction.device,
                     dtype=prediction.dtype,
+                    current_sample_ids=comparison_batch.sample_ids,
+                    strict_distinct=True,
                 )
                 if reference.shape[1] != prediction.shape[1]:
                     raise ValueError(
@@ -433,8 +756,11 @@ def _evaluate(
                     family_module,
                     family_bank,
                     query_ids if isinstance(query_ids, torch.Tensor) else None,
-                    step=0,
-                    batch_size=prediction.shape[0],
+                    bank_rows=family_bank.selection_indices(
+                        prediction.shape[0], step=0,
+                        current_sample_ids=comparison_batch.sample_ids,
+                        strict_distinct=True,
+                    ),
                 )
             family_result = family_module(
                 prediction,
@@ -446,18 +772,25 @@ def _evaluate(
                 },
             )
             weight = float(getattr(family_module, "family_weight", 1.0))
-            combined_total = combined_total + weight * family_result.scalar_loss
+            calibration_scale = float((family_scales or {}).get(family_name, 1.0))
+            combined_total = (
+                combined_total + weight * calibration_scale * family_result.scalar_loss
+            )
             combined_components.update(_component_scalars(family_result))
             all_reference_ids.extend(reference_ids)
             family_payloads[family_name] = {
                 "target_use": family_module.target_use,
                 "units": family_module.units,
                 "weight": weight,
+                "calibration_scale": calibration_scale,
                 "total": float(family_result.scalar_loss.cpu()),
-                "weighted_total": float((weight * family_result.scalar_loss).cpu()),
-                "components": _component_scalars(family_result),
+                "weighted_total": float(
+                    (weight * calibration_scale * family_result.scalar_loss).cpu()
+                ),
+                "components": _component_reports(family_module, family_result),
+                "component_scalars": _component_scalars(family_result),
                 "reference_ids": list(reference_ids),
-                "diagnostics": family_result.diagnostics,
+                "diagnostics": _json_safe(family_result.diagnostics),
             }
         target_uses = {module.target_use for module in families.values()}
         units = {module.units for module in families.values()}
@@ -480,6 +813,14 @@ def _evaluate(
         },
         "coherence": coherence_payload,
         "sample_ids": list(comparison_batch.sample_ids),
+        "query_ids": (
+            comparison_batch.metadata["query_indices"].detach().cpu().tolist()
+            if isinstance(comparison_batch.metadata.get("query_indices"), torch.Tensor)
+            else None
+        ),
+        "generation_seed": evaluation_seed,
+        "generation_steps": int(evaluation.get("generation_steps", 2)),
+        "evaluation_weight_source": "configured_evaluation_weights",
     }
 
 
@@ -538,6 +879,45 @@ def _reference_bank(
     if bank.values.shape[1] != int(config["coherence"]["compute_budget"]["point_count"]):
         raise ValueError("reference bank point count disagrees with coherence compute budget")
     return bank
+
+
+def _add_source_relative_coherence(
+    before: Mapping[str, Any], after: dict[str, Any]
+) -> None:
+    source_families = before.get("coherence", {}).get("families", {})
+    for name, payload in after.get("coherence", {}).get("families", {}).items():
+        source = source_families.get(name, {}).get("total")
+        current = payload.get("total")
+        payload["source_total"] = source
+        if source is None or current is None or not math.isfinite(float(source)) or float(source) == 0:
+            payload["source_normalized_ratio"] = None
+            payload["relative_reduction"] = None
+        else:
+            ratio = float(current) / float(source)
+            payload["source_normalized_ratio"] = ratio
+            payload["relative_reduction"] = 1.0 - ratio
+
+
+def _fidelity_guard_report(
+    before: Mapping[str, Any], after: Mapping[str, Any], config: Mapping[str, Any]
+) -> dict[str, Any]:
+    settings = config.get("posttrain_fidelity", {})
+    threshold = settings.get("max_relative_mse_increase")
+    before_mse = float(before["mse_normalized"])
+    after_mse = float(after["mse_normalized"])
+    relative_increase = (
+        math.inf if before_mse == 0 and after_mse > 0 else 0.0 if before_mse == 0 else (after_mse - before_mse) / before_mse
+    )
+    exceeded = threshold is not None and relative_increase > float(threshold)
+    return {
+        "source_mse_normalized": before_mse,
+        "posttrain_mse_normalized": after_mse,
+        "relative_mse_increase": relative_increase,
+        "max_relative_mse_increase": None if threshold is None else float(threshold),
+        "behavior": settings.get("behavior", "report"),
+        "status": "exceeded" if exceeded else "passed" if threshold is not None else "reported",
+        "exceeded": exceeded,
+    }
 
 
 def run_post_training(
@@ -633,6 +1013,40 @@ def run_post_training(
             name: store.save_artifact(f"{name}_family.pt", family.state_artifact())
             for name, family in families.items()
         }
+    calibration_path = store.run_dir / "artifacts" / "coherence_calibration.json"
+    if resume is None:
+        calibration = _calibrate_family_balance(
+            model,
+            train_dataset,
+            families,
+            banks,
+            config,
+            device=device,
+            source_hashes_before=source_hashes_before,
+        )
+        store.write_json("artifacts/coherence_calibration.json", calibration)
+    else:
+        if not calibration_path.is_file():
+            raise FileNotFoundError("resume is missing artifacts/coherence_calibration.json")
+        calibration = json.loads(calibration_path.read_text(encoding="utf-8"))
+        calibration_hash = file_sha256(calibration_path)
+        manifest = json.loads((store.run_dir / "run_manifest.json").read_text(encoding="utf-8"))
+        if manifest.get("coherence_calibration_sha256") != calibration_hash:
+            raise ValueError("resume coherence calibration artifact hash mismatch")
+        if checkpoint is None or checkpoint.get("coherence_calibration_sha256") != calibration_hash:
+            raise ValueError("resume checkpoint does not bind the exact coherence calibration")
+        if calibration.get("source_checkpoint_sha256") != source_hashes_before["checkpoint"]:
+            raise ValueError("resume coherence calibration source checkpoint hash mismatch")
+        if calibration.get("mode") != config["coherence"].get("family_balance", {}).get(
+            "mode", "none"
+        ):
+            raise ValueError("resume coherence family-balance mode mismatch")
+        if checkpoint.get("family_scales") != calibration.get("resolved_scales"):
+            raise ValueError("resume checkpoint family scales differ from calibration artifact")
+    family_scales = {
+        name: float(calibration["resolved_scales"][name]) for name in families
+    }
+    calibration_hash = file_sha256(calibration_path)
     store.save_artifact("normalization.pt", train_dataset.normalizer.state_dict())
     store.write_json("artifacts/trainable_parameters.json", {"names": list(trainable_names)})
     store.write_json(
@@ -679,6 +1093,9 @@ def run_post_training(
             name: file_sha256(path) for name, path in family_paths.items()
         },
         coherence_families=list(families),
+        coherence_calibration_sha256=calibration_hash,
+        coherence_family_scales=family_scales,
+        coherence_family_balance_mode=calibration["mode"],
     )
 
     evaluation_split = config.get("evaluation", {}).get("split", "validation")
@@ -688,8 +1105,11 @@ def run_post_training(
     protocol = sensor_protocol_from_config(config)
     evaluation_batch = _build_evaluation_batch(evaluation_dataset, config, protocol, device)
     comparison_batch = _build_comparison_batch(evaluation_batch, config)
+    # Bind sensors and the exact fixed comparison queries into one replayable
+    # evaluation contract. The complete batch remains available only for
+    # structured-model reconstruction before gathering these comparison IDs.
     evaluation_manifest = manifest_from_batch(
-        evaluation_batch, evaluation_dataset.path, evaluation_split
+        comparison_batch, evaluation_dataset.path, evaluation_split
     )
     evaluation_manifest.save(store.run_dir / "artifacts" / "evaluation_sensor_manifest.json")
     query_path = store.save_artifact(
@@ -707,9 +1127,18 @@ def run_post_training(
             banks,
             train_dataset.field_names,
             config,
+            normalizer=train_dataset.normalizer,
+            family_scales=family_scales,
         )
         before_metrics["sensor_manifest_sha256"] = evaluation_manifest.digest()
         store.write_json("evaluation/before.json", before_metrics)
+    source_metrics = (
+        before_metrics
+        if before_metrics is not None
+        else json.loads(
+            (store.run_dir / "evaluation" / "before.json").read_text(encoding="utf-8")
+        )
+    )
     # Evaluation initializes geometry-dependent fixed artifacts. Persist those
     # exact tensors rather than the empty lazy-construction placeholders.
     family_paths = {
@@ -800,6 +1229,8 @@ def run_post_training(
             "step": global_step + 1,
             "epoch": epoch,
             "data_loss": float(data_loss.detach().cpu()),
+            "native_data_loss": float(data_loss.detach().cpu()),
+            "data_retention_objective": "model_native_training_loss",
             "coherence_applied": coherence_active,
             "coherence_weight": coherence_weight,
         }
@@ -815,10 +1246,33 @@ def run_post_training(
                 config,
                 step=global_step,
                 generator=rollout_generator,
+                family_scales=family_scales,
             )
             coherence_loss = result.scalar_loss
             if bool(config["coherence"]["schedule"].get("interval_rescale", False)):
                 coherence_loss = coherence_loss * every
+            diagnostic_every = int(
+                config["coherence"]
+                .get("family_balance", {})
+                .get("gradient_diagnostics_every_epochs", 0)
+            )
+            if (
+                diagnostic_every > 0
+                and global_step % steps_per_epoch == 0
+                and epoch % diagnostic_every == 0
+            ):
+                row["family_gradient_diagnostics"] = _sparse_family_gradient_diagnostics(
+                    model,
+                    batch,
+                    data_loss,
+                    coherence_loss,
+                    families,
+                    banks,
+                    config,
+                    step=global_step,
+                    rollout_seed=seed + 1_000_003 + global_step,
+                    device=device,
+                )
             data_update_weight, coherence_update_weight = _balanced_weights(
                 config, coherence_weight
             )
@@ -839,6 +1293,7 @@ def run_post_training(
                 coherence_loss=float(result.scalar_loss.detach().cpu()),
                 coherence_reference_ids=list(reference_ids),
                 **_component_scalars(result),
+                **_family_scalar_report(result),
                 **gradient,
             )
             last_result = result
@@ -874,6 +1329,8 @@ def run_post_training(
                     index_generator=index_generator,
                     device=device,
                     config_sha256=store.config_hash,
+                    coherence_calibration_sha256=calibration_hash,
+                    family_scales=family_scales,
                 ),
                 model=model,
                 preview=preview,
@@ -904,9 +1361,24 @@ def run_post_training(
         banks,
         train_dataset.field_names,
         config,
+        normalizer=train_dataset.normalizer,
+        family_scales=family_scales,
     )
     after_metrics["sensor_manifest_sha256"] = evaluation_manifest.digest()
+    _add_source_relative_coherence(source_metrics, after_metrics)
     store.write_json("evaluation/after.json", after_metrics)
+    fidelity_guard = _fidelity_guard_report(source_metrics, after_metrics, config)
+    store.write_json("evaluation/fidelity_guard.json", fidelity_guard)
+    if fidelity_guard["exceeded"] and fidelity_guard["behavior"] == "warn":
+        warnings.warn(
+            "post-training reconstruction MSE exceeded the configured fidelity guard",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+    if fidelity_guard["exceeded"] and fidelity_guard["behavior"] == "error":
+        raise RuntimeError(
+            "post-training reconstruction MSE exceeded the configured fidelity guard"
+        )
     family_paths = {
         name: store.save_artifact(f"{name}_family.pt", family.state_artifact())
         for name, family in families.items()
@@ -922,6 +1394,8 @@ def run_post_training(
         index_generator=index_generator,
         device=device,
         config_sha256=store.config_hash,
+        coherence_calibration_sha256=calibration_hash,
+        family_scales=family_scales,
     )
     saved = checkpoint_manager.save(
         checkpoint_payload,
@@ -951,16 +1425,21 @@ def run_post_training(
     if source_hashes_after != source_hashes_before:
         raise RuntimeError("source run changed during child post-training")
     status = "completed" if final_step >= configured_steps else "integration_truncated"
+    final_checkpoint_hashes = {
+        "last": file_sha256(last_path),
+        "best": file_sha256(best_path),
+    }
+    best_fidelity_path = store.run_dir / "checkpoints" / "best_fidelity.pt"
+    if best_fidelity_path.is_file():
+        final_checkpoint_hashes["best_fidelity"] = file_sha256(best_fidelity_path)
     store.update_manifest(
-        checkpoint_hashes={
-            "last": file_sha256(last_path),
-            "best": file_sha256(best_path),
-        },
+        checkpoint_hashes=final_checkpoint_hashes,
         source_hashes_after=source_hashes_after,
         source_immutable_verified=True,
         evaluation_sensor_manifest_sha256=evaluation_manifest.digest(),
         before_metric=None if before_metrics is None else before_metrics.get("mse_normalized"),
         after_metric=after_metrics.get("mse_normalized"),
+        fidelity_guard=fidelity_guard,
         coherence_family_state_sha256s={
             name: file_sha256(path) for name, path in family_paths.items()
         },
@@ -1002,6 +1481,8 @@ def _post_checkpoint_payload(
     index_generator: torch.Generator,
     device: torch.device,
     config_sha256: str,
+    coherence_calibration_sha256: str,
+    family_scales: Mapping[str, float],
 ) -> dict[str, Any]:
     """Build an internally consistent post-training recovery checkpoint."""
     payload = {
@@ -1016,6 +1497,8 @@ def _post_checkpoint_payload(
         "family_states": {name: family.state_dict() for name, family in families.items()},
         "family_configs": {name: family.config for name, family in families.items()},
         "config_sha256": config_sha256,
+        "coherence_calibration_sha256": coherence_calibration_sha256,
+        "family_scales": dict(family_scales),
         "rng_state": {
             "torch_cpu": torch.get_rng_state(),
             "torch_cuda": torch.cuda.get_rng_state_all() if device.type == "cuda" else [],

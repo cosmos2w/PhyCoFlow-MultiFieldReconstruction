@@ -86,14 +86,42 @@ class ReferenceBank:
         step: int,
         device: torch.device,
         dtype: torch.dtype,
+        current_sample_ids: tuple[str, ...] | None = None,
+        strict_distinct: bool = False,
     ) -> tuple[torch.Tensor, tuple[str, ...]]:
         self.validate()
-        indices = [
-            (int(step) * int(batch_size) + offset) % self.values.shape[0]
-            for offset in range(batch_size)
-        ]
+        indices = self.selection_indices(
+            batch_size,
+            step=step,
+            current_sample_ids=current_sample_ids,
+            strict_distinct=strict_distinct,
+        )
         values = self.values[indices].to(device=device, dtype=dtype)
         return values, tuple(self.sample_ids[index] for index in indices)
+
+    def selection_indices(
+        self,
+        batch_size: int,
+        *,
+        step: int,
+        current_sample_ids: tuple[str, ...] | None = None,
+        strict_distinct: bool = False,
+    ) -> list[int]:
+        """Return deterministic bank rows, preferring IDs outside the current batch."""
+        if batch_size < 1:
+            raise ValueError("reference selection requires batch_size>=1")
+        if current_sample_ids is not None and len(current_sample_ids) != batch_size:
+            raise ValueError("current sample IDs must align with the selected batch")
+        excluded = set(current_sample_ids or ())
+        available = [index for index, sample_id in enumerate(self.sample_ids) if sample_id not in excluded]
+        if excluded and not available:
+            if strict_distinct:
+                raise ValueError(
+                    "reference bank cannot select IDs distinct from the current sample IDs"
+                )
+            available = list(range(self.values.shape[0]))
+        start = int(step) * int(batch_size)
+        return [available[(start + offset) % len(available)] for offset in range(batch_size)]
 
 
 def fit_reference_bank(

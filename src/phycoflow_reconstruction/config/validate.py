@@ -31,6 +31,7 @@ COMMON_KEYS = {
     "observation_consistency",
     "benchmark_telemetry",
     "trainable",
+    "posttrain_fidelity",
 }
 
 
@@ -222,7 +223,13 @@ def _validate_common_sections(config: Mapping[str, Any]) -> None:
         raise TypeError("checkpointing must be a mapping")
     _reject_unknown(
         checkpointing,
-        {"enabled", "every_epochs", "epochs", "save_epoch_one"},
+        {
+            "enabled",
+            "every_epochs",
+            "epochs",
+            "save_epoch_one",
+            "selection_metric",
+        },
         "checkpointing",
     )
     for key in ("enabled", "save_epoch_one"):
@@ -236,6 +243,18 @@ def _validate_common_sections(config: Mapping[str, Any]) -> None:
             raise ValueError("checkpointing.epochs must be a non-empty list of positive epochs")
         if len({int(epoch) for epoch in epochs}) != len(epochs):
             raise ValueError("checkpointing.epochs must not contain duplicates")
+    if checkpointing.get("selection_metric", "native_validation_loss") not in {
+        "native_validation_loss",
+        "reconstruction_mse",
+    }:
+        raise ValueError(
+            "checkpointing.selection_metric must be native_validation_loss or reconstruction_mse"
+        )
+    if (
+        checkpointing.get("selection_metric") == "reconstruction_mse"
+        and not bool(preview.get("enabled", True))
+    ):
+        raise ValueError("reconstruction_mse checkpoint selection requires preview.enabled=true")
 
     telemetry = config.get("benchmark_telemetry", {})
     if not isinstance(telemetry, Mapping):
@@ -394,8 +413,9 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
         if not isinstance(settings, Mapping):
             raise TypeError(f"objectives.{name} must be a mapping")
         _reject_unknown(settings, {"enabled", "weight"}, f"objectives.{name}")
-        if float(settings.get("weight", 0.0)) < 0:
-            raise ValueError(f"objectives.{name}.weight must be non-negative")
+        weight = float(settings.get("weight", 0.0))
+        if weight < 0 or (bool(settings.get("enabled", True)) and weight <= 0):
+            raise ValueError(f"enabled objectives.{name}.weight must be positive")
     if not any(
         bool(objectives[name].get("enabled", True))
         and float(objectives[name].get("weight", 0.0)) > 0
@@ -404,7 +424,44 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
         raise ValueError("post_training must enable at least one positive-weight objective")
 
     coherence = config["coherence"]
-    _reject_unknown(coherence, {"schedule", "compute_budget", "families"}, "coherence")
+    _reject_unknown(
+        coherence,
+        {"schedule", "compute_budget", "family_balance", "families"},
+        "coherence",
+    )
+    family_balance = coherence.get("family_balance", {})
+    if not isinstance(family_balance, Mapping):
+        raise TypeError("coherence.family_balance must be a mapping")
+    _reject_unknown(
+        family_balance,
+        {
+            "mode",
+            "calibration_batches",
+            "reference",
+            "epsilon",
+            "scale_min",
+            "scale_max",
+            "max_batch_ratio",
+            "gradient_diagnostics_every_epochs",
+            "seed",
+        },
+        "coherence.family_balance",
+    )
+    if family_balance.get("mode", "none") not in {"none", "initial_grad_norm"}:
+        raise ValueError("coherence.family_balance.mode is invalid")
+    if int(family_balance.get("calibration_batches", 2)) < 1:
+        raise ValueError("coherence.family_balance.calibration_batches must be positive")
+    if family_balance.get("reference", "median") != "median":
+        raise ValueError("coherence.family_balance.reference currently supports only median")
+    epsilon = float(family_balance.get("epsilon", 1.0e-12))
+    scale_min = float(family_balance.get("scale_min", 1.0e-2))
+    scale_max = float(family_balance.get("scale_max", 1.0e2))
+    if epsilon <= 0 or scale_min <= 0 or scale_max < scale_min:
+        raise ValueError("coherence.family_balance calibration bounds are invalid")
+    if float(family_balance.get("max_batch_ratio", 1.0e2)) < 1:
+        raise ValueError("coherence.family_balance.max_batch_ratio must be >=1")
+    if int(family_balance.get("gradient_diagnostics_every_epochs", 0)) < 0:
+        raise ValueError("gradient diagnostics interval must be non-negative")
     schedule = coherence.get("schedule", {})
     _reject_unknown(
         schedule,
@@ -432,9 +489,7 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
     unknown_families = sorted(set(families) - supported_families)
     if unknown_families:
         raise ValueError(f"unsupported coherence families: {unknown_families}")
-    enabled_families = [
-        name for name, settings in families.items() if bool(settings.get("enabled", True))
-    ]
+    enabled_families = [name for name, settings in families.items() if bool(settings.get("enabled", True))]
     if not enabled_families:
         raise ValueError("post-training coherence must enable at least one family")
     if any(name in {"cross_spectrum", "topology"} for name in enabled_families) and (
@@ -465,8 +520,10 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
             common_family_keys | extra_keys,
             f"coherence.families.{family_name}",
         )
-        if float(family.get("weight", 1.0)) < 0:
-            raise ValueError(f"coherence family {family_name} weight must be non-negative")
+        family_weight = float(family.get("weight", 1.0))
+        family_enabled = bool(family.get("enabled", True))
+        if family_weight < 0 or (family_enabled and family_weight <= 0):
+            raise ValueError(f"enabled coherence family {family_name} weight must be positive")
         target_use = family.get("target_use", "training_reference")
         if target_use not in {"training_reference", "paired_supervised"}:
             raise ValueError(f"{family_name}.target_use is invalid")
@@ -504,7 +561,14 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
             },
             "topology": {
                 "self": {"enabled", "weight"},
-                "mutual": {"enabled", "weight", "pairs", "lines", "theta_min_degrees"},
+                "mutual": {
+                    "enabled",
+                    "weight",
+                    "pairs",
+                    "lines",
+                    "theta_min_degrees",
+                    "axis_tolerance",
+                },
             },
         }[family_name]
         _reject_unknown(components, set(component_keys), f"{family_name}.components")
@@ -514,8 +578,17 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
                 component_keys[component_name],
                 f"{family_name}.components.{component_name}",
             )
-            if float(settings.get("weight", 1.0)) < 0:
-                raise ValueError("coherence component weights must be non-negative")
+            component_weight = float(settings.get("weight", 1.0))
+            component_enabled = bool(settings.get("enabled", True))
+            if component_weight < 0 or (component_enabled and component_weight <= 0):
+                raise ValueError("enabled coherence component weights must be positive")
+        if family_enabled and not any(
+            bool(settings.get("enabled", True)) and float(settings.get("weight", 1.0)) > 0
+            for settings in components.values()
+        ):
+            raise ValueError(
+                f"enabled coherence family {family_name} requires a positive enabled component"
+            )
 
         if family_name == "cross_spectrum":
             graph = family.get("graph", {})
@@ -527,16 +600,31 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
             if int(graph.get("k_neighbors", 16)) < 1 or int(graph.get("num_modes", 64)) < 1:
                 raise ValueError("cross_spectrum graph sizes must be positive")
             cross_frequency = components.get("cross_frequency", {})
-            if bool(cross_frequency.get("enabled", True)) and int(compute["batch_size"]) < 3:
+            cross_active = family_enabled and family_weight > 0 and bool(cross_frequency.get("enabled", True)) and float(cross_frequency.get("weight", 1.0)) > 0
+            if cross_active and int(compute["batch_size"]) < 3:
                 raise ValueError("cross-frequency coherence requires compute batch_size>=3")
             same_frequency = components.get("same_frequency", {})
-            if bool(same_frequency.get("enabled", True)) and int(compute["batch_size"]) < 2:
+            same_active = family_enabled and family_weight > 0 and bool(same_frequency.get("enabled", True)) and float(same_frequency.get("weight", 1.0)) > 0
+            if same_active and int(compute["batch_size"]) < 2:
                 raise ValueError("same-frequency coherence requires compute batch_size>=2")
+            evaluation_minimum = 3 if cross_active else 2 if same_active else 1
+            if int(config.get("evaluation", {}).get("max_samples", 1)) < evaluation_minimum:
+                raise ValueError(
+                    f"evaluation.max_samples must be >= {evaluation_minimum} for active spectral components"
+                )
         elif family_name == "topology":
             geometry = family.get("geometry", {})
             _reject_unknown(
                 geometry,
-                {"grid_shape", "axes", "neighbors", "power", "periodic"},
+                {
+                    "grid_shape",
+                    "axes",
+                    "neighbors",
+                    "power",
+                    "periodic",
+                    "periods",
+                    "allow_projected_collisions",
+                },
                 "topology.geometry",
             )
             filtration = family.get("filtration", {})
@@ -610,6 +698,20 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
         "evaluation",
     )
     _reject_unknown(config["output"], {"experiment_name"}, "output")
+    fidelity = config.get("posttrain_fidelity", {})
+    if not isinstance(fidelity, Mapping):
+        raise TypeError("posttrain_fidelity must be a mapping")
+    _reject_unknown(
+        fidelity,
+        {"max_relative_mse_increase", "behavior"},
+        "posttrain_fidelity",
+    )
+    if fidelity.get("max_relative_mse_increase") is not None and float(
+        fidelity["max_relative_mse_increase"]
+    ) < 0:
+        raise ValueError("posttrain_fidelity.max_relative_mse_increase must be non-negative")
+    if fidelity.get("behavior", "report") not in {"report", "warn", "error"}:
+        raise ValueError("posttrain_fidelity.behavior must be report, warn, or error")
 
 
 def _validate_physics_settings(settings: Mapping[str, Any]) -> None:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from itertools import combinations
-from math import cos, pi, sin
+from math import ceil, cos, pi, sin
 from typing import Any
 
 import torch
@@ -38,6 +38,8 @@ class TopologyFamily(nn.Module):
         self.target_use = str(config.get("target_use", "paired_supervised"))
         self.units = str(config.get("units", "model_units"))
         self.family_weight = float(config.get("weight", 1.0))
+        if self.family_weight <= 0:
+            raise ValueError("topology.weight must be positive")
         if self.target_use not in {"training_reference", "paired_supervised"}:
             raise ValueError("topology.target_use is invalid")
         if self.units not in {"model_units", "physical_units"}:
@@ -61,10 +63,22 @@ class TopologyFamily(nn.Module):
         self.raster_neighbors = int(geometry.get("neighbors", 4))
         self.raster_power = float(geometry.get("power", 2.0))
         self.periodic = bool(geometry.get("periodic", False))
+        configured_periods = geometry.get("periods")
+        if configured_periods is not None and (
+            not isinstance(configured_periods, (list, tuple)) or len(configured_periods) != 2
+        ):
+            raise ValueError("topology geometry.periods must contain exactly two values")
+        self.periods = None if configured_periods is None else tuple(map(float, configured_periods))
+        if not self.periodic and self.periods is not None:
+            raise ValueError("topology geometry.periods requires periodic=true")
+        self.allow_projected_collisions = bool(
+            geometry.get("allow_projected_collisions", False)
+        )
         self.register_buffer("neighbor_indices", torch.empty(0, 0, dtype=torch.long))
         self.register_buffer("neighbor_weights", torch.empty(0, 0))
         self.register_buffer("grid_coordinates", torch.empty(0, 0, 2))
         self.geometry_sha256: str | None = None
+        self.geometry_diagnostics: dict[str, float | int] = {}
 
         filtration = config.get("filtration", {})
         quantiles = filtration.get("quantiles", (0.1, 0.25, 0.5, 0.75, 0.9))
@@ -93,6 +107,13 @@ class TopologyFamily(nn.Module):
         self.smoothing_sigma = float(filtration.get("smoothing_sigma", 0.8))
         if self.sharpness <= 0 or self.smoothing_sigma < 0:
             raise ValueError("topology sharpness must be positive and smoothing non-negative")
+        smoothing_radius = ceil(3.0 * self.smoothing_sigma)
+        if not self.periodic and self.smoothing_sigma > 0 and (
+            smoothing_radius >= self.grid_shape[0] or smoothing_radius >= self.grid_shape[1]
+        ):
+            raise ValueError(
+                "topology nonperiodic smoothing radius must be smaller than both grid dimensions"
+            )
 
         components = config.get("components", {})
         self_settings = components.get("self", {})
@@ -124,6 +145,7 @@ class TopologyFamily(nn.Module):
                 raise KeyError("topology mutual pair contains a field outside fields") from error
             self.fibered_lines = int(mutual_settings.get("lines", 3))
             self.theta_min_degrees = float(mutual_settings.get("theta_min_degrees", 15.0))
+            self.mutual_axis_tolerance = float(mutual_settings.get("axis_tolerance", 1e-6))
             if (
                 not self.mutual_pairs
                 or any(left == right for left, right in self.mutual_pairs)
@@ -131,6 +153,7 @@ class TopologyFamily(nn.Module):
                 != len(self.mutual_pairs)
                 or self.fibered_lines < 1
                 or not 0.0 < self.theta_min_degrees < 45.0
+                or self.mutual_axis_tolerance <= 0
             ):
                 raise ValueError("topology mutual component requires pairs and lines>=1")
             specs.append(
@@ -148,6 +171,7 @@ class TopologyFamily(nn.Module):
             self.mutual_pairs = ()
             self.fibered_lines = 0
             self.theta_min_degrees = 15.0
+            self.mutual_axis_tolerance = 1e-6
         if not self.component_weights or any(value < 0 for value in self.component_weights.values()):
             raise ValueError("topology must enable non-negative component weights")
         if not any(self.component_weights.values()):
@@ -174,11 +198,15 @@ class TopologyFamily(nn.Module):
                 neighbors=self.raster_neighbors,
                 power=self.raster_power,
                 periodic=self.periodic,
+                periods=self.periods,
+                allow_projected_collisions=self.allow_projected_collisions,
             )
             self.neighbor_indices = mapping.neighbor_indices.to(coordinates.device)
             self.neighbor_weights = mapping.neighbor_weights.to(coordinates.device)
             self.grid_coordinates = mapping.grid_coordinates.to(coordinates.device)
             self.geometry_sha256 = mapping.coordinate_sha256
+            self.periods = mapping.periods
+            self.geometry_diagnostics = dict(mapping.diagnostics)
         elif digest != self.geometry_sha256:
             raise ValueError("topology coordinates changed after raster-map construction")
 
@@ -196,9 +224,11 @@ class TopologyFamily(nn.Module):
         self,
         generated: torch.Tensor,
         reference: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, dict[str, int]]:
         """Return per-sample curve MSE for `[B,H,W]` fields."""
         costs = []
+        requested_level_count = 0
+        unique_level_count = 0
         quantiles = torch.as_tensor(self.quantiles, device=generated.device, dtype=generated.dtype)
         for batch_index in range(generated.shape[0]):
             sample_costs = []
@@ -207,6 +237,10 @@ class TopologyFamily(nn.Module):
                 generated_field = sign * generated[batch_index]
                 reference_field = sign * reference[batch_index]
                 levels = torch.quantile(reference_field.detach().reshape(-1), quantiles)
+                requested_level_count += int(levels.numel())
+                # v1 rule: collapse identical thresholds and weight every unique level equally.
+                levels = torch.unique(levels, sorted=True)
+                unique_level_count += int(levels.numel())
                 generated_curves = betti_curves(
                     generated_field,
                     levels,
@@ -226,26 +260,43 @@ class TopologyFamily(nn.Module):
                         (generated_curves[dimension] - reference_curves[dimension]).square().mean()
                     )
             costs.append(torch.stack(sample_costs).mean())
-        return torch.stack(costs)
+        return torch.stack(costs), {
+            "requested_threshold_count": requested_level_count,
+            "unique_threshold_count": unique_level_count,
+        }
 
-    def _self_cost(self, generated: torch.Tensor, reference: torch.Tensor) -> torch.Tensor:
-        return torch.stack(
-            [self._curve_cost(generated[:, field], reference[:, field])
-             for field in range(generated.shape[1])]
-        ).mean(dim=0)
+    def _self_cost(
+        self, generated: torch.Tensor, reference: torch.Tensor
+    ) -> tuple[torch.Tensor, dict[str, int]]:
+        outputs = [
+            self._curve_cost(generated[:, field], reference[:, field])
+            for field in range(generated.shape[1])
+        ]
+        return torch.stack([output[0] for output in outputs]).mean(dim=0), {
+            key: sum(output[1][key] for output in outputs) for key in outputs[0][1]
+        }
 
-    def _mutual_cost(self, generated: torch.Tensor, reference: torch.Tensor) -> torch.Tensor:
+    def _mutual_cost(
+        self, generated: torch.Tensor, reference: torch.Tensor
+    ) -> tuple[torch.Tensor, dict[str, int]]:
         theta_min = self.theta_min_degrees * pi / 180.0
         angle_step = (pi / 2.0 - 2.0 * theta_min) / (self.fibered_lines + 1.0)
         angles = tuple(theta_min + angle_step * (index + 1) for index in range(self.fibered_lines))
         all_costs = []
+        threshold_counts = {"requested_threshold_count": 0, "unique_threshold_count": 0}
         for left, right in self.mutual_pairs:
             reference_left = reference[:, left]
             reference_right = reference[:, right]
             mean_left = reference_left.detach().mean(dim=(1, 2), keepdim=True)
             mean_right = reference_right.detach().mean(dim=(1, 2), keepdim=True)
-            std_left = reference_left.detach().std(dim=(1, 2), keepdim=True).clamp_min(1e-6)
-            std_right = reference_right.detach().std(dim=(1, 2), keepdim=True).clamp_min(1e-6)
+            std_left = reference_left.detach().std(dim=(1, 2), keepdim=True)
+            std_right = reference_right.detach().std(dim=(1, 2), keepdim=True)
+            if (std_left <= self.mutual_axis_tolerance).any() or (
+                std_right <= self.mutual_axis_tolerance
+            ).any():
+                raise ValueError(
+                    "topology mutual axis is constant or near-constant in a reference sample"
+                )
             generated_left = (generated[:, left] - mean_left) / std_left
             generated_right = (generated[:, right] - mean_right) / std_right
             reference_left = (reference_left - mean_left) / std_left
@@ -267,9 +318,12 @@ class TopologyFamily(nn.Module):
                     (reference_left - offset_left[:, None, None]) / velocity_left,
                     (reference_right - offset_right[:, None, None]) / velocity_right,
                 )
-                line_costs.append(self._curve_cost(generated_push, reference_push))
+                line_cost, counts = self._curve_cost(generated_push, reference_push)
+                line_costs.append(line_cost)
+                for key, value in counts.items():
+                    threshold_counts[key] += value
             all_costs.append(torch.stack(line_costs).mean(dim=0))
-        return torch.stack(all_costs).mean(dim=0)
+        return torch.stack(all_costs).mean(dim=0), threshold_counts
 
     def forward(
         self,
@@ -303,20 +357,40 @@ class TopologyFamily(nn.Module):
         reference_grid = gaussian_blur(reference_grid, self.smoothing_sigma, self.periodic)
         results: dict[str, TermResult] = {}
         per_sample = generated.sum(dim=(1, 2)) * 0.0
-        if "self" in self.component_weights:
-            cost = self._self_cost(generated_grid, reference_grid)
+        if self.component_weights.get("self", 0.0) > 0:
+            cost, threshold_counts = self._self_cost(generated_grid, reference_grid)
+            collapsed = 1.0 - (
+                threshold_counts["unique_threshold_count"]
+                / threshold_counts["requested_threshold_count"]
+            )
             results[f"{self.family_name}.self.betti_curves"] = TermResult(
                 cost,
                 cost.mean(),
-                diagnostics={"dimensions": self.dimensions, "directions": self.directions},
+                diagnostics={
+                    "dimensions": self.dimensions,
+                    "directions": self.directions,
+                    **threshold_counts,
+                    "collapsed_threshold_fraction": collapsed,
+                    "threshold_rule": "deduplicate_equal_then_equal_weight_unique",
+                },
             )
             per_sample = per_sample + self.component_weights["self"] * cost
-        if "mutual" in self.component_weights:
-            cost = self._mutual_cost(generated_grid, reference_grid)
+        if self.component_weights.get("mutual", 0.0) > 0:
+            cost, threshold_counts = self._mutual_cost(generated_grid, reference_grid)
+            collapsed = 1.0 - (
+                threshold_counts["unique_threshold_count"]
+                / threshold_counts["requested_threshold_count"]
+            )
             results[f"{self.family_name}.mutual.fibered_betti_curves"] = TermResult(
                 cost,
                 cost.mean(),
-                diagnostics={"pairs": self.mutual_pairs, "lines": self.fibered_lines},
+                diagnostics={
+                    "pairs": self.mutual_pairs,
+                    "lines": self.fibered_lines,
+                    **threshold_counts,
+                    "collapsed_threshold_fraction": collapsed,
+                    "threshold_rule": "deduplicate_equal_then_equal_weight_unique",
+                },
             )
             per_sample = per_sample + self.component_weights["mutual"] * cost
         if not torch.isfinite(per_sample).all():
@@ -334,7 +408,9 @@ class TopologyFamily(nn.Module):
                 "fields": self.field_names,
                 "grid_shape": self.grid_shape,
                 "periodic": self.periodic,
+                "periods": self.periods,
                 "geometry_sha256": self.geometry_sha256,
+                "geometry": dict(self.geometry_diagnostics),
                 "component_weights": dict(self.component_weights),
             },
         )
@@ -353,6 +429,8 @@ class TopologyFamily(nn.Module):
             "target_use": self.target_use,
             "units": self.units,
             "geometry_sha256": self.geometry_sha256,
+            "periods": self.periods,
+            "geometry_diagnostics": dict(self.geometry_diagnostics),
             "state_dict": self.state_dict(),
         }
 
@@ -367,4 +445,6 @@ class TopologyFamily(nn.Module):
         self.neighbor_weights = state["neighbor_weights"].to(device)
         self.grid_coordinates = state["grid_coordinates"].to(device)
         self.geometry_sha256 = artifact.get("geometry_sha256")
+        self.periods = artifact.get("periods", self.periods)
+        self.geometry_diagnostics = dict(artifact.get("geometry_diagnostics", {}))
         self.load_state_dict(state, strict=True)
