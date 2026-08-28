@@ -1,8 +1,6 @@
 # Dataset Catalog
 
-Only Markdown explanations are synchronized here. HDF5/PT payloads and links
-are local-only and ignored by Git. A collaborator may create the documented
-relative link or place an equivalent validated file at the same path.
+Only Markdown explanations are synchronized here. HDF5/PT payloads and links are local-only and ignored by Git. A collaborator may create the documented relative link or place an equivalent validated file at the same path.
 
 | Case | Local payload | Benchmark split |
 |---|---|---|

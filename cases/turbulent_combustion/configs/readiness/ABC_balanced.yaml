@@ -1,0 +1,44 @@
+defaults: [_common.yaml]
+
+coherence:
+  family_balance: {mode: initial_grad_norm, calibration_batches: 2, reference: median, epsilon: 1.0e-12, scale_min: 0.00001, scale_max: 100.0, max_batch_ratio: 100.0, gradient_diagnostics_every_epochs: 1, seed: 700043}
+  families:
+    global_distribution:
+      enabled: true
+      weight: 1.0
+      target_use: paired_supervised
+      units: model_units
+      fields: [CH4, CO, T, U_1, p]
+      reference_bank: {enabled: false}
+      components:
+        self: {enabled: true, weight: 1.0}
+        mutual: {enabled: true, weight: 1.0, directions: 8, seed: 1234}
+        cross: {enabled: true, weight: 1.0, directions: 16, top_fraction: 0.1, seed: 1234, include_axes: true, qmc: true}
+    cross_spectrum:
+      enabled: true
+      weight: 1.0
+      target_use: paired_supervised
+      units: model_units
+      fields: [CH4, CO, T, U_1, p]
+      pairs: [[CO, T], [T, CH4], [T, U_1], [CH4, U_1]]
+      reference_bank: {enabled: false}
+      graph: {k_neighbors: 16, sigma: null, num_modes: 48, exclude_zero: true, bands: [low, mid, high]}
+      eps: 1.0e-8
+      components:
+        same_frequency: {enabled: true, weight: 1.0}
+        cross_frequency: {enabled: true, weight: 1.0}
+        band_energy: {enabled: false, weight: 0.0}
+    topology:
+      enabled: true
+      weight: 1.0
+      target_use: paired_supervised
+      units: model_units
+      fields: [CO, T]
+      reference_bank: {enabled: false}
+      geometry: {grid_shape: [32, 128], axes: [0, 1], neighbors: 4, power: 2.0, periodic: false, allow_projected_collisions: false}
+      filtration: {quantiles: [0.10, 0.25, 0.40, 0.50, 0.60, 0.75, 0.90], dimensions: [0, 1], directions: [superlevel, sublevel], sharpness: 12.0, smoothing_sigma: 0.8}
+      components:
+        self: {enabled: true, weight: 1.0}
+        mutual: {enabled: true, weight: 1.0, pairs: [[CO, T]], lines: 3, theta_min_degrees: 15.0, axis_tolerance: 1.0e-6}
+
+output: {experiment_name: coherence_fix_ABC_balanced}

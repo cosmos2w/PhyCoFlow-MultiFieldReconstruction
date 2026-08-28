@@ -1,23 +1,144 @@
 # Model, Training, and Coherence Logic
 
-This document describes the mathematical contract implemented by `phycoflow_reconstruction`: how sparse measurements become a full-field reconstruction, how each registered model is trained and sampled, and how data-driven or equation-based physical constraints modify a trained model. The limitations listed here describe the current implementation and are intended to guide later model updates.
+This document describes the mathematical contract implemented by `phycoflow_reconstruction`: how sparse measurements become a full-field reconstruction, how each registered model is trained and sampled, and how data-driven or equation-based physical constraints modify a trained model. It is code-oriented: the tables below identify the configuration and Python implementation behind each mathematical term. The limitations listed here describe the current implementation and are intended to guide later model updates.
 
-## Registry and capabilities at a glance
+## Table of contents
 
-| Registry name | Family | Native objective | Reconstruction/stage notes |
+- [0. Current implementation and settings](#0-current-implementation-and-settings)
+  - [0.1 Registered model map](#01-registered-model-map)
+  - [0.2 Canonical model settings](#02-canonical-model-settings)
+  - [0.3 Current turbulent-combustion coherence settings](#03-current-turbulent-combustion-coherence-settings)
+  - [0.4 End-to-end code path](#04-end-to-end-code-path)
+- [1. Reconstruction problem and notation](#1-reconstruction-problem-and-notation)
+- [2. Shared coordinate and observation features](#2-shared-coordinate-and-observation-features)
+- [3. Deterministic reconstruction models](#3-deterministic-reconstruction-models)
+  - [3.1 Coordinate MLP](#31-coordinate-mlp)
+  - [3.2 MLP-RBF](#32-mlp-rbf)
+  - [3.3 Sparse DeepONet](#33-sparse-deeponet)
+  - [3.4 Senseiver regressor](#34-senseiver-regressor)
+  - [3.5 GeoFNO regressor](#35-geofno-regressor)
+- [4. Generative and flow reconstruction models](#4-generative-and-flow-reconstruction-models)
+  - [4.1 Conditional DiffusionPDE model](#41-conditional-diffusionpde-model)
+  - [4.2 Two-stage latent flow matching](#42-two-stage-latent-flow-matching)
+  - [4.3 PointCloudFFM](#43-pointcloudffm)
+    - [GL-RBF/CQ point backbone](#gl-rbfcq-point-backbone)
+    - [FNO flow backbone](#fno-flow-backbone)
+- [5. Physics-informed coordinate model](#5-physics-informed-coordinate-model)
+  - [Brusselator residual](#brusselator-residual)
+- [6. Base-training objectives](#6-base-training-objectives)
+- [7. Data-driven coherence model](#7-data-driven-coherence-model)
+  - [7.1 Unified objective](#71-unified-objective)
+  - [7.2 Global-distribution coherence](#72-global-distribution-coherence)
+    - [Marginal Wasserstein term](#marginal-wasserstein-term)
+    - [Pairwise sliced Wasserstein term](#pairwise-sliced-wasserstein-term)
+    - [Joint top-tail sliced Wasserstein term](#joint-top-tail-sliced-wasserstein-term)
+  - [7.3 Graph cross-spectrum coherence](#73-graph-cross-spectrum-coherence)
+  - [7.4 Topology coherence](#74-topology-coherence)
+  - [7.5 Reference policies and target leakage boundary](#75-reference-policies-and-target-leakage-boundary)
+- [8. Differentiable reconstruction and observation consistency](#8-differentiable-reconstruction-and-observation-consistency)
+- [9. Physics post-training](#9-physics-post-training)
+- [10. Gradient combination](#10-gradient-combination)
+- [11. Evaluation definitions](#11-evaluation-definitions)
+- [12. Cross-cutting limitations](#12-cross-cutting-limitations)
+
+## 0. Current implementation and settings
+
+Configuration has three layers. Shared architecture defaults live in [`configs/models/`](configs/models/), case launch profiles compose them with a dataset and sensor protocol, and a run writes the final merge to `resolved_config.yaml`. The resolved run file is the authoritative record for an experiment; a value in this document is a snapshot, not a second runtime default.
+
+### 0.1 Registered model map
+
+[`models/__init__.py`](src/phycoflow_reconstruction/models/__init__.py) owns the public registry and the allowlist that maps YAML keys into constructor arguments. Capability flags in each adapter, rather than string comparisons in the trainer, determine whether the model needs a structured grid, is stochastic, and supports differentiable post-training.
+
+| Registry name | Adapter implementation | Native base objective | Sparse reconstruction path |
 |---|---|---|---|
-| `coordinate_mlp` | deterministic point | masked field MSE | direct query prediction |
-| `mlp_rbf` | deterministic point | masked field MSE | local RBF value/support features |
-| `deeponet` | deterministic point | masked field MSE | sparse branch + coordinate trunk |
-| `senseiver` | deterministic point | masked field MSE | latent sparse attention |
-| `geofno` | grid operator | masked field MSE | optional `neuraloperator` dependency |
-| `diffusion_pde` | grid generative | noise-prediction MSE | deterministic DDIM-style sampling |
-| `latent_fm` | latent generative | autoencoder / latent flow | Stage 1 prerequisite, Stage 2 source |
-| `pointcloud_ffm` | point rectified flow | velocity MSE | `gl_rbf_enh` or optional FNO backbone |
-| `gl_rbf_cq` | point rectified flow | velocity MSE | cached-K/V, EMA, coherence-ready |
-| `pinn` | physics-informed point | data + case PDE loss | direct physics route only |
+| `coordinate_mlp` | [`deterministic/coordinate_mlp.py`](src/phycoflow_reconstruction/models/deterministic/coordinate_mlp.py) | masked field MSE | direct point prediction |
+| `mlp_rbf` | [`deterministic/mlp_rbf.py`](src/phycoflow_reconstruction/models/deterministic/mlp_rbf.py) | masked field MSE | direct point prediction with local RBF features |
+| `deeponet` | [`deterministic/deeponet.py`](src/phycoflow_reconstruction/models/deterministic/deeponet.py) | masked field MSE | sparse branch and coordinate trunk |
+| `senseiver` | [`deterministic/senseiver.py`](src/phycoflow_reconstruction/models/deterministic/senseiver.py) | masked field MSE | latent cross-attention |
+| `geofno` | [`operators/geofno.py`](src/phycoflow_reconstruction/models/operators/geofno.py) | masked field MSE | rasterized values and masks on a complete grid |
+| `diffusion_pde` | [`generative/diffusion_pde.py`](src/phycoflow_reconstruction/models/generative/diffusion_pde.py) | noise-prediction MSE | differentiable DDIM-style reconstruction |
+| `latent_fm` | [`generative/latent_fm.py`](src/phycoflow_reconstruction/models/generative/latent_fm.py) | Stage 1 autoencoder MSE; Stage 2 latent velocity MSE | frozen Stage-1 decoder after Stage-2 latent flow |
+| `pointcloud_ffm` | [`adapters/pointcloud_ffm_adapter.py`](src/phycoflow_reconstruction/models/flows/pointcloud/adapters/pointcloud_ffm_adapter.py) | rectified-flow velocity MSE | point flow with `gl_rbf_enh` or FNO backbone |
+| `gl_rbf_cq` | [`adapters/gl_rbf_cq_adapter.py`](src/phycoflow_reconstruction/models/flows/pointcloud/adapters/gl_rbf_cq_adapter.py) | rectified-flow velocity MSE | portable GL-RBF/CQ flow, cached/streamed reconstruction, EMA |
+| `pinn` | [`deterministic/coordinate_mlp.py`](src/phycoflow_reconstruction/models/deterministic/coordinate_mlp.py) | data MSE plus case PDE loss | direct-physics route only |
 
-All adapters consume the common `ObservationBatch` and return a `ReconstructionBatch`; the shared trainer therefore does not need a model- specific loop. A model that supports post-training must advertise that stage in its `ModelCapabilities`. The historical Demo50 adapter is intentionally outside this modern registry table and lives under `models/compatibility/`.
+The historical Demo50 adapter is deliberately isolated in [`models/compatibility/legacy_tc_demo50.py`](src/phycoflow_reconstruction/models/compatibility/legacy_tc_demo50.py) and is not a new-training registry entry.
+
+### 0.2 Canonical model settings
+
+The following is a compact snapshot of the maintained fragments in `configs/models/` as of 2026-08-28. Case files can override these values.
+
+| Model fragment | Current architecture settings |
+|---|---|
+| `coordinate_mlp` | hidden width 128; 16 Fourier bands; 4096 query points |
+| `mlp_rbf` | hidden width 128; RBF sigma 0.08; 16 Fourier bands; 4096 query points |
+| `deeponet` | width 128; basis dimension 64; 4096 query points |
+| `senseiver` | width 128; 64 latents; 4 heads; depth 3; 4096 query points |
+| `geofno` | 32 hidden channels; modes `[16,16]`; 4 layers |
+| `diffusion_pde` | 64 hidden channels; 1000 diffusion training steps |
+| `latent_fm` | 16 latent channels; explicit Stage 1/2 fragments; Stage 2 requires a selected Stage-1 checkpoint |
+| `pointcloud_ffm` GL-RBF | widths 128; 32 latents; 4 heads; 2 latent blocks; top-16 gathering; 2048 query chunk; RFF prior |
+| `pointcloud_ffm` FNO | 32 FNO hidden channels; RFF prior |
+| `pinn` | hidden width 64; 8 Fourier bands; model physics weight 1.0 |
+
+The canonical [`gl_rbf_cq.yaml`](configs/models/gl_rbf_cq.yaml) is the current high-capacity coherence-ready model. Its compatibility-sensitive identity is public name `gl_rbf_cq` with historical backbone name `GL_rbf_ENH_CQ`. Its main settings are:
+
+- RFF source prior with 256 features, length scale 0.15, and `sigma_min=1e-4`;
+- hidden/condition/field widths 256/128/128; 128 latents, 8 heads, 4 latent blocks, and Fourier coordinates with 32 bands up to frequency 64;
+- cached sensor-attention K/V, sensor reinjection every latent block, learnable-width top-32 RBF gathering, KeOps neighbor search, and top-16 sensor-local attention;
+- low-rank CQ readout of dimension 128 and rank 64 with 4 heads, additive global/local fusion, sinusoidal-FiLM time conditioning, and normalized RBF measurement support;
+- EMA enabled with decay 0.999 and EMA evaluation; 4096 training queries in microbatches of 2048 with reused condition context;
+- cached-streamed reconstruction, 8192-query chunks, `static_features` cache, and Euler as the configured native integrator.
+
+These settings map through `_portable_config` in the adapter to the preserved portable core in [`core/portable_core.py`](src/phycoflow_reconstruction/models/flows/pointcloud/core/portable_core.py). The adapter registers the portable children directly so existing checkpoint state-dict keys remain loadable. Native and coherence training gradients update the live parameters; evaluation and reconstruction previews enter the adapter's configured EMA weight context because `model_ema_eval: true`.
+
+### 0.3 Current turbulent-combustion coherence settings
+
+The source profile is [`gl_rbf_cq_cached_kv_5000ep.yaml`](cases/turbulent_combustion/configs/base/gl_rbf_cq_cached_kv_5000ep.yaml). It trains the canonical `gl_rbf_cq` model for 5000 epochs with AdamW batch size 128, learning rate $10^{-4}$, weight decay $10^{-6}$, and clip norm 1.0. The state has five output fields in order `CH4, CO, T, U_1, p` on a $100\times403$ grid with training mean/std normalization. Its only sparse input field is `T`, sampled uniformly at 192--384 locations per snapshot. Base training uses 4096 queries and an RFF rectified-flow source; configured evaluation uses four Euler generation steps and EMA weights.
+
+The readiness matrix is rooted at [`readiness/_common.yaml`](cases/turbulent_combustion/configs/readiness/_common.yaml). It selects `best.pt` and inherits the dataset, model, and observations from the immutable source run and trains the full model for 1000 epochs with learning rate $5\times10^{-5}$, weight decay $10^{-6}$, and gradient clipping at 1.0. The A, B, and ABC profiles use optimization batch size 16 and 20% of the training split. C uses batch size 32 and 10% of the split, while its coherence compute budget remains 16 samples. Each update retains the native source-model loss with weight 0.1. The outer coherence-objective weight is 1.0. Coherence starts at epoch 1, runs every step without warmup or interval rescaling, and uses a two-step Euler rollout over a fixed shared set of 4096 query points. Smooth endpoint observation consistency uses strength 1.0, sigma 0.05, schedule power 2, and a final exact clamp.
+
+The current A/B/C/ABC profiles select these family definitions:
+
+| Profile | Active loss terms and settings |
+|---|---|
+| A: global distribution | all five fields; marginal W2, pairwise SWD with 8 directions, and joint top-tail SWD with 16 Sobol directions and top fraction 0.1 |
+| B: cross spectrum | all five fields; pairs `(CO,T)`, `(T,CH4)`, `(T,U_1)`, `(CH4,U_1)`; 16-neighbor graph, 48 retained modes, zero mode excluded, low/mid/high bands; same- and cross-frequency terms enabled; log band-power disabled |
+| C: topology | family weight 0.01; fields `CO,T`; nonperiodic $32\times128$ raster, 4 interpolation neighbors, power 2, smoothing sigma 0.8; 7 quantile thresholds, dimensions 0 and 1, super/sublevel filtrations; 3 mutual lines |
+| ABC | all three definitions above; fixed `initial_grad_norm` family scaling calibrated over two batches |
+
+Every readiness family uses `target_use: paired_supervised`, `model_units`, and no reference bank. Consequently these experiments are supervised structural regularization, not target-free refinement. The single-family A, B, and C profiles use no family rescaling; ABC calibrates a fixed scale for each family from its source-checkpoint gradient norm. All profiles set `gradient_balance: config`, which means ConFIG is attempted only when the weighted native-data and aggregate-coherence gradients conflict.
+
+### 0.4 End-to-end code path
+
+The correlation between configuration, model, and coherence code is:
+
+1. [`config/load.py`](src/phycoflow_reconstruction/config/load.py) composes defaults; source loading in [`training/source.py`](src/phycoflow_reconstruction/training/source.py) restores the immutable base model, dataset, and observation contract.
+2. `build_model` in [`models/__init__.py`](src/phycoflow_reconstruction/models/__init__.py) selects the adapter. For `gl_rbf_cq`, the adapter supplies native `training_loss`, flow source/velocity hooks, streamed reconstruction, EMA, and observation-clamp behavior.
+3. [`training/post_training.py`](src/phycoflow_reconstruction/training/post_training.py) computes the adapter's native loss from the target-bearing training batch, removes `target_fields` before differentiable reconstruction, and reuses one generated endpoint across every enabled coherence family.
+4. [`coherence/compose.py`](src/phycoflow_reconstruction/coherence/compose.py) and [`coherence/registry.py`](src/phycoflow_reconstruction/coherence/registry.py) instantiate only enabled families. Their component paths correspond to the mathematical terms in Section 7.
+5. For `paired_supervised`, the target is introduced only after reconstruction as the reference argument to the family loss. For `training_reference`, [`coherence/reference_bank.py`](src/phycoflow_reconstruction/coherence/reference_bank.py) selects a distinct training-only empirical reference and validates fixed geometry where required.
+6. [`training/coherence_calibration.py`](src/phycoflow_reconstruction/training/coherence_calibration.py) optionally fixes between-family scales; then [`training/gradient_balance.py`](src/phycoflow_reconstruction/training/gradient_balance.py) combines the weighted native-data gradient with the already-aggregated coherence gradient and performs one optimizer update.
+
+In compact form:
+
+```text
+sparse observations + query coordinates
+              |                         dense training target
+              v                                  |
+       model differentiable rollout              +--> native model loss
+              |                                  |
+              v                                  v
+      reconstructed endpoint -----------> coherence family <--- reference target
+                                           (paired_supervised only)
+                                                   |
+                                                   v
+                                  components --> family weights/scales
+                                             --> aggregate coherence loss
+
+native-data gradient + aggregate-coherence gradient --> weighted sum/ConFIG
+                                                     --> optimizer + EMA update
+```
 
 ## 1. Reconstruction problem and notation
 
@@ -323,7 +444,7 @@ Reconstruction starts from Gaussian noise and uses a deterministic DDIM-style su
 $$
 \widehat{\mathbf X}_0
 =\frac{
-\mathbf X_t-sqrt{1-\overline\alpha_t}
+\mathbf X_t-\sqrt{1-\overline\alpha_t}
 \widehat{\boldsymbol\epsilon}_\theta
 }{\sqrt{\overline\alpha_t}},
 $$
@@ -449,7 +570,7 @@ $$
 
 with Euler steps. The common post-training rollout can instead select Euler or Heun while retaining gradients.
 
-#### GL-RBF enhanced point backbone
+#### GL-RBF/CQ point backbone
 
 Sensors are embedded from coordinate, value, and learned field identity. A learned latent array cross-attends to sensors, passes through self-attention, and receives sensor reinjection after each latent block. Queries read the global latents. In parallel, the $K$ nearest valid sensors receive learned-width Gaussian weights
 
@@ -466,7 +587,23 @@ $$
 {\max\left(\sum_{k=1}^{K}w_{bqk},10^{-8}\right)}.
 $$
 
-The head fuses current-state/time features, query-to-latent readout, local RBF features, and the global latent mean. Distance and query-attention work are chunked to avoid allocating one global $Q\times M$ matrix.
+The `gl_rbf_enh` head fuses current-state/time features, query-to-latent readout, local RBF features, and the global latent mean. Distance and query-attention work are chunked to avoid allocating one global $Q\times M$ matrix. The public alias is in [`gl_rbf_enh_core.py`](src/phycoflow_reconstruction/models/flows/pointcloud/core/gl_rbf_enh_core.py) and the checkpoint-compatible implementation is in `portable_core.py`.
+
+The registered `gl_rbf_cq` model retains that condition encoder and local GL-RBF residual, then adds a conditional-query (CQ) readout. Public aliases are in [`gl_rbf_cq_core.py`](src/phycoflow_reconstruction/models/flows/pointcloud/core/gl_rbf_cq_core.py); the implementation remains in `portable_core.py` so parameter names are not changed.
+
+With the canonical additive fusion, each query first combines the encoded current point state, global condition, local GL-RBF condition, and query-specific latent readout:
+
+$$
+\mathbf h_{bq}
+=\mathbf h^{\mathrm{point}}_{bq}
++s_g\mathbf h^{\mathrm{global}}_b
++s_lP_l\mathbf h^{\mathrm{local}}_{bq}
++s_r\mathbf h^{\mathrm{readout}}_{bq}.
+$$
+
+The query-specific term is a low-rank multihead query-to-latent readout and the local term carries the GL-RBF neighborhood feature. Normalized per-field RBF measurement and support features are concatenated to $\mathbf h_{bq}$ before the CQ head. Sinusoidal time features modulate the point representation through FiLM. The scales $s_g,s_l,s_r$ are initialized by `cq_global_scale_init`, `cq_local_scale_init`, and `cq_readout_scale_init`; they are learned model parameters and are serialized in checkpoints. With `topk_rbf_glres`, the final velocity is the CQ residual plus a separately scaled coarse prediction.
+
+The adapter in [`gl_rbf_cq_adapter.py`](src/phycoflow_reconstruction/models/flows/pointcloud/adapters/gl_rbf_cq_adapter.py) connects this tensor model to repository contracts. It also owns query microbatching, cached condition context, cached/streamed reconstruction, portable observation consistency, and EMA lifecycle. Thus the CQ mechanism is part of the ML velocity model, whereas coherence remains an external post-training loss computed from its reconstructed endpoint.
 
 #### FNO flow backbone
 
@@ -575,6 +712,19 @@ $$
 \{\text{global distribution},\text{cross-spectrum},\text{topology}\}.
 $$
 
+The YAML-to-code-to-math mapping is exact:
+
+| YAML component | Implementation | Quantity described below |
+|---|---|---|
+| `global_distribution.components.self` | [`components/self_marginal.py`](src/phycoflow_reconstruction/coherence/families/global_distribution/components/self_marginal.py) | per-field empirical $W_2^2$ |
+| `global_distribution.components.mutual` | [`components/mutual_pairwise.py`](src/phycoflow_reconstruction/coherence/families/global_distribution/components/mutual_pairwise.py) | pairwise sliced $W_2^2$ |
+| `global_distribution.components.cross` | [`components/cross_joint.py`](src/phycoflow_reconstruction/coherence/families/global_distribution/components/cross_joint.py) | joint top-tail sliced $W_2^2$ |
+| `cross_spectrum.components.same_frequency` | [`cross_spectrum/family.py`](src/phycoflow_reconstruction/coherence/families/cross_spectrum/family.py) and [`statistics.py`](src/phycoflow_reconstruction/coherence/families/cross_spectrum/statistics.py) | graph-mode magnitude-squared coherence |
+| `cross_spectrum.components.cross_frequency` | same files | off-diagonal cross-band energy coupling |
+| `cross_spectrum.components.band_energy` | same files | log spectral-band power |
+| `topology.components.self` | [`topology/family.py`](src/phycoflow_reconstruction/coherence/families/topology/family.py) and [`betti_curves.py`](src/phycoflow_reconstruction/coherence/families/topology/betti_curves.py) | single-field Betti curves |
+| `topology.components.mutual` | same files | fibered two-field Betti curves |
+
 For enabled family $F$ and component $k$, let $w_F$ and $w_{Fk}$ be configured nonnegative weights. A family produces
 
 $$
@@ -582,12 +732,22 @@ $$
 =\sum_{k\in\mathcal K_F}w_{Fk}\mathcal L_{Fk},
 $$
 
-and the combined coherence objective is
+If optional source-checkpoint calibration resolves a fixed scale $a_F$, the combined coherence objective is
 
 $$
 \mathcal L_{\mathrm{coh}}
-=\sum_{F\in\mathfrak F_{\mathrm{enabled}}}w_F\mathcal L_F.
+=\sum_{F\in\mathfrak F_{\mathrm{enabled}}}w_Fa_F\mathcal L_F.
 $$
+
+Here $a_F=1$ when `family_balance.mode: none`. For `initial_grad_norm`, the code measures each unweighted family-gradient norm $n_F$ on fixed calibration batches, takes their median $n_{\mathrm{ref}}$, and freezes
+
+$$
+a_F=\operatorname{clip}
+\left(\frac{n_{\mathrm{ref}}}{\max(n_F,\varepsilon)},
+a_{\min},a_{\max}\right).
+$$
+
+This balances families inside $\mathcal L_{\mathrm{coh}}$. It is distinct from ConFIG, which later combines the aggregate coherence gradient with the native-data gradient.
 
 The post-training objective at epoch $e$ is
 
@@ -753,7 +913,7 @@ $$
 \longrightarrow\mathbb R^{B\times C\times H\times W}.
 $$
 
-Periodic cases tile coordinate images across seams before interpolation. Optional Gaussian smoothing is applied on the raster.
+When `geometry.periodic: true`, the rasterizer tiles coordinate images across seams before interpolation. Optional Gaussian smoothing is applied on the raster.
 
 For threshold $\tau$, a superlevel filtration uses
 
@@ -832,7 +992,7 @@ The reference is supplied only after reconstruction to compute $\mathcal L_{\mat
 
 Post-training dispatches by capability rather than model name:
 
-- PointCloudFFM and the legacy combustion adapter expose source sampling and velocity hooks for differentiable Euler/Heun integration.
+- PointCloudFFM, `gl_rbf_cq`, and the legacy combustion adapter expose source sampling and velocity hooks for differentiable Euler/Heun integration.
 - Direct regressors and GeoFNO use their direct prediction.
 - DiffusionPDE uses differentiable DDIM.
 - Latent flow Stage 2 uses differentiable latent integration and decoding.
@@ -910,6 +1070,8 @@ $$
 \mathbf g_c=\nabla_\theta(\lambda_c\mathcal L_c).
 $$
 
+When `gradient_balance: config`, the implementation first also multiplies $\lambda_d$ and $\lambda_c$ by `config_data_grad_scale` and `config_coherence_grad_scale`, respectively. In the current readiness profiles both scales are 1.0. The family-calibration factors $a_F$ from Section 7.1 are already inside $\mathcal L_c$ at this point.
+
 The default update uses
 
 $$
@@ -924,7 +1086,7 @@ $$
 {\lVert\mathbf g_d\rVert_2\lVert\mathbf g_c\rVert_2+\varepsilon}.
 $$
 
-When optional ConFIG mode is selected and $\cos\varphi<0$, the `conflictfree` package proposes a combined gradient. It is accepted only if it is finite and is a descent direction for both component gradients:
+When ConFIG mode is selected and $\cos\varphi<0$, the optional `conflictfree` package proposes a combined gradient. It is accepted only if it is finite and is a descent direction for both component gradients:
 
 $$
 \mathbf g^\top\mathbf g_d>0,
@@ -932,7 +1094,7 @@ $$
 \mathbf g^\top\mathbf g_c>0.
 $$
 
-Otherwise the trainer falls back according to configuration. Complex parameters are flattened as real/imaginary pairs and restored without changing their dtype.
+For aligned gradients the code deliberately keeps the weighted sum. A missing `conflictfree` installation follows `config_missing_behavior`; the readiness profiles choose `error`. A non-finite or non-descent ConFIG proposal falls back to the weighted sum and is recorded in metrics. Complex parameters are flattened as real/imaginary pairs and restored without changing their dtype.
 
 Current drawbacks:
 

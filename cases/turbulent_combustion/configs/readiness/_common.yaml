@@ -1,0 +1,67 @@
+stage: post_training
+case: turbulent_combustion
+
+source_run: /home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/runs/tc_gl_rbf_cq_cached_kv_5000ep/20260826T212231Z_7b68c461
+source_checkpoint: best.pt
+inherit_base_config: true
+source: {kind: native_run, allow_integration_source: true}
+
+objectives:
+  data_retention: {enabled: true, weight: 0.1}
+  coherence: {enabled: true, weight: 1.0}
+
+rollout: {steps: 2, solver: euler}
+observation_consistency: {mode: endpoint_smooth, strength: 1.0, sigma: 0.05, schedule_power: 2.0, final_clamp: true, chunk_size: 4096}
+trainable: {scope: full_model}
+
+optimization:
+  epochs: 1000
+  batch_size: 16
+  train_fraction: 0.20
+  lr: 5.0e-5
+  weight_decay: 1.0e-6
+  grad_clip: 1.0
+  gradient_balance: config
+  config_missing_behavior: error
+  config_data_grad_scale: 1.0
+  config_coherence_grad_scale: 1.0
+
+runtime:
+  seed: 42
+  device: cuda:1
+  deterministic: true
+  num_workers: 0
+  data_strategy: async_cpu
+  progress: true
+  plot_every_steps: 1
+
+evaluation:
+  split: validation
+  max_samples: 32
+  query_points: 4096
+  generation_steps: 2
+  seed: 2027
+  preview:
+    enabled: true
+    loss_every_epochs: 10
+    reconstruct_every_epochs: 200
+    split: validation
+    sample_index: 0
+    query_points: 4096
+    generation_steps: 2
+    seed: 2027
+    keep_history: true
+
+checkpointing:
+  enabled: true
+  every_epochs: 5
+  save_epoch_one: true
+  selection_metric: reconstruction_mse
+
+posttrain_fidelity:
+  max_relative_mse_increase: 0.05
+  behavior: report
+
+coherence:
+  schedule: {start_epoch: 1, every_n_steps: 1, weight_warmup_epochs: 0, interval_rescale: false}
+  compute_budget: {batch_size: 16, point_count: 4096, query_policy: fixed_shared, query_seed: 100045}

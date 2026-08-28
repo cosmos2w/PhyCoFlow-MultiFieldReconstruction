@@ -1,0 +1,24 @@
+version: 1
+label: supervised_coherence_regularization
+source_checkpoint: best.pt
+execution_order: [A_global_distribution, B_cross_spectrum, C_topology, ABC_balanced]
+configs:
+  A: A_global_distribution.yaml
+  B: B_cross_spectrum.yaml
+  C: C_topology.yaml
+  ABC: ABC_balanced.yaml
+matched_contract:
+  training: {epochs: 100, train_fraction: 0.01, batch_size: 4, lr: 5.0e-5, seed: 42}
+  coherence_queries: {policy: fixed_shared, count: 4096, seed: 100045}
+  coherence_target_use: paired_supervised
+  rollout: {steps: 2, solver: euler}
+  validation: {samples: 4, query_points: 4096, generation_seed: 2027, generation_steps: 2}
+  checkpoint_selection: reconstruction_mse
+  family_outer_priorities: {global_distribution: 1.0, cross_spectrum: 1.0, topology: 1.0}
+gates:
+  max_relative_normalized_mse_increase: 0.05
+  single_family_target_reduction: 0.20
+  abc_each_family_reduction: 0.10
+notes:
+  - A/B/C use fixed scale 1.0; ABC calibrates once at the immutable source checkpoint.
+  - Preserve the generated calibration artifact and fixed scales when resuming ABC.

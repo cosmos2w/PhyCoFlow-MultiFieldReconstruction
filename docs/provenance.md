@@ -1,12 +1,8 @@
 # Upstream References and Provenance
 
-This project uses upstream software in one of three explicit ways: a pinned
-library dependency, a clean-room local implementation guided by publications
-and public interfaces, or a version-locked extraction from this repository's
-own historical demo. No upstream repository is vendored as a monolith.
+This project uses upstream software in one of three explicit ways: a pinned library dependency, a clean-room local implementation guided by publications and public interfaces, or a version-locked extraction from this repository's own historical demo. No upstream repository is vendored as a monolith.
 
-The repository revisions below were reviewed on 2026-08-16. A future upgrade
-must update this file and rerun model-contract and real-case integration checks.
+The repository revisions below were reviewed on 2026-08-16. A future upgrade must update this file and rerun model-contract and real-case integration checks.
 
 | Reference | Reviewed revision | License | Use in this project |
 |---|---|---|---|
@@ -20,26 +16,8 @@ must update this file and rerun model-contract and real-case integration checks.
 
 ## Optional local historical compatibility source
 
-`src/phycoflow_reconstruction/models/compatibility/legacy_tc_demo50.py` is a
-focused extraction of the
-architecture and RF/RFF behavior required by
-`0_demo_TurbulentCombustion/Save_TrainedModel/ffm_tc_pointcloud_DemoN50_20260706_084857`.
-It has no runtime import from the demo, is absent from the new-model registry,
-and is accepted only after strict key/shape loading and fixed-seed equivalence
-against the historical implementation. The extracted compatibility code remains
-tracked inside this standalone repository; the old demo tree is now an
-optional local-only reference and is not tracked on this validation branch.
-Live historical equivalence validation requires that separately retained local
-source tree, checkpoint, and dataset. `pykeops==2.3` is pinned solely for that
-checkpoint's original neighbor-search path.
+`src/phycoflow_reconstruction/models/compatibility/legacy_tc_demo50.py` is a focused extraction of the architecture and RF/RFF behavior required by `0_demo_TurbulentCombustion/Save_TrainedModel/ffm_tc_pointcloud_DemoN50_20260706_084857`. It has no runtime import from the demo, is absent from the new-model registry, and is accepted only after strict key/shape loading and fixed-seed equivalence against the historical implementation. The extracted compatibility code remains tracked inside this standalone repository; the old demo tree is now an optional local-only reference and is not tracked on this validation branch. Live historical equivalence validation requires that separately retained local source tree, checkpoint, and dataset. `pykeops==2.3` is pinned solely for that checkpoint's original neighbor-search path.
 
-The `global_distribution` estimators and endpoint-consistency behavior
-are focused, typed refactors of the optional local historical source
-`0_demo_TurbulentCombustion/src/{coherence_dist.py,direct_coherence_loss.py,obs_consistency.py}`.
-They have no runtime import from the demo. A compatibility test compares every
-refactored component numerically when that local source is available; clean
-checkouts skip this optional historical comparison explicitly.
+The `global_distribution` estimators and endpoint-consistency behavior are focused, typed refactors of the optional local historical source `0_demo_TurbulentCombustion/src/{coherence_dist.py,direct_coherence_loss.py,obs_consistency.py}`. They have no runtime import from the demo. A compatibility test compares every refactored component numerically when that local source is available; clean checkouts skip this optional historical comparison explicitly.
 
-`conflictfree==0.1.8` is an optional post-training dependency used only when
-`optimization.gradient_balance: config` is selected. Weighted-sum training
-does not import it.
+`conflictfree==0.1.8` is an optional post-training dependency used only when `optimization.gradient_balance: config` is selected. Weighted-sum training does not import it.

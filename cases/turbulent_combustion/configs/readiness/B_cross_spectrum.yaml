@@ -1,0 +1,21 @@
+defaults: [_common.yaml]
+
+coherence:
+  family_balance: {mode: none, calibration_batches: 2, reference: median, epsilon: 1.0e-12, scale_min: 0.00001, scale_max: 100.0, max_batch_ratio: 100.0, gradient_diagnostics_every_epochs: 0, seed: 700043}
+  families:
+    cross_spectrum:
+      enabled: true
+      weight: 1.0
+      target_use: paired_supervised
+      units: model_units
+      fields: [CH4, CO, T, U_1, p]
+      pairs: [[CO, T], [T, CH4], [T, U_1], [CH4, U_1]]
+      reference_bank: {enabled: false}
+      graph: {k_neighbors: 16, sigma: null, num_modes: 48, exclude_zero: true, bands: [low, mid, high]}
+      eps: 1.0e-8
+      components:
+        same_frequency: {enabled: true, weight: 1.0}
+        cross_frequency: {enabled: true, weight: 1.0}
+        band_energy: {enabled: false, weight: 0.0}
+
+output: {experiment_name: coherence_fix_B_cross_spectrum}

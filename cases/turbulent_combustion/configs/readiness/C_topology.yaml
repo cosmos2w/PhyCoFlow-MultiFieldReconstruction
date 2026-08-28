@@ -1,0 +1,57 @@
+defaults: [_common.yaml]
+
+optimization:
+  epochs: 1000
+  batch_size: 32
+  train_fraction: 0.10
+  lr: 5.0e-5
+  weight_decay: 1.0e-6
+  grad_clip: 1.0
+  gradient_balance: config
+  config_missing_behavior: error
+  config_data_grad_scale: 1.0
+  config_coherence_grad_scale: 1.0
+
+runtime:
+  seed: 42
+  device: cuda:2
+  deterministic: true
+  num_workers: 0
+  data_strategy: async_cpu
+  progress: true
+  plot_every_steps: 1
+
+evaluation:
+  split: validation
+  max_samples: 32
+  query_points: 4096
+  generation_steps: 2
+  seed: 2027
+  preview:
+    enabled: true
+    loss_every_epochs: 1
+    reconstruct_every_epochs: 200
+    split: validation
+    sample_index: 0
+    query_points: 4096
+    generation_steps: 2
+    seed: 2027
+    keep_history: true
+
+coherence:
+  family_balance: {mode: none, calibration_batches: 2, reference: median, epsilon: 1.0e-12, scale_min: 0.00001, scale_max: 100.0, max_batch_ratio: 100.0, gradient_diagnostics_every_epochs: 0, seed: 700043}
+  families:
+    topology:
+      enabled: true
+      weight: 0.01
+      target_use: paired_supervised
+      units: model_units
+      fields: [CO, T]
+      reference_bank: {enabled: false}
+      geometry: {grid_shape: [32, 128], axes: [0, 1], neighbors: 4, power: 2.0, periodic: false, allow_projected_collisions: false}
+      filtration: {quantiles: [0.10, 0.25, 0.40, 0.50, 0.60, 0.75, 0.90], dimensions: [0, 1], directions: [superlevel, sublevel], sharpness: 12.0, smoothing_sigma: 0.8}
+      components:
+        self: {enabled: true, weight: 1.0}
+        mutual: {enabled: true, weight: 1.0, pairs: [[CO, T]], lines: 3, theta_min_degrees: 15.0, axis_tolerance: 1.0e-6}
+
+output: {experiment_name: coherence_fix_C_topology}

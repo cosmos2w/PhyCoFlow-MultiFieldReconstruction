@@ -1,0 +1,18 @@
+defaults: [_common.yaml]
+
+coherence:
+  family_balance: {mode: none, calibration_batches: 2, reference: median, epsilon: 1.0e-12, scale_min: 0.00001, scale_max: 100.0, max_batch_ratio: 100.0, gradient_diagnostics_every_epochs: 0, seed: 700043}
+  families:
+    global_distribution:
+      enabled: true
+      weight: 1.0
+      target_use: paired_supervised
+      units: model_units
+      fields: [CH4, CO, T, U_1, p]
+      reference_bank: {enabled: false}
+      components:
+        self: {enabled: true, weight: 1.0}
+        mutual: {enabled: true, weight: 1.0, directions: 8, seed: 1234}
+        cross: {enabled: true, weight: 1.0, directions: 16, top_fraction: 0.1, seed: 1234, include_axes: true, qmc: true}
+
+output: {experiment_name: coherence_fix_A_global_distribution}
