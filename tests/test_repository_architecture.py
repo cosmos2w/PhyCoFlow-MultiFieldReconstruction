@@ -58,7 +58,9 @@ def test_every_canonical_yaml_resolves_and_stage_configs_validate() -> None:
         path
         for root in roots
         for path in root.rglob("*.yaml")
-        if not {"_experiments", "runs", "manifests", "generated"}.intersection(path.parts)
+        if not {"_experiments", "readiness", "runs", "manifests", "generated"}.intersection(
+            path.parts
+        )
     )
     assert paths
     for path in paths:
