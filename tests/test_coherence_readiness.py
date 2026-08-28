@@ -8,9 +8,10 @@ import pytest
 import torch
 from test_config_contracts import _base_config
 
-from phycoflow_reconstruction.coherence import ReferenceBank
+from phycoflow_reconstruction.coherence import ReferenceBank, build_coherence_family
 from phycoflow_reconstruction.config.validate import validate_config
-from phycoflow_reconstruction.contracts import ObservationBatch
+from phycoflow_reconstruction.contracts import DataSpec, ObservationBatch
+from phycoflow_reconstruction.data.normalization import FieldNormalizer
 from phycoflow_reconstruction.data.training_batches import fixed_query_indices
 from phycoflow_reconstruction.training.post_training import _coherence_objective
 
@@ -55,6 +56,57 @@ def test_strict_weights_allow_only_disabled_zero_and_require_effective_family():
         component.update(enabled=False, weight=0.0)
     with pytest.raises(ValueError, match="positive enabled component"):
         validate_config(broken)
+
+
+@pytest.mark.parametrize("family_name", ["global_distribution", "cross_spectrum", "topology"])
+@pytest.mark.parametrize("weight", [0.0, -1.0])
+def test_direct_family_constructors_require_positive_outer_weight(
+    family_name: str, weight: float
+) -> None:
+    configs = {
+        "global_distribution": {
+            "weight": weight,
+            "fields": ["u", "v"],
+            "components": {
+                "self": {"enabled": True, "weight": 1.0},
+                "mutual": {"enabled": False, "weight": 0.0},
+                "cross": {"enabled": False, "weight": 0.0},
+            },
+        },
+        "cross_spectrum": {
+            "weight": weight,
+            "fields": ["u", "v"],
+            "pairs": [["u", "v"]],
+            "graph": {"num_modes": 2, "bands": ["low", "high"]},
+            "components": {
+                "same_frequency": {"enabled": True, "weight": 1.0},
+                "cross_frequency": {"enabled": False, "weight": 0.0},
+                "band_energy": {"enabled": False, "weight": 0.0},
+            },
+        },
+        "topology": {
+            "weight": weight,
+            "fields": ["u", "v"],
+            "geometry": {"grid_shape": [2, 2]},
+            "filtration": {
+                "dimensions": [0],
+                "directions": ["superlevel"],
+                "smoothing_sigma": 0.0,
+            },
+            "components": {
+                "self": {"enabled": True, "weight": 1.0},
+                "mutual": {"enabled": False, "weight": 0.0},
+            },
+        },
+    }
+    data_spec = DataSpec(("u", "v"), ("1", "1"), 2, (2, 2))
+    with pytest.raises(ValueError, match=rf"{family_name}\.weight must be positive"):
+        build_coherence_family(
+            family_name,
+            configs[family_name],
+            data_spec,
+            FieldNormalizer.identity(2),
+        )
 
 
 def test_active_spectral_components_set_evaluation_ensemble_minimum():

@@ -37,8 +37,8 @@ class GlobalDistributionFamily(nn.Module):
         self.target_use = str(config.get("target_use", "training_reference"))
         self.units = str(config.get("units", "model_units"))
         self.family_weight = float(config.get("weight", 1.0))
-        if self.family_weight < 0:
-            raise ValueError("global_distribution.weight must be non-negative")
+        if self.family_weight <= 0:
+            raise ValueError("global_distribution.weight must be positive")
         if self.target_use not in {"training_reference", "paired_supervised"}:
             raise ValueError(
                 "global_distribution.target_use must be training_reference or paired_supervised"

@@ -38,6 +38,8 @@ class TopologyFamily(nn.Module):
         self.target_use = str(config.get("target_use", "paired_supervised"))
         self.units = str(config.get("units", "model_units"))
         self.family_weight = float(config.get("weight", 1.0))
+        if self.family_weight <= 0:
+            raise ValueError("topology.weight must be positive")
         if self.target_use not in {"training_reference", "paired_supervised"}:
             raise ValueError("topology.target_use is invalid")
         if self.units not in {"model_units", "physical_units"}:
