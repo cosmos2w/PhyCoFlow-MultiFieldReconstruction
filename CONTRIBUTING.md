@@ -4,7 +4,7 @@ PhyCoFlow is a shared research workspace. Keep each change within a clear contra
 
 ## Workflow
 
-1. Start from an up-to-date `main` and create a focused task branch.
+1. Start from an up-to-date `main` and create a focused task branch. Short-lived pilot branches (for example `pilot/<topic>`) are fine for checking the coworking workflow itself.
 2. Keep the branch reviewable: separate layout, model, config, and artifact changes into logically scoped commits.
 3. Open a pull request to `main` using the repository template. Do not merge your own research change without review.
 4. Explain checkpoint, config, data, and artifact compatibility impact in the PR description.
