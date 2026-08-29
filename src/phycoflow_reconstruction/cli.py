@@ -177,6 +177,24 @@ def run_case_cli(case_name: str, case_dir: str | Path) -> int:
     visualizer.add_argument("--snapshot-index", type=int, default=0)
     visualizer.add_argument("--eval-set", choices=("train", "validation", "test"))
     visualizer.add_argument("--eval-samples", type=_evaluation_sample_limit, default=200)
+    visualizer.add_argument(
+        "--stat-scale",
+        choices=("log", "linear"),
+        default="log",
+        help=(
+            "vertical scale for reconstruction and discrepancy-distribution plots; "
+            "cross-spectrum coherence bars always use a bounded 0-1 scale (default: log)"
+        ),
+    )
+    visualizer.add_argument(
+        "--eval-coherence",
+        nargs="+",
+        choices=("global_distribution", "cross_spectrum"),
+        help=(
+            "also evaluate selected coherence families over --eval-set; "
+            "currently supports global_distribution and cross_spectrum"
+        ),
+    )
     visualizer.add_argument("--sensor-config", type=Path)
     visualizer.add_argument("--sensor-manifest", type=Path)
     visualizer.add_argument("--generation-steps", type=int)
@@ -219,6 +237,8 @@ def run_case_cli(case_name: str, case_dir: str | Path) -> int:
         return 0
 
     if args.command == "visualize-run":
+        if args.eval_coherence and args.eval_set is None:
+            parser.error("--eval-coherence requires --eval-set")
         run_dir = args.run.resolve() if args.run.is_absolute() else (case_dir / args.run).resolve()
         sensor_config = args.sensor_config
         if sensor_config is not None and not sensor_config.is_absolute():
@@ -244,6 +264,8 @@ def run_case_cli(case_name: str, case_dir: str | Path) -> int:
                 output_path=output,
                 weight_selection=args.weight_selection,
                 max_samples=args.eval_samples,
+                coherence_families=args.eval_coherence,
+                statistic_scale=args.stat_scale,
             )
             print(figure)
             return 0

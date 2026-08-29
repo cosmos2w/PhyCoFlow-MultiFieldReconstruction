@@ -18,6 +18,7 @@ from ..training.common import sensor_protocol_from_config
 from ..training.model_lifecycle import selected_evaluation_weight_context
 from ..training.run_store import file_sha256
 from .checkpoint import load_evaluation_runtime
+from .coherence_set import build_coherence_accumulators
 from .reconstruction_visualization import warn_if_cuda_memory_tight
 
 
@@ -88,6 +89,7 @@ def render_reconstruction_set_distribution(
     *,
     title: str | None = None,
     dpi: int = 300,
+    scale: str = "log",
 ) -> Path:
     """Render per-field violin distributions overlaid with per-sample scatter points."""
     import matplotlib
@@ -108,6 +110,8 @@ def render_reconstruction_set_distribution(
         raise ValueError("set-evaluation payload must have shape [samples, fields]")
     if errors.shape[0] < 1:
         raise ValueError("set-evaluation payload contains no samples")
+    if scale not in {"log", "linear"}:
+        raise ValueError("statistical plot scale must be 'log' or 'linear'")
 
     figure_width = max(7.2, 1.15 * len(field_names) + 1.9)
     figure, axis = plt.subplots(figsize=(figure_width, 4.7), layout="constrained")
@@ -131,6 +135,8 @@ def render_reconstruction_set_distribution(
     for field_index in range(len(field_names)):
         finite = errors[:, field_index]
         finite = finite[np.isfinite(finite)]
+        if scale == "log":
+            finite = finite[finite > 0.0]
         if finite.size >= 2:
             finite_by_field.append(finite)
             finite_positions.append(positions[field_index])
@@ -190,8 +196,15 @@ def render_reconstruction_set_distribution(
     )
     axis.set_xlim(0.35, len(field_names) + 0.65)
     finite_errors = errors[np.isfinite(errors)]
-    upper = float(finite_errors.max()) * 1.07 if finite_errors.size else 1.0
-    axis.set_ylim(0.0, max(upper, np.finfo(np.float64).eps))
+    axis.set_yscale(scale)
+    if scale == "log":
+        finite_errors = finite_errors[finite_errors > 0.0]
+        if not finite_errors.size:
+            raise ValueError("log-scale reconstruction plot contains no positive values")
+        axis.set_ylim(float(finite_errors.min()) * 0.75, float(finite_errors.max()) * 1.25)
+    else:
+        upper = float(finite_errors.max()) * 1.07 if finite_errors.size else 1.0
+        axis.set_ylim(0.0, max(upper, np.finfo(np.float64).eps))
     axis.set_ylabel(
         r"Relative $L_2$ error after physical-unit decoding",
         fontsize=10.5,
@@ -264,6 +277,8 @@ def evaluate_reconstruction_set(
     output_path: str | Path | None = None,
     weight_selection: str = "configured",
     max_samples: int | None = 200,
+    coherence_families: tuple[str, ...] | list[str] | None = None,
+    statistic_scale: str = "log",
 ) -> Path:
     """Stream a complete split through one loaded model and plot field-wise error statistics."""
     run_dir = Path(run_dir).resolve()
@@ -295,6 +310,7 @@ def evaluate_reconstruction_set(
     sample_count = int(selected_indices.size)
     input_manifest = SensorManifest.load(sensor_manifest) if sensor_manifest is not None else None
     field_names = tuple(dataset.field_names)
+    coherence = build_coherence_accumulators(coherence_families or (), runtime)
     errors = np.full((sample_count, len(field_names)), np.nan, dtype=np.float64)
     sample_ids: list[str] = []
     manifest_path = output_dir / "sensor_manifest.jsonl"
@@ -399,13 +415,25 @@ def evaluate_reconstruction_set(
                 target = batch.target_fields
                 if target is None:
                     raise ValueError("set evaluation requires dense targets")
-                sample_errors = _physical_relative_l2(
-                    reconstruction.prediction,
-                    target,
-                    dataset.normalizer,
-                )[0].cpu().numpy()
+                sample_errors = (
+                    _physical_relative_l2(
+                        reconstruction.prediction,
+                        target,
+                        dataset.normalizer,
+                    )[0]
+                    .cpu()
+                    .numpy()
+                )
                 errors[output_index] = sample_errors
                 sample_ids.append(batch.sample_ids[0])
+                valid_query = batch.query_valid_mask[0]
+                for accumulator in coherence.values():
+                    accumulator.update(
+                        reconstruction.prediction[:, valid_query],
+                        target[:, valid_query],
+                        batch.query_coords[:, valid_query],
+                        batch.sample_ids[0],
+                    )
                 writer.writerow((sample_index, batch.sample_ids[0], *sample_errors.tolist()))
                 if (output_index + 1) % 100 == 0:
                     manifest_stream.flush()
@@ -429,7 +457,18 @@ def evaluate_reconstruction_set(
             f"({checkpoint_label}.pt, n={sample_count})"
         ),
         dpi=300,
+        scale=statistic_scale,
     )
+    coherence_outputs = {
+        name: accumulator.finalize(
+            output_dir,
+            split=split,
+            checkpoint_label=checkpoint_label,
+            run_label=run_dir.parent.name,
+            scale=statistic_scale,
+        )
+        for name, accumulator in coherence.items()
+    }
     report = {
         "metric": "per_sample_per_field_relative_l2_physical",
         "split": split,
@@ -445,6 +484,8 @@ def evaluate_reconstruction_set(
             "split_relative_indices": selected_indices.tolist(),
         },
         "field_names": list(field_names),
+        "statistic_scale": statistic_scale,
+        "coherence": coherence_outputs,
         "per_field_statistics": {
             field: _finite_summary(errors[:, field_index])
             for field_index, field in enumerate(field_names)

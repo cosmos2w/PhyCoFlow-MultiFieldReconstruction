@@ -113,12 +113,7 @@ python run.py train-base \
 
 Normal training omits `--max-steps`. Point models consume sparse observation tokens; grid/operator models rasterize observations and their support mask. Diffusion and flow models retain their native noise/velocity objectives.
 
-DiffusionPDE supports two interchangeable denoising backbones. The maintained
-`configs/models/diffusion_pde.yaml` profile selects a time-conditioned,
-multiscale U-Net with configurable channel multipliers, residual depth,
-timestep embedding, coarse-level attention, attention heads, and dropout. The
-original three-convolution implementation remains available as the lightweight,
-checkpoint-compatible `plain_cnn` option:
+DiffusionPDE supports two interchangeable denoising backbones. The maintained `configs/models/diffusion_pde.yaml` profile selects a time-conditioned, multiscale U-Net with configurable channel multipliers, residual depth, timestep embedding, coarse-level attention, attention heads, and dropout. The original three-convolution implementation remains available as the lightweight, checkpoint-compatible `plain_cnn` option:
 
 ```bash
 # Maintained conditional U-Net profile.
@@ -129,11 +124,7 @@ python run.py train-base --config configs/base/diffusion_pde.yaml \
   --override model.backbone=plain_cnn
 ```
 
-Both backbones use the same cosine noise schedule, noise-prediction loss, and
-deterministic DDIM-style reconstruction with observed values clamped after each
-sampling update. They require complete two-dimensional target grids. The U-Net
-uses considerably more accelerator memory, especially when attention is enabled;
-set the case-level training batch size accordingly.
+Both backbones use the same cosine noise schedule, noise-prediction loss, and deterministic DDIM-style reconstruction with observed values clamped after each sampling update. They require complete two-dimensional target grids. The U-Net uses considerably more accelerator memory, especially when attention is enabled; set the case-level training batch size accordingly.
 
 Latent flow has an explicit two-stage lifecycle:
 
@@ -196,9 +187,7 @@ From the repository root, the simple form is:
 python cases/<case>/run.py visualize-run --run runs/<experiment>/<run-id>
 ```
 
-With no optional arguments, this loads `best.pt`, selects snapshot `0` relative to the test split,
-and uses the sparse observation protocol and generation settings in `resolved_config.yaml`. It
-always reconstructs the complete grid and writes a 300-DPI PNG.
+With no optional arguments, this loads `best.pt`, selects snapshot `0` relative to the test split, and uses the sparse observation protocol and generation settings in `resolved_config.yaml`. It always reconstructs the complete grid and writes a 300-DPI PNG.
 
 The fully explicit command used for the Senseiver example below is:
 
@@ -215,25 +204,18 @@ python cases/turbulent_combustion/run.py visualize-run \
 ```
 
 - `--snapshot-index` is relative to the selected split.
-- Omit `--sensor-config` and `--sensor-manifest` to use the observation protocol recorded by the
-  run. Supplying either option overrides or replays that protocol.
-- `--contour-levels` controls both filled and thin grey contours. Colorbars are continuous with
-  four labeled ticks.
+- Omit `--sensor-config` and `--sensor-manifest` to use the observation protocol recorded by the run. Supplying either option overrides or replays that protocol.
+- `--contour-levels` controls both filled and thin grey contours. Colorbars are continuous with four labeled ticks.
 - Figure size, spacing, and text scale adapt to the physical-domain aspect ratio and field count.
-- A CUDA-memory warning appears before inference when the selected device may be tight; choose a
-  different device with `--device`.
+- A CUDA-memory warning appears before inference when the selected device may be tight; choose a different device with `--device`.
 
-Outputs are stored under
-`evaluation/reconstruction_<split>_<snapshot>_<checkpoint>/`: `reconstruction.png`, `report.json`,
-`sensor_manifest.json`, `query_indices.pt`, and the portable plotting payload
-`reconstruction.npz`. The former duplicate `reconstruction.pt` is no longer written.
+Outputs are stored under `evaluation/reconstruction_<split>_<snapshot>_<checkpoint>/`: `reconstruction.png`, `report.json`, `sensor_manifest.json`, `query_indices.pt`, and the portable plotting payload `reconstruction.npz`. The former duplicate `reconstruction.pt` is no longer written.
 
 ![Senseiver turbulent-combustion reconstruction on the first test snapshot](docs/assets/reconstruction_examples/senseiver_test_snapshot_0000_last.png)
 
 ### Multi-snapshot reconstruction statistics
 
-Add `--eval-set` to render each field's physical-space relative $L_2$ distribution as a violin
-plot overlaid with individual sample points. The quick form is:
+Add `--eval-set` to render each field's physical-space relative $L_2$ distribution as a violin plot overlaid with individual sample points. The quick form is:
 
 ```bash
 python cases/<case>/run.py visualize-run \
@@ -253,17 +235,67 @@ python cases/turbulent_combustion/run.py visualize-run \
   --weight-selection configured
 ```
 
-`--eval-set` accepts `train`, `validation`, or `test`. The default limit is 200 deterministic,
-evenly spaced samples across that split; request more with `--eval-samples 500` or the complete
-split with `--eval-samples all`. For snapshot datasets each sample is one snapshot; trajectory
-datasets are evaluated one trajectory at a time. The model and checkpoint load once while full-grid
-samples stream individually to bound memory.
+`--eval-set` accepts `train`, `validation`, or `test`. The default limit is 200 deterministic, evenly spaced samples across that split; request more with `--eval-samples 500` or the complete split with `--eval-samples all`. Statistical distribution plots use a logarithmic vertical scale by default; select the normal linear scale with `--stat-scale linear`. For snapshot datasets each sample is one snapshot; trajectory datasets are evaluated one trajectory at a time. The model and checkpoint load once while full-grid samples stream individually to bound memory.
 
-Outputs are written under `evaluation/reconstruction_set_<split>_<checkpoint>/` and include the
-300-DPI violin/scatter figure, summary report, per-sample CSV, reusable NPZ metrics, and streaming
-sensor manifest.
+Outputs are written under `evaluation/reconstruction_set_<split>_<checkpoint>/` and include the 300-DPI violin/scatter figure, summary report, per-sample CSV, reusable NPZ metrics, and streaming sensor manifest.
 
-![Senseiver test-set relative L2 distributions](docs/assets/reconstruction_examples/senseiver_test_best_relative_l2_violin.png)
+<img src="docs/assets/reconstruction_examples/senseiver_test_best_relative_l2_violin.png" alt="Senseiver test-set relative L2 distributions" width="65%">
+
+### Multi-snapshot physical-coherence statistics
+
+Add `--eval-coherence` to the same set evaluation to calculate paired reconstruction-to-ground-truth coherence metrics alongside the default relative-$L_2$ results. The shortest command for both currently supported statistical coherence families is:
+
+```bash
+python cases/<case>/run.py visualize-run \
+  --run runs/<experiment>/<run-id> \
+  --eval-set test \
+  --eval-coherence global_distribution cross_spectrum
+```
+
+Use one family name when only that evaluation is needed. `--eval-coherence` requires `--eval-set`, accepts `global_distribution`, `cross_spectrum`, or both, and writes each family into `evaluation/reconstruction_set_<split>_<checkpoint>/coherence/<family>/` so figures and numerical artifacts remain separated.
+
+#### Global-distribution coherence
+
+The fully explicit global-distribution command for the Senseiver example is:
+
+```bash
+python cases/turbulent_combustion/run.py visualize-run \
+  --run runs/tc_senseiver_5000ep/20260828T190145Z_fea0fc25 \
+  --checkpoint best \
+  --eval-set test \
+  --eval-samples 200 \
+  --eval-coherence global_distribution \
+  --stat-scale log \
+  --generation-steps 4 \
+  --device cuda:2 \
+  --weight-selection configured
+```
+
+Global-distribution evaluation is calculated per snapshot and produces separate violin/scatter figures for marginal field distributions, pairwise field distributions, and joint top-tail distributions. Each figure includes its sub-terms, weighted component total, and family total. Use `--stat-scale linear` when a normal vertical scale is preferred; the default is logarithmic. The family directory also contains `metrics.csv`, `metrics.npz`, and `report.json`.
+
+<img src="docs/assets/reconstruction_examples/senseiver_test_best_global_distribution_marginal.png" alt="Senseiver test-set marginal field-distribution coherence discrepancies" width="72%">
+
+#### Cross-spectrum coherence
+
+The fully explicit cross-spectrum command for the same checkpoint is:
+
+```bash
+python cases/turbulent_combustion/run.py visualize-run \
+  --run runs/tc_senseiver_5000ep/20260828T190145Z_fea0fc25 \
+  --checkpoint best \
+  --eval-set test \
+  --eval-samples 200 \
+  --eval-coherence cross_spectrum \
+  --generation-steps 4 \
+  --device cuda:2 \
+  --weight-selection configured
+```
+
+Cross-spectrum evaluation pools all selected snapshots into one ensemble while retaining only compact graph-Fourier coefficients. The modern horizontal-bar figures report same-frequency and cross-frequency field-pair scores on a fixed linear range from 0 to 1, where 1 means exact spectral agreement; `--stat-scale` therefore does not alter these score charts. Raw mean-squared spectral discrepancies and normalized coherence scores are both retained in `metrics.csv`, `metrics.npz`, and `report.json`. If spectral-band energy is enabled in the run's coherence configuration, its figure is generated in the same family directory.
+
+<img src="docs/assets/reconstruction_examples/senseiver_test_best_cross_spectrum_same_frequency.png" alt="Senseiver test-set same-frequency spectral coherence scores" width="72%">
+
+> **Pending topology evaluation:** the topology coherence family is available for training and post-training objectives, but its intuitive set-level statistical evaluation and visualization are intentionally pending. That work will be refined as a separate task before `topology` is exposed through `visualize-run --eval-coherence`.
 
 During training, the fixed validation objective and qualitative reconstruction use independent `evaluation.preview.loss_every_epochs` and `reconstruct_every_epochs` cadences. Validation loss is added to `loss_history.png` and selects `best.pt`; periodic recovery writes only `last.pt`, plus explicitly requested epoch checkpoints. Re-render a portable preview payload with:
 

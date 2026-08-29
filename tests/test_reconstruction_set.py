@@ -13,7 +13,7 @@ import torch
 from phycoflow_reconstruction.cli import _evaluation_sample_limit
 from phycoflow_reconstruction.contracts import DataSpec, FieldSample
 from phycoflow_reconstruction.data.normalization import FieldNormalizer
-from phycoflow_reconstruction.evaluation import reconstruction_set
+from phycoflow_reconstruction.evaluation import coherence_set, reconstruction_set
 from phycoflow_reconstruction.evaluation.checkpoint import EvaluationRuntime
 
 
@@ -94,9 +94,17 @@ def test_distribution_renderer_supports_general_field_counts(tmp_path, field_nam
         split=np.asarray("validation"),
     )
 
-    reconstruction_set.render_reconstruction_set_distribution(payload, output)
+    reconstruction_set.render_reconstruction_set_distribution(
+        payload,
+        output,
+        scale="linear" if len(field_names) > 1 else "log",
+    )
 
     assert output.is_file()
+
+
+def test_coherence_publication_labels_format_compound_field_pairs():
+    assert coherence_set._publication_label("CH4–U_1") == r"CH$_{4}$–$U_{1}$"
 
 
 class _FixtureDataset:
@@ -115,12 +123,10 @@ class _FixtureDataset:
         self.closed = False
 
     def __len__(self) -> int:
-        return 3
+        return 4
 
     def __getitem__(self, index: int) -> FieldSample:
-        coordinates = torch.tensor(
-            [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]]
-        )
+        coordinates = torch.tensor([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])
         values = torch.tensor(
             [
                 [1.0 + index, 2.0],
@@ -149,7 +155,10 @@ class _FixtureDataset:
 class _FixtureModel(torch.nn.Module):
     def reconstruct(self, batch, *, steps, generator):
         del steps, generator
-        return SimpleNamespace(prediction=batch.target_fields * 0.9, samples=None)
+        target = batch.target_fields
+        prediction = target * 0.88 + 0.02 * target.square()
+        prediction[..., 1] += 0.03 * target[..., 0]
+        return SimpleNamespace(prediction=prediction, samples=None)
 
 
 def test_set_evaluation_streams_selected_samples_and_writes_outputs(tmp_path, monkeypatch):
@@ -190,6 +199,7 @@ def test_set_evaluation_streams_selected_samples_and_writes_outputs(tmp_path, mo
         case_dir=case_dir,
         split="test",
         max_samples=2,
+        coherence_families=["global_distribution"],
     )
 
     output_dir = run_dir / "evaluation" / "reconstruction_set_test_best"
@@ -200,8 +210,106 @@ def test_set_evaluation_streams_selected_samples_and_writes_outputs(tmp_path, mo
     assert (output_dir / "sensor_manifest.jsonl").is_file()
     report = json.loads((output_dir / "report.json").read_text(encoding="utf-8"))
     assert report["sample_count"] == 2
-    assert report["available_sample_count"] == 3
-    assert report["selection"]["split_relative_indices"] == [0, 2]
+    assert report["available_sample_count"] == 4
+    assert report["selection"]["split_relative_indices"] == [0, 3]
     assert report["selection"]["policy"] == "evenly_spaced_split_subset"
+    assert report["statistic_scale"] == "log"
     assert report["per_field_statistics"]["u"]["count"] == 2
+    coherence_dir = output_dir / "coherence" / "global_distribution"
+    assert (coherence_dir / "marginal_field_distributions.png").is_file()
+    assert (coherence_dir / "pairwise_field_distributions.png").is_file()
+    assert (coherence_dir / "joint_top_tail_distributions.png").is_file()
+    assert (coherence_dir / "metrics.csv").is_file()
+    assert (coherence_dir / "report.json").is_file()
+    with np.load(coherence_dir / "metrics.npz", allow_pickle=False) as payload:
+        assert payload["marginal_per_field"].shape == (2, 2)
+        assert payload["pairwise_per_field_pair"].shape == (2, 1)
+        assert payload["joint_top_tail"].shape == (2, 1)
+        assert payload["family_total"].shape == (2, 1)
+        assert payload["pair_labels"].tolist() == ["u–v"]
+        np.testing.assert_allclose(
+            payload["family_total"][:, 0],
+            payload["weighted_component_totals"].sum(axis=1),
+        )
+    coherence_report = json.loads((coherence_dir / "report.json").read_text(encoding="utf-8"))
+    assert coherence_report["target_use"] == "paired_supervised"
+    assert coherence_report["sample_count"] == 2
+    assert coherence_report["statistic_scale"] == "log"
+    assert coherence_report["statistics"]["family_total"]["count"] == 2
+    assert report["coherence"]["global_distribution"]["family"] == "global_distribution"
+    assert dataset.closed
+
+
+def test_set_evaluation_writes_pooled_cross_spectrum_coherence_scores(tmp_path, monkeypatch):
+    case_dir = tmp_path / "case"
+    run_dir = case_dir / "runs" / "experiment" / "cross-run"
+    checkpoint = run_dir / "checkpoints" / "best.pt"
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_bytes(b"checkpoint")
+    (run_dir / "resolved_config.yaml").write_text("fixture: true\n", encoding="utf-8")
+    dataset_path = tmp_path / "cross-dataset.bin"
+    dataset_path.write_bytes(b"dataset")
+    dataset = _FixtureDataset(dataset_path)
+    runtime = EvaluationRuntime(
+        config={
+            "observations": {
+                "protocol": "random_uniform",
+                "seed": 42,
+                "fields": {"u": {"count": 1}},
+            },
+            "runtime": {"seed": 42},
+            "coherence": {"compute_budget": {"batch_size": 3, "point_count": 4, "query_seed": 17}},
+        },
+        device=torch.device("cpu"),
+        dataset=dataset,
+        model=_FixtureModel(),
+        checkpoint_path=checkpoint,
+        generation_steps=2,
+        seed=2027,
+    )
+    monkeypatch.setattr(reconstruction_set, "load_evaluation_runtime", lambda *a, **k: runtime)
+    monkeypatch.setattr(
+        reconstruction_set,
+        "warn_if_cuda_memory_tight",
+        lambda *args, **kwargs: False,
+    )
+
+    reconstruction_set.evaluate_reconstruction_set(
+        run_dir,
+        case_dir=case_dir,
+        split="test",
+        max_samples=4,
+        coherence_families=["cross_spectrum"],
+    )
+
+    output_dir = run_dir / "evaluation" / "reconstruction_set_test_best"
+    cross_dir = output_dir / "coherence" / "cross_spectrum"
+    assert (cross_dir / "same_frequency_coherence.png").is_file()
+    assert (cross_dir / "cross_frequency_coherence.png").is_file()
+    assert not (cross_dir / "band_energy_coherence.png").exists()
+    assert not (cross_dir / "same_frequency_pair_distributions.png").exists()
+    assert (cross_dir / "metrics.csv").is_file()
+    with np.load(cross_dir / "metrics.npz", allow_pickle=False) as payload:
+        assert payload["same_frequency_absolute_discrepancy"].shape == (1,)
+        assert payload["same_frequency_coherence_score"].shape == (1,)
+        assert payload["cross_frequency_absolute_discrepancy"].shape == (1,)
+        assert payload["cross_frequency_coherence_score"].shape == (1,)
+        assert payload["sample_ids"].shape == (4,)
+        assert 0.0 <= payload["family_coherence_score"].item() <= 1.0
+        assert np.all(payload["component_coherence_scores"] >= 0.0)
+        assert np.all(payload["component_coherence_scores"] <= 1.0)
+    cross_report = json.loads((cross_dir / "report.json").read_text(encoding="utf-8"))
+    assert cross_report["selected_sample_count"] == 4
+    assert cross_report["used_sample_count"] == 4
+    assert cross_report["dropped_sample_count"] == 0
+    assert cross_report["dropped_sample_ids"] == []
+    assert cross_report["ensemble"]["policy"] == "single_pooled_selected_snapshot_ensemble"
+    assert cross_report["ensemble"]["minimum_size"] == 3
+    assert cross_report["ensemble"]["sample_count"] == 4
+    assert cross_report["statistic_scale"] == "bounded_linear_0_to_1"
+    assert cross_report["coherence_score"]["perfect_agreement"] == 1.0
+    assert cross_report["graph"]["query_policy"] == "fixed_shared"
+    assert cross_report["graph"]["query_point_count"] == 4
+    report = json.loads((output_dir / "report.json").read_text(encoding="utf-8"))
+    assert report["coherence"]["cross_spectrum"]["family"] == "cross_spectrum"
     assert dataset.closed

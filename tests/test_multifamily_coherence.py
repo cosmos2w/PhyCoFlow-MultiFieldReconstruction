@@ -7,6 +7,9 @@ from pathlib import Path
 import torch
 
 from phycoflow_reconstruction.coherence import build_coherence_family
+from phycoflow_reconstruction.coherence.families.cross_spectrum.statistics import (
+    symmetric_relative_coherence_score,
+)
 from phycoflow_reconstruction.coherence.families.topology.betti_curves import betti_curves
 from phycoflow_reconstruction.config import load_config
 from phycoflow_reconstruction.config.validate import validate_config
@@ -20,6 +23,15 @@ def _coordinates(size: int = 6) -> torch.Tensor:
         torch.meshgrid(torch.linspace(0, 1, size), torch.linspace(0, 1, size), indexing="ij"),
         dim=-1,
     ).reshape(-1, 2)
+
+
+def test_symmetric_spectral_coherence_score_is_bounded_and_calibrated():
+    reference = torch.tensor([1.0, 2.0, 3.0])
+
+    assert symmetric_relative_coherence_score(reference, reference, 1.0e-8) == 1.0
+    assert symmetric_relative_coherence_score(torch.zeros_like(reference), reference, 1.0e-8) == 0.0
+    partial = symmetric_relative_coherence_score(reference * 0.8, reference, 1.0e-8)
+    assert 0.0 < partial < 1.0
 
 
 def _global_config() -> dict:
@@ -108,6 +120,40 @@ def test_cross_spectrum_is_ensemble_only_geometry_fixed_and_differentiable():
     result = family(generated, reference, coordinates=coordinates)
     assert result.per_sample_cost is None
     assert len(result.component_results) == 3
+    assert (
+        len(
+            result.component_results["cross_spectrum.same_frequency.magnitude_squared"].diagnostics[
+                "per_pair_mean_square"
+            ]
+        )
+        == 1
+    )
+    same_scores = result.component_results[
+        "cross_spectrum.same_frequency.magnitude_squared"
+    ].diagnostics["per_pair_coherence_score"]
+    assert len(same_scores) == 1
+    assert 0.0 <= same_scores[0] <= 1.0
+    assert (
+        len(
+            result.component_results[
+                "cross_spectrum.cross_frequency.band_energy_coupling"
+            ].diagnostics["per_pair_mean_square"]
+        )
+        == 1
+    )
+    cross_scores = result.component_results[
+        "cross_spectrum.cross_frequency.band_energy_coupling"
+    ].diagnostics["per_pair_coherence_score"]
+    assert len(cross_scores) == 1
+    assert 0.0 <= cross_scores[0] <= 1.0
+    assert (
+        len(
+            result.component_results["cross_spectrum.band_energy.log_power"].diagnostics[
+                "per_band_field_mean_square"
+            ]
+        )
+        == 3
+    )
     result.scalar_loss.backward()
     assert generated.grad is not None and torch.isfinite(generated.grad).all()
     assert torch.linalg.vector_norm(generated.grad) > 0
@@ -197,20 +243,15 @@ def test_one_rollout_composes_all_three_families_and_backpropagates():
     }
     result.scalar_loss.backward()
     assert model.scale.grad is not None and torch.isfinite(model.scale.grad)
-    restored_topology = build_coherence_family(
-        "topology", _topology_config(), spec, normalizer
-    )
+    restored_topology = build_coherence_family("topology", _topology_config(), spec, normalizer)
     restored_topology.load_state_artifact(families["topology"].state_artifact())
     assert restored_topology.geometry_sha256 == families["topology"].geometry_sha256
-    assert torch.equal(
-        restored_topology.neighbor_indices, families["topology"].neighbor_indices
-    )
+    assert torch.equal(restored_topology.neighbor_indices, families["topology"].neighbor_indices)
 
 
 def test_combined_demo50_template_satisfies_strict_config_contract():
     project = Path(__file__).resolve().parents[1]
     config = load_config(
-        project
-        / "cases/turbulent_combustion/configs/posttrain/demo50_all_coherence.yaml"
+        project / "cases/turbulent_combustion/configs/posttrain/demo50_all_coherence.yaml"
     )
     validate_config(config)
