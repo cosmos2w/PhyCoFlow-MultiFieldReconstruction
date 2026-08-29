@@ -113,6 +113,28 @@ python run.py train-base \
 
 Normal training omits `--max-steps`. Point models consume sparse observation tokens; grid/operator models rasterize observations and their support mask. Diffusion and flow models retain their native noise/velocity objectives.
 
+DiffusionPDE supports two interchangeable denoising backbones. The maintained
+`configs/models/diffusion_pde.yaml` profile selects a time-conditioned,
+multiscale U-Net with configurable channel multipliers, residual depth,
+timestep embedding, coarse-level attention, attention heads, and dropout. The
+original three-convolution implementation remains available as the lightweight,
+checkpoint-compatible `plain_cnn` option:
+
+```bash
+# Maintained conditional U-Net profile.
+python run.py train-base --config configs/base/diffusion_pde.yaml
+
+# Select the legacy plain CNN without editing the shared model fragment.
+python run.py train-base --config configs/base/diffusion_pde.yaml \
+  --override model.backbone=plain_cnn
+```
+
+Both backbones use the same cosine noise schedule, noise-prediction loss, and
+deterministic DDIM-style reconstruction with observed values clamped after each
+sampling update. They require complete two-dimensional target grids. The U-Net
+uses considerably more accelerator memory, especially when attention is enabled;
+set the case-level training batch size accordingly.
+
 Latent flow has an explicit two-stage lifecycle:
 
 ```bash

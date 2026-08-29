@@ -1,0 +1,78 @@
+# Senseiver baseline matched to the tc_gl_rbf_cq_cached_kv_5000ep run.
+
+# Composition order; later files override earlier defaults.
+defaults:
+  - ../../../../configs/defaults/base_training.yaml
+  - ../dataset.yaml
+  - ../sensors/T_only_random_192_384.yaml
+  - ../../../../configs/models/senseiver.yaml
+
+model:
+  name: senseiver
+  width: 256
+  num_latents: 128
+  heads: 8
+  depth: 4
+  query_points: 4096
+
+# Run identity. Choices: base_training | post_training | direct_physics.
+stage: base_training
+case: turbulent_combustion
+
+# Match the reference run's normalized dataset.
+dataset:
+  normalization: mean_std
+  normalization_stats_path: configs/normalization/train_mean_std.json
+
+# Match the reference run's training duration and optimizer settings.
+optimization:
+  epochs: 5000
+  batch_size: 128
+  lr: 1.0e-4
+  weight_decay: 1.0e-6
+  grad_clip: 1.0
+  backward_loss_scale: 1.0
+
+# Match the reference run's reproducibility and data-loading settings.
+runtime:
+  seed: 42
+  device: cuda:2
+  deterministic: true
+  num_workers: 4
+  data_strategy: async_cpu
+  progress: true
+  plot_every_steps: 50
+
+# Match the reference run's validation and reconstruction-preview cadence.
+evaluation:
+  split: validation
+  max_samples: 20
+  query_points: 4096
+  generation_steps: 4
+  seed: 2027
+  preview:
+    enabled: true
+    loss_every_epochs: 10
+    reconstruct_every_epochs: 500
+    split: validation
+    sample_index: 0
+    query_points: 4096
+    generation_steps: 4
+    seed: 2027
+    keep_history: true
+
+# Match the reference run's checkpoint policy.
+checkpointing:
+  enabled: true
+  every_epochs: 10
+  epochs: [100, 500, 1000, 2000, 5000]
+  save_epoch_one: false
+
+# Match the reference run's timing and memory telemetry.
+benchmark_telemetry:
+  enabled: true
+  sample_steps: 5
+
+# Keep Senseiver output separate from the GL-RBF-CQ reference run.
+output:
+  experiment_name: tc_senseiver_5000ep

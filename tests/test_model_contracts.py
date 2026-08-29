@@ -9,8 +9,12 @@ from phycoflow_reconstruction.models import build_model
 from phycoflow_reconstruction.training.rollout import differentiable_reconstruction
 
 
-def _batch():
-    y, x = torch.meshgrid(torch.linspace(0, 1, 4), torch.linspace(0, 1, 4), indexing="ij")
+def _batch(shape=(4, 4)):
+    y, x = torch.meshgrid(
+        torch.linspace(0, 1, shape[0]),
+        torch.linspace(0, 1, shape[1]),
+        indexing="ij",
+    )
     coords = torch.stack((x, y), -1).reshape(-1, 2)
     sample = FieldSample(
         values=torch.stack((torch.sin(x * 3.14), torch.cos(y * 3.14)), -1).reshape(-1, 2),
@@ -21,7 +25,7 @@ def _batch():
         time_index=0,
         conditions=torch.empty(0),
         field_names=("u", "v"),
-        logical_shape=(4, 4),
+        logical_shape=shape,
     )
     protocol = SensorProtocol(field_counts={"u": 4}, seed=3)
     return build_observation_batch([sample], protocol)
@@ -36,6 +40,16 @@ def _batch():
         {"name": "senseiver", "width": 16, "num_latents": 4, "heads": 2, "depth": 1},
         {"name": "geofno", "hidden_channels": 8, "layers": 1},
         {"name": "diffusion_pde", "hidden_channels": 8},
+        {
+            "name": "diffusion_pde",
+            "backbone": "conditional_unet",
+            "base_channels": 8,
+            "channel_multipliers": [1, 2],
+            "num_res_blocks": 1,
+            "time_embed_dim": 16,
+            "attention_levels": [1],
+            "attention_heads": 2,
+        },
         {"name": "latent_fm", "latent_channels": 4, "stage": 1},
         {
             "name": "pointcloud_ffm",
@@ -146,6 +160,42 @@ def test_diffusion_group_width_is_validated_before_torch_raises():
     spec = DataSpec(("u", "v"), ("1", "1"), 2, (4, 4), mesh_type="structured")
     with pytest.raises(ValueError, match="multiple of four"):
         build_model({"name": "diffusion_pde", "hidden_channels": 6}, spec)
+
+
+def test_diffusion_rejects_invalid_unet_attention_level():
+    spec = DataSpec(("u", "v"), ("1", "1"), 2, (4, 4), mesh_type="structured")
+    with pytest.raises(ValueError, match="invalid U-Net level"):
+        build_model(
+            {
+                "name": "diffusion_pde",
+                "backbone": "conditional_unet",
+                "base_channels": 8,
+                "channel_multipliers": [1, 2],
+                "attention_levels": [2],
+            },
+            spec,
+        )
+
+
+def test_diffusion_unet_preserves_odd_grid_shape():
+    shape = (9, 13)
+    batch = _batch(shape)
+    spec = DataSpec(("u", "v"), ("1", "1"), 2, shape, mesh_type="structured")
+    model = build_model(
+        {
+            "name": "diffusion_pde",
+            "backbone": "conditional_unet",
+            "base_channels": 8,
+            "channel_multipliers": [1, 2, 4],
+            "num_res_blocks": 1,
+            "time_embed_dim": 16,
+            "attention_levels": [],
+            "attention_heads": 2,
+        },
+        spec,
+    )
+    assert model.training_loss(batch).total.isfinite()
+    assert model.reconstruct(batch, steps=1).prediction.shape == batch.target_fields.shape
 
 
 @pytest.mark.parametrize(

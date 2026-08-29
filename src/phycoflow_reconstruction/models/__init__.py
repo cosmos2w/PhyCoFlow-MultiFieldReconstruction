@@ -153,7 +153,18 @@ def build_model(config: Mapping[str, Any], data_spec: DataSpec, physics_provider
         "deeponet": {"width", "basis_dim"},
         "senseiver": {"width", "num_latents", "heads", "depth"},
         "geofno": {"hidden_channels", "modes", "layers"},
-        "diffusion_pde": {"hidden_channels", "training_timesteps"},
+        "diffusion_pde": {
+            "backbone",
+            "hidden_channels",
+            "base_channels",
+            "channel_multipliers",
+            "num_res_blocks",
+            "time_embed_dim",
+            "attention_levels",
+            "attention_heads",
+            "dropout",
+            "training_timesteps",
+        },
         "latent_fm": {"latent_channels", "stage", "stage1_checkpoint"},
         "pointcloud_ffm": {
             "backbone",
@@ -260,6 +271,9 @@ def build_model(config: Mapping[str, Any], data_spec: DataSpec, physics_provider
     kwargs = {key: value for key, value in config.items() if key in allowed_by_model[name]}
     if "modes" in kwargs:
         kwargs["modes"] = tuple(int(v) for v in kwargs["modes"])
+    for key in ("channel_multipliers", "attention_levels"):
+        if key in kwargs:
+            kwargs[key] = tuple(int(v) for v in kwargs[key])
     if name == "pinn":
         kwargs["physics_provider"] = physics_provider
     return MODEL_REGISTRY.build(name, **common, **kwargs)

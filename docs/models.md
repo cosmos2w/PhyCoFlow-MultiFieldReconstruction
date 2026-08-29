@@ -305,7 +305,7 @@ $$
 +\sqrt{1-\overline\alpha_t}\,\boldsymbol\epsilon.
 $$
 
-The convolutional denoiser is conditioned on noisy state, sparse value raster, mask raster, and normalized scalar time:
+The selected denoiser is conditioned on noisy state, sparse value raster, mask raster, and normalized time:
 
 $$
 \widehat{\boldsymbol\epsilon}_\theta
@@ -318,12 +318,22 @@ $$
 \right].
 $$
 
+`backbone: plain_cnn` retains the original three-convolution checkpoint layout
+and scalar time map. `backbone: conditional_unet` selects the maintained
+multiscale encoder-decoder: sinusoidal time features pass through an MLP and
+enter each residual block, encoder features feed skip concatenations, and
+optional multi-head spatial attention runs at configured zero-based resolution
+levels. Its tunable architecture fields are `base_channels`,
+`channel_multipliers`, `num_res_blocks`, `time_embed_dim`, `attention_levels`,
+`attention_heads`, and `dropout`; `hidden_channels` applies only to the plain
+CNN. Both use `training_timesteps` for the shared cosine schedule.
+
 Reconstruction starts from Gaussian noise and uses a deterministic DDIM-style subsequence. At step $t$,
 
 $$
 \widehat{\mathbf X}_0
 =\frac{
-\mathbf X_t-sqrt{1-\overline\alpha_t}
+\mathbf X_t-\sqrt{1-\overline\alpha_t}
 \widehat{\boldsymbol\epsilon}_\theta
 }{\sqrt{\overline\alpha_t}},
 $$
@@ -347,8 +357,8 @@ $$
 
 Current drawbacks:
 
-- The denoiser is a shallow three-convolution network rather than a multiscale U-Net; it has limited receptive-field and conditioning capacity.
-- It supports only complete two-dimensional grids and uses a scalar time map, with no learned time embedding or attention.
+- The optional plain CNN remains a shallow, local baseline with limited receptive-field and conditioning capacity.
+- The U-Net requires complete two-dimensional grids and substantially more memory; spatial attention is quadratic in the cell count at each selected level and should remain confined to coarse resolutions.
 - The training loss conditions on value/mask channels but does not explicitly clamp the noisy training state at sensors, whereas inference clamps after each DDIM update.
 - `reconstruct` returns one draw and no stacked ensemble, so the advertised stochastic capability does not currently produce uncertainty samples for the common evaluator.
 
