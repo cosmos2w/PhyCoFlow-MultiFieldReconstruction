@@ -186,9 +186,51 @@ python run.py evaluate-run \
   --report-name validation
 ```
 
-The evaluator records normalized/physical errors, observed/unobserved metrics, sample/query/sensor identities, diagnostics, timing, and provenance. Generated checkpoints, manifests, reports, previews, figures, caches, and histories stay under `cases/<case>/runs/` and are ignored by Git. Re-render a portable preview payload with:
+The evaluator records normalized/physical errors, observed/unobserved metrics, sample/query/sensor identities, diagnostics, timing, and provenance. Generated checkpoints, manifests, reports, previews, figures, caches, and histories stay under `cases/<case>/runs/` and are ignored by Git.
 
-During training, the fixed validation objective and qualitative reconstruction use independent `evaluation.preview.loss_every_epochs` and `reconstruct_every_epochs` cadences. Validation loss is added to `loss_history.png` and selects `best.pt`; periodic recovery writes only `last.pt`, plus explicitly requested epoch checkpoints.
+### Single-snapshot reconstruction figure
+
+From the repository root, the simple form is:
+
+```bash
+python cases/<case>/run.py visualize-run --run runs/<experiment>/<run-id>
+```
+
+With no optional arguments, this loads `best.pt`, selects snapshot `0` relative to the test split,
+and uses the sparse observation protocol and generation settings in `resolved_config.yaml`. It
+always reconstructs the complete grid and writes a 300-DPI PNG.
+
+The fully explicit command used for the Senseiver example below is:
+
+```bash
+python cases/turbulent_combustion/run.py visualize-run \
+  --run runs/tc_senseiver_5000ep/20260828T190145Z_fea0fc25 \
+  --checkpoint last \
+  --split test \
+  --snapshot-index 0 \
+  --generation-steps 4 \
+  --device cuda:2 \
+  --contour-levels 20 \
+  --weight-selection configured
+```
+
+- `--snapshot-index` is relative to the selected split.
+- Omit `--sensor-config` and `--sensor-manifest` to use the observation protocol recorded by the
+  run. Supplying either option overrides or replays that protocol.
+- `--contour-levels` controls both filled and thin grey contours. Colorbars are continuous with
+  four labeled ticks.
+- Figure size, spacing, and text scale adapt to the physical-domain aspect ratio and field count.
+- A CUDA-memory warning appears before inference when the selected device may be tight; choose a
+  different device with `--device`.
+
+Outputs are stored under
+`evaluation/reconstruction_<split>_<snapshot>_<checkpoint>/`: `reconstruction.png`, `report.json`,
+`sensor_manifest.json`, `query_indices.pt`, and the portable plotting payload
+`reconstruction.npz`. The former duplicate `reconstruction.pt` is no longer written.
+
+![Senseiver turbulent-combustion reconstruction on the first test snapshot](docs/assets/reconstruction_examples/senseiver_test_snapshot_0000_last.png)
+
+During training, the fixed validation objective and qualitative reconstruction use independent `evaluation.preview.loss_every_epochs` and `reconstruct_every_epochs` cadences. Validation loss is added to `loss_history.png` and selects `best.pt`; periodic recovery writes only `last.pt`, plus explicitly requested epoch checkpoints. Re-render a portable preview payload with:
 
 ```bash
 python scripts/visualization/training_reconstruction_preview.py \

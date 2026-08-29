@@ -146,12 +146,30 @@ def run_case_cli(case_name: str, case_dir: str | Path) -> int:
     evaluator.add_argument("--sensor-config", type=Path)
     evaluator.add_argument("--sensor-manifest", type=Path)
     evaluator.add_argument("--split", choices=("train", "validation", "test"), default="validation")
+    evaluator.add_argument("--sample-index", type=int, default=0)
     evaluator.add_argument("--max-samples", type=int, default=1)
     evaluator.add_argument("--query-points", type=int)
     evaluator.add_argument("--generation-steps", type=int)
     evaluator.add_argument("--device")
     evaluator.add_argument("--report-name", default="benchmark")
     evaluator.add_argument(
+        "--weight-selection",
+        choices=("configured", "live"),
+        default="configured",
+    )
+
+    visualizer = subparsers.add_parser("visualize-run")
+    visualizer.add_argument("--run", type=Path, required=True)
+    visualizer.add_argument("--checkpoint", default="best")
+    visualizer.add_argument("--split", choices=("train", "validation", "test"), default="test")
+    visualizer.add_argument("--snapshot-index", type=int, default=0)
+    visualizer.add_argument("--sensor-config", type=Path)
+    visualizer.add_argument("--sensor-manifest", type=Path)
+    visualizer.add_argument("--generation-steps", type=int)
+    visualizer.add_argument("--device")
+    visualizer.add_argument("--output", type=Path)
+    visualizer.add_argument("--contour-levels", type=int, default=20)
+    visualizer.add_argument(
         "--weight-selection",
         choices=("configured", "live"),
         default="configured",
@@ -172,6 +190,7 @@ def run_case_cli(case_name: str, case_dir: str | Path) -> int:
             run_dir,
             case_dir=case_dir,
             split=args.split,
+            sample_index=args.sample_index,
             max_samples=args.max_samples,
             checkpoint=args.checkpoint,
             sensor_config=sensor_config,
@@ -183,6 +202,36 @@ def run_case_cli(case_name: str, case_dir: str | Path) -> int:
             weight_selection=args.weight_selection,
         )
         print(report)
+        return 0
+
+    if args.command == "visualize-run":
+        from .evaluation.reconstruction_visualization import visualize_run
+
+        run_dir = args.run.resolve() if args.run.is_absolute() else (case_dir / args.run).resolve()
+        sensor_config = args.sensor_config
+        if sensor_config is not None and not sensor_config.is_absolute():
+            sensor_config = (case_dir / sensor_config).resolve()
+        sensor_manifest = args.sensor_manifest
+        if sensor_manifest is not None and not sensor_manifest.is_absolute():
+            sensor_manifest = (case_dir / sensor_manifest).resolve()
+        output = args.output
+        if output is not None and not output.is_absolute():
+            output = Path.cwd() / output
+        figure = visualize_run(
+            run_dir,
+            case_dir=case_dir,
+            checkpoint=args.checkpoint,
+            split=args.split,
+            sample_index=args.snapshot_index,
+            sensor_config=sensor_config,
+            sensor_manifest=sensor_manifest,
+            generation_steps=args.generation_steps,
+            device_name=args.device,
+            output_path=output,
+            weight_selection=args.weight_selection,
+            contour_levels=args.contour_levels,
+        )
+        print(figure)
         return 0
 
     config_path = (
