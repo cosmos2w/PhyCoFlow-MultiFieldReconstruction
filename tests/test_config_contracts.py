@@ -119,6 +119,27 @@ def test_pointcloud_scope_is_strict():
         validate_config(config)
 
 
+def test_diffusion_unet_config_is_validated_without_model_construction():
+    config = _base_config()
+    config["model"] = {
+        "name": "diffusion_pde",
+        "backbone": "conditional_unet",
+        "base_channels": 8,
+        "channel_multipliers": [1, 2],
+        "num_res_blocks": 1,
+        "time_embed_dim": 16,
+        "attention_levels": [1],
+        "attention_heads": 2,
+        "dropout": 0.0,
+        "training_timesteps": 100,
+    }
+    validate_config(config)
+
+    config["model"]["attention_levels"] = [2]
+    with pytest.raises(ValueError, match="invalid U-Net level"):
+        validate_config(config)
+
+
 def test_base_sections_reject_misspelled_or_invalid_nested_values():
     config = _base_config()
     config["optimization"]["learning_rate"] = 1e-3

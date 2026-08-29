@@ -785,6 +785,42 @@ def validate_config(config: Mapping[str, Any]) -> None:
             raise ValueError("new PointCloudFFM supports only gl_rbf_enh or fno")
         if backbone == "gl_rbf_enh" and model.get("gather_mode", "topk_rbf") != "topk_rbf":
             raise ValueError("new GL_rbf_ENH supports only gather_mode=topk_rbf")
+    elif model_name == "diffusion_pde":
+        backbone = str(model.get("backbone", "plain_cnn")).lower()
+        if backbone not in {"plain_cnn", "conditional_unet"}:
+            raise ValueError("diffusion_pde backbone must be plain_cnn or conditional_unet")
+        if int(model.get("training_timesteps", 1000)) < 2:
+            raise ValueError("model.training_timesteps must be at least two")
+        if backbone == "plain_cnn":
+            hidden_channels = int(model.get("hidden_channels", 32))
+            if hidden_channels < 4 or hidden_channels % 4:
+                raise ValueError("model.hidden_channels must be a positive multiple of four")
+        else:
+            base_channels = int(model.get("base_channels", 64))
+            multipliers = tuple(
+                int(value) for value in model.get("channel_multipliers", (1, 2, 4, 8))
+            )
+            levels = tuple(int(value) for value in model.get("attention_levels", (2, 3)))
+            heads = int(model.get("attention_heads", 4))
+            if base_channels < 4:
+                raise ValueError("model.base_channels must be at least four")
+            if not multipliers or any(value < 1 for value in multipliers):
+                raise ValueError("model.channel_multipliers must contain positive integers")
+            if int(model.get("num_res_blocks", 2)) < 1:
+                raise ValueError("model.num_res_blocks must be positive")
+            if int(model.get("time_embed_dim", 256)) < 4:
+                raise ValueError("model.time_embed_dim must be at least four")
+            if heads < 1:
+                raise ValueError("model.attention_heads must be positive")
+            dropout = float(model.get("dropout", 0.0))
+            if not 0.0 <= dropout < 1.0:
+                raise ValueError("model.dropout must lie in [0, 1)")
+            if any(level < 0 or level >= len(multipliers) for level in levels):
+                raise ValueError("model.attention_levels contains an invalid U-Net level")
+            if any(base_channels * multipliers[level] % heads for level in levels):
+                raise ValueError(
+                    "model attention level channels must be divisible by attention_heads"
+                )
     elif model_name == "gl_rbf_cq":
         backbone = str(model.get("backbone", "GL_rbf_ENH_CQ")).lower()
         if backbone != "gl_rbf_enh_cq":

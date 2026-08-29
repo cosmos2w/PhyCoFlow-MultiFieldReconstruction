@@ -75,7 +75,7 @@ The following is a compact snapshot of the maintained fragments in `configs/mode
 | `deeponet` | width 128; basis dimension 64; 4096 query points |
 | `senseiver` | width 128; 64 latents; 4 heads; depth 3; 4096 query points |
 | `geofno` | 32 hidden channels; modes `[16,16]`; 4 layers |
-| `diffusion_pde` | 64 hidden channels; 1000 diffusion training steps |
+| `diffusion_pde` | conditional U-Net; base width 64; multipliers `[1,2,4,8]`; 2 residual blocks/level; attention at levels 2–3 with 4 heads; time embedding 256; 1000 diffusion training steps (legacy `plain_cnn` optional) |
 | `latent_fm` | 16 latent channels; explicit Stage 1/2 fragments; Stage 2 requires a selected Stage-1 checkpoint |
 | `pointcloud_ffm` GL-RBF | widths 128; 32 latents; 4 heads; 2 latent blocks; top-16 gathering; 2048 query chunk; RFF prior |
 | `pointcloud_ffm` FNO | 32 FNO hidden channels; RFF prior |
@@ -426,7 +426,7 @@ $$
 +\sqrt{1-\overline\alpha_t}\,\boldsymbol\epsilon.
 $$
 
-The convolutional denoiser is conditioned on noisy state, sparse value raster, mask raster, and normalized scalar time:
+The denoiser is conditioned on noisy state, sparse value raster, mask raster, and normalized time:
 
 $$
 \widehat{\boldsymbol\epsilon}_\theta
@@ -438,6 +438,40 @@ $$
 \lVert\widehat{\boldsymbol\epsilon}_\theta-\boldsymbol\epsilon\rVert_2^2
 \right].
 $$
+
+Two backbones are available under the same diffusion objective and sampling
+contract:
+
+- `plain_cnn` preserves the original compact checkpoint layout. It concatenates
+  $[\mathbf X_t,\mathbf V,\mathbf M,t]$ and applies three $3\times3$
+  convolutions with GroupNorm and SiLU. With five fields and width 64 it has
+  49,349 trainable parameters and a $7\times7$ receptive field.
+- `conditional_unet` concatenates $[\mathbf X_t,\mathbf V,\mathbf M]$, projects
+  it to the configured base width, and processes it through a multiscale
+  encoder-decoder. Each resolution contains configurable time-conditioned
+  residual blocks; strided convolutions downsample, nearest-neighbor resizing
+  aligns odd grid sizes during decoding, and encoder features enter through
+  skip concatenations. A learned MLP transforms a sinusoidal timestep embedding
+  before injection into every residual block. Spatial self-attention is enabled
+  only at the configured zero-based resolution levels. The maintained
+  five-field profile has 47,056,645 trainable parameters.
+
+The corresponding architecture controls are:
+
+```yaml
+model:
+  name: diffusion_pde
+  backbone: conditional_unet  # choices: plain_cnn | conditional_unet
+  hidden_channels: 64         # plain_cnn only
+  base_channels: 64           # conditional_unet only
+  channel_multipliers: [1, 2, 4, 8]
+  num_res_blocks: 2
+  time_embed_dim: 256
+  attention_levels: [2, 3]
+  attention_heads: 4
+  dropout: 0.0
+  training_timesteps: 1000
+```
 
 Reconstruction starts from Gaussian noise and uses a deterministic DDIM-style subsequence. At step $t$,
 
@@ -468,8 +502,8 @@ $$
 
 Current drawbacks:
 
-- The denoiser is a shallow three-convolution network rather than a multiscale U-Net; it has limited receptive-field and conditioning capacity.
-- It supports only complete two-dimensional grids and uses a scalar time map, with no learned time embedding or attention.
+- The optional plain CNN remains a shallow, local baseline with limited receptive-field and conditioning capacity.
+- The conditional U-Net is substantially more expensive, requires complete two-dimensional grids, and its spatial attention cost is quadratic in the number of cells at each selected level. Attention should therefore remain confined to coarse levels on large grids.
 - The training loss conditions on value/mask channels but does not explicitly clamp the noisy training state at sensors, whereas inference clamps after each DDIM update.
 - `reconstruct` returns one draw and no stacked ensemble, so the advertised stochastic capability does not currently produce uncertainty samples for the common evaluator.
 

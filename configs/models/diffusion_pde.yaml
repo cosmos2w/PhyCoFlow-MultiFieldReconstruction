@@ -3,5 +3,22 @@
 # Model family and architecture settings.
 model:
   name: diffusion_pde
+
+  # choices: plain_cnn | conditional_unet. The plain CNN preserves legacy
+  # checkpoint structure; the conditional U-Net is the maintained baseline.
+  backbone: conditional_unet
+
+  # Used only by backbone=plain_cnn.
   hidden_channels: 64
+
+  # Used only by backbone=conditional_unet.
+  base_channels: 64
+  channel_multipliers: [1, 2, 4, 8]
+  num_res_blocks: 2
+  time_embed_dim: 256
+  attention_levels: [2, 3]  # zero-based U-Net resolution levels
+  attention_heads: 4
+  dropout: 0.0
+
+  # Shared diffusion schedule.
   training_timesteps: 1000
