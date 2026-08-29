@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
 from typing import Any
@@ -29,6 +30,19 @@ from ..training.model_lifecycle import (
 )
 from ..training.run_store import file_sha256, load_model_state_strict, load_project_checkpoint
 from .metrics import reconstruction_metrics
+
+
+@dataclass
+class EvaluationRuntime:
+    """Loaded checkpoint, dataset, and policy shared by evaluation workflows."""
+
+    config: dict[str, Any]
+    device: torch.device
+    dataset: FieldDataset
+    model: torch.nn.Module
+    checkpoint_path: Path
+    generation_steps: int
+    seed: int
 
 
 def _checkpoint_path(run_dir: Path, checkpoint: str) -> Path:
@@ -69,6 +83,67 @@ def _uncertainty_metrics(samples: torch.Tensor | None, target: torch.Tensor) -> 
     }
 
 
+def load_evaluation_runtime(
+    run_dir: str | Path,
+    *,
+    split: str,
+    checkpoint: str,
+    sensor_config: str | Path | None,
+    generation_steps: int | None,
+    device_name: str | None,
+    include_temporal_derivative: bool = True,
+) -> EvaluationRuntime:
+    """Load one verified model and dataset for single- or multi-snapshot evaluation."""
+    run_dir = Path(run_dir).resolve()
+    config = load_config(run_dir / "resolved_config.yaml")
+    if sensor_config is not None:
+        sensor_settings = load_config(sensor_config)
+        if "observations" not in sensor_settings:
+            raise ValueError("sensor config must contain an observations section")
+        config["observations"] = sensor_settings["observations"]
+    device = torch.device(device_name or config.get("runtime", {}).get("device", "cpu"))
+    if device.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA was requested but is unavailable")
+
+    dataset_config = dict(config["dataset"])
+    if include_temporal_derivative and Path(dataset_config["path"]).suffix.lower() in {
+        ".h5",
+        ".hdf5",
+    }:
+        dataset_config["include_temporal_derivative"] = True
+    dataset = open_field_dataset(dataset_config, split=split)
+
+    physics = None
+    if config["stage"] == "direct_physics" or config["model"]["name"] == "pinn":
+        physics = build_case_physics(
+            config["case"], config["physics"], dataset.data_spec, dataset.normalizer
+        )
+    model = build_model(config["model"], dataset.data_spec, physics_provider=physics).to(device)
+    checkpoint_path = _checkpoint_path(run_dir, checkpoint)
+    payload = load_project_checkpoint(checkpoint_path)
+    checkpoint_normalizer = FieldNormalizer(**payload["normalization"])
+    if checkpoint_normalizer.digest() != dataset.normalizer.digest():
+        dataset.close()
+        raise ValueError("checkpoint normalization disagrees with the configured dataset")
+    load_model_state_strict(model, payload["model"])
+    load_training_aux_state(model, payload)
+    model.eval()
+    steps = int(
+        generation_steps
+        if generation_steps is not None
+        else config.get("evaluation", {}).get("generation_steps", 2)
+    )
+    return EvaluationRuntime(
+        config=config,
+        device=device,
+        dataset=dataset,
+        model=model,
+        checkpoint_path=checkpoint_path,
+        generation_steps=steps,
+        seed=int(config.get("evaluation", {}).get("seed", 2027)),
+    )
+
+
 def evaluate_run(
     run_dir: str | Path,
     *,
@@ -88,22 +163,19 @@ def evaluate_run(
     """Evaluate a native project run and persist metrics plus a plotting payload."""
     run_dir = Path(run_dir).resolve()
     case_dir = Path(case_dir).resolve()
-    config = load_config(run_dir / "resolved_config.yaml")
-    if sensor_config is not None:
-        sensor_settings = load_config(sensor_config)
-        if "observations" not in sensor_settings:
-            raise ValueError("sensor config must contain an observations section")
-        config["observations"] = sensor_settings["observations"]
-    device = torch.device(device_name or config.get("runtime", {}).get("device", "cpu"))
-    if device.type == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("CUDA was requested but is unavailable")
-
-    dataset_config = dict(config["dataset"])
-    if Path(dataset_config["path"]).suffix.lower() in {".h5", ".hdf5"}:
-        # Case diagnostics may require paired finite-difference context even
-        # when the source was trained only with data loss.
-        dataset_config["include_temporal_derivative"] = True
-    dataset = open_field_dataset(dataset_config, split=split)
+    runtime = load_evaluation_runtime(
+        run_dir,
+        split=split,
+        checkpoint=checkpoint,
+        sensor_config=sensor_config,
+        generation_steps=generation_steps,
+        device_name=device_name,
+    )
+    config = runtime.config
+    device = runtime.device
+    dataset = runtime.dataset
+    model = runtime.model
+    checkpoint_path = runtime.checkpoint_path
     sample_index = int(sample_index)
     if not 0 <= sample_index < len(dataset):
         dataset.close()
@@ -127,26 +199,8 @@ def evaluate_run(
         )
     batch = batch.to(device)
 
-    physics = None
-    if config["stage"] == "direct_physics" or config["model"]["name"] == "pinn":
-        physics = build_case_physics(
-            config["case"], config["physics"], dataset.data_spec, dataset.normalizer
-        )
-    model = build_model(config["model"], dataset.data_spec, physics_provider=physics).to(device)
-    checkpoint_path = _checkpoint_path(run_dir, checkpoint)
-    payload = load_project_checkpoint(checkpoint_path)
-    checkpoint_normalizer = FieldNormalizer(**payload["normalization"])
-    if checkpoint_normalizer.digest() != dataset.normalizer.digest():
-        raise ValueError("checkpoint normalization disagrees with the configured dataset")
-    load_model_state_strict(model, payload["model"])
-    load_training_aux_state(model, payload)
-    model.eval()
-    steps = int(
-        generation_steps
-        if generation_steps is not None
-        else config.get("evaluation", {}).get("generation_steps", 2)
-    )
-    seed = int(config.get("evaluation", {}).get("seed", 2027))
+    steps = runtime.generation_steps
+    seed = runtime.seed
 
     with selected_evaluation_weight_context(model, weight_selection), torch.no_grad():
         warmup = torch.Generator(device=device).manual_seed(seed)

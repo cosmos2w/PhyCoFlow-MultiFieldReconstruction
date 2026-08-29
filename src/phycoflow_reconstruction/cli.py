@@ -19,6 +19,18 @@ from .data.validation import validate_dataset
 from .training.common import sensor_protocol_from_config
 
 
+def _evaluation_sample_limit(value: str) -> int | None:
+    if value.lower() == "all":
+        return None
+    try:
+        count = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("must be a positive integer or 'all'") from error
+    if count < 1:
+        raise argparse.ArgumentTypeError("must be a positive integer or 'all'")
+    return count
+
+
 def _resolve_dataset_path(config: dict[str, Any], case_dir: Path) -> Path:
     path = Path(config["dataset"]["path"])
     return path.resolve() if path.is_absolute() else (case_dir / path).resolve()
@@ -163,6 +175,8 @@ def run_case_cli(case_name: str, case_dir: str | Path) -> int:
     visualizer.add_argument("--checkpoint", default="best")
     visualizer.add_argument("--split", choices=("train", "validation", "test"), default="test")
     visualizer.add_argument("--snapshot-index", type=int, default=0)
+    visualizer.add_argument("--eval-set", choices=("train", "validation", "test"))
+    visualizer.add_argument("--eval-samples", type=_evaluation_sample_limit, default=200)
     visualizer.add_argument("--sensor-config", type=Path)
     visualizer.add_argument("--sensor-manifest", type=Path)
     visualizer.add_argument("--generation-steps", type=int)
@@ -205,8 +219,6 @@ def run_case_cli(case_name: str, case_dir: str | Path) -> int:
         return 0
 
     if args.command == "visualize-run":
-        from .evaluation.reconstruction_visualization import visualize_run
-
         run_dir = args.run.resolve() if args.run.is_absolute() else (case_dir / args.run).resolve()
         sensor_config = args.sensor_config
         if sensor_config is not None and not sensor_config.is_absolute():
@@ -217,6 +229,27 @@ def run_case_cli(case_name: str, case_dir: str | Path) -> int:
         output = args.output
         if output is not None and not output.is_absolute():
             output = Path.cwd() / output
+        if args.eval_set is not None:
+            from .evaluation.reconstruction_set import evaluate_reconstruction_set
+
+            figure = evaluate_reconstruction_set(
+                run_dir,
+                case_dir=case_dir,
+                split=args.eval_set,
+                checkpoint=args.checkpoint,
+                sensor_config=sensor_config,
+                sensor_manifest=sensor_manifest,
+                generation_steps=args.generation_steps,
+                device_name=args.device,
+                output_path=output,
+                weight_selection=args.weight_selection,
+                max_samples=args.eval_samples,
+            )
+            print(figure)
+            return 0
+
+        from .evaluation.reconstruction_visualization import visualize_run
+
         figure = visualize_run(
             run_dir,
             case_dir=case_dir,

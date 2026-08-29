@@ -230,6 +230,41 @@ Outputs are stored under
 
 ![Senseiver turbulent-combustion reconstruction on the first test snapshot](docs/assets/reconstruction_examples/senseiver_test_snapshot_0000_last.png)
 
+### Multi-snapshot reconstruction statistics
+
+Add `--eval-set` to render each field's physical-space relative $L_2$ distribution as a violin
+plot overlaid with individual sample points. The quick form is:
+
+```bash
+python cases/<case>/run.py visualize-run \
+  --run runs/<experiment>/<run-id> --eval-set test
+```
+
+The fully explicit command used for the Senseiver example below is:
+
+```bash
+python cases/turbulent_combustion/run.py visualize-run \
+  --run runs/tc_senseiver_5000ep/20260828T190145Z_fea0fc25 \
+  --checkpoint best \
+  --eval-set test \
+  --eval-samples 200 \
+  --generation-steps 4 \
+  --device cuda:2 \
+  --weight-selection configured
+```
+
+`--eval-set` accepts `train`, `validation`, or `test`. The default limit is 200 deterministic,
+evenly spaced samples across that split; request more with `--eval-samples 500` or the complete
+split with `--eval-samples all`. For snapshot datasets each sample is one snapshot; trajectory
+datasets are evaluated one trajectory at a time. The model and checkpoint load once while full-grid
+samples stream individually to bound memory.
+
+Outputs are written under `evaluation/reconstruction_set_<split>_<checkpoint>/` and include the
+300-DPI violin/scatter figure, summary report, per-sample CSV, reusable NPZ metrics, and streaming
+sensor manifest.
+
+![Senseiver test-set relative L2 distributions](docs/assets/reconstruction_examples/senseiver_test_best_relative_l2_violin.png)
+
 During training, the fixed validation objective and qualitative reconstruction use independent `evaluation.preview.loss_every_epochs` and `reconstruct_every_epochs` cadences. Validation loss is added to `loss_history.png` and selects `best.pt`; periodic recovery writes only `last.pt`, plus explicitly requested epoch checkpoints. Re-render a portable preview payload with:
 
 ```bash
