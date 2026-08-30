@@ -370,6 +370,27 @@ python cases/turbulent_combustion/run.py visualize-run \
 
 Global-distribution evaluation is calculated per snapshot and produces separate violin/scatter figures for marginal field distributions, pairwise field distributions, and joint top-tail distributions. Each figure includes its sub-terms, weighted component total, and family total. Use `--stat-scale linear` when a normal vertical scale is preferred; the default is logarithmic. The family directory also contains `metrics.csv`, `metrics.npz`, and `report.json`.
 
+Add `--extraview-coherence` to render a dedicated ground-truth-versus-reconstruction joint-PDF figure for every field pair represented in `pairwise_field_distributions.png`:
+
+```bash
+python cases/<case>/run.py visualize-run \
+  --run runs/<experiment>/<run-id> \
+  --checkpoint last \
+  --eval-set test \
+  --eval-coherence global_distribution \
+  --extraview-coherence
+```
+
+The extra views are written under `coherence/global_distribution/global_distribution_extra/`. Each 300-DPI figure compares ground-truth and reconstruction joint densities on shared axes, bins, and density normalization and marks the Jensen–Shannon divergence in bits, where `0` is identical and `1` is maximally separated. The default evaluation pools deterministic spatial samples from all 200 selected snapshots; larger or full-set evaluations automatically reduce points per snapshot to keep memory bounded without dropping snapshots. For post-training runs, standard filenames represent the assigned checkpoint and adjacent `-base` files represent its source checkpoint, with the same samples and visualization scales. CSV, NPZ, and JSON artifacts retain the probability masses, bin edges, sampling contract, and divergence values.
+
+> **Extra-view support:** `--extraview-coherence` currently supports only `global_distribution`. Dedicated extra visualizations for `cross_spectrum` and `topology` are pending; the existing cross-spectrum statistical bar charts remain available through `--eval-coherence cross_spectrum`.
+
+The CO–T example below compares the source `best.pt` checkpoint with the AB post-training `last.pt` checkpoint over the same 200 test snapshots.
+
+<p align="center"><img src="docs/assets/reconstruction_examples/ab_test_last_global_distribution_joint_pdf_CO-T_base.png" alt="Base-source CO-T joint probability density comparison over 200 test snapshots" width="49%"> <img src="docs/assets/reconstruction_examples/ab_test_last_global_distribution_joint_pdf_CO-T_posttraining.png" alt="AB post-training CO-T joint probability density comparison over the same 200 test snapshots" width="49%"></p>
+
+<p align="center"><em>Left: base source. Right: post-training checkpoint. Both figures share samples, bin edges, field axes, and density normalization.</em></p>
+
 The paired example below compares the source `best.pt` checkpoint with the global-distribution post-training `last.pt` checkpoint over the same 200 test snapshots. Both figures use the same logarithmic vertical limits; the standard filename identifies the post-training result and the adjacent `-base` filename identifies its source counterpart.
 
 <p align="center"><img src="docs/assets/reconstruction_examples/gl_rbf_A_test_last_global_distribution_marginal_base.png" alt="Base-source marginal field-distribution coherence over 200 test snapshots" width="49%"> <img src="docs/assets/reconstruction_examples/gl_rbf_A_test_last_global_distribution_marginal_posttraining.png" alt="Post-training marginal field-distribution coherence over the same 200 test snapshots" width="49%"></p>
@@ -382,19 +403,26 @@ The fully explicit cross-spectrum command for the same checkpoint is:
 
 ```bash
 python cases/turbulent_combustion/run.py visualize-run \
-  --run runs/tc_senseiver_5000ep/20260828T190145Z_fea0fc25 \
-  --checkpoint best \
-  --eval-set test \
+  --run runs/coherence_fix_AB_balanced/20260829T235221Z_b3b586c4 \
+  --checkpoint last \
+  --eval-set train \
   --eval-samples 200 \
   --eval-coherence cross_spectrum \
-  --generation-steps 4 \
-  --device cuda:2 \
+  --cross-spectrum-aggregation training_aligned \
+  --generation-steps 2 \
+  --device cuda:0 \
   --weight-selection configured
 ```
 
-Cross-spectrum evaluation pools all selected snapshots into one ensemble while retaining only compact graph-Fourier coefficients. The modern horizontal-bar figures report same-frequency and cross-frequency field-pair scores on a fixed linear range from 0 to 1, where 1 means exact spectral agreement; `--stat-scale` therefore does not alter these score charts. Raw mean-squared spectral discrepancies and normalized coherence scores are both retained in `metrics.csv`, `metrics.npz`, and `report.json`. If spectral-band energy is enabled in the run's coherence configuration, its figure is generated in the same family directory.
+Cross-spectrum evaluation defaults to `--cross-spectrum-aggregation training_aligned`: it reads `coherence.compute_budget.batch_size` from the resolved configuration, divides the selected set into deterministic complete ensembles of that size, applies the same spectral calculations used during post-training to every ensemble, and reports their mean with ±1 standard-deviation whiskers. Incomplete trailing samples are excluded and recorded explicitly; for example, 200 selected snapshots with a coherence batch size of 16 produce 12 ensembles, 192 used samples, and 8 recorded as dropped. Use `--cross-spectrum-aggregation pooled` only when one all-snapshot diagnostic ensemble is intentionally required.
 
-<img src="docs/assets/reconstruction_examples/senseiver_test_best_cross_spectrum_same_frequency.png" alt="Senseiver test-set same-frequency spectral coherence scores" width="72%">
+The horizontal-bar figures report same-frequency and cross-frequency agreement scores on a fixed linear range from 0 to 1, where 1 means exact spectral agreement; `--stat-scale` therefore does not alter these charts. Per-ensemble values, averaged raw mean-squared discrepancies, normalized scores, spread statistics, ensemble membership, and dropped sample IDs are retained in `metrics.csv`, `metrics.npz`, and `report.json`. If spectral-band energy is enabled in the run's coherence configuration, its figure is generated in the same family directory.
+
+The paired example below compares the source `last.pt` checkpoint with the AB post-training `last.pt` checkpoint over the same 12 training ensembles. Both figures use the same samples, graph, field pairs, and bounded score axis; the whiskers show ±1 standard deviation across ensembles.
+
+<p align="center"><img src="docs/assets/reconstruction_examples/ab_train_last_cross_spectrum_cross_frequency_base.png" alt="Base-source cross-frequency spectral coherence over 12 matched training ensembles" width="49%"> <img src="docs/assets/reconstruction_examples/ab_train_last_cross_spectrum_cross_frequency_posttraining.png" alt="AB post-training cross-frequency spectral coherence over the same 12 training ensembles" width="49%"></p>
+
+<p align="center"><em>Left: base source. Right: post-training checkpoint. The cross-frequency pair mean increases from 84.4% to 90.6% under the training-aligned estimator.</em></p>
 
 > **Pending topology evaluation:** the topology coherence family is available for training and post-training objectives, but its intuitive set-level statistical evaluation and visualization are intentionally pending. That work will be refined as a separate task before `topology` is exposed through `visualize-run --eval-coherence`.
 

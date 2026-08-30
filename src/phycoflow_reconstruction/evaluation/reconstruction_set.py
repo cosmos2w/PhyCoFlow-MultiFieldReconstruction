@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import json
 import re
+import shutil
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
@@ -50,6 +51,7 @@ class _SetEvaluationResult:
     generation_steps: int
     evaluation_seed: int
     coherence_outputs: dict[str, Any]
+    coherence_accumulators: dict[str, Any]
 
 
 def _finite_summary(values: np.ndarray) -> dict[str, float | int | None]:
@@ -329,6 +331,8 @@ def _evaluate_reconstruction_set_once(
     weight_selection: str = "configured",
     max_samples: int | None = 200,
     coherence_families: tuple[str, ...] | list[str] | None = None,
+    extra_coherence_views: bool = False,
+    cross_spectrum_aggregation: str = "training_aligned",
     statistic_scale: str = "log",
     output_dir_override: str | Path | None = None,
     coherence_config_override: dict[str, Any] | None = None,
@@ -373,7 +377,13 @@ def _evaluate_reconstruction_set_once(
     sample_count = int(selected_indices.size)
     input_manifest = SensorManifest.load(sensor_manifest) if sensor_manifest is not None else None
     field_names = tuple(dataset.field_names)
-    coherence = build_coherence_accumulators(coherence_families or (), runtime)
+    coherence = build_coherence_accumulators(
+        coherence_families or (),
+        runtime,
+        extra_views=extra_coherence_views,
+        evaluated_sample_count=sample_count,
+        cross_spectrum_aggregation=cross_spectrum_aggregation,
+    )
     errors = np.full((sample_count, len(field_names)), np.nan, dtype=np.float64)
     sample_ids: list[str] = []
     manifest_path = output_dir / "sensor_manifest.jsonl"
@@ -598,6 +608,7 @@ def _evaluate_reconstruction_set_once(
         generation_steps=runtime.generation_steps,
         evaluation_seed=runtime.seed,
         coherence_outputs=coherence_outputs,
+        coherence_accumulators=coherence,
     )
 
 
@@ -648,14 +659,19 @@ def _global_distribution_specs(
 
 def _cross_spectrum_specs(
     path: Path,
-) -> dict[str, tuple[np.ndarray, tuple[str, ...], tuple[str, ...], str, str]]:
+) -> dict[str, tuple[np.ndarray, np.ndarray, tuple[str, ...], tuple[str, ...], str, str]]:
     with np.load(path, allow_pickle=False) as payload:
         component_names = tuple(str(value) for value in payload["component_names"])
         component_scores = {
             name: float(payload["component_coherence_scores"][index])
             for index, name in enumerate(component_names)
         }
+        component_score_std = {
+            name: float(payload["component_coherence_score_std"][index])
+            for index, name in enumerate(component_names)
+        }
         family_score = float(payload["family_coherence_score"])
+        family_score_std = float(payload["family_coherence_score_std"])
         pair_labels = tuple(str(value) for value in payload["pair_labels"])
         band_labels = tuple(str(value) for value in payload["band_field_labels"])
         arrays = {
@@ -666,6 +682,15 @@ def _cross_spectrum_specs(
                 payload["cross_frequency_coherence_score"], dtype=np.float64
             ),
             "band_energy": np.asarray(payload["band_energy_coherence_score"], dtype=np.float64),
+        }
+        spread_arrays = {
+            "same_frequency": np.asarray(
+                payload["same_frequency_coherence_score_std"], dtype=np.float64
+            ),
+            "cross_frequency": np.asarray(
+                payload["cross_frequency_coherence_score_std"], dtype=np.float64
+            ),
+            "band_energy": np.asarray(payload["band_energy_coherence_score_std"], dtype=np.float64),
         }
     definitions = {
         "same_frequency": (
@@ -694,12 +719,38 @@ def _cross_spectrum_specs(
         labels, filename, title, component_label = definitions[name]
         specs[name] = (
             np.concatenate((scores, [component_scores[name], family_score])),
+            np.concatenate((spread_arrays[name], [component_score_std[name], family_score_std])),
             (*labels, component_label, "Overall score"),
             (*("detail" for _ in labels), "component_total", "family_total"),
             filename,
             title,
         )
     return specs
+
+
+def _cross_spectrum_comparison_subtitle(
+    role: str,
+    result: _SetEvaluationResult,
+    payload_path: Path,
+) -> str:
+    with np.load(payload_path, allow_pickle=False) as payload:
+        aggregation = str(payload["aggregation"])
+        ensemble_count = int(payload["ensemble_count"])
+        ensemble_size = int(payload["ensemble_size"])
+        used_count = int(payload["sample_ids"].size)
+        selected_count = int(payload["selected_sample_ids"].size)
+    if aggregation == "training_aligned":
+        ensemble_summary = (
+            f"{ensemble_count}×{ensemble_size} ensembles · n={used_count}/{selected_count}"
+        )
+        estimate_summary = "bars mean; whiskers ±1 SD"
+    else:
+        ensemble_summary = f"one pooled ensemble · n={used_count}"
+        estimate_summary = "single pooled estimate"
+    return (
+        f"{role} · {result.run_label.replace('_', ' ')} · {result.split} · "
+        f"{result.checkpoint_label}.pt · {ensemble_summary} · {estimate_summary}"
+    )
 
 
 def _comparison_subtitle(role: str, result: _SetEvaluationResult, *, scale: str) -> str:
@@ -742,9 +793,7 @@ def _render_posttraining_comparison(
     if current_manifest_sha != base_manifest_sha:
         raise ValueError("base and post-training comparison sensor selections do not match")
 
-    current_errors, current_fields, current_ids = _load_relative_l2_payload(
-        current.payload_path
-    )
+    current_errors, current_fields, current_ids = _load_relative_l2_payload(current.payload_path)
     base_errors, base_fields, base_ids = _load_relative_l2_payload(base.payload_path)
     if (current_fields, current_ids) != (base_fields, base_ids):
         raise ValueError("base and post-training reconstruction payloads are not aligned")
@@ -780,22 +829,14 @@ def _render_posttraining_comparison(
         "relative_l2": list(reconstruction_limits),
     }
     artifacts: dict[str, Any] = {
-        "base": {
-            "relative_l2": _report_artifact_path(
-                base_reconstruction, current.output_dir
-            )
-        },
+        "base": {"relative_l2": _report_artifact_path(base_reconstruction, current.output_dir)},
         "post_training": {
-            "relative_l2": _report_artifact_path(
-                post_reconstruction, current.output_dir
-            )
+            "relative_l2": _report_artifact_path(post_reconstruction, current.output_dir)
         },
     }
     if "global_distribution" in coherence_families:
         base_payload = base.output_dir / "coherence" / "global_distribution" / "metrics.npz"
-        current_payload = (
-            current.output_dir / "coherence" / "global_distribution" / "metrics.npz"
-        )
+        current_payload = current.output_dir / "coherence" / "global_distribution" / "metrics.npz"
         base_specs = _global_distribution_specs(base_payload)
         current_specs = _global_distribution_specs(current_payload)
         family_limits = {}
@@ -808,12 +849,7 @@ def _render_posttraining_comparison(
                 statistic_scale,
             )
             family_limits[name] = list(limits)
-            post_path = (
-                current.output_dir
-                / "coherence"
-                / "global_distribution"
-                / current_spec[3]
-            )
+            post_path = current.output_dir / "coherence" / "global_distribution" / current_spec[3]
             base_path = _base_figure_path(post_path)
             render_coherence_distribution(
                 base_spec[0],
@@ -831,9 +867,7 @@ def _render_posttraining_comparison(
                 current_spec[2],
                 post_path,
                 title=f"Post-training — {current_spec[4]}",
-                subtitle=_comparison_subtitle(
-                    "Post-training", current, scale=statistic_scale
-                ),
+                subtitle=_comparison_subtitle("Post-training", current, scale=statistic_scale),
                 scale=statistic_scale,
                 value_limits=limits,
             )
@@ -845,36 +879,104 @@ def _render_posttraining_comparison(
             )
         shared_limits["global_distribution"] = family_limits
 
+        current_extra = current.coherence_accumulators.get("global_distribution")
+        base_extra = base.coherence_accumulators.get("global_distribution")
+        if current_extra is not None and getattr(current_extra, "extra_view", False):
+            if base_extra is None or not getattr(base_extra, "extra_view", False):
+                raise ValueError("base global-distribution extra view is unavailable")
+            extra_ranges = current_extra.extra_value_ranges(base_extra)
+            extra_density_limits = current_extra.extra_density_limits(extra_ranges, base_extra)
+            extra_destination = (
+                current.output_dir
+                / "coherence"
+                / "global_distribution"
+                / "global_distribution_extra"
+            )
+            base_extra_output = base_extra.render_extra(
+                extra_destination,
+                split=base.split,
+                checkpoint_label=base.checkpoint_label,
+                run_label=base.run_label,
+                value_ranges=extra_ranges,
+                density_limits=extra_density_limits,
+                filename_suffix="-base",
+                role_label="Base source",
+            )
+            current_extra_output = current_extra.render_extra(
+                extra_destination,
+                split=current.split,
+                checkpoint_label=current.checkpoint_label,
+                run_label=current.run_label,
+                value_ranges=extra_ranges,
+                density_limits=extra_density_limits,
+                role_label="Post-training",
+            )
+            artifacts["base"]["global_distribution_extra"] = {
+                label: str(Path(path).relative_to(current.output_dir))
+                for label, path in base_extra_output["figures"].items()
+            }
+            artifacts["post_training"]["global_distribution_extra"] = {
+                label: str(Path(path).relative_to(current.output_dir))
+                for label, path in current_extra_output["figures"].items()
+            }
+            shared_limits["global_distribution_extra"] = {
+                label: {
+                    "x": list(limits[0]),
+                    "y": list(limits[1]),
+                    "density": list(extra_density_limits[label]),
+                }
+                for label, limits in extra_ranges.items()
+            }
+
     if "cross_spectrum" in coherence_families:
         base_payload = base.output_dir / "coherence" / "cross_spectrum" / "metrics.npz"
         current_payload = current.output_dir / "coherence" / "cross_spectrum" / "metrics.npz"
+        current_cross_dir = current_payload.parent
+        base_csv = base_payload.with_name("metrics.csv")
+        base_report_path = base_payload.with_name("report.json")
+        base_payload_copy = current_cross_dir / "metrics-base.npz"
+        base_csv_copy = current_cross_dir / "metrics-base.csv"
+        base_report_copy = current_cross_dir / "report-base.json"
+        shutil.copy2(base_payload, base_payload_copy)
+        shutil.copy2(base_csv, base_csv_copy)
+        base_report_payload = json.loads(base_report_path.read_text(encoding="utf-8"))
+        base_report_payload["artifacts"]["metrics_payload"] = base_payload_copy.name
+        base_report_payload["artifacts"]["metrics_csv"] = base_csv_copy.name
+        base_report_payload["artifacts"]["figures"] = {
+            key: _base_figure_path(current_cross_dir / filename).name
+            for key, filename in base_report_payload["artifacts"]["figures"].items()
+        }
+        base_report_copy.write_text(
+            json.dumps(base_report_payload, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
         base_specs = _cross_spectrum_specs(base_payload)
         current_specs = _cross_spectrum_specs(current_payload)
         for name, base_spec in base_specs.items():
             current_spec = current_specs[name]
-            if base_spec[1:3] != current_spec[1:3]:
+            if base_spec[2:4] != current_spec[2:4]:
                 raise ValueError(f"cross-spectrum {name} comparison labels do not match")
-            post_path = (
-                current.output_dir / "coherence" / "cross_spectrum" / current_spec[3]
-            )
+            post_path = current.output_dir / "coherence" / "cross_spectrum" / current_spec[4]
             base_path = _base_figure_path(post_path)
             render_cross_spectrum_score_bars(
                 base_spec[0],
-                base_spec[1],
                 base_spec[2],
+                base_spec[3],
                 base_path,
-                title=f"Base source — {base_spec[4]}",
-                subtitle=_comparison_subtitle("Base source", base, scale="bounded 0–1"),
+                title=f"Base source — {base_spec[5]}",
+                subtitle=_cross_spectrum_comparison_subtitle("Base source", base, base_payload),
+                score_std=base_spec[1],
             )
             render_cross_spectrum_score_bars(
                 current_spec[0],
-                current_spec[1],
                 current_spec[2],
+                current_spec[3],
                 post_path,
-                title=f"Post-training — {current_spec[4]}",
-                subtitle=_comparison_subtitle(
-                    "Post-training", current, scale="bounded 0–1"
+                title=f"Post-training — {current_spec[5]}",
+                subtitle=_cross_spectrum_comparison_subtitle(
+                    "Post-training", current, current_payload
                 ),
+                score_std=current_spec[1],
             )
             artifacts["base"].setdefault("cross_spectrum", {})[name] = str(
                 base_path.relative_to(current.output_dir)
@@ -883,6 +985,13 @@ def _render_posttraining_comparison(
                 post_path.relative_to(current.output_dir)
             )
         shared_limits["cross_spectrum"] = {"coherence_score": [0.0, 1.0]}
+        artifacts["base"].setdefault("cross_spectrum", {}).update(
+            {
+                "metrics_csv": str(base_csv_copy.relative_to(current.output_dir)),
+                "metrics_payload": str(base_payload_copy.relative_to(current.output_dir)),
+                "report": str(base_report_copy.relative_to(current.output_dir)),
+            }
+        )
 
     report = {
         "kind": "post_training_source_comparison",
@@ -938,7 +1047,10 @@ def _posttraining_source(config: dict[str, Any], run_dir: Path) -> tuple[Path, P
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         if Path(str(manifest.get("parent_run", source_run))).resolve() != source_run:
             raise ValueError("post-training run manifest parent disagrees with resolved config")
-        if Path(str(manifest.get("source_checkpoint", checkpoint_path))).resolve() != checkpoint_path:
+        if (
+            Path(str(manifest.get("source_checkpoint", checkpoint_path))).resolve()
+            != checkpoint_path
+        ):
             raise ValueError("post-training source checkpoint lineage is inconsistent")
         expected_sha = manifest.get("source_hashes", {}).get("checkpoint")
         if expected_sha and file_sha256(checkpoint_path) != expected_sha:
@@ -960,6 +1072,8 @@ def evaluate_reconstruction_set(
     weight_selection: str = "configured",
     max_samples: int | None = 200,
     coherence_families: tuple[str, ...] | list[str] | None = None,
+    extra_coherence_views: bool = False,
+    cross_spectrum_aggregation: str = "training_aligned",
     statistic_scale: str = "log",
     compare_source: bool = True,
 ) -> Path:
@@ -984,6 +1098,8 @@ def evaluate_reconstruction_set(
         weight_selection=weight_selection,
         max_samples=max_samples,
         coherence_families=families,
+        extra_coherence_views=extra_coherence_views,
+        cross_spectrum_aggregation=cross_spectrum_aggregation,
         statistic_scale=statistic_scale,
     )
     if source is None:
@@ -1004,6 +1120,8 @@ def evaluate_reconstruction_set(
             weight_selection=weight_selection,
             max_samples=max_samples,
             coherence_families=families,
+            extra_coherence_views=extra_coherence_views,
+            cross_spectrum_aggregation=cross_spectrum_aggregation,
             statistic_scale=statistic_scale,
             output_dir_override=Path(temporary_dir),
             coherence_config_override=run_config.get("coherence"),

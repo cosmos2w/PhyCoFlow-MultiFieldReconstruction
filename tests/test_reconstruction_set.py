@@ -107,8 +107,16 @@ def test_coherence_publication_labels_format_compound_field_pairs():
     assert coherence_set._publication_label("CH4–U_1") == r"CH$_{4}$–$U_{1}$"
 
 
+def test_jensen_shannon_divergence_is_bounded_and_calibrated():
+    reference = np.asarray([[0.5, 0.5], [0.0, 0.0]])
+    disjoint = np.asarray([[0.0, 0.0], [0.5, 0.5]])
+
+    assert coherence_set._jensen_shannon_divergence_bits(reference, reference) == 0.0
+    assert coherence_set._jensen_shannon_divergence_bits(reference, disjoint) == 1.0
+
+
 class _FixtureDataset:
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, sample_count: int = 4) -> None:
         self.path = path
         self.field_names = ("u", "v")
         self.normalizer = FieldNormalizer.identity(2)
@@ -121,9 +129,10 @@ class _FixtureDataset:
             mesh_type="structured",
         )
         self.closed = False
+        self.sample_count = int(sample_count)
 
     def __len__(self) -> int:
-        return 4
+        return self.sample_count
 
     def __getitem__(self, index: int) -> FieldSample:
         coordinates = torch.tensor([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])
@@ -204,6 +213,7 @@ def test_set_evaluation_streams_selected_samples_and_writes_outputs(tmp_path, mo
         split="test",
         max_samples=2,
         coherence_families=["global_distribution"],
+        extra_coherence_views=True,
     )
 
     output_dir = run_dir / "evaluation" / "reconstruction_set_test_best"
@@ -241,10 +251,18 @@ def test_set_evaluation_streams_selected_samples_and_writes_outputs(tmp_path, mo
     assert coherence_report["statistic_scale"] == "log"
     assert coherence_report["statistics"]["family_total"]["count"] == 2
     assert report["coherence"]["global_distribution"]["family"] == "global_distribution"
+    extra_dir = coherence_dir / "global_distribution_extra"
+    assert (extra_dir / "joint_pdf_u-v.png").is_file()
+    assert (extra_dir / "joint_pdf_metrics.csv").is_file()
+    assert (extra_dir / "joint_pdf_metrics.npz").is_file()
+    extra_report = json.loads((extra_dir / "report.json").read_text(encoding="utf-8"))
+    assert extra_report["sample_count"] == 2
+    assert extra_report["pooled_point_count"] == 8
+    assert 0.0 <= extra_report["pairs"][0]["jensen_shannon_divergence_bits"] <= 1.0
     assert dataset.closed
 
 
-def test_set_evaluation_writes_pooled_cross_spectrum_coherence_scores(tmp_path, monkeypatch):
+def test_set_evaluation_writes_training_aligned_cross_spectrum_statistics(tmp_path, monkeypatch):
     case_dir = tmp_path / "case"
     run_dir = case_dir / "runs" / "experiment" / "cross-run"
     checkpoint = run_dir / "checkpoints" / "best.pt"
@@ -253,7 +271,7 @@ def test_set_evaluation_writes_pooled_cross_spectrum_coherence_scores(tmp_path, 
     (run_dir / "resolved_config.yaml").write_text("fixture: true\n", encoding="utf-8")
     dataset_path = tmp_path / "cross-dataset.bin"
     dataset_path.write_bytes(b"dataset")
-    dataset = _FixtureDataset(dataset_path)
+    dataset = _FixtureDataset(dataset_path, sample_count=7)
     runtime = EvaluationRuntime(
         config={
             "observations": {
@@ -282,7 +300,7 @@ def test_set_evaluation_writes_pooled_cross_spectrum_coherence_scores(tmp_path, 
         run_dir,
         case_dir=case_dir,
         split="test",
-        max_samples=4,
+        max_samples=7,
         coherence_families=["cross_spectrum"],
     )
 
@@ -298,18 +316,37 @@ def test_set_evaluation_writes_pooled_cross_spectrum_coherence_scores(tmp_path, 
         assert payload["same_frequency_coherence_score"].shape == (1,)
         assert payload["cross_frequency_absolute_discrepancy"].shape == (1,)
         assert payload["cross_frequency_coherence_score"].shape == (1,)
-        assert payload["sample_ids"].shape == (4,)
+        assert payload["same_frequency_coherence_score_by_ensemble"].shape == (2, 1)
+        assert payload["cross_frequency_coherence_score_by_ensemble"].shape == (2, 1)
+        assert payload["sample_ids"].shape == (6,)
+        assert payload["selected_sample_ids"].shape == (7,)
+        assert payload["dropped_sample_ids"].shape == (1,)
+        assert payload["ensemble_sample_ids"].shape == (2, 3)
+        assert payload["aggregation"].item() == "training_aligned"
+        assert payload["ensemble_size"].item() == 3
+        assert payload["ensemble_count"].item() == 2
+        np.testing.assert_allclose(
+            payload["same_frequency_coherence_score"],
+            payload["same_frequency_coherence_score_by_ensemble"].mean(axis=0),
+        )
+        np.testing.assert_allclose(
+            payload["same_frequency_coherence_score_std"],
+            payload["same_frequency_coherence_score_by_ensemble"].std(axis=0, ddof=1),
+        )
         assert 0.0 <= payload["family_coherence_score"].item() <= 1.0
         assert np.all(payload["component_coherence_scores"] >= 0.0)
         assert np.all(payload["component_coherence_scores"] <= 1.0)
     cross_report = json.loads((cross_dir / "report.json").read_text(encoding="utf-8"))
-    assert cross_report["selected_sample_count"] == 4
-    assert cross_report["used_sample_count"] == 4
-    assert cross_report["dropped_sample_count"] == 0
-    assert cross_report["dropped_sample_ids"] == []
-    assert cross_report["ensemble"]["policy"] == "single_pooled_selected_snapshot_ensemble"
+    assert cross_report["selected_sample_count"] == 7
+    assert cross_report["used_sample_count"] == 6
+    assert cross_report["dropped_sample_count"] == 1
+    assert len(cross_report["dropped_sample_ids"]) == 1
+    assert cross_report["ensemble"]["policy"] == "training_aligned_fixed_size_nonoverlapping"
+    assert cross_report["ensemble"]["aggregation"] == "training_aligned"
     assert cross_report["ensemble"]["minimum_size"] == 3
-    assert cross_report["ensemble"]["sample_count"] == 4
+    assert cross_report["ensemble"]["ensemble_size"] == 3
+    assert cross_report["ensemble"]["ensemble_count"] == 2
+    assert cross_report["ensemble"]["sample_count"] == 6
     assert cross_report["statistic_scale"] == "bounded_linear_0_to_1"
     assert cross_report["coherence_score"]["perfect_agreement"] == 1.0
     assert cross_report["graph"]["query_policy"] == "fixed_shared"
@@ -319,9 +356,7 @@ def test_set_evaluation_writes_pooled_cross_spectrum_coherence_scores(tmp_path, 
     assert dataset.closed
 
 
-def test_posttraining_set_evaluation_builds_matched_source_comparison(
-    tmp_path, monkeypatch
-):
+def test_posttraining_set_evaluation_builds_matched_source_comparison(tmp_path, monkeypatch):
     case_dir = tmp_path / "case"
     source_run = case_dir / "runs" / "base_experiment" / "base-run"
     child_run = case_dir / "runs" / "post_experiment" / "child-run"
@@ -340,13 +375,9 @@ def test_posttraining_set_evaluation_builds_matched_source_comparison(
         "stage": "post_training",
         "source_run": str(source_run),
         "source_checkpoint": str(source_checkpoint),
-        "coherence": {
-            "compute_budget": {"batch_size": 3, "point_count": 4, "query_seed": 17}
-        },
+        "coherence": {"compute_budget": {"batch_size": 3, "point_count": 4, "query_seed": 17}},
     }
-    (child_run / "resolved_config.yaml").write_text(
-        json.dumps(child_config), encoding="utf-8"
-    )
+    (child_run / "resolved_config.yaml").write_text(json.dumps(child_config), encoding="utf-8")
     dataset_path = tmp_path / "comparison-dataset.bin"
     dataset_path.write_bytes(b"dataset")
 
@@ -380,9 +411,7 @@ def test_posttraining_set_evaluation_builds_matched_source_comparison(
     )
     reconstruction_limits = []
     coherence_limits = []
-    original_reconstruction_renderer = (
-        reconstruction_set.render_reconstruction_set_distribution
-    )
+    original_reconstruction_renderer = reconstruction_set.render_reconstruction_set_distribution
     original_coherence_renderer = reconstruction_set.render_coherence_distribution
 
     def capture_reconstruction(*args, **kwargs):
@@ -412,6 +441,7 @@ def test_posttraining_set_evaluation_builds_matched_source_comparison(
         split="test",
         max_samples=4,
         coherence_families=["global_distribution", "cross_spectrum"],
+        extra_coherence_views=True,
     )
 
     output_dir = child_run / "evaluation" / "reconstruction_set_test_best"
@@ -429,6 +459,20 @@ def test_posttraining_set_evaluation_builds_matched_source_comparison(
     for stem in ("same_frequency_coherence", "cross_frequency_coherence"):
         assert (cross_dir / f"{stem}.png").is_file()
         assert (cross_dir / f"{stem}-base.png").is_file()
+    assert (cross_dir / "metrics-base.csv").is_file()
+    assert (cross_dir / "metrics-base.npz").is_file()
+    assert (cross_dir / "report-base.json").is_file()
+    extra_dir = global_dir / "global_distribution_extra"
+    assert (extra_dir / "joint_pdf_u-v.png").is_file()
+    assert (extra_dir / "joint_pdf_u-v-base.png").is_file()
+    assert (extra_dir / "report.json").is_file()
+    assert (extra_dir / "report-base.json").is_file()
+    with (
+        np.load(extra_dir / "joint_pdf_metrics.npz", allow_pickle=False) as current_extra,
+        np.load(extra_dir / "joint_pdf_metrics-base.npz", allow_pickle=False) as base_extra,
+    ):
+        np.testing.assert_array_equal(current_extra["x_edges"], base_extra["x_edges"])
+        np.testing.assert_array_equal(current_extra["y_edges"], base_extra["y_edges"])
     assert not (output_dir / "comparison").exists()
     assert len(reconstruction_limits) == 2
     assert reconstruction_limits[0] == reconstruction_limits[1]
@@ -436,9 +480,7 @@ def test_posttraining_set_evaluation_builds_matched_source_comparison(
     assert coherence_limits[0] == coherence_limits[1]
     assert coherence_limits[2] == coherence_limits[3]
     assert coherence_limits[4] == coherence_limits[5]
-    report = json.loads(
-        (output_dir / "comparison_report.json").read_text(encoding="utf-8")
-    )
+    report = json.loads((output_dir / "comparison_report.json").read_text(encoding="utf-8"))
     assert report["kind"] == "post_training_source_comparison"
     assert report["sample_count"] == 4
     assert report["runs"]["base"]["checkpoint"] == str(source_checkpoint)
@@ -447,6 +489,7 @@ def test_posttraining_set_evaluation_builds_matched_source_comparison(
         0.0,
         1.0,
     ]
+    assert "density" in report["shared_axis_limits"]["global_distribution_extra"]["u–v"]
     child_report = json.loads((output_dir / "report.json").read_text(encoding="utf-8"))
     assert child_report["comparison"]["enabled"] is True
     assert not (source_run / "evaluation").exists()

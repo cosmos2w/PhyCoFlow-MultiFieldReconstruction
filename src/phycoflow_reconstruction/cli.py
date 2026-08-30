@@ -196,12 +196,27 @@ def run_case_cli(case_name: str, case_dir: str | Path) -> int:
         ),
     )
     visualizer.add_argument(
-        "--no-base-comparison",
+        "--cross-spectrum-aggregation",
+        choices=("training_aligned", "pooled"),
+        default="training_aligned",
+        help=(
+            "cross-spectrum ensemble estimator; training_aligned uses the configured "
+            "coherence batch size and averages complete ensembles (default), while pooled "
+            "uses all selected snapshots as one diagnostic ensemble"
+        ),
+    )
+    visualizer.add_argument(
+        "--extraview-coherence",
         action="store_true",
         help=(
-            "skip the automatic matched source-run comparison when --run is a "
-            "post-training run"
+            "add dedicated coherence-family views to --eval-coherence output; "
+            "currently renders global-distribution pairwise joint PDFs"
         ),
+    )
+    visualizer.add_argument(
+        "--no-base-comparison",
+        action="store_true",
+        help=("skip the automatic matched source-run comparison when --run is a post-training run"),
     )
     visualizer.add_argument("--sensor-config", type=Path)
     visualizer.add_argument("--sensor-manifest", type=Path)
@@ -247,6 +262,12 @@ def run_case_cli(case_name: str, case_dir: str | Path) -> int:
     if args.command == "visualize-run":
         if args.eval_coherence and args.eval_set is None:
             parser.error("--eval-coherence requires --eval-set")
+        if args.extraview_coherence and not args.eval_coherence:
+            parser.error("--extraview-coherence requires --eval-coherence")
+        if args.extraview_coherence and "global_distribution" not in args.eval_coherence:
+            parser.error(
+                "--extraview-coherence currently requires global_distribution in --eval-coherence"
+            )
         run_dir = args.run.resolve() if args.run.is_absolute() else (case_dir / args.run).resolve()
         sensor_config = args.sensor_config
         if sensor_config is not None and not sensor_config.is_absolute():
@@ -273,6 +294,8 @@ def run_case_cli(case_name: str, case_dir: str | Path) -> int:
                 weight_selection=args.weight_selection,
                 max_samples=args.eval_samples,
                 coherence_families=args.eval_coherence,
+                extra_coherence_views=args.extraview_coherence,
+                cross_spectrum_aggregation=args.cross_spectrum_aggregation,
                 statistic_scale=args.stat_scale,
                 compare_source=not args.no_base_comparison,
             )
