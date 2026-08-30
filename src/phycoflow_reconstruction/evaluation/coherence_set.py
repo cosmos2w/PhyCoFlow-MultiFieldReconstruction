@@ -860,6 +860,8 @@ class GlobalDistributionAccumulator:
             x_edges_all.append(x_edges)
             y_edges_all.append(y_edges)
 
+        if not rows:
+            raise ValueError("global-distribution extra-view requires at least one field pair")
         metrics_stem = f"joint_pdf_metrics{filename_suffix}"
         csv_path = destination / f"{metrics_stem}.csv"
         with csv_path.open("w", encoding="utf-8", newline="") as stream:
