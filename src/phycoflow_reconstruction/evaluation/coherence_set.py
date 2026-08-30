@@ -168,6 +168,7 @@ def render_coherence_distribution(
     ylabel: str = r"Squared distribution discrepancy ($W_2^2$)",
     dpi: int = 300,
     scale: str = "log",
+    value_limits: tuple[float, float] | None = None,
 ) -> Path:
     """Render violin densities overlaid with samples and explicit medians."""
     import matplotlib
@@ -260,14 +261,25 @@ def render_coherence_distribution(
     axis.set_xlim(0.35, len(labels) + 0.65)
     finite_values = values[np.isfinite(values)]
     axis.set_yscale(scale)
-    if scale == "log":
-        finite_values = finite_values[finite_values > 0.0]
-        if not finite_values.size:
-            raise ValueError("log-scale coherence plot contains no positive values")
-        axis.set_ylim(float(finite_values.min()) * 0.75, float(finite_values.max()) * 1.25)
+    if value_limits is None:
+        if scale == "log":
+            finite_values = finite_values[finite_values > 0.0]
+            if not finite_values.size:
+                raise ValueError("log-scale coherence plot contains no positive values")
+            limits = (
+                float(finite_values.min()) * 0.75,
+                float(finite_values.max()) * 1.25,
+            )
+        else:
+            upper = float(finite_values.max()) * 1.08 if finite_values.size else 1.0
+            limits = (0.0, max(upper, np.finfo(np.float64).eps))
     else:
-        upper = float(finite_values.max()) * 1.08 if finite_values.size else 1.0
-        axis.set_ylim(0.0, max(upper, np.finfo(np.float64).eps))
+        limits = value_limits
+    if scale == "log" and limits[0] <= 0.0:
+        raise ValueError("log-scale coherence limits must be positive")
+    if not np.isfinite(limits).all() or limits[0] >= limits[1]:
+        raise ValueError("coherence plot limits must be finite and increasing")
+    axis.set_ylim(*limits)
     axis.set_ylabel(ylabel, fontsize=10.3)
     axis.set_title(title, fontsize=12.0, fontweight="medium", pad=21)
     axis.text(

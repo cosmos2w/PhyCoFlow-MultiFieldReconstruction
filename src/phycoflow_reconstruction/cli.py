@@ -195,6 +195,14 @@ def run_case_cli(case_name: str, case_dir: str | Path) -> int:
             "currently supports global_distribution and cross_spectrum"
         ),
     )
+    visualizer.add_argument(
+        "--no-base-comparison",
+        action="store_true",
+        help=(
+            "skip the automatic matched source-run comparison when --run is a "
+            "post-training run"
+        ),
+    )
     visualizer.add_argument("--sensor-config", type=Path)
     visualizer.add_argument("--sensor-manifest", type=Path)
     visualizer.add_argument("--generation-steps", type=int)
@@ -266,6 +274,7 @@ def run_case_cli(case_name: str, case_dir: str | Path) -> int:
                 max_samples=args.eval_samples,
                 coherence_families=args.eval_coherence,
                 statistic_scale=args.stat_scale,
+                compare_source=not args.no_base_comparison,
             )
             print(figure)
             return 0

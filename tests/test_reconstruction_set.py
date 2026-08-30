@@ -153,10 +153,14 @@ class _FixtureDataset:
 
 
 class _FixtureModel(torch.nn.Module):
+    def __init__(self, scale: float = 0.88) -> None:
+        super().__init__()
+        self.scale = float(scale)
+
     def reconstruct(self, batch, *, steps, generator):
         del steps, generator
         target = batch.target_fields
-        prediction = target * 0.88 + 0.02 * target.square()
+        prediction = target * self.scale + 0.02 * target.square()
         prediction[..., 1] += 0.03 * target[..., 0]
         return SimpleNamespace(prediction=prediction, samples=None)
 
@@ -313,3 +317,136 @@ def test_set_evaluation_writes_pooled_cross_spectrum_coherence_scores(tmp_path, 
     report = json.loads((output_dir / "report.json").read_text(encoding="utf-8"))
     assert report["coherence"]["cross_spectrum"]["family"] == "cross_spectrum"
     assert dataset.closed
+
+
+def test_posttraining_set_evaluation_builds_matched_source_comparison(
+    tmp_path, monkeypatch
+):
+    case_dir = tmp_path / "case"
+    source_run = case_dir / "runs" / "base_experiment" / "base-run"
+    child_run = case_dir / "runs" / "post_experiment" / "child-run"
+    source_checkpoint = source_run / "checkpoints" / "best.pt"
+    child_checkpoint = child_run / "checkpoints" / "best.pt"
+    for path, payload in (
+        (source_checkpoint, b"source-checkpoint"),
+        (child_checkpoint, b"child-checkpoint"),
+    ):
+        path.parent.mkdir(parents=True)
+        path.write_bytes(payload)
+    (source_run / "resolved_config.yaml").write_text(
+        json.dumps({"stage": "base_training"}), encoding="utf-8"
+    )
+    child_config = {
+        "stage": "post_training",
+        "source_run": str(source_run),
+        "source_checkpoint": str(source_checkpoint),
+        "coherence": {
+            "compute_budget": {"batch_size": 3, "point_count": 4, "query_seed": 17}
+        },
+    }
+    (child_run / "resolved_config.yaml").write_text(
+        json.dumps(child_config), encoding="utf-8"
+    )
+    dataset_path = tmp_path / "comparison-dataset.bin"
+    dataset_path.write_bytes(b"dataset")
+
+    def runtime_for(run_dir, **kwargs):
+        del kwargs
+        resolved = Path(run_dir).resolve()
+        is_child = resolved == child_run.resolve()
+        return EvaluationRuntime(
+            config={
+                "observations": {
+                    "protocol": "random_uniform",
+                    "seed": 42,
+                    "fields": {"u": {"count": 1}},
+                },
+                "runtime": {"seed": 42},
+                "coherence": child_config["coherence"],
+            },
+            device=torch.device("cpu"),
+            dataset=_FixtureDataset(dataset_path),
+            model=_FixtureModel(scale=0.94 if is_child else 0.84),
+            checkpoint_path=child_checkpoint if is_child else source_checkpoint,
+            generation_steps=2,
+            seed=2027,
+        )
+
+    monkeypatch.setattr(reconstruction_set, "load_evaluation_runtime", runtime_for)
+    monkeypatch.setattr(
+        reconstruction_set,
+        "warn_if_cuda_memory_tight",
+        lambda *args, **kwargs: False,
+    )
+    reconstruction_limits = []
+    coherence_limits = []
+    original_reconstruction_renderer = (
+        reconstruction_set.render_reconstruction_set_distribution
+    )
+    original_coherence_renderer = reconstruction_set.render_coherence_distribution
+
+    def capture_reconstruction(*args, **kwargs):
+        if kwargs.get("value_limits") is not None:
+            reconstruction_limits.append(kwargs["value_limits"])
+        return original_reconstruction_renderer(*args, **kwargs)
+
+    def capture_coherence(*args, **kwargs):
+        if kwargs.get("value_limits") is not None:
+            coherence_limits.append(kwargs["value_limits"])
+        return original_coherence_renderer(*args, **kwargs)
+
+    monkeypatch.setattr(
+        reconstruction_set,
+        "render_reconstruction_set_distribution",
+        capture_reconstruction,
+    )
+    monkeypatch.setattr(
+        reconstruction_set,
+        "render_coherence_distribution",
+        capture_coherence,
+    )
+
+    reconstruction_set.evaluate_reconstruction_set(
+        child_run,
+        case_dir=case_dir,
+        split="test",
+        max_samples=4,
+        coherence_families=["global_distribution", "cross_spectrum"],
+    )
+
+    output_dir = child_run / "evaluation" / "reconstruction_set_test_best"
+    assert (output_dir / "relative_l2_violin.png").is_file()
+    assert (output_dir / "relative_l2_violin-base.png").is_file()
+    global_dir = output_dir / "coherence" / "global_distribution"
+    for stem in (
+        "marginal_field_distributions",
+        "pairwise_field_distributions",
+        "joint_top_tail_distributions",
+    ):
+        assert (global_dir / f"{stem}.png").is_file()
+        assert (global_dir / f"{stem}-base.png").is_file()
+    cross_dir = output_dir / "coherence" / "cross_spectrum"
+    for stem in ("same_frequency_coherence", "cross_frequency_coherence"):
+        assert (cross_dir / f"{stem}.png").is_file()
+        assert (cross_dir / f"{stem}-base.png").is_file()
+    assert not (output_dir / "comparison").exists()
+    assert len(reconstruction_limits) == 2
+    assert reconstruction_limits[0] == reconstruction_limits[1]
+    assert len(coherence_limits) == 6
+    assert coherence_limits[0] == coherence_limits[1]
+    assert coherence_limits[2] == coherence_limits[3]
+    assert coherence_limits[4] == coherence_limits[5]
+    report = json.loads(
+        (output_dir / "comparison_report.json").read_text(encoding="utf-8")
+    )
+    assert report["kind"] == "post_training_source_comparison"
+    assert report["sample_count"] == 4
+    assert report["runs"]["base"]["checkpoint"] == str(source_checkpoint)
+    assert report["matched_inputs"]["evaluation_seed"] == 2027
+    assert report["shared_axis_limits"]["cross_spectrum"]["coherence_score"] == [
+        0.0,
+        1.0,
+    ]
+    child_report = json.loads((output_dir / "report.json").read_text(encoding="utf-8"))
+    assert child_report["comparison"]["enabled"] is True
+    assert not (source_run / "evaluation").exists()
