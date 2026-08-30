@@ -72,6 +72,7 @@ def _cross_config() -> dict:
             "bands": ["low", "mid", "high"],
         },
         "components": {
+            "self_spectrum": {"enabled": False, "weight": 0.0},
             "same_frequency": {"enabled": True, "weight": 1.0},
             "cross_frequency": {"enabled": True, "weight": 1.0},
             "band_energy": {"enabled": True, "weight": 0.25},

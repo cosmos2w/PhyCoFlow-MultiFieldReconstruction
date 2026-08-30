@@ -34,9 +34,10 @@ def _register_defaults() -> None:
         COHERENCE_FAMILY_REGISTRY.register(
             "cross_spectrum",
             CrossSpectrumFamily,
-            version="1",
+            version="2",
             metadata={
                 "components": (
+                    "self_spectrum.auto_spectrum",
                     "same_frequency.magnitude_squared",
                     "cross_frequency.band_energy_coupling",
                     "band_energy.log_power",

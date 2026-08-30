@@ -306,16 +306,20 @@ def test_set_evaluation_writes_training_aligned_cross_spectrum_statistics(tmp_pa
 
     output_dir = run_dir / "evaluation" / "reconstruction_set_test_best"
     cross_dir = output_dir / "coherence" / "cross_spectrum"
+    assert (cross_dir / "self_spectrum_coherence.png").is_file()
     assert (cross_dir / "same_frequency_coherence.png").is_file()
     assert (cross_dir / "cross_frequency_coherence.png").is_file()
     assert not (cross_dir / "band_energy_coherence.png").exists()
     assert not (cross_dir / "same_frequency_pair_distributions.png").exists()
     assert (cross_dir / "metrics.csv").is_file()
     with np.load(cross_dir / "metrics.npz", allow_pickle=False) as payload:
+        assert payload["self_spectrum_absolute_discrepancy"].shape == (2,)
+        assert payload["self_spectrum_coherence_score"].shape == (2,)
         assert payload["same_frequency_absolute_discrepancy"].shape == (1,)
         assert payload["same_frequency_coherence_score"].shape == (1,)
         assert payload["cross_frequency_absolute_discrepancy"].shape == (1,)
         assert payload["cross_frequency_coherence_score"].shape == (1,)
+        assert payload["self_spectrum_coherence_score_by_ensemble"].shape == (2, 2)
         assert payload["same_frequency_coherence_score_by_ensemble"].shape == (2, 1)
         assert payload["cross_frequency_coherence_score_by_ensemble"].shape == (2, 1)
         assert payload["sample_ids"].shape == (6,)
@@ -456,7 +460,11 @@ def test_posttraining_set_evaluation_builds_matched_source_comparison(tmp_path, 
         assert (global_dir / f"{stem}.png").is_file()
         assert (global_dir / f"{stem}-base.png").is_file()
     cross_dir = output_dir / "coherence" / "cross_spectrum"
-    for stem in ("same_frequency_coherence", "cross_frequency_coherence"):
+    for stem in (
+        "self_spectrum_coherence",
+        "same_frequency_coherence",
+        "cross_frequency_coherence",
+    ):
         assert (cross_dir / f"{stem}.png").is_file()
         assert (cross_dir / f"{stem}-base.png").is_file()
     assert (cross_dir / "metrics-base.csv").is_file()

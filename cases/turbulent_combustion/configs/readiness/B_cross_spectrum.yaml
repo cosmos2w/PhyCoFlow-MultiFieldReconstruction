@@ -1,5 +1,10 @@
 defaults: [_common.yaml]
 
+optimization:
+  epochs: 5000
+  batch_size: 32
+  train_fraction: 0.20
+
 coherence:
   family_balance: {mode: none, calibration_batches: 2, reference: median, epsilon: 1.0e-12, scale_min: 0.00001, scale_max: 100.0, max_batch_ratio: 100.0, gradient_diagnostics_every_epochs: 0, seed: 700043}
   families:
@@ -14,6 +19,8 @@ coherence:
       graph: {k_neighbors: 16, sigma: null, num_modes: 48, exclude_zero: true, bands: [low, mid, high]}
       eps: 1.0e-8
       components:
+        # Explicit per-field, modewise auto-spectrum matching; independently disable-able.
+        self_spectrum: {enabled: true, weight: 1.0}
         same_frequency: {enabled: true, weight: 1.0}
         cross_frequency: {enabled: true, weight: 1.0}
         band_energy: {enabled: false, weight: 0.0}

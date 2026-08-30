@@ -555,6 +555,7 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
                 },
             },
             "cross_spectrum": {
+                "self_spectrum": {"enabled", "weight"},
                 "same_frequency": {"enabled", "weight"},
                 "cross_frequency": {"enabled", "weight"},
                 "band_energy": {"enabled", "weight"},

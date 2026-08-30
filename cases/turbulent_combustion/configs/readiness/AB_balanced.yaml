@@ -25,6 +25,8 @@ coherence:
       graph: {k_neighbors: 16, sigma: null, num_modes: 48, exclude_zero: true, bands: [low, mid, high]}
       eps: 1.0e-8
       components:
+        # Explicit per-field, modewise auto-spectrum matching; independently disable-able.
+        self_spectrum: {enabled: true, weight: 1.0}
         same_frequency: {enabled: true, weight: 1.0}
         cross_frequency: {enabled: true, weight: 1.0}
         band_energy: {enabled: false, weight: 0.0}

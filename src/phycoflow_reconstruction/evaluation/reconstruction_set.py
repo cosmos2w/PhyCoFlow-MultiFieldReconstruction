@@ -672,9 +672,13 @@ def _cross_spectrum_specs(
         }
         family_score = float(payload["family_coherence_score"])
         family_score_std = float(payload["family_coherence_score_std"])
+        field_names = tuple(str(value) for value in payload["field_names"])
         pair_labels = tuple(str(value) for value in payload["pair_labels"])
         band_labels = tuple(str(value) for value in payload["band_field_labels"])
         arrays = {
+            "self_spectrum": np.asarray(
+                payload["self_spectrum_coherence_score"], dtype=np.float64
+            ),
             "same_frequency": np.asarray(
                 payload["same_frequency_coherence_score"], dtype=np.float64
             ),
@@ -684,6 +688,9 @@ def _cross_spectrum_specs(
             "band_energy": np.asarray(payload["band_energy_coherence_score"], dtype=np.float64),
         }
         spread_arrays = {
+            "self_spectrum": np.asarray(
+                payload["self_spectrum_coherence_score_std"], dtype=np.float64
+            ),
             "same_frequency": np.asarray(
                 payload["same_frequency_coherence_score_std"], dtype=np.float64
             ),
@@ -693,6 +700,12 @@ def _cross_spectrum_specs(
             "band_energy": np.asarray(payload["band_energy_coherence_score_std"], dtype=np.float64),
         }
     definitions = {
+        "self_spectrum": (
+            field_names,
+            "self_spectrum_coherence.png",
+            "Self-spectrum coherence",
+            "Field mean",
+        ),
         "same_frequency": (
             pair_labels,
             "same_frequency_coherence.png",

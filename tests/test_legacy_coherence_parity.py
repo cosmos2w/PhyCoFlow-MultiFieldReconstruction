@@ -201,6 +201,7 @@ def test_cross_spectrum_restored_basis_matches_archived_zero_mode_and_bands() ->
         "eps": eps,
         "graph": {"num_modes": 4, "exclude_zero": False, "bands": ["low", "high"]},
         "components": {
+            "self_spectrum": {"enabled": False, "weight": 0.0},
             "same_frequency": {"weight": 1.0},
             "cross_frequency": {"weight": 1.0},
             "band_energy": {"enabled": True, "weight": 1.0},

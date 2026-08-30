@@ -221,6 +221,27 @@ coherence:
 output: {experiment_name: <case>_posttrain_global_distribution}
 ```
 
+A cross-spectrum family can enable explicit per-field auto-spectrum matching alongside the distinct-field terms:
+
+```yaml
+coherence:
+  families:
+    cross_spectrum:
+      enabled: true
+      weight: 1.0
+      target_use: paired_supervised
+      units: model_units
+      fields: [<field_a>, <field_b>, <field_c>]
+      pairs: [[<field_a>, <field_b>], [<field_b>, <field_c>]]
+      components:
+        self_spectrum: {enabled: true, weight: 1.0}
+        same_frequency: {enabled: true, weight: 1.0}
+        cross_frequency: {enabled: true, weight: 1.0}
+        band_energy: {enabled: false, weight: 0.0}
+```
+
+`self_spectrum` is an explicit mode-by-mode auto-spectrum loss for every selected field; it does not need a field pair, needs only one ensemble state, and can be disabled independently. `same_frequency` compares normalized cross-field coherence for each configured distinct-field pair at the same graph mode, while `cross_frequency` compares coupling for distinct fields across different graph-frequency bands (and therefore needs a coherence batch of at least 3). The optional coarse `band_energy` term compares log spectral power aggregated over each band; it is complementary to, and lower-resolution than, modewise `self_spectrum`. These component choices are orthogonal to `target_use`: `paired_supervised` supplies the dense target from the current sample after reconstruction, whereas `training_reference` uses an independently sampled frozen training reference bank.
+
 Use `target_use: paired_supervised` with `reference_bank.enabled: false` when every reconstruction is compared with its own dense target. Use `target_use: training_reference` with an enabled reference bank when matching an independently sampled training distribution; its `points_per_sample` must equal `coherence.compute_budget.point_count`. Cross-spectrum and topology require `query_policy: fixed_shared`; same-frequency cross-spectrum requires coherence batch size at least 2, cross-frequency requires at least 3, and `optimization.batch_size` must not be smaller than the coherence batch size. For a single family, `family_balance.mode: none` is the clear default; for multiple families with different raw scales, use `initial_grad_norm` and record its calibration settings.
 
 ### 6.2 Validate and launch
@@ -416,7 +437,7 @@ python cases/turbulent_combustion/run.py visualize-run \
 
 Cross-spectrum evaluation defaults to `--cross-spectrum-aggregation training_aligned`: it reads `coherence.compute_budget.batch_size` from the resolved configuration, divides the selected set into deterministic complete ensembles of that size, applies the same spectral calculations used during post-training to every ensemble, and reports their mean with ±1 standard-deviation whiskers. Incomplete trailing samples are excluded and recorded explicitly; for example, 200 selected snapshots with a coherence batch size of 16 produce 12 ensembles, 192 used samples, and 8 recorded as dropped. Use `--cross-spectrum-aggregation pooled` only when one all-snapshot diagnostic ensemble is intentionally required.
 
-The horizontal-bar figures report same-frequency and cross-frequency agreement scores on a fixed linear range from 0 to 1, where 1 means exact spectral agreement; `--stat-scale` therefore does not alter these charts. Per-ensemble values, averaged raw mean-squared discrepancies, normalized scores, spread statistics, ensemble membership, and dropped sample IDs are retained in `metrics.csv`, `metrics.npz`, and `report.json`. If spectral-band energy is enabled in the run's coherence configuration, its figure is generated in the same family directory.
+The horizontal-bar figures report self-spectrum, same-frequency, and cross-frequency agreement scores on a fixed linear range from 0 to 1, where 1 means exact spectral agreement; `--stat-scale` therefore does not alter these charts. Self-spectrum bars are one per selected field, whereas the two distinct-field terms report one per configured pair. Per-ensemble values, averaged raw mean-squared discrepancies, normalized scores, spread statistics, ensemble membership, and dropped sample IDs are retained in `metrics.csv`, `metrics.npz`, and `report.json`. If spectral-band energy is enabled in the run's coherence configuration, its figure is generated in the same family directory.
 
 The paired example below compares the source `last.pt` checkpoint with the AB post-training `last.pt` checkpoint over the same 12 training ensembles. Both figures use the same samples, graph, field pairs, and bounded score axis; the whiskers show ±1 standard deviation across ensembles.
 

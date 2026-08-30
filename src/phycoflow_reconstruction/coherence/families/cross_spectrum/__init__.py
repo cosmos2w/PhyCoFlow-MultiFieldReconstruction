@@ -1,4 +1,4 @@
-"""Reserved cross-spectrum family; no scientific loss is implemented yet."""
+"""Graph cross-spectrum coherence family and its training objectives."""
 
 from .family import CrossSpectrumFamily
 

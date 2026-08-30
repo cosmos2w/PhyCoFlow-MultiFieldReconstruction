@@ -43,6 +43,8 @@ coherence:
 
       # Component enablement and relative weights.
       components:
+        # Explicit per-field, modewise auto-spectrum matching; independently disable-able.
+        self_spectrum: {enabled: true, weight: 1.0}
         same_frequency: {enabled: true, weight: 1.0}
         cross_frequency: {enabled: true, weight: 1.0}
         band_energy: {enabled: false, weight: 0.0}

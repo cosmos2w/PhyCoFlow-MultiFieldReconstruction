@@ -18,6 +18,28 @@ def spectral_coherence(coefficients: torch.Tensor, eps: float) -> torch.Tensor:
     return cross.abs().square() / (denominator + eps)
 
 
+def auto_spectrum(coefficients: torch.Tensor) -> torch.Tensor:
+    """Return the ensemble-mean modewise power for every field.
+
+    Coefficients have shape ``[batch, mode, field]`` and the returned
+    auto-spectrum has shape ``[mode, field]``.  Keeping this estimator
+    separate from the coherence estimator makes the absolute spectral-power
+    term usable without changing the existing pairwise coherence terms.
+    """
+    if coefficients.ndim != 3:
+        raise ValueError("auto-spectrum coefficients must have shape [B,K,C]")
+    return coefficients.abs().square().mean(dim=0)
+
+
+def auto_spectrum_mean_square_values(
+    generated: torch.Tensor, reference: torch.Tensor
+) -> torch.Tensor:
+    """Return one modewise auto-spectrum MSE value per field."""
+    if generated.ndim != 3 or reference.shape != generated.shape:
+        raise ValueError("auto-spectrum coefficients must align as [B,K,C]")
+    return (auto_spectrum(generated) - auto_spectrum(reference)).square().mean(dim=0)
+
+
 def band_energies(coefficients: torch.Tensor, band_ids: torch.Tensor) -> torch.Tensor:
     count = int(band_ids.max().item()) + 1
     energies = []

@@ -20,6 +20,8 @@ from ....data.normalization import FieldNormalizer
 from ...base import require_field_tensor
 from .basis import build_graph_basis, coordinate_digest
 from .statistics import (
+    auto_spectrum,
+    auto_spectrum_mean_square_values,
     band_energies,
     graph_fourier,
     normalized_cross_band_coupling,
@@ -33,7 +35,7 @@ from .statistics import (
 
 class CrossSpectrumFamily(nn.Module):
     family_name = "cross_spectrum"
-    version = "1"
+    version = "2"
 
     def __init__(
         self,
@@ -60,7 +62,12 @@ class CrossSpectrumFamily(nn.Module):
         if unknown:
             raise KeyError(f"unknown cross-spectrum fields: {unknown}")
         self.field_ids = tuple(lookup[name] for name in self.field_names)
-        pair_names = config.get("pairs") or list(combinations(self.field_names, 2))
+        configured_pairs = config.get("pairs")
+        pair_names = (
+            list(combinations(self.field_names, 2))
+            if configured_pairs is None
+            else list(configured_pairs)
+        )
         try:
             self.pairs = tuple(
                 (self.field_names.index(left), self.field_names.index(right))
@@ -69,11 +76,10 @@ class CrossSpectrumFamily(nn.Module):
         except ValueError as error:
             raise KeyError("cross-spectrum pair contains a field outside fields") from error
         if (
-            not self.pairs
-            or any(left == right for left, right in self.pairs)
+            any(left == right for left, right in self.pairs)
             or len({tuple(sorted(pair)) for pair in self.pairs}) != len(self.pairs)
         ):
-            raise ValueError("cross_spectrum requires unique pairs of distinct fields")
+            raise ValueError("cross_spectrum pairs must be unique and contain distinct fields")
         self.register_buffer("normalization_offset", normalizer.offset.clone())
         self.register_buffer("normalization_scale", normalizer.scale.clone())
         self.register_buffer("eigenvalues", torch.empty(0), persistent=True)
@@ -98,6 +104,7 @@ class CrossSpectrumFamily(nn.Module):
 
         components = config.get("components", {})
         definitions = (
+            ("self_spectrum", "self_spectrum.auto_spectrum", 1),
             ("same_frequency", "same_frequency.magnitude_squared", 2),
             ("cross_frequency", "cross_frequency.band_energy_coupling", 3),
             ("band_energy", "band_energy.log_power", 1),
@@ -127,6 +134,13 @@ class CrossSpectrumFamily(nn.Module):
                 )
         if not self.component_weights or not any(self.component_weights.values()):
             raise ValueError("cross_spectrum must enable a positive-weight component")
+        if (
+            self.component_weights.get("same_frequency", 0.0) > 0
+            or self.component_weights.get("cross_frequency", 0.0) > 0
+        ) and not self.pairs:
+            raise ValueError(
+                "same-frequency and cross-frequency coherence require at least one field pair"
+            )
         if "cross_frequency" in self.component_weights and len(self.band_names) < 2:
             raise ValueError("cross-frequency coherence requires at least two bands")
         self.spec = CoherenceFamilySpec(
@@ -226,6 +240,32 @@ class CrossSpectrumFamily(nn.Module):
         results: dict[str, TermResult] = {}
         component_diagnostics: dict[str, dict[str, Any]] = {}
         total = generated.sum() * 0.0
+        if self.component_weights.get("self_spectrum", 0.0) > 0:
+            generated_auto = auto_spectrum(coefficients_generated)
+            reference_auto = auto_spectrum(coefficients_reference)
+            per_field = auto_spectrum_mean_square_values(
+                coefficients_generated, coefficients_reference
+            )
+            loss = per_field.mean()
+            path = f"{self.family_name}.self_spectrum.auto_spectrum"
+            weight = self.component_weights["self_spectrum"]
+            results[path] = TermResult(
+                None,
+                loss,
+                diagnostics={
+                    "minimum_batch_size": 1,
+                    "per_field_mean_square": per_field.detach().cpu().tolist(),
+                    "generated_auto_spectrum": generated_auto.detach().cpu().tolist(),
+                    "reference_auto_spectrum": reference_auto.detach().cpu().tolist(),
+                },
+            )
+            component_diagnostics[path] = {
+                "weight": weight,
+                "executed": True,
+                "raw_scalar_loss": float(loss.detach()),
+                "weighted_scalar_contribution": float((weight * loss).detach()),
+            }
+            total = total + weight * loss
         if self.component_weights.get("same_frequency", 0.0) > 0:
             generated_coherence = spectral_coherence(coefficients_generated, self.eps)
             reference_coherence = spectral_coherence(coefficients_reference, self.eps)
@@ -316,13 +356,14 @@ class CrossSpectrumFamily(nn.Module):
             }
             total = total + weight * loss
         component_paths = {
+            "self_spectrum": f"{self.family_name}.self_spectrum.auto_spectrum",
             "same_frequency": f"{self.family_name}.same_frequency.magnitude_squared",
             "cross_frequency": f"{self.family_name}.cross_frequency.band_energy_coupling",
             "band_energy": f"{self.family_name}.band_energy.log_power",
         }
-        for key, weight in self.component_weights.items():
-            if weight == 0.0:
-                component_diagnostics[component_paths[key]] = {
+        for key, path in component_paths.items():
+            if self.component_weights.get(key, 0.0) == 0.0:
+                component_diagnostics[path] = {
                     "weight": 0.0,
                     "executed": False,
                     "raw_scalar_loss": None,
