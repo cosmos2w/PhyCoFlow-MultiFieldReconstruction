@@ -22,13 +22,33 @@ _LOSS_LABELS = {
     "physics_loss": "physics",
     "validation_loss": "validation",
 }
-_LOSS_COLORS = {
-    "total": "tab:blue",
-    "data_loss": "tab:orange",
-    "coherence_loss": "tab:green",
-    "physics_loss": "tab:red",
-    "validation_loss": "tab:purple",
+_PLOT_LABELS = {
+    "total": "Total objective",
+    "data_loss": "Training data",
+    "coherence_loss": "Coherence",
+    "physics_loss": "Physics",
+    "validation_loss": "Fixed validation",
 }
+_LOSS_COLORS = {
+    "total": "#2563A6",
+    "data_loss": "#D97706",
+    "coherence_loss": "#16827C",
+    "physics_loss": "#C2410C",
+    "validation_loss": "#7C5AB8",
+}
+_COHERENCE_FAMILY_PREFIX = "coherence_family/"
+_COHERENCE_FAMILY_SUFFIX = "/weighted_contribution"
+_COHERENCE_FAMILY_COLORS = (
+    "#3B6EA8",
+    "#D95F59",
+    "#B58900",
+    "#5B8E7D",
+    "#8C6BB1",
+)
+_COHERENCE_FAMILY_LINESTYLES = ("--", "-.", ":")
+_TEXT_COLOR = "#202733"
+_MUTED_TEXT_COLOR = "#667085"
+_GRID_COLOR = "#D9DEE7"
 
 
 def _format_duration(seconds: float) -> str:
@@ -133,7 +153,13 @@ class TrainingMonitor:
 
     def _capture(self, row: Mapping[str, Any]) -> None:
         step = int(row.get("step", 0))
-        for key in _LOSS_KEYS:
+        family_keys = (
+            key
+            for key in row
+            if key.startswith(_COHERENCE_FAMILY_PREFIX)
+            and key.endswith(_COHERENCE_FAMILY_SUFFIX)
+        )
+        for key in (*_LOSS_KEYS, *family_keys):
             value = row.get(key)
             if isinstance(value, (int, float)) and math.isfinite(float(value)):
                 self._steps[key].append(step)
@@ -347,7 +373,7 @@ class TrainingMonitor:
         plt.rcParams["svg.fonttype"] = "none"
         figure = self._build_loss_figure(plt)
         temporary = self.plot_path.with_name(f".{self.plot_path.name}.tmp")
-        figure.savefig(temporary, dpi=150, format="png")
+        figure.savefig(temporary, dpi=180, format="png")
         plt.close(figure)
         os.replace(temporary, self.plot_path)
 
@@ -357,20 +383,56 @@ class TrainingMonitor:
         stride = max(1, math.ceil(len(values) / 4000))
         return self._epoch_coordinates(steps[::stride]), values[::stride]
 
+    def _coherence_family_keys(self) -> list[str]:
+        """Return stable keys for families contributing to the coherence objective."""
+        return sorted(
+            key
+            for key, values in self._values.items()
+            if values
+            and key.startswith(_COHERENCE_FAMILY_PREFIX)
+            and key.endswith(_COHERENCE_FAMILY_SUFFIX)
+        )
+
+    @staticmethod
+    def _coherence_family_label(key: str) -> str:
+        name = key[len(_COHERENCE_FAMILY_PREFIX) : -len(_COHERENCE_FAMILY_SUFFIX)]
+        return name.replace("_", " ").capitalize()
+
     @staticmethod
     def _style_loss_axis(axis, values: list[float]) -> None:
         axis.set_xlim(left=0)
         if values and all(value > 0.0 for value in values):
             axis.set_yscale("log")
-        axis.grid(True, which="both", linestyle="--", alpha=0.35)
+        axis.set_axisbelow(True)
+        axis.grid(
+            True,
+            which="major",
+            color=_GRID_COLOR,
+            linewidth=0.75,
+            linestyle="--",
+            alpha=0.8,
+        )
+        axis.grid(
+            True,
+            which="minor",
+            color=_GRID_COLOR,
+            linewidth=0.45,
+            linestyle=":",
+            alpha=0.55,
+        )
+        axis.tick_params(axis="both", colors=_TEXT_COLOR, labelsize=9.5)
+        for spine in axis.spines.values():
+            spine.set_color("#7A8493")
+            spine.set_linewidth(0.8)
 
     def _build_loss_figure(self, plt):
         """Build one combined panel plus independently scaled term panels."""
         available = [key for key in _LOSS_KEYS if self._values.get(key)]
         individual_rows = math.ceil(len(available) / 2)
         figure = plt.figure(
-            figsize=(12, 3.6 + 3.0 * individual_rows),
+            figsize=(12.4, 3.5 + 3.1 * individual_rows),
             constrained_layout=True,
+            facecolor="white",
         )
         grid = figure.add_gridspec(
             1 + individual_rows,
@@ -388,13 +450,34 @@ class TrainingMonitor:
                 shown_epochs,
                 shown_values,
                 color=_LOSS_COLORS[key],
-                linewidth=1.5,
-                label=_LOSS_LABELS[key],
+                linewidth=2.0,
+                marker="o" if key == "validation_loss" else None,
+                markersize=4.5 if key == "validation_loss" else None,
+                markerfacecolor="white" if key == "validation_loss" else None,
+                markeredgewidth=1.2 if key == "validation_loss" else None,
+                label=_PLOT_LABELS[key],
             )
-        combined.set_ylabel("Loss (shared scale)")
-        combined.set_title(f"{self.description} loss history — combined")
+        combined.set_ylabel("Objective value (shared scale)", color=_TEXT_COLOR)
+        combined.set_title(
+            f"{self.description.replace(':', ' · ').replace('_', ' ')} objective history",
+            color=_TEXT_COLOR,
+            fontsize=15,
+            fontweight="medium",
+            pad=10,
+        )
         self._style_loss_axis(combined, combined_values)
-        combined.legend(frameon=False, ncol=min(3, len(available)))
+        combined.legend(
+            loc="lower center",
+            bbox_to_anchor=(0.5, 0.08),
+            frameon=True,
+            facecolor="white",
+            edgecolor="#D4D9E2",
+            framealpha=0.94,
+            fontsize=9.5,
+            ncol=min(4, len(available)),
+            handlelength=2.5,
+            columnspacing=1.6,
+        )
 
         for index, key in enumerate(available):
             row = 1 + index // 2
@@ -410,12 +493,73 @@ class TrainingMonitor:
                 shown_epochs,
                 shown_values,
                 color=_LOSS_COLORS[key],
-                linewidth=1.5,
+                linewidth=2.2 if key == "coherence_loss" else 1.9,
+                marker="o" if key == "validation_loss" else None,
+                markersize=5.5 if key == "validation_loss" else None,
+                markerfacecolor="white" if key == "validation_loss" else None,
+                markeredgewidth=1.3 if key == "validation_loss" else None,
+                label="Total coherence" if key == "coherence_loss" else None,
             )
+            panel_values = list(shown_values)
+            family_keys = self._coherence_family_keys() if key == "coherence_loss" else []
+            if len(family_keys) > 1:
+                for family_index, family_key in enumerate(family_keys):
+                    family_epochs, family_values = self._shown_loss_series(family_key)
+                    panel_values.extend(family_values)
+                    axis.plot(
+                        family_epochs,
+                        family_values,
+                        color=_COHERENCE_FAMILY_COLORS[
+                            family_index % len(_COHERENCE_FAMILY_COLORS)
+                        ],
+                        linewidth=1.65,
+                        linestyle=_COHERENCE_FAMILY_LINESTYLES[
+                            family_index % len(_COHERENCE_FAMILY_LINESTYLES)
+                        ],
+                        alpha=0.9,
+                        label=self._coherence_family_label(family_key),
+                    )
             axis.set_xlabel("Training epoch")
-            axis.set_ylabel("Loss")
-            axis.set_title(f"{_LOSS_LABELS[key].capitalize()} loss — independent scale")
-            self._style_loss_axis(axis, shown_values)
+            axis.set_ylabel("Objective value")
+            if key == "validation_loss":
+                title = "Fixed validation objective"
+            elif len(family_keys) > 1:
+                title = "Coherence objective"
+            else:
+                title = f"{_PLOT_LABELS[key].capitalize()} objective"
+            axis.set_title(
+                title,
+                loc="left",
+                color=_TEXT_COLOR,
+                fontsize=12.5,
+                fontweight="medium",
+                pad=10,
+            )
+            self._style_loss_axis(axis, panel_values)
+            if len(family_keys) > 1:
+                axis.legend(
+                    loc="center",
+                    bbox_to_anchor=(0.5, 0.57),
+                    frameon=True,
+                    facecolor="white",
+                    edgecolor="#D4D9E2",
+                    framealpha=0.94,
+                    fontsize=8.3,
+                    ncol=min(3, 1 + len(family_keys)),
+                    handlelength=2.3,
+                    columnspacing=1.1,
+                )
+            if key == "validation_loss":
+                axis.text(
+                    1.0,
+                    1.015,
+                    "Native model objective · one fixed validation sample",
+                    transform=axis.transAxes,
+                    ha="right",
+                    va="bottom",
+                    color=_MUTED_TEXT_COLOR,
+                    fontsize=8.8,
+                )
         return figure
 
     def close(

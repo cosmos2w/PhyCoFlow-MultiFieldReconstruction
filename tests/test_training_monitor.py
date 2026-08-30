@@ -93,23 +93,70 @@ def test_loss_figure_combines_terms_and_gives_each_an_independent_panel(tmp_path
     assert len(figure.axes) == 4
     combined, data_axis, coherence_axis, validation_axis = figure.axes
     assert len(combined.lines) == 3
-    assert [axis.get_title() for axis in figure.axes] == [
-        "test:post-training loss history — combined",
-        "Data loss — independent scale",
-        "Coherence loss — independent scale",
-        "Validation loss — independent scale",
+    assert combined.get_title() == "test · post-training objective history"
+    assert [axis.get_title(loc="left") for axis in figure.axes[1:]] == [
+        "Training data objective",
+        "Coherence objective",
+        "Fixed validation objective",
     ]
     assert all(len(axis.lines) == 1 for axis in figure.axes[1:])
     assert all(axis.get_yscale() == "log" for axis in figure.axes)
     assert combined.lines[0].get_color() == data_axis.lines[0].get_color()
     assert combined.lines[1].get_color() == coherence_axis.lines[0].get_color()
     assert combined.lines[2].get_color() == validation_axis.lines[0].get_color()
+    assert validation_axis.lines[0].get_marker() == "o"
+    assert [text.get_text() for text in validation_axis.texts] == [
+        "Native model objective · one fixed validation sample"
+    ]
     figure.canvas.draw()
     assert validation_axis.get_position().width > 1.5 * data_axis.get_position().width
     plt.close(figure)
 
     monitor._plot()
     assert [path.name for path in tmp_path.glob("*.png")] == ["loss_history.png"]
+    monitor.close()
+
+
+def test_coherence_panel_shows_multiple_family_contributions(tmp_path):
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    (tmp_path / "metrics").mkdir()
+    monitor = TrainingMonitor(
+        tmp_path,
+        start_step=0,
+        final_step=2,
+        configured_steps=2,
+        steps_per_epoch=1,
+        description="test:multi-family",
+        enabled=False,
+        plot_every_steps=10,
+    )
+    for step, total, global_distribution, cross_spectrum in (
+        (1, 0.7, 0.4, 0.3),
+        (2, 0.5, 0.3, 0.2),
+    ):
+        monitor._capture(
+            {
+                "step": step,
+                "coherence_loss": total,
+                "coherence_family/global_distribution/weighted_contribution": global_distribution,
+                "coherence_family/cross_spectrum/weighted_contribution": cross_spectrum,
+            }
+        )
+
+    figure = monitor._build_loss_figure(plt)
+    coherence_axis = figure.axes[1]
+    assert coherence_axis.get_title(loc="left") == "Coherence objective"
+    assert [line.get_label() for line in coherence_axis.lines] == [
+        "Total coherence",
+        "Cross spectrum",
+        "Global distribution",
+    ]
+    assert len({line.get_linestyle() for line in coherence_axis.lines}) == 3
+    assert coherence_axis.get_yscale() == "log"
+    plt.close(figure)
     monitor.close()
 
 

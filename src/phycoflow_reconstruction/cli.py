@@ -19,6 +19,18 @@ from .data.validation import validate_dataset
 from .training.common import sensor_protocol_from_config
 
 
+def _evaluation_sample_limit(value: str) -> int | None:
+    if value.lower() == "all":
+        return None
+    try:
+        count = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("must be a positive integer or 'all'") from error
+    if count < 1:
+        raise argparse.ArgumentTypeError("must be a positive integer or 'all'")
+    return count
+
+
 def _resolve_dataset_path(config: dict[str, Any], case_dir: Path) -> Path:
     path = Path(config["dataset"]["path"])
     return path.resolve() if path.is_absolute() else (case_dir / path).resolve()
@@ -146,12 +158,73 @@ def run_case_cli(case_name: str, case_dir: str | Path) -> int:
     evaluator.add_argument("--sensor-config", type=Path)
     evaluator.add_argument("--sensor-manifest", type=Path)
     evaluator.add_argument("--split", choices=("train", "validation", "test"), default="validation")
+    evaluator.add_argument("--sample-index", type=int, default=0)
     evaluator.add_argument("--max-samples", type=int, default=1)
     evaluator.add_argument("--query-points", type=int)
     evaluator.add_argument("--generation-steps", type=int)
     evaluator.add_argument("--device")
     evaluator.add_argument("--report-name", default="benchmark")
     evaluator.add_argument(
+        "--weight-selection",
+        choices=("configured", "live"),
+        default="configured",
+    )
+
+    visualizer = subparsers.add_parser("visualize-run")
+    visualizer.add_argument("--run", type=Path, required=True)
+    visualizer.add_argument("--checkpoint", default="best")
+    visualizer.add_argument("--split", choices=("train", "validation", "test"), default="test")
+    visualizer.add_argument("--snapshot-index", type=int, default=0)
+    visualizer.add_argument("--eval-set", choices=("train", "validation", "test"))
+    visualizer.add_argument("--eval-samples", type=_evaluation_sample_limit, default=200)
+    visualizer.add_argument(
+        "--stat-scale",
+        choices=("log", "linear"),
+        default="log",
+        help=(
+            "vertical scale for reconstruction and discrepancy-distribution plots; "
+            "cross-spectrum coherence bars always use a bounded 0-1 scale (default: log)"
+        ),
+    )
+    visualizer.add_argument(
+        "--eval-coherence",
+        nargs="+",
+        choices=("global_distribution", "cross_spectrum"),
+        help=(
+            "also evaluate selected coherence families over --eval-set; "
+            "currently supports global_distribution and cross_spectrum"
+        ),
+    )
+    visualizer.add_argument(
+        "--cross-spectrum-aggregation",
+        choices=("training_aligned", "pooled"),
+        default="training_aligned",
+        help=(
+            "cross-spectrum ensemble estimator; training_aligned uses the configured "
+            "coherence batch size and averages complete ensembles (default), while pooled "
+            "uses all selected snapshots as one diagnostic ensemble"
+        ),
+    )
+    visualizer.add_argument(
+        "--extraview-coherence",
+        action="store_true",
+        help=(
+            "add dedicated coherence-family views to --eval-coherence output; "
+            "currently renders global-distribution pairwise joint PDFs"
+        ),
+    )
+    visualizer.add_argument(
+        "--no-base-comparison",
+        action="store_true",
+        help=("skip the automatic matched source-run comparison when --run is a post-training run"),
+    )
+    visualizer.add_argument("--sensor-config", type=Path)
+    visualizer.add_argument("--sensor-manifest", type=Path)
+    visualizer.add_argument("--generation-steps", type=int)
+    visualizer.add_argument("--device")
+    visualizer.add_argument("--output", type=Path)
+    visualizer.add_argument("--contour-levels", type=int, default=20)
+    visualizer.add_argument(
         "--weight-selection",
         choices=("configured", "live"),
         default="configured",
@@ -172,6 +245,7 @@ def run_case_cli(case_name: str, case_dir: str | Path) -> int:
             run_dir,
             case_dir=case_dir,
             split=args.split,
+            sample_index=args.sample_index,
             max_samples=args.max_samples,
             checkpoint=args.checkpoint,
             sensor_config=sensor_config,
@@ -183,6 +257,68 @@ def run_case_cli(case_name: str, case_dir: str | Path) -> int:
             weight_selection=args.weight_selection,
         )
         print(report)
+        return 0
+
+    if args.command == "visualize-run":
+        if args.eval_coherence and args.eval_set is None:
+            parser.error("--eval-coherence requires --eval-set")
+        if args.extraview_coherence and not args.eval_coherence:
+            parser.error("--extraview-coherence requires --eval-coherence")
+        if args.extraview_coherence and "global_distribution" not in args.eval_coherence:
+            parser.error(
+                "--extraview-coherence currently requires global_distribution in --eval-coherence"
+            )
+        run_dir = args.run.resolve() if args.run.is_absolute() else (case_dir / args.run).resolve()
+        sensor_config = args.sensor_config
+        if sensor_config is not None and not sensor_config.is_absolute():
+            sensor_config = (case_dir / sensor_config).resolve()
+        sensor_manifest = args.sensor_manifest
+        if sensor_manifest is not None and not sensor_manifest.is_absolute():
+            sensor_manifest = (case_dir / sensor_manifest).resolve()
+        output = args.output
+        if output is not None and not output.is_absolute():
+            output = Path.cwd() / output
+        if args.eval_set is not None:
+            from .evaluation.reconstruction_set import evaluate_reconstruction_set
+
+            figure = evaluate_reconstruction_set(
+                run_dir,
+                case_dir=case_dir,
+                split=args.eval_set,
+                checkpoint=args.checkpoint,
+                sensor_config=sensor_config,
+                sensor_manifest=sensor_manifest,
+                generation_steps=args.generation_steps,
+                device_name=args.device,
+                output_path=output,
+                weight_selection=args.weight_selection,
+                max_samples=args.eval_samples,
+                coherence_families=args.eval_coherence,
+                extra_coherence_views=args.extraview_coherence,
+                cross_spectrum_aggregation=args.cross_spectrum_aggregation,
+                statistic_scale=args.stat_scale,
+                compare_source=not args.no_base_comparison,
+            )
+            print(figure)
+            return 0
+
+        from .evaluation.reconstruction_visualization import visualize_run
+
+        figure = visualize_run(
+            run_dir,
+            case_dir=case_dir,
+            checkpoint=args.checkpoint,
+            split=args.split,
+            sample_index=args.snapshot_index,
+            sensor_config=sensor_config,
+            sensor_manifest=sensor_manifest,
+            generation_steps=args.generation_steps,
+            device_name=args.device,
+            output_path=output,
+            weight_selection=args.weight_selection,
+            contour_levels=args.contour_levels,
+        )
+        print(figure)
         return 0
 
     config_path = (

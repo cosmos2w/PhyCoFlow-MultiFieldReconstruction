@@ -23,8 +23,10 @@ from .statistics import (
     band_energies,
     graph_fourier,
     normalized_cross_band_coupling,
-    off_diagonal_pair_mean_square,
-    pair_mean_square,
+    off_diagonal_pair_mean_square_values,
+    off_diagonal_pair_symmetric_coherence_scores,
+    pair_mean_square_values,
+    pair_symmetric_coherence_scores,
     spectral_coherence,
 )
 
@@ -179,9 +181,7 @@ class CrossSpectrumFamily(nn.Module):
             reference = reference * scale + offset
         return generated[..., self.field_ids], reference[..., self.field_ids]
 
-    def _same_frequency_epsilon_diagnostics(
-        self, coefficients: torch.Tensor
-    ) -> dict[str, float]:
+    def _same_frequency_epsilon_diagnostics(self, coefficients: torch.Tensor) -> dict[str, float]:
         auto = coefficients.abs().square().mean(dim=0)
         denominator = torch.einsum("ki,kj->kij", auto, auto)
         return {
@@ -189,16 +189,11 @@ class CrossSpectrumFamily(nn.Module):
             "epsilon_dominated_fraction": float((denominator <= self.eps).float().mean()),
         }
 
-    def _cross_frequency_epsilon_diagnostics(
-        self, energies: torch.Tensor
-    ) -> dict[str, float]:
+    def _cross_frequency_epsilon_diagnostics(self, energies: torch.Tensor) -> dict[str, float]:
         centered = energies - energies.mean(dim=0, keepdim=True)
         covariance = torch.einsum("bmi,bnj->mnij", centered, centered) / energies.shape[0]
         variances = torch.stack(
-            [
-                torch.diagonal(covariance[index, index])
-                for index in range(covariance.shape[0])
-            ]
+            [torch.diagonal(covariance[index, index]) for index in range(covariance.shape[0])]
         )
         denominator = torch.einsum("mi,nj->mnij", variances, variances)
         return {
@@ -232,25 +227,25 @@ class CrossSpectrumFamily(nn.Module):
         component_diagnostics: dict[str, dict[str, Any]] = {}
         total = generated.sum() * 0.0
         if self.component_weights.get("same_frequency", 0.0) > 0:
-            loss = pair_mean_square(
-                spectral_coherence(coefficients_generated, self.eps),
-                spectral_coherence(coefficients_reference, self.eps),
-                self.pairs,
+            generated_coherence = spectral_coherence(coefficients_generated, self.eps)
+            reference_coherence = spectral_coherence(coefficients_reference, self.eps)
+            per_pair = pair_mean_square_values(generated_coherence, reference_coherence, self.pairs)
+            per_pair_score = pair_symmetric_coherence_scores(
+                generated_coherence, reference_coherence, self.pairs, self.eps
             )
+            loss = per_pair.mean()
             path = f"{self.family_name}.same_frequency.magnitude_squared"
             weight = self.component_weights["same_frequency"]
-            results[f"{self.family_name}.same_frequency.magnitude_squared"] = TermResult(
+            results[path] = TermResult(
                 None,
                 loss,
                 diagnostics={
                     "minimum_batch_size": 2,
                     "epsilon": self.eps,
-                    "generated": self._same_frequency_epsilon_diagnostics(
-                        coefficients_generated
-                    ),
-                    "reference": self._same_frequency_epsilon_diagnostics(
-                        coefficients_reference
-                    ),
+                    "generated": self._same_frequency_epsilon_diagnostics(coefficients_generated),
+                    "reference": self._same_frequency_epsilon_diagnostics(coefficients_reference),
+                    "per_pair_mean_square": per_pair.detach().cpu().tolist(),
+                    "per_pair_coherence_score": per_pair_score.detach().cpu().tolist(),
                 },
             )
             component_diagnostics[path] = {
@@ -261,18 +256,23 @@ class CrossSpectrumFamily(nn.Module):
             }
             total = total + weight * loss
         energies_generated = energies_reference = None
-        if self.component_weights.get("cross_frequency", 0.0) > 0 or self.component_weights.get(
-            "band_energy", 0.0
-        ) > 0:
+        if (
+            self.component_weights.get("cross_frequency", 0.0) > 0
+            or self.component_weights.get("band_energy", 0.0) > 0
+        ):
             energies_generated = band_energies(coefficients_generated, self.band_ids)
             energies_reference = band_energies(coefficients_reference, self.band_ids)
         if self.component_weights.get("cross_frequency", 0.0) > 0:
             assert energies_generated is not None and energies_reference is not None
-            loss = off_diagonal_pair_mean_square(
-                normalized_cross_band_coupling(energies_generated, self.eps),
-                normalized_cross_band_coupling(energies_reference, self.eps),
-                self.pairs,
+            generated_coupling = normalized_cross_band_coupling(energies_generated, self.eps)
+            reference_coupling = normalized_cross_band_coupling(energies_reference, self.eps)
+            per_pair = off_diagonal_pair_mean_square_values(
+                generated_coupling, reference_coupling, self.pairs
             )
+            per_pair_score = off_diagonal_pair_symmetric_coherence_scores(
+                generated_coupling, reference_coupling, self.pairs, self.eps
+            )
+            loss = per_pair.mean()
             path = f"{self.family_name}.cross_frequency.band_energy_coupling"
             weight = self.component_weights["cross_frequency"]
             results[path] = TermResult(
@@ -281,12 +281,10 @@ class CrossSpectrumFamily(nn.Module):
                 diagnostics={
                     "minimum_batch_size": 3,
                     "epsilon": self.eps,
-                    "generated": self._cross_frequency_epsilon_diagnostics(
-                        energies_generated
-                    ),
-                    "reference": self._cross_frequency_epsilon_diagnostics(
-                        energies_reference
-                    ),
+                    "generated": self._cross_frequency_epsilon_diagnostics(energies_generated),
+                    "reference": self._cross_frequency_epsilon_diagnostics(energies_reference),
+                    "per_pair_mean_square": per_pair.detach().cpu().tolist(),
+                    "per_pair_coherence_score": per_pair_score.detach().cpu().tolist(),
                 },
             )
             component_diagnostics[path] = {
@@ -298,13 +296,18 @@ class CrossSpectrumFamily(nn.Module):
             total = total + weight * loss
         if self.component_weights.get("band_energy", 0.0) > 0:
             assert energies_generated is not None and energies_reference is not None
-            loss = (
+            per_band_field = (
                 (energies_generated.mean(dim=0) + self.eps).log()
                 - (energies_reference.mean(dim=0) + self.eps).log()
-            ).square().mean()
+            ).square()
+            loss = per_band_field.mean()
             path = f"{self.family_name}.band_energy.log_power"
             weight = self.component_weights["band_energy"]
-            results[path] = TermResult(None, loss)
+            results[path] = TermResult(
+                None,
+                loss,
+                diagnostics={"per_band_field_mean_square": per_band_field.detach().cpu().tolist()},
+            )
             component_diagnostics[path] = {
                 "weight": weight,
                 "executed": True,
