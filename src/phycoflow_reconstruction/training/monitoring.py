@@ -457,7 +457,7 @@ class TrainingMonitor:
                 markeredgewidth=1.2 if key == "validation_loss" else None,
                 label=_PLOT_LABELS[key],
             )
-        combined.set_ylabel("Objective value (shared log scale)", color=_TEXT_COLOR)
+        combined.set_ylabel("Objective value (shared scale)", color=_TEXT_COLOR)
         combined.set_title(
             f"{self.description.replace(':', ' · ').replace('_', ' ')} objective history",
             color=_TEXT_COLOR,
