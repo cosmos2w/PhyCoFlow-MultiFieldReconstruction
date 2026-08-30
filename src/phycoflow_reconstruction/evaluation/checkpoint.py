@@ -247,6 +247,7 @@ def evaluate_run(
     portable_plot_path = output_dir / "reconstruction.npz"
     query_indices = batch.metadata.get("query_indices")
     if not isinstance(query_indices, torch.Tensor):
+        dataset.close()
         raise TypeError("evaluation plotting requires serialized query indices")
     first_query_indices = query_indices.cpu()[0, batch.query_valid_mask[0].cpu()]
     np.savez_compressed(
