@@ -353,18 +353,18 @@ For a post-training target, the same command automatically adds a matched `-base
 
 #### 7.3.1 Global-distribution coherence
 
-The fully explicit global-distribution command for the Senseiver example is:
+The fully explicit global-distribution command for the AB post-training example is:
 
 ```bash
 python cases/turbulent_combustion/run.py visualize-run \
-  --run runs/tc_senseiver_5000ep/20260828T190145Z_fea0fc25 \
-  --checkpoint best \
-  --eval-set test \
+  --run runs/coherence_fix_AB_balanced/20260829T235221Z_b3b586c4 \
+  --checkpoint last \
+  --eval-set train \
   --eval-samples 200 \
   --eval-coherence global_distribution \
   --stat-scale log \
-  --generation-steps 4 \
-  --device cuda:2 \
+  --generation-steps 2 \
+  --device cuda:0 \
   --weight-selection configured
 ```
 
@@ -385,15 +385,15 @@ The extra views are written under `coherence/global_distribution/global_distribu
 
 > **Extra-view support:** `--extraview-coherence` currently supports only `global_distribution`. Dedicated extra visualizations for `cross_spectrum` and `topology` are pending; the existing cross-spectrum statistical bar charts remain available through `--eval-coherence cross_spectrum`.
 
-The CO–T example below compares the source `best.pt` checkpoint with the AB post-training `last.pt` checkpoint over the same 200 test snapshots.
+The CO–T example below compares the source `last.pt` checkpoint with the AB post-training `last.pt` checkpoint over the same 200 test snapshots.
 
 <p align="center"><img src="docs/assets/reconstruction_examples/ab_test_last_global_distribution_joint_pdf_CO-T_base.png" alt="Base-source CO-T joint probability density comparison over 200 test snapshots" width="49%"> <img src="docs/assets/reconstruction_examples/ab_test_last_global_distribution_joint_pdf_CO-T_posttraining.png" alt="AB post-training CO-T joint probability density comparison over the same 200 test snapshots" width="49%"></p>
 
 <p align="center"><em>Left: base source. Right: post-training checkpoint. Both figures share samples, bin edges, field axes, and density normalization.</em></p>
 
-The paired example below compares the source `best.pt` checkpoint with the global-distribution post-training `last.pt` checkpoint over the same 200 test snapshots. Both figures use the same logarithmic vertical limits; the standard filename identifies the post-training result and the adjacent `-base` filename identifies its source counterpart.
+The paired statistical example below compares the source `last.pt` checkpoint with the AB post-training `last.pt` checkpoint over the same 200 training snapshots. Both pairwise field-distribution figures use identical samples and logarithmic vertical limits; the standard filename identifies the post-training result and the adjacent `-base` filename identifies its source counterpart.
 
-<p align="center"><img src="docs/assets/reconstruction_examples/gl_rbf_A_test_last_global_distribution_marginal_base.png" alt="Base-source marginal field-distribution coherence over 200 test snapshots" width="49%"> <img src="docs/assets/reconstruction_examples/gl_rbf_A_test_last_global_distribution_marginal_posttraining.png" alt="Post-training marginal field-distribution coherence over the same 200 test snapshots" width="49%"></p>
+<p align="center"><img src="docs/assets/reconstruction_examples/ab_train_last_global_distribution_pairwise_base.png" alt="Base-source pairwise field-distribution coherence over 200 training snapshots" width="49%"> <img src="docs/assets/reconstruction_examples/ab_train_last_global_distribution_pairwise_posttraining.png" alt="AB post-training pairwise field-distribution coherence over the same 200 training snapshots" width="49%"></p>
 
 <p align="center"><em>Left: base source. Right: post-training checkpoint. Shared samples and vertical scale make the distributions directly comparable.</em></p>
 

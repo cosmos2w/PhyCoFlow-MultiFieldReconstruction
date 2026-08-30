@@ -15,5 +15,7 @@ This tracked gallery stores selected, review-ready reconstruction and evaluation
 - `ab_test_last_global_distribution_joint_pdf_CO-T_posttraining.png`: AB post-training `last.pt` counterpart using the same samples, histogram bins, axes, and density normalization.
 - `ab_train_last_cross_spectrum_cross_frequency_base.png`: source `last.pt` cross-frequency coherence scores over 12 deterministic training-aligned ensembles of 16 snapshots generated from `coherence_fix_AB_balanced/20260829T235221Z_b3b586c4`.
 - `ab_train_last_cross_spectrum_cross_frequency_posttraining.png`: AB post-training `last.pt` counterpart using the same 12 ensembles, graph, field pairs, and bounded score axis.
+- `ab_train_last_global_distribution_pairwise_base.png`: source `last.pt` pairwise field-distribution discrepancies for the matched 200-snapshot training comparison generated from `coherence_fix_AB_balanced/20260829T235221Z_b3b586c4`.
+- `ab_train_last_global_distribution_pairwise_posttraining.png`: AB post-training `last.pt` counterpart using the same training snapshots and logarithmic vertical limits.
 
 Add future examples with descriptive, stable filenames and record their source run, checkpoint, split, and snapshot selection here.
