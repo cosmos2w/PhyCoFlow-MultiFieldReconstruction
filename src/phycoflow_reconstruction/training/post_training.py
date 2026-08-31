@@ -349,6 +349,51 @@ def _family_scalar_report(result: FamilyResult) -> dict[str, float]:
     return payload
 
 
+def _component_history_report(
+    result: FamilyResult, families: Mapping[str, Any] | None = None
+) -> dict[str, float]:
+    """Return generic raw and additive component metrics for history rendering."""
+    payload: dict[str, float] = {}
+    family_diagnostics_by_name = result.diagnostics.get("families", {})
+    paths = set(result.component_results)
+    paths.update(
+        path
+        for diagnostics in family_diagnostics_by_name.values()
+        for path, component in diagnostics.get("components", {}).items()
+        if component.get("executed", component.get("raw_scalar_loss") is not None)
+    )
+    for path in sorted(paths):
+        family_name = path.split(".", 1)[0]
+        family_diagnostics = family_diagnostics_by_name.get(family_name, {})
+        outer = float(family_diagnostics.get("weight", 1.0))
+        calibration = float(family_diagnostics.get("calibration_scale", 1.0))
+        diagnostics = family_diagnostics.get("components", {}).get(path, {})
+        raw_value = diagnostics.get("raw_scalar_loss")
+        if raw_value is None and path in result.component_results:
+            raw_value = float(result.component_results[path].scalar_loss.detach().cpu())
+        if raw_value is None:
+            continue
+        if "weight" in diagnostics:
+            inner = float(diagnostics["weight"])
+        else:
+            family = (families or {}).get(family_name)
+            matches = [
+                float(weight)
+                for key, weight in getattr(family, "component_weights", {}).items()
+                if f".{key}." in f".{path}." or path.startswith(f"{family_name}.{key}.")
+            ]
+            inner = matches[0] if len(matches) == 1 else 1.0
+        component = str(path).removeprefix(f"{family_name}.")
+        raw = float(raw_value)
+        prefix = f"coherence_component/{family_name}/{component}"
+        payload[f"{prefix}/raw"] = raw
+        payload[f"{prefix}/weighted_contribution"] = raw * inner * outer * calibration
+        payload[f"{prefix}/inner_weight"] = inner
+        payload[f"{prefix}/outer_weight"] = outer
+        payload[f"{prefix}/calibration_scale"] = calibration
+    return payload
+
+
 def _query_digest(query_ids: torch.Tensor) -> str:
     payload = query_ids.detach().to(device="cpu", dtype=torch.long).contiguous().numpy()
     return hashlib.sha256(payload.tobytes()).hexdigest()
@@ -1293,6 +1338,7 @@ def run_post_training(
                 coherence_loss=float(result.scalar_loss.detach().cpu()),
                 coherence_reference_ids=list(reference_ids),
                 **_component_scalars(result),
+                **_component_history_report(result, families),
                 **_family_scalar_report(result),
                 **gradient,
             )

@@ -107,6 +107,16 @@ def test_coherence_publication_labels_format_compound_field_pairs():
     assert coherence_set._publication_label("CH4–U_1") == r"CH$_{4}$–$U_{1}$"
 
 
+def test_adaptive_coherence_score_limits_are_padded_rounded_and_conservative():
+    scores = np.asarray([0.835, 0.910, 0.798, 0.831, 0.917, 0.924, 0.870, 0.905])
+    spread = np.asarray([0.068, 0.068, 0.076, 0.120, 0.029, 0.062, 0.048, 0.041])
+
+    assert coherence_set.adaptive_coherence_score_limits(scores, spread) == (0.65, 1.0)
+    assert coherence_set.adaptive_coherence_score_limits(
+        np.asarray([0.96, 0.98, 0.99]), np.asarray([0.01, 0.005, 0.002])
+    ) == (0.75, 1.0)
+
+
 def test_jensen_shannon_divergence_is_bounded_and_calibrated():
     reference = np.asarray([[0.5, 0.5], [0.0, 0.0]])
     disjoint = np.asarray([[0.0, 0.0], [0.5, 0.5]])
@@ -415,8 +425,10 @@ def test_posttraining_set_evaluation_builds_matched_source_comparison(tmp_path, 
     )
     reconstruction_limits = []
     coherence_limits = []
+    cross_spectrum_limits = []
     original_reconstruction_renderer = reconstruction_set.render_reconstruction_set_distribution
     original_coherence_renderer = reconstruction_set.render_coherence_distribution
+    original_cross_spectrum_renderer = reconstruction_set.render_cross_spectrum_score_bars
 
     def capture_reconstruction(*args, **kwargs):
         if kwargs.get("value_limits") is not None:
@@ -428,6 +440,10 @@ def test_posttraining_set_evaluation_builds_matched_source_comparison(tmp_path, 
             coherence_limits.append(kwargs["value_limits"])
         return original_coherence_renderer(*args, **kwargs)
 
+    def capture_cross_spectrum(*args, **kwargs):
+        cross_spectrum_limits.append(kwargs["score_limits"])
+        return original_cross_spectrum_renderer(*args, **kwargs)
+
     monkeypatch.setattr(
         reconstruction_set,
         "render_reconstruction_set_distribution",
@@ -437,6 +453,11 @@ def test_posttraining_set_evaluation_builds_matched_source_comparison(tmp_path, 
         reconstruction_set,
         "render_coherence_distribution",
         capture_coherence,
+    )
+    monkeypatch.setattr(
+        reconstruction_set,
+        "render_cross_spectrum_score_bars",
+        capture_cross_spectrum,
     )
 
     reconstruction_set.evaluate_reconstruction_set(
@@ -488,6 +509,10 @@ def test_posttraining_set_evaluation_builds_matched_source_comparison(tmp_path, 
     assert coherence_limits[0] == coherence_limits[1]
     assert coherence_limits[2] == coherence_limits[3]
     assert coherence_limits[4] == coherence_limits[5]
+    assert len(cross_spectrum_limits) == 6
+    assert cross_spectrum_limits[0] == cross_spectrum_limits[1]
+    assert cross_spectrum_limits[2] == cross_spectrum_limits[3]
+    assert cross_spectrum_limits[4] == cross_spectrum_limits[5]
     report = json.loads((output_dir / "comparison_report.json").read_text(encoding="utf-8"))
     assert report["kind"] == "post_training_source_comparison"
     assert report["sample_count"] == 4
@@ -497,6 +522,18 @@ def test_posttraining_set_evaluation_builds_matched_source_comparison(tmp_path, 
         0.0,
         1.0,
     ]
+    displayed = report["shared_axis_limits"]["cross_spectrum"][
+        "displayed_coherence_score_by_component"
+    ]
+    assert set(displayed) == {"self_spectrum", "same_frequency", "cross_frequency"}
+    assert displayed == {
+        name: list(cross_spectrum_limits[index])
+        for name, index in (
+            ("self_spectrum", 0),
+            ("same_frequency", 2),
+            ("cross_frequency", 4),
+        )
+    }
     assert "density" in report["shared_axis_limits"]["global_distribution_extra"]["u–v"]
     child_report = json.loads((output_dir / "report.json").read_text(encoding="utf-8"))
     assert child_report["comparison"]["enabled"] is True

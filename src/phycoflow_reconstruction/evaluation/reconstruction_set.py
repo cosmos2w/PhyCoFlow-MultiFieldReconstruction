@@ -26,6 +26,7 @@ from ..training.run_store import file_sha256
 from ..training.source import source_checkpoint_path
 from .checkpoint import load_evaluation_runtime
 from .coherence_set import (
+    adaptive_coherence_score_limits,
     build_coherence_accumulators,
     render_coherence_distribution,
     render_cross_spectrum_score_bars,
@@ -676,9 +677,7 @@ def _cross_spectrum_specs(
         pair_labels = tuple(str(value) for value in payload["pair_labels"])
         band_labels = tuple(str(value) for value in payload["band_field_labels"])
         arrays = {
-            "self_spectrum": np.asarray(
-                payload["self_spectrum_coherence_score"], dtype=np.float64
-            ),
+            "self_spectrum": np.asarray(payload["self_spectrum_coherence_score"], dtype=np.float64),
             "same_frequency": np.asarray(
                 payload["same_frequency_coherence_score"], dtype=np.float64
             ),
@@ -965,10 +964,16 @@ def _render_posttraining_comparison(
         )
         base_specs = _cross_spectrum_specs(base_payload)
         current_specs = _cross_spectrum_specs(current_payload)
+        displayed_score_ranges = {}
         for name, base_spec in base_specs.items():
             current_spec = current_specs[name]
             if base_spec[2:4] != current_spec[2:4]:
                 raise ValueError(f"cross-spectrum {name} comparison labels do not match")
+            score_limits = adaptive_coherence_score_limits(
+                np.concatenate((base_spec[0], current_spec[0])),
+                np.concatenate((base_spec[1], current_spec[1])),
+            )
+            displayed_score_ranges[name] = list(score_limits)
             post_path = current.output_dir / "coherence" / "cross_spectrum" / current_spec[4]
             base_path = _base_figure_path(post_path)
             render_cross_spectrum_score_bars(
@@ -979,6 +984,7 @@ def _render_posttraining_comparison(
                 title=f"Base source — {base_spec[5]}",
                 subtitle=_cross_spectrum_comparison_subtitle("Base source", base, base_payload),
                 score_std=base_spec[1],
+                score_limits=score_limits,
             )
             render_cross_spectrum_score_bars(
                 current_spec[0],
@@ -990,6 +996,7 @@ def _render_posttraining_comparison(
                     "Post-training", current, current_payload
                 ),
                 score_std=current_spec[1],
+                score_limits=score_limits,
             )
             artifacts["base"].setdefault("cross_spectrum", {})[name] = str(
                 base_path.relative_to(current.output_dir)
@@ -997,7 +1004,10 @@ def _render_posttraining_comparison(
             artifacts["post_training"].setdefault("cross_spectrum", {})[name] = str(
                 post_path.relative_to(current.output_dir)
             )
-        shared_limits["cross_spectrum"] = {"coherence_score": [0.0, 1.0]}
+        shared_limits["cross_spectrum"] = {
+            "coherence_score": [0.0, 1.0],
+            "displayed_coherence_score_by_component": displayed_score_ranges,
+        }
         artifacts["base"].setdefault("cross_spectrum", {}).update(
             {
                 "metrics_csv": str(base_csv_copy.relative_to(current.output_dir)),

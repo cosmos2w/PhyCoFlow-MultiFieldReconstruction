@@ -242,6 +242,15 @@ coherence:
 
 `self_spectrum` is an explicit mode-by-mode auto-spectrum loss for every selected field; it does not need a field pair, needs only one ensemble state, and can be disabled independently. `same_frequency` compares normalized cross-field coherence for each configured distinct-field pair at the same graph mode, while `cross_frequency` compares coupling for distinct fields across different graph-frequency bands (and therefore needs a coherence batch of at least 3). The optional coarse `band_energy` term compares log spectral power aggregated over each band; it is complementary to, and lower-resolution than, modewise `self_spectrum`. These component choices are orthogonal to `target_use`: `paired_supervised` supplies the dense target from the current sample after reconstruction, whereas `training_reference` uses an independently sampled frozen training reference bank.
 
+Every data-driven coherence post-training run writes two restart-safe figures at its run root. `loss_history.png` retains the compact native-data/coherence/validation overview. `coherence_history.png` groups enabled components by family and gives every subterm an independently scaled history panel, so marginal, pairwise, joint, spectral, and topology losses remain readable even when their raw magnitudes differ by orders of magnitude. The top panel shows total coherence and, for multi-family runs, calibrated weighted family contributions. Component panels show raw scientific losses and disclose their effective inner-weight × outer-weight × calibration multiplier. Disabled components are omitted, sparse schedules begin only where coherence was evaluated, and partial epochs use open markers.
+
+Both new namespaced component histories and older flat component keys are supported. Re-render an existing or active run without loading its model or dataset:
+
+```bash
+python cases/<case>/run.py render-history \
+  --run runs/<experiment>/<run-id>
+```
+
 Use `target_use: paired_supervised` with `reference_bank.enabled: false` when every reconstruction is compared with its own dense target. Use `target_use: training_reference` with an enabled reference bank when matching an independently sampled training distribution; its `points_per_sample` must equal `coherence.compute_budget.point_count`. Cross-spectrum and topology require `query_policy: fixed_shared`; same-frequency cross-spectrum requires coherence batch size at least 2, cross-frequency requires at least 3, and `optimization.batch_size` must not be smaller than the coherence batch size. For a single family, `family_balance.mode: none` is the clear default; for multiple families with different raw scales, use `initial_grad_norm` and record its calibration settings.
 
 ### 6.2 Validate and launch

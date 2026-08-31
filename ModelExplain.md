@@ -35,6 +35,7 @@ This document describes the mathematical contract implemented by `phycoflow_reco
   - [7.3 Graph cross-spectrum coherence](#73-graph-cross-spectrum-coherence)
   - [7.4 Topology coherence](#74-topology-coherence)
   - [7.5 Reference policies and target leakage boundary](#75-reference-policies-and-target-leakage-boundary)
+  - [7.6 Coherence training-history monitoring](#76-coherence-training-history-monitoring)
 - [8. Differentiable reconstruction and observation consistency](#8-differentiable-reconstruction-and-observation-consistency)
 - [9. Physics post-training](#9-physics-post-training)
 - [10. Gradient combination](#10-gradient-combination)
@@ -1044,6 +1045,19 @@ $$
 $$
 
 The reference is supplied only after reconstruction to compute $\mathcal L_{\mathrm{coh}}$. Validation and test states are never used to fit a training reference bank.
+
+### 7.6 Coherence training-history monitoring
+
+At every recorded epoch, post-training retains each executed component's raw scalar and its additive contribution to the aggregate coherence objective. For component $k$ in family $F$, the history contract records
+
+$$
+\mathcal L^{\mathrm{contribution}}_{Fk}
+=w_Fa_Fw_{Fk}\mathcal L^{\mathrm{raw}}_{Fk}.
+$$
+
+Consequently, component contributions sum to the plotted coherence objective before the separate optimizer-level coherence schedule weight is applied. Metrics use family-independent keys of the form `coherence_component/<family>/<component>/raw` and `.../weighted_contribution`; the historical flat `<family>.<component>` raw keys remain available for compatibility.
+
+`loss_history.png` intentionally remains the compact top-level optimization view. Data-driven post-training additionally writes `coherence_history.png`. Its first panel shows total coherence and calibrated weighted family totals, while subsequent family-grouped small multiples give every enabled component its own adaptive vertical scale. This is necessary because valid component losses can differ by many orders of magnitude. Disabled terms are absent, unevaluated epochs are not fabricated, partial epochs receive open markers, and resume collisions use the last recorded value at a given epoch. The standalone `render-history` command reconstructs the figure from `resolved_config.yaml` and `metrics/history.jsonl` without loading a checkpoint or dataset, including for runs created before the namespaced component history contract.
 
 ## 8. Differentiable reconstruction and observation consistency
 
