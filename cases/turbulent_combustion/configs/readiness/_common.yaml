@@ -64,4 +64,4 @@ posttrain_fidelity:
 
 coherence:
   schedule: {start_epoch: 1, every_n_steps: 1, weight_warmup_epochs: 0, interval_rescale: false}
-  compute_budget: {batch_size: 16, point_count: 4096, query_policy: fixed_shared, query_seed: 100045}
+  compute_budget: {batch_size: 32, point_count: 4096, query_policy: fixed_shared, query_seed: 100045}

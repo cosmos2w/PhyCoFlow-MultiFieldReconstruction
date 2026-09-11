@@ -35,6 +35,7 @@ This document describes the mathematical contract implemented by `phycoflow_reco
   - [7.3 Graph cross-spectrum coherence](#73-graph-cross-spectrum-coherence)
   - [7.4 Topology coherence](#74-topology-coherence)
   - [7.5 Reference policies and target leakage boundary](#75-reference-policies-and-target-leakage-boundary)
+  - [7.6 Coherence training-history monitoring](#76-coherence-training-history-monitoring)
 - [8. Differentiable reconstruction and observation consistency](#8-differentiable-reconstruction-and-observation-consistency)
 - [9. Physics post-training](#9-physics-post-training)
 - [10. Gradient combination](#10-gradient-combination)
@@ -103,7 +104,7 @@ The current A/B/C/ABC profiles select these family definitions:
 | Profile | Active loss terms and settings |
 |---|---|
 | A: global distribution | all five fields; marginal W2, pairwise SWD with 8 directions, and joint top-tail SWD with 16 Sobol directions and top fraction 0.1 |
-| B: cross spectrum | all five fields; pairs `(CO,T)`, `(T,CH4)`, `(T,U_1)`, `(CH4,U_1)`; 16-neighbor graph, 48 retained modes, zero mode excluded, low/mid/high bands; same- and cross-frequency terms enabled; log band-power disabled |
+| B: cross spectrum | all five fields; pairs `(CO,T)`, `(T,CH4)`, `(T,U_1)`, `(CH4,U_1)`; 16-neighbor graph, 48 retained modes, zero mode excluded, low/mid/high bands; modewise per-field auto-spectrum, same-frequency, and cross-frequency terms enabled; coarse log band-power disabled |
 | C: topology | family weight 0.01; fields `CO,T`; nonperiodic $32\times128$ raster, 4 interpolation neighbors, power 2, smoothing sigma 0.8; 7 quantile thresholds, dimensions 0 and 1, super/sublevel filtrations; 3 mutual lines |
 | ABC | all three definitions above; fixed `initial_grad_norm` family scaling calibrated over two batches |
 
@@ -753,7 +754,8 @@ The YAML-to-code-to-math mapping is exact:
 | `global_distribution.components.self` | [`components/self_marginal.py`](src/phycoflow_reconstruction/coherence/families/global_distribution/components/self_marginal.py) | per-field empirical $W_2^2$ |
 | `global_distribution.components.mutual` | [`components/mutual_pairwise.py`](src/phycoflow_reconstruction/coherence/families/global_distribution/components/mutual_pairwise.py) | pairwise sliced $W_2^2$ |
 | `global_distribution.components.cross` | [`components/cross_joint.py`](src/phycoflow_reconstruction/coherence/families/global_distribution/components/cross_joint.py) | joint top-tail sliced $W_2^2$ |
-| `cross_spectrum.components.same_frequency` | [`cross_spectrum/family.py`](src/phycoflow_reconstruction/coherence/families/cross_spectrum/family.py) and [`statistics.py`](src/phycoflow_reconstruction/coherence/families/cross_spectrum/statistics.py) | graph-mode magnitude-squared coherence |
+| `cross_spectrum.components.self_spectrum` | [`cross_spectrum/family.py`](src/phycoflow_reconstruction/coherence/families/cross_spectrum/family.py) and [`statistics.py`](src/phycoflow_reconstruction/coherence/families/cross_spectrum/statistics.py) | modewise per-field auto-spectrum |
+| `cross_spectrum.components.same_frequency` | [`cross_spectrum/family.py`](src/phycoflow_reconstruction/coherence/families/cross_spectrum/family.py) and [`statistics.py`](src/phycoflow_reconstruction/coherence/families/cross_spectrum/statistics.py) | graph-mode magnitude-squared coherence for distinct field pairs |
 | `cross_spectrum.components.cross_frequency` | same files | off-diagonal cross-band energy coupling |
 | `cross_spectrum.components.band_energy` | same files | log spectral-band power |
 | `topology.components.self` | [`topology/family.py`](src/phycoflow_reconstruction/coherence/families/topology/family.py) and [`betti_curves.py`](src/phycoflow_reconstruction/coherence/families/topology/betti_curves.py) | single-field Betti curves |
@@ -895,6 +897,25 @@ P_i(k)=\frac{1}{B}\sum_b|A_{bki}|^2,
 P_{ij}(k)=\frac{1}{B}\sum_bA_{bki}A_{bkj}^{\ast}.
 $$
 
+The explicit per-field auto-spectrum is the first quantity above:
+
+$$
+S_i(k)=P_i(k)=\frac{1}{B}\sum_b|A_{bki}|^2.
+$$
+
+For generated and reference ensembles $X$ and $Y$, `self_spectrum` compares this power mode by mode for every selected field, rather than requiring a configured field pair:
+
+$$
+\mathcal L_{\mathrm{self\ spectrum}}
+=\frac{1}{|\mathcal C|K}
+\sum_{i\in\mathcal C}\sum_{k=1}^{K}
+\left(S_i^{X}(k)-S_i^{Y}(k)\right)^2.
+$$
+
+This term is independently controlled by `cross_spectrum.components.self_spectrum` and is opt-in because its current raw-power calculation can be unstable. Omitting the component or its `enabled` key defaults to disabled; it runs only when `enabled: true` is explicit. Its weight defaults to 1.0 after it is enabled, and disabling it does not disable either distinct-field component. A self-spectrum-only family may select one field and use no field pairs.
+
+The auto-spectrum estimate needs only $B\ge1$ state. The family still requires the largest minimum batch among its enabled components: $B\ge2$ when same-frequency is enabled and $B\ge3$ when cross-frequency is enabled.
+
 The same-frequency magnitude-squared coherence is
 
 $$
@@ -902,7 +923,7 @@ $$
 =\frac{|P_{ij}(k)|^2}{P_i(k)P_j(k)+\varepsilon}.
 $$
 
-`same_frequency.magnitude_squared` compares generated and reference curves for configured field pairs.
+`same_frequency.magnitude_squared` compares generated and reference curves for configured pairs of distinct fields. It is therefore complementary to `self_spectrum`: the latter matches each field's absolute modewise power, while the former matches normalized within-mode coupling between two fields and can agree even when their individual power levels differ.
 
 For graph-frequency band $\mathcal B_m$, per-state energy is
 
@@ -921,17 +942,18 @@ Q_{mnij}
 }.
 $$
 
-`cross_frequency.band_energy_coupling` compares cells with $m\ne n$. The optional `band_energy.log_power` also compares
+`cross_frequency.band_energy_coupling` compares cells with $m\ne n$ for configured pairs of distinct fields, so it measures cross-field coupling between different graph-frequency bands rather than the same-mode auto-power or same-mode cross-field coherence. The optional `band_energy.log_power` also compares
 
 $$
 \log\left(\mathbb E_b[E_{bmc}]+\varepsilon\right),
 $$
 
-because normalized coherence alone discards absolute spectral power.
+because normalized coherence alone discards absolute spectral power. It is a coarse per-band summary; `self_spectrum` retains modewise resolution but is opt-in while its raw-power calculation remains unstable.
 
 Current drawbacks:
 
 - The graph, point order, and eigenbasis are geometry-specific; a changed coordinate set invalidates the artifact.
+- Auto-spectrum matching is an absolute-power term in the configured units, so its raw scale can differ substantially across fields; use the component weight and, where appropriate, family calibration deliberately.
 - Magnitude-squared coherence loses cross-spectrum phase and sign.
 - Only retained eigenmodes are measured. Results depend on graph neighbor count, kernel scale, zero-mode policy, and band boundaries.
 - Degenerate or nearly degenerate Laplacian eigenvalues can make individual eigenvectors basis-dependent even when their invariant subspace is stable.
@@ -1010,6 +1032,8 @@ With `target_use: training_reference`, a frozen empirical bank is fitted only fr
 
 With `target_use: paired_supervised`, the reference is the dense target of the current training sample. This is supervised structural regularization, not target-free physical refinement.
 
+This target policy is independent of the cross-spectrum component choice: in either policy, `self_spectrum` remains a per-field modewise power comparison. Only the source of the reference ensemble changes—paired current-sample target versus an independently selected frozen training reference.
+
 In both modes, dense targets are removed from the batch passed into the model's differentiable rollout:
 
 $$
@@ -1021,6 +1045,19 @@ $$
 $$
 
 The reference is supplied only after reconstruction to compute $\mathcal L_{\mathrm{coh}}$. Validation and test states are never used to fit a training reference bank.
+
+### 7.6 Coherence training-history monitoring
+
+At every recorded epoch, post-training retains each executed component's raw scalar and its additive contribution to the aggregate coherence objective. For component $k$ in family $F$, the history contract records
+
+$$
+\mathcal L^{\mathrm{contribution}}_{Fk}
+=w_Fa_Fw_{Fk}\mathcal L^{\mathrm{raw}}_{Fk}.
+$$
+
+Consequently, component contributions sum to the plotted coherence objective before the separate optimizer-level coherence schedule weight is applied. Metrics use family-independent keys of the form `coherence_component/<family>/<component>/raw` and `.../weighted_contribution`; the historical flat `<family>.<component>` raw keys remain available for compatibility.
+
+`loss_history.png` intentionally remains the compact top-level optimization view. Data-driven post-training additionally writes `coherence_history.png`. Its first panel shows total coherence and calibrated weighted family totals, while subsequent family-grouped small multiples give every enabled component its own adaptive vertical scale. This is necessary because valid component losses can differ by many orders of magnitude. Disabled terms are absent, unevaluated epochs are not fabricated, partial epochs receive open markers, and resume collisions use the last recorded value at a given epoch. The standalone `render-history` command reconstructs the figure from `resolved_config.yaml` and `metrics/history.jsonl` without loading a checkpoint or dataset, including for runs created before the namespaced component history contract.
 
 ## 8. Differentiable reconstruction and observation consistency
 

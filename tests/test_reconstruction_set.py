@@ -107,6 +107,16 @@ def test_coherence_publication_labels_format_compound_field_pairs():
     assert coherence_set._publication_label("CH4–U_1") == r"CH$_{4}$–$U_{1}$"
 
 
+def test_adaptive_coherence_score_limits_are_padded_rounded_and_conservative():
+    scores = np.asarray([0.835, 0.910, 0.798, 0.831, 0.917, 0.924, 0.870, 0.905])
+    spread = np.asarray([0.068, 0.068, 0.076, 0.120, 0.029, 0.062, 0.048, 0.041])
+
+    assert coherence_set.adaptive_coherence_score_limits(scores, spread) == (0.65, 1.0)
+    assert coherence_set.adaptive_coherence_score_limits(
+        np.asarray([0.96, 0.98, 0.99]), np.asarray([0.01, 0.005, 0.002])
+    ) == (0.75, 1.0)
+
+
 def test_jensen_shannon_divergence_is_bounded_and_calibrated():
     reference = np.asarray([[0.5, 0.5], [0.0, 0.0]])
     disjoint = np.asarray([[0.0, 0.0], [0.5, 0.5]])
@@ -280,7 +290,16 @@ def test_set_evaluation_writes_training_aligned_cross_spectrum_statistics(tmp_pa
                 "fields": {"u": {"count": 1}},
             },
             "runtime": {"seed": 42},
-            "coherence": {"compute_budget": {"batch_size": 3, "point_count": 4, "query_seed": 17}},
+            "coherence": {
+                "compute_budget": {"batch_size": 3, "point_count": 4, "query_seed": 17},
+                "families": {
+                    "cross_spectrum": {
+                        "components": {
+                            "self_spectrum": {"enabled": True, "weight": 1.0},
+                        }
+                    }
+                },
+            },
         },
         device=torch.device("cpu"),
         dataset=dataset,
@@ -306,16 +325,20 @@ def test_set_evaluation_writes_training_aligned_cross_spectrum_statistics(tmp_pa
 
     output_dir = run_dir / "evaluation" / "reconstruction_set_test_best"
     cross_dir = output_dir / "coherence" / "cross_spectrum"
+    assert (cross_dir / "self_spectrum_coherence.png").is_file()
     assert (cross_dir / "same_frequency_coherence.png").is_file()
     assert (cross_dir / "cross_frequency_coherence.png").is_file()
     assert not (cross_dir / "band_energy_coherence.png").exists()
     assert not (cross_dir / "same_frequency_pair_distributions.png").exists()
     assert (cross_dir / "metrics.csv").is_file()
     with np.load(cross_dir / "metrics.npz", allow_pickle=False) as payload:
+        assert payload["self_spectrum_absolute_discrepancy"].shape == (2,)
+        assert payload["self_spectrum_coherence_score"].shape == (2,)
         assert payload["same_frequency_absolute_discrepancy"].shape == (1,)
         assert payload["same_frequency_coherence_score"].shape == (1,)
         assert payload["cross_frequency_absolute_discrepancy"].shape == (1,)
         assert payload["cross_frequency_coherence_score"].shape == (1,)
+        assert payload["self_spectrum_coherence_score_by_ensemble"].shape == (2, 2)
         assert payload["same_frequency_coherence_score_by_ensemble"].shape == (2, 1)
         assert payload["cross_frequency_coherence_score_by_ensemble"].shape == (2, 1)
         assert payload["sample_ids"].shape == (6,)
@@ -375,7 +398,16 @@ def test_posttraining_set_evaluation_builds_matched_source_comparison(tmp_path, 
         "stage": "post_training",
         "source_run": str(source_run),
         "source_checkpoint": str(source_checkpoint),
-        "coherence": {"compute_budget": {"batch_size": 3, "point_count": 4, "query_seed": 17}},
+        "coherence": {
+            "compute_budget": {"batch_size": 3, "point_count": 4, "query_seed": 17},
+            "families": {
+                "cross_spectrum": {
+                    "components": {
+                        "self_spectrum": {"enabled": True, "weight": 1.0},
+                    }
+                }
+            },
+        },
     }
     (child_run / "resolved_config.yaml").write_text(json.dumps(child_config), encoding="utf-8")
     dataset_path = tmp_path / "comparison-dataset.bin"
@@ -411,8 +443,10 @@ def test_posttraining_set_evaluation_builds_matched_source_comparison(tmp_path, 
     )
     reconstruction_limits = []
     coherence_limits = []
+    cross_spectrum_limits = []
     original_reconstruction_renderer = reconstruction_set.render_reconstruction_set_distribution
     original_coherence_renderer = reconstruction_set.render_coherence_distribution
+    original_cross_spectrum_renderer = reconstruction_set.render_cross_spectrum_score_bars
 
     def capture_reconstruction(*args, **kwargs):
         if kwargs.get("value_limits") is not None:
@@ -424,6 +458,10 @@ def test_posttraining_set_evaluation_builds_matched_source_comparison(tmp_path, 
             coherence_limits.append(kwargs["value_limits"])
         return original_coherence_renderer(*args, **kwargs)
 
+    def capture_cross_spectrum(*args, **kwargs):
+        cross_spectrum_limits.append(kwargs["score_limits"])
+        return original_cross_spectrum_renderer(*args, **kwargs)
+
     monkeypatch.setattr(
         reconstruction_set,
         "render_reconstruction_set_distribution",
@@ -433,6 +471,11 @@ def test_posttraining_set_evaluation_builds_matched_source_comparison(tmp_path, 
         reconstruction_set,
         "render_coherence_distribution",
         capture_coherence,
+    )
+    monkeypatch.setattr(
+        reconstruction_set,
+        "render_cross_spectrum_score_bars",
+        capture_cross_spectrum,
     )
 
     reconstruction_set.evaluate_reconstruction_set(
@@ -456,7 +499,11 @@ def test_posttraining_set_evaluation_builds_matched_source_comparison(tmp_path, 
         assert (global_dir / f"{stem}.png").is_file()
         assert (global_dir / f"{stem}-base.png").is_file()
     cross_dir = output_dir / "coherence" / "cross_spectrum"
-    for stem in ("same_frequency_coherence", "cross_frequency_coherence"):
+    for stem in (
+        "self_spectrum_coherence",
+        "same_frequency_coherence",
+        "cross_frequency_coherence",
+    ):
         assert (cross_dir / f"{stem}.png").is_file()
         assert (cross_dir / f"{stem}-base.png").is_file()
     assert (cross_dir / "metrics-base.csv").is_file()
@@ -480,6 +527,10 @@ def test_posttraining_set_evaluation_builds_matched_source_comparison(tmp_path, 
     assert coherence_limits[0] == coherence_limits[1]
     assert coherence_limits[2] == coherence_limits[3]
     assert coherence_limits[4] == coherence_limits[5]
+    assert len(cross_spectrum_limits) == 6
+    assert cross_spectrum_limits[0] == cross_spectrum_limits[1]
+    assert cross_spectrum_limits[2] == cross_spectrum_limits[3]
+    assert cross_spectrum_limits[4] == cross_spectrum_limits[5]
     report = json.loads((output_dir / "comparison_report.json").read_text(encoding="utf-8"))
     assert report["kind"] == "post_training_source_comparison"
     assert report["sample_count"] == 4
@@ -489,6 +540,18 @@ def test_posttraining_set_evaluation_builds_matched_source_comparison(tmp_path, 
         0.0,
         1.0,
     ]
+    displayed = report["shared_axis_limits"]["cross_spectrum"][
+        "displayed_coherence_score_by_component"
+    ]
+    assert set(displayed) == {"self_spectrum", "same_frequency", "cross_frequency"}
+    assert displayed == {
+        name: list(cross_spectrum_limits[index])
+        for name, index in (
+            ("self_spectrum", 0),
+            ("same_frequency", 2),
+            ("cross_frequency", 4),
+        )
+    }
     assert "density" in report["shared_axis_limits"]["global_distribution_extra"]["u–v"]
     child_report = json.loads((output_dir / "report.json").read_text(encoding="utf-8"))
     assert child_report["comparison"]["enabled"] is True

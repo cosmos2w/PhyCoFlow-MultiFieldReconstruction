@@ -14,6 +14,14 @@ from typing import Any
 
 from tqdm.auto import tqdm
 
+from .history_plotting import (
+    HISTORY_FAMILY_COLORS,
+    HISTORY_FAMILY_LINESTYLES,
+    HISTORY_MUTED_TEXT_COLOR,
+    HISTORY_TEXT_COLOR,
+    style_history_axis,
+)
+
 _LOSS_KEYS = ("total", "data_loss", "coherence_loss", "physics_loss", "validation_loss")
 _LOSS_LABELS = {
     "total": "total",
@@ -38,17 +46,10 @@ _LOSS_COLORS = {
 }
 _COHERENCE_FAMILY_PREFIX = "coherence_family/"
 _COHERENCE_FAMILY_SUFFIX = "/weighted_contribution"
-_COHERENCE_FAMILY_COLORS = (
-    "#3B6EA8",
-    "#D95F59",
-    "#B58900",
-    "#5B8E7D",
-    "#8C6BB1",
-)
-_COHERENCE_FAMILY_LINESTYLES = ("--", "-.", ":")
-_TEXT_COLOR = "#202733"
-_MUTED_TEXT_COLOR = "#667085"
-_GRID_COLOR = "#D9DEE7"
+_COHERENCE_FAMILY_COLORS = HISTORY_FAMILY_COLORS
+_COHERENCE_FAMILY_LINESTYLES = HISTORY_FAMILY_LINESTYLES
+_TEXT_COLOR = HISTORY_TEXT_COLOR
+_MUTED_TEXT_COLOR = HISTORY_MUTED_TEXT_COLOR
 
 
 def _format_duration(seconds: float) -> str:
@@ -376,6 +377,9 @@ class TrainingMonitor:
         figure.savefig(temporary, dpi=180, format="png")
         plt.close(figure)
         os.replace(temporary, self.plot_path)
+        from .coherence_history import render_coherence_history
+
+        render_coherence_history(self.run_dir, description=self.description, pyplot=plt)
 
     def _shown_loss_series(self, key: str) -> tuple[list[float], list[float]]:
         values = self._values[key]
@@ -400,30 +404,7 @@ class TrainingMonitor:
 
     @staticmethod
     def _style_loss_axis(axis, values: list[float]) -> None:
-        axis.set_xlim(left=0)
-        if values and all(value > 0.0 for value in values):
-            axis.set_yscale("log")
-        axis.set_axisbelow(True)
-        axis.grid(
-            True,
-            which="major",
-            color=_GRID_COLOR,
-            linewidth=0.75,
-            linestyle="--",
-            alpha=0.8,
-        )
-        axis.grid(
-            True,
-            which="minor",
-            color=_GRID_COLOR,
-            linewidth=0.45,
-            linestyle=":",
-            alpha=0.55,
-        )
-        axis.tick_params(axis="both", colors=_TEXT_COLOR, labelsize=9.5)
-        for spine in axis.spines.values():
-            spine.set_color("#7A8493")
-            spine.set_linewidth(0.8)
+        style_history_axis(axis, values)
 
     def _build_loss_figure(self, plt):
         """Build one combined panel plus independently scaled term panels."""

@@ -58,6 +58,21 @@ def test_strict_weights_allow_only_disabled_zero_and_require_effective_family():
         validate_config(broken)
 
 
+def test_self_spectrum_is_opt_in_during_config_validation():
+    config = _post_config()
+    components = config["coherence"]["families"]["cross_spectrum"]["components"]
+    components["same_frequency"] = {"enabled": False, "weight": 0.0}
+    components["cross_frequency"] = {"enabled": False, "weight": 0.0}
+    components["band_energy"] = {"enabled": False, "weight": 0.0}
+    components["self_spectrum"] = {"weight": 1.0}
+
+    with pytest.raises(ValueError, match="positive enabled component"):
+        validate_config(config)
+
+    components["self_spectrum"]["enabled"] = True
+    validate_config(config)
+
+
 @pytest.mark.parametrize("family_name", ["global_distribution", "cross_spectrum", "topology"])
 @pytest.mark.parametrize("weight", [0.0, -1.0])
 def test_direct_family_constructors_require_positive_outer_weight(

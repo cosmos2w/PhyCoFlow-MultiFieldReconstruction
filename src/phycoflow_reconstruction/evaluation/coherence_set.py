@@ -16,6 +16,8 @@ import numpy as np
 import torch
 
 from ..coherence.families.cross_spectrum.statistics import (
+    auto_spectrum,
+    auto_spectrum_mean_square_values,
     band_energies,
     graph_fourier,
     normalized_cross_band_coupling,
@@ -55,6 +57,34 @@ def _finite_summary(values: np.ndarray) -> dict[str, float | int | None]:
         "quartile_75": float(np.quantile(finite, 0.75)),
         "maximum": float(finite.max()),
     }
+
+
+def _self_spectrum_values(
+    generated_coefficients: torch.Tensor,
+    reference_coefficients: torch.Tensor,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return per-field auto-spectrum MSE and bounded agreement values.
+
+    Coefficients are expected as ``[ensemble, mode, field]``. The auto-spectrum
+    is estimated over the ensemble, so each returned value compares one field's
+    modewise power spectrum.
+    """
+    if (
+        generated_coefficients.ndim != 3
+        or reference_coefficients.shape != generated_coefficients.shape
+    ):
+        raise ValueError("self-spectrum coefficients must align as [B,K,C]")
+    generated_auto = auto_spectrum(generated_coefficients)
+    reference_auto = auto_spectrum(reference_coefficients)
+    discrepancy = auto_spectrum_mean_square_values(generated_coefficients, reference_coefficients)
+    difference = generated_auto - reference_auto
+    denominator = (
+        torch.linalg.vector_norm(generated_auto, dim=0)
+        + torch.linalg.vector_norm(reference_auto, dim=0)
+    ).clamp_min(eps)
+    score = (1.0 - torch.linalg.vector_norm(difference, dim=0) / denominator).clamp(0.0, 1.0)
+    return discrepancy, score
 
 
 def _default_global_distribution_config(field_names: Sequence[str]) -> dict[str, Any]:
@@ -108,6 +138,7 @@ def _default_cross_spectrum_config(field_names: Sequence[str]) -> dict[str, Any]
         },
         "eps": 1.0e-8,
         "components": {
+            "self_spectrum": {"enabled": False, "weight": 1.0},
             "same_frequency": {"enabled": True, "weight": 1.0},
             "cross_frequency": {"enabled": True, "weight": 1.0},
             "band_energy": {"enabled": False, "weight": 0.0},
@@ -345,6 +376,7 @@ def render_cross_spectrum_score_bars(
     title: str,
     subtitle: str,
     score_std: np.ndarray | None = None,
+    score_limits: tuple[float, float] | None = None,
     dpi: int = 300,
 ) -> Path:
     """Render mean bounded spectral-agreement scores with optional ensemble spread."""
@@ -370,6 +402,14 @@ def render_cross_spectrum_score_bars(
             raise ValueError("cross-spectrum score standard deviations must align and be finite")
         if np.any(score_std < 0.0):
             raise ValueError("cross-spectrum score standard deviations must be non-negative")
+    if score_limits is None:
+        score_limits = adaptive_coherence_score_limits(scores, score_std)
+    lower_limit, upper_limit = (float(value) for value in score_limits)
+    if not 0.0 <= lower_limit < upper_limit <= 1.0:
+        raise ValueError("cross-spectrum score limits must satisfy 0 <= lower < upper <= 1")
+    lower_whiskers = np.maximum(0.0, scores - score_std)
+    if np.any(lower_whiskers < lower_limit - 1.0e-12):
+        raise ValueError("cross-spectrum score limits must include every lower whisker")
 
     role_colors = {
         "detail": "#4C78A8",
@@ -392,7 +432,8 @@ def render_cross_spectrum_score_bars(
     for position, score, spread, role in zip(positions, scores, score_std, roles):
         axis.barh(
             position,
-            score,
+            score - lower_limit,
+            left=lower_limit,
             height=0.36 if role == "detail" else 0.44,
             color=role_colors[role],
             edgecolor=role_edges[role],
@@ -442,12 +483,23 @@ def render_cross_spectrum_score_bars(
         tick.set_fontweight("semibold" if role != "detail" else "normal")
         tick.set_color("#27313D")
     axis.invert_yaxis()
-    axis.set_xlim(0.0, 1.045)
-    axis.set_xticks(np.linspace(0.0, 1.0, 5))
+    display_padding = max(0.012, 0.06 * (upper_limit - lower_limit))
+    axis.set_xlim(lower_limit, min(1.05, upper_limit + display_padding))
+    tick_step = 0.05 if upper_limit - lower_limit <= 0.40 else 0.10
+    axis.set_xticks(
+        np.arange(lower_limit, upper_limit + 0.5 * tick_step, tick_step).clip(
+            lower_limit, upper_limit
+        )
+    )
     axis.xaxis.set_major_formatter(lambda value, _: f"{value:.0%}")
     axis.tick_params(axis="x", labelsize=8.8, colors="#56606D", width=0.7, length=3.5)
     axis.tick_params(axis="y", labelsize=9.1, width=0.0, length=0, pad=7)
-    axis.set_xlabel("Coherence score", fontsize=9.6, color="#374151", labelpad=8)
+    axis.set_xlabel(
+        f"Coherence score (focused {lower_limit:.0%}–{upper_limit:.0%} scale)",
+        fontsize=9.6,
+        color="#374151",
+        labelpad=8,
+    )
     axis.set_title(
         title,
         fontsize=12.2,
@@ -466,7 +518,8 @@ def render_cross_spectrum_score_bars(
         fontsize=8.7,
         color="#66707C",
     )
-    axis.axvline(1.0, color="#68717D", linewidth=0.85, linestyle=(0, (3, 3)), zorder=2)
+    axis.axvline(upper_limit, color="#68717D", linewidth=0.85, linestyle=(0, (3, 3)), zorder=2)
+    axis.axvline(lower_limit, color="#9AA1AA", linewidth=0.75, zorder=2)
     if detail_count and detail_count < len(labels):
         separator = (positions[detail_count - 1] + positions[detail_count]) / 2
         axis.axhline(separator, color="#D4D8DE", linewidth=0.75, zorder=1)
@@ -482,6 +535,36 @@ def render_cross_spectrum_score_bars(
     figure.savefig(output_path, dpi=dpi, bbox_inches="tight")
     plt.close(figure)
     return output_path
+
+
+def adaptive_coherence_score_limits(
+    scores: np.ndarray,
+    score_std: np.ndarray | None = None,
+) -> tuple[float, float]:
+    """Return a conservative focused range for bounded coherence-score bars.
+
+    The lower bound includes every one-standard-deviation whisker, adds visual
+    breathing room, rounds down to a five-percentage-point boundary, and never
+    rises above 75%.  This keeps high-score differences legible without making
+    ordinary absolute-score bars look like near-zero-baseline deltas.
+    """
+    scores = np.asarray(scores, dtype=np.float64).reshape(-1)
+    if not scores.size or not np.isfinite(scores).all():
+        raise ValueError("cross-spectrum score limits require finite scores")
+    if np.any((scores < 0.0) | (scores > 1.0)):
+        raise ValueError("cross-spectrum coherence scores must lie in [0, 1]")
+    if score_std is None:
+        spread = np.zeros_like(scores)
+    else:
+        spread = np.asarray(score_std, dtype=np.float64).reshape(-1)
+        if spread.shape != scores.shape or not np.isfinite(spread).all():
+            raise ValueError("cross-spectrum score standard deviations must align and be finite")
+        if np.any(spread < 0.0):
+            raise ValueError("cross-spectrum score standard deviations must be non-negative")
+    lower_extent = float(np.maximum(0.0, scores - spread).min())
+    margin = max(0.025, 0.15 * (1.0 - lower_extent))
+    rounded = np.floor(max(0.0, lower_extent - margin) / 0.05) * 0.05
+    return float(min(0.75, rounded)), 1.0
 
 
 def _padded_finite_range(*values: np.ndarray) -> tuple[float, float]:
@@ -1298,6 +1381,16 @@ class CrossSpectrumAccumulator:
         for ensemble_slice in ensemble_slices:
             ensemble_generated = generated[ensemble_slice]
             ensemble_reference = reference[ensemble_slice]
+            if self.family.component_weights.get("self_spectrum", 0.0) > 0:
+                self_discrepancy, self_score = _self_spectrum_values(
+                    ensemble_generated, ensemble_reference, self.family.eps
+                )
+                absolute_lists.setdefault("self_spectrum", []).append(
+                    self_discrepancy.detach().cpu().numpy()
+                )
+                score_lists.setdefault("self_spectrum", []).append(
+                    self_score.detach().cpu().numpy()
+                )
             if self.family.component_weights.get("same_frequency", 0.0) > 0:
                 generated_coherence = spectral_coherence(ensemble_generated, self.family.eps)
                 reference_coherence = spectral_coherence(ensemble_reference, self.family.eps)
@@ -1390,6 +1483,7 @@ class CrossSpectrumAccumulator:
         }
 
         labels_by_component = {
+            "self_spectrum": tuple(self.family.field_names),
             "same_frequency": self.pair_labels,
             "cross_frequency": self.pair_labels,
             "band_energy": self.band_field_labels,
@@ -1438,6 +1532,20 @@ class CrossSpectrumAccumulator:
         payload_path = destination / "metrics.npz"
         np.savez_compressed(
             payload_path,
+            self_spectrum_absolute_discrepancy=absolute_discrepancies.get(
+                "self_spectrum", np.empty(0)
+            ),
+            self_spectrum_absolute_discrepancy_std=absolute_discrepancy_std.get(
+                "self_spectrum", np.empty(0)
+            ),
+            self_spectrum_absolute_discrepancy_by_ensemble=absolute_by_ensemble.get(
+                "self_spectrum", np.empty((ensemble_count, 0))
+            ),
+            self_spectrum_coherence_score=coherence_scores.get("self_spectrum", np.empty(0)),
+            self_spectrum_coherence_score_std=coherence_score_std.get("self_spectrum", np.empty(0)),
+            self_spectrum_coherence_score_by_ensemble=scores_by_ensemble.get(
+                "self_spectrum", np.empty((ensemble_count, 0))
+            ),
             same_frequency_absolute_discrepancy=absolute_discrepancies.get(
                 "same_frequency", np.empty(0)
             ),
@@ -1511,6 +1619,7 @@ class CrossSpectrumAccumulator:
             ),
             ensemble_count=np.asarray(ensemble_count),
             query_indices=self.query_indices.cpu().numpy(),
+            field_names=np.asarray(self.family.field_names),
             split=np.asarray(split),
             units=np.asarray(self.family.units),
         )
@@ -1575,6 +1684,11 @@ class CrossSpectrumAccumulator:
             f"{self.query_indices.numel():,} graph points · {estimate_summary}"
         )
         definitions = {
+            "self_spectrum": (
+                "self_spectrum_coherence.png",
+                "Self-spectrum coherence",
+                tuple(self.family.field_names),
+            ),
             "same_frequency": (
                 "same_frequency_coherence.png",
                 "Same-frequency spectral coherence",
@@ -1595,7 +1709,10 @@ class CrossSpectrumAccumulator:
         for key, scores in coherence_scores.items():
             filename, title, labels = definitions[key]
             figures[key] = destination / filename
-            component_label = "Pair mean" if key != "band_energy" else "Band–field mean"
+            component_label = {
+                "self_spectrum": "Field mean",
+                "band_energy": "Band–field mean",
+            }.get(key, "Pair mean")
             render_cross_spectrum_score_bars(
                 np.concatenate((scores, [component_scores[key], family_score])),
                 (*labels, component_label, "Overall score"),
@@ -1638,6 +1755,21 @@ class CrossSpectrumAccumulator:
         report = {
             "family": "cross_spectrum",
             "metric": "paired_reconstruction_to_ground_truth_graph_cross_spectrum_coherence",
+            "components": {
+                "self_spectrum": {
+                    "definition": "modewise per-field auto-spectrum matching",
+                    "sub_terms": "one auto-spectrum discrepancy and bounded agreement score per field",
+                },
+                "same_frequency": {
+                    "definition": "modewise pairwise cross-spectrum matching",
+                },
+                "cross_frequency": {
+                    "definition": "off-diagonal normalized band-energy coupling matching",
+                },
+                "band_energy": {
+                    "definition": "mean-band log-power matching",
+                },
+            },
             "coherence_score": {
                 "range": [0.0, 1.0],
                 "perfect_agreement": 1.0,
