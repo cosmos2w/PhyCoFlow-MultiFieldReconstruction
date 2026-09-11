@@ -48,6 +48,16 @@ def _require_mapping(config: Mapping[str, Any], key: str) -> Mapping[str, Any]:
     return value
 
 
+def _coherence_component_enabled(
+    family_name: str, component_name: str, settings: Mapping[str, Any]
+) -> bool:
+    """Resolve component activation without implicitly enabling unstable terms."""
+    default_enabled = not (
+        family_name == "cross_spectrum" and component_name == "self_spectrum"
+    )
+    return bool(settings.get("enabled", default_enabled))
+
+
 def _validate_common_sections(config: Mapping[str, Any]) -> None:
     dataset = _require_mapping(config, "dataset")
     _reject_unknown(
@@ -580,12 +590,15 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
                 f"{family_name}.components.{component_name}",
             )
             component_weight = float(settings.get("weight", 1.0))
-            component_enabled = bool(settings.get("enabled", True))
+            component_enabled = _coherence_component_enabled(
+                family_name, component_name, settings
+            )
             if component_weight < 0 or (component_enabled and component_weight <= 0):
                 raise ValueError("enabled coherence component weights must be positive")
         if family_enabled and not any(
-            bool(settings.get("enabled", True)) and float(settings.get("weight", 1.0)) > 0
-            for settings in components.values()
+            _coherence_component_enabled(family_name, component_name, settings)
+            and float(settings.get("weight", 1.0)) > 0
+            for component_name, settings in components.items()
         ):
             raise ValueError(
                 f"enabled coherence family {family_name} requires a positive enabled component"

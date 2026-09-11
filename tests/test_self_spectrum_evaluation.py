@@ -11,8 +11,17 @@ import torch
 
 from phycoflow_reconstruction.evaluation.coherence_set import (
     CrossSpectrumAccumulator,
+    _default_cross_spectrum_config,
     _self_spectrum_values,
 )
+
+
+def test_default_cross_spectrum_evaluation_keeps_self_spectrum_disabled() -> None:
+    config = _default_cross_spectrum_config(("u", "v"))
+    assert config["components"]["self_spectrum"] == {
+        "enabled": False,
+        "weight": 1.0,
+    }
 
 
 def test_self_spectrum_values_are_modewise_per_field_and_bounded() -> None:

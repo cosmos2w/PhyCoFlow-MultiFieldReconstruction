@@ -138,7 +138,7 @@ def _default_cross_spectrum_config(field_names: Sequence[str]) -> dict[str, Any]
         },
         "eps": 1.0e-8,
         "components": {
-            "self_spectrum": {"enabled": True, "weight": 1.0},
+            "self_spectrum": {"enabled": False, "weight": 1.0},
             "same_frequency": {"enabled": True, "weight": 1.0},
             "cross_frequency": {"enabled": True, "weight": 1.0},
             "band_energy": {"enabled": False, "weight": 0.0},

@@ -1,4 +1,4 @@
-"""Readiness regression tests for canonical graph cross-spectrum v2."""
+"""Readiness regression tests for canonical graph cross-spectrum v3."""
 
 from __future__ import annotations
 
@@ -115,23 +115,30 @@ def test_self_spectrum_matches_modewise_per_field_auto_spectrum_mse() -> None:
     assert result.component_results[path].diagnostics["minimum_batch_size"] == 1
 
 
-def test_self_spectrum_omission_defaults_to_enabled_unit_weight() -> None:
+@pytest.mark.parametrize("self_settings", [None, {"weight": 1.0}])
+def test_self_spectrum_requires_explicit_enabled_true(
+    self_settings: dict | None,
+) -> None:
     config = _config(same_weight=0.0, band_weight=1.0)
-    config["components"].pop("self_spectrum")
+    if self_settings is None:
+        config["components"].pop("self_spectrum")
+    else:
+        config["components"]["self_spectrum"] = self_settings
     family = _family(config)
-    assert family.component_weights["self_spectrum"] == 1.0
+    assert "self_spectrum" not in family.component_weights
 
     coordinates = _coordinates().expand(2, -1, -1)
     result = family(
         torch.randn(2, 16, 2), torch.randn(2, 16, 2), coordinates=coordinates
     )
-    assert "cross_spectrum.self_spectrum.auto_spectrum" in result.component_results
+    path = "cross_spectrum.self_spectrum.auto_spectrum"
+    assert path not in result.component_results
+    assert result.diagnostics["components"][path]["executed"] is False
 
     disabled = _family(_config(same_weight=1.0, band_weight=0.0))
     disabled_result = disabled(
         torch.randn(2, 16, 2), torch.randn(2, 16, 2), coordinates=coordinates
     )
-    path = "cross_spectrum.self_spectrum.auto_spectrum"
     assert path not in disabled_result.component_results
     assert disabled_result.diagnostics["components"][path]["executed"] is False
 

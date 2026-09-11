@@ -35,7 +35,7 @@ from .statistics import (
 
 class CrossSpectrumFamily(nn.Module):
     family_name = "cross_spectrum"
-    version = "2"
+    version = "3"
 
     def __init__(
         self,
@@ -114,7 +114,7 @@ class CrossSpectrumFamily(nn.Module):
         specs = []
         for key, path, minimum in definitions:
             settings = components.get(key, {})
-            default_enabled = key != "band_energy"
+            default_enabled = key not in {"self_spectrum", "band_energy"}
             if bool(settings.get("enabled", default_enabled)):
                 weight = float(settings.get("weight", 1.0))
                 if weight < 0:

@@ -290,7 +290,16 @@ def test_set_evaluation_writes_training_aligned_cross_spectrum_statistics(tmp_pa
                 "fields": {"u": {"count": 1}},
             },
             "runtime": {"seed": 42},
-            "coherence": {"compute_budget": {"batch_size": 3, "point_count": 4, "query_seed": 17}},
+            "coherence": {
+                "compute_budget": {"batch_size": 3, "point_count": 4, "query_seed": 17},
+                "families": {
+                    "cross_spectrum": {
+                        "components": {
+                            "self_spectrum": {"enabled": True, "weight": 1.0},
+                        }
+                    }
+                },
+            },
         },
         device=torch.device("cpu"),
         dataset=dataset,
@@ -389,7 +398,16 @@ def test_posttraining_set_evaluation_builds_matched_source_comparison(tmp_path, 
         "stage": "post_training",
         "source_run": str(source_run),
         "source_checkpoint": str(source_checkpoint),
-        "coherence": {"compute_budget": {"batch_size": 3, "point_count": 4, "query_seed": 17}},
+        "coherence": {
+            "compute_budget": {"batch_size": 3, "point_count": 4, "query_seed": 17},
+            "families": {
+                "cross_spectrum": {
+                    "components": {
+                        "self_spectrum": {"enabled": True, "weight": 1.0},
+                    }
+                }
+            },
+        },
     }
     (child_run / "resolved_config.yaml").write_text(json.dumps(child_config), encoding="utf-8")
     dataset_path = tmp_path / "comparison-dataset.bin"

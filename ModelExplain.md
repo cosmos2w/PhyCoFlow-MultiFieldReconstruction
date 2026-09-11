@@ -912,7 +912,7 @@ $$
 \left(S_i^{X}(k)-S_i^{Y}(k)\right)^2.
 $$
 
-This term is independently controlled by `cross_spectrum.components.self_spectrum`, defaults to `enabled: true` and weight 1.0 in the maintained cross-spectrum templates, and can be disabled with `enabled: false` (normally paired with weight 0.0) without disabling either distinct-field component. A self-spectrum-only family may select one field and use no field pairs.
+This term is independently controlled by `cross_spectrum.components.self_spectrum` and is opt-in because its current raw-power calculation can be unstable. Omitting the component or its `enabled` key defaults to disabled; it runs only when `enabled: true` is explicit. Its weight defaults to 1.0 after it is enabled, and disabling it does not disable either distinct-field component. A self-spectrum-only family may select one field and use no field pairs.
 
 The auto-spectrum estimate needs only $B\ge1$ state. The family still requires the largest minimum batch among its enabled components: $B\ge2$ when same-frequency is enabled and $B\ge3$ when cross-frequency is enabled.
 
@@ -948,7 +948,7 @@ $$
 \log\left(\mathbb E_b[E_{bmc}]+\varepsilon\right),
 $$
 
-because normalized coherence alone discards absolute spectral power. It is a coarse per-band summary; `self_spectrum` retains modewise resolution and is the explicit default in the maintained templates.
+because normalized coherence alone discards absolute spectral power. It is a coarse per-band summary; `self_spectrum` retains modewise resolution but is opt-in while its raw-power calculation remains unstable.
 
 Current drawbacks:
 
