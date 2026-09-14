@@ -68,3 +68,6 @@ local-experiments/
 
 # Optional historical source retained only for local compatibility checks.
 LegacyCoherence/
+
+# Slurm batch job logs written next to the submission directory.
+slurm-*.out
