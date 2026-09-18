@@ -35,6 +35,111 @@ def _post_config() -> dict:
     return config
 
 
+def _topology_family() -> dict:
+    """The default topology term, in the shape `validate_config` must accept."""
+    return {
+        "enabled": True,
+        "weight": 1.0,
+        "target_use": "paired_supervised",
+        "fields": ["u", "v"],
+        "geometry": {
+            "grid_shape": [4, 4],
+            "axes": [0, 1],
+            "neighbors": 4,
+            "power": 2.0,
+            "periodic": False,
+        },
+        "filtration": {
+            "dimensions": [0, 1],
+            "directions": ["sublevel", "superlevel"],
+            "smoothing_sigma": 0.0,
+        },
+        "matching": {
+            "order": 1.0,
+            "lambda_spatial": 1.0,
+            "spatial_mode": "multiplicative",
+            "min_persistence": 0.01,
+        },
+        "components": {
+            "self": {"enabled": True, "weight": 1.0},
+            "mutual": {
+                "enabled": True,
+                "weight": 1.0,
+                "pairs": [["u", "v"]],
+                "lines": 8,
+                "line_sampling": "stratified",
+                "angle_margin": 0.12,
+                "seed": 0,
+            },
+        },
+    }
+
+
+def _persistence_post_config() -> dict:
+    config = _post_config()
+    config["coherence"]["families"] = {
+        "topology": _topology_family()
+    }
+    return config
+
+
+def test_topology_is_an_accepted_post_training_family():
+    validate_config(_persistence_post_config())
+
+
+def test_topology_requires_fixed_shared_queries():
+    config = _persistence_post_config()
+    config["coherence"]["compute_budget"]["query_policy"] = "random_per_sample"
+    with pytest.raises(ValueError, match="query_policy=fixed_shared"):
+        validate_config(config)
+
+
+@pytest.mark.parametrize("key", ["quantiles", "sharpness"])
+def test_topology_rejects_betti_only_filtration_keys(key: str) -> None:
+    """The two topology terms are distinct definitions, not interchangeable spellings."""
+    config = _persistence_post_config()
+    config["coherence"]["families"]["topology"]["filtration"][key] = 1.0
+    with pytest.raises(ValueError, match="topology.filtration"):
+        validate_config(config)
+
+
+@pytest.mark.parametrize("key", ["solver", "solver_tolerance"])
+def test_topology_names_retired_matching_keys(key: str) -> None:
+    config = _persistence_post_config()
+    config["coherence"]["families"]["topology"]["matching"][key] = "exact"
+    with pytest.raises(ValueError, match="were removed"):
+        validate_config(config)
+
+
+def test_topology_matching_bounds_are_enforced():
+    config = _persistence_post_config()
+    config["coherence"]["families"]["topology"]["matching"]["order"] = 0.0
+    with pytest.raises(ValueError, match="order>0"):
+        validate_config(config)
+    config = _persistence_post_config()
+    config["coherence"]["families"]["topology"]["matching"][
+        "min_persistence"
+    ] = 1.0
+    with pytest.raises(ValueError, match=r"min_persistence must lie in \[0, 1\)"):
+        validate_config(config)
+
+
+def test_topology_rejects_periodic_geometry():
+    config = _persistence_post_config()
+    config["coherence"]["families"]["topology"]["geometry"]["periodic"] = True
+    with pytest.raises(ValueError, match="only nonperiodic geometry"):
+        validate_config(config)
+
+
+def test_registry_schemas_cover_exactly_the_registered_families():
+    from phycoflow_reconstruction.coherence.registry import family_schemas
+    from phycoflow_reconstruction.registry import COHERENCE_FAMILY_REGISTRY
+
+    schemas = family_schemas()
+    assert set(schemas) == set(COHERENCE_FAMILY_REGISTRY.names())
+    assert {"global_distribution", "cross_spectrum", "topology"} <= set(schemas)
+
+
 def test_full_domain_fixed_queries_are_explicit_and_ordered():
     assert torch.equal(fixed_query_indices(5, None, seed=9), torch.arange(5))
     assert torch.equal(fixed_query_indices(5, 99, seed=9), torch.arange(5))
@@ -73,7 +178,7 @@ def test_self_spectrum_is_opt_in_during_config_validation():
     validate_config(config)
 
 
-@pytest.mark.parametrize("family_name", ["global_distribution", "cross_spectrum", "topology"])
+@pytest.mark.parametrize("family_name", ["global_distribution", "cross_spectrum"])
 @pytest.mark.parametrize("weight", [0.0, -1.0])
 def test_direct_family_constructors_require_positive_outer_weight(
     family_name: str, weight: float
@@ -97,20 +202,6 @@ def test_direct_family_constructors_require_positive_outer_weight(
                 "same_frequency": {"enabled": True, "weight": 1.0},
                 "cross_frequency": {"enabled": False, "weight": 0.0},
                 "band_energy": {"enabled": False, "weight": 0.0},
-            },
-        },
-        "topology": {
-            "weight": weight,
-            "fields": ["u", "v"],
-            "geometry": {"grid_shape": [2, 2]},
-            "filtration": {
-                "dimensions": [0],
-                "directions": ["superlevel"],
-                "smoothing_sigma": 0.0,
-            },
-            "components": {
-                "self": {"enabled": True, "weight": 1.0},
-                "mutual": {"enabled": False, "weight": 0.0},
             },
         },
     }

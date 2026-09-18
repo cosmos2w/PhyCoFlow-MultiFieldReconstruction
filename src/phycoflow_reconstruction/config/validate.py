@@ -48,16 +48,6 @@ def _require_mapping(config: Mapping[str, Any], key: str) -> Mapping[str, Any]:
     return value
 
 
-def _coherence_component_enabled(
-    family_name: str, component_name: str, settings: Mapping[str, Any]
-) -> bool:
-    """Resolve component activation without implicitly enabling unstable terms."""
-    default_enabled = not (
-        family_name == "cross_spectrum" and component_name == "self_spectrum"
-    )
-    return bool(settings.get("enabled", default_enabled))
-
-
 def _validate_common_sections(config: Mapping[str, Any]) -> None:
     dataset = _require_mapping(config, "dataset")
     _reject_unknown(
@@ -492,161 +482,7 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
     if query_policy not in {"random_per_sample", "fixed_shared"}:
         raise ValueError("coherence.compute_budget.query_policy is invalid")
 
-    families = coherence.get("families", {})
-    supported_families = {"global_distribution", "cross_spectrum", "topology"}
-    if not isinstance(families, Mapping) or not families:
-        raise ValueError("post-training coherence must configure at least one family")
-    unknown_families = sorted(set(families) - supported_families)
-    if unknown_families:
-        raise ValueError(f"unsupported coherence families: {unknown_families}")
-    enabled_families = [name for name, settings in families.items() if bool(settings.get("enabled", True))]
-    if not enabled_families:
-        raise ValueError("post-training coherence must enable at least one family")
-    if any(name in {"cross_spectrum", "topology"} for name in enabled_families) and (
-        query_policy != "fixed_shared"
-    ):
-        raise ValueError("cross_spectrum/topology coherence requires query_policy=fixed_shared")
-
-    common_family_keys = {
-        "enabled",
-        "weight",
-        "target_use",
-        "units",
-        "fields",
-        "reference_bank",
-        "components",
-    }
-    reference_keys = {"enabled", "path", "max_samples", "points_per_sample", "seed"}
-    for family_name, family in families.items():
-        if not isinstance(family, Mapping):
-            raise TypeError(f"coherence.families.{family_name} must be a mapping")
-        extra_keys = {
-            "global_distribution": set(),
-            "cross_spectrum": {"pairs", "graph", "eps"},
-            "topology": {"geometry", "filtration"},
-        }[family_name]
-        _reject_unknown(
-            family,
-            common_family_keys | extra_keys,
-            f"coherence.families.{family_name}",
-        )
-        family_weight = float(family.get("weight", 1.0))
-        family_enabled = bool(family.get("enabled", True))
-        if family_weight < 0 or (family_enabled and family_weight <= 0):
-            raise ValueError(f"enabled coherence family {family_name} weight must be positive")
-        target_use = family.get("target_use", "training_reference")
-        if target_use not in {"training_reference", "paired_supervised"}:
-            raise ValueError(f"{family_name}.target_use is invalid")
-        if family.get("units", "model_units") not in {"model_units", "physical_units"}:
-            raise ValueError(f"{family_name}.units is invalid")
-        reference = family.get("reference_bank", {})
-        _reject_unknown(reference, reference_keys, f"{family_name}.reference_bank")
-        if target_use == "training_reference" and bool(family.get("enabled", True)):
-            if not bool(reference.get("enabled", True)):
-                raise ValueError("training_reference coherence requires an enabled reference bank")
-            if (
-                int(reference.get("max_samples", 0)) < 1
-                or int(reference.get("points_per_sample", 0)) < 2
-            ):
-                raise ValueError("reference bank requires max_samples>=1 and points_per_sample>=2")
-            if int(reference["points_per_sample"]) != int(compute["point_count"]):
-                raise ValueError("reference-bank and coherence compute point counts must match")
-
-        components = family.get("components", {})
-        if not isinstance(components, Mapping) or not components:
-            raise ValueError(f"{family_name}.components cannot be empty")
-        component_keys = {
-            "global_distribution": {
-                "self": {"enabled", "weight", "channel_weights"},
-                "mutual": {"enabled", "weight", "pairs", "directions", "seed"},
-                "cross": {
-                    "enabled", "weight", "directions", "top_fraction", "seed",
-                    "include_axes", "qmc",
-                },
-            },
-            "cross_spectrum": {
-                "self_spectrum": {"enabled", "weight"},
-                "same_frequency": {"enabled", "weight"},
-                "cross_frequency": {"enabled", "weight"},
-                "band_energy": {"enabled", "weight"},
-            },
-            "topology": {
-                "self": {"enabled", "weight"},
-                "mutual": {
-                    "enabled",
-                    "weight",
-                    "pairs",
-                    "lines",
-                    "theta_min_degrees",
-                    "axis_tolerance",
-                },
-            },
-        }[family_name]
-        _reject_unknown(components, set(component_keys), f"{family_name}.components")
-        for component_name, settings in components.items():
-            _reject_unknown(
-                settings,
-                component_keys[component_name],
-                f"{family_name}.components.{component_name}",
-            )
-            component_weight = float(settings.get("weight", 1.0))
-            component_enabled = _coherence_component_enabled(
-                family_name, component_name, settings
-            )
-            if component_weight < 0 or (component_enabled and component_weight <= 0):
-                raise ValueError("enabled coherence component weights must be positive")
-        if family_enabled and not any(
-            _coherence_component_enabled(family_name, component_name, settings)
-            and float(settings.get("weight", 1.0)) > 0
-            for component_name, settings in components.items()
-        ):
-            raise ValueError(
-                f"enabled coherence family {family_name} requires a positive enabled component"
-            )
-
-        if family_name == "cross_spectrum":
-            graph = family.get("graph", {})
-            _reject_unknown(
-                graph,
-                {"k_neighbors", "sigma", "num_modes", "exclude_zero", "bands"},
-                "cross_spectrum.graph",
-            )
-            if int(graph.get("k_neighbors", 16)) < 1 or int(graph.get("num_modes", 64)) < 1:
-                raise ValueError("cross_spectrum graph sizes must be positive")
-            cross_frequency = components.get("cross_frequency", {})
-            cross_active = family_enabled and family_weight > 0 and bool(cross_frequency.get("enabled", True)) and float(cross_frequency.get("weight", 1.0)) > 0
-            if cross_active and int(compute["batch_size"]) < 3:
-                raise ValueError("cross-frequency coherence requires compute batch_size>=3")
-            same_frequency = components.get("same_frequency", {})
-            same_active = family_enabled and family_weight > 0 and bool(same_frequency.get("enabled", True)) and float(same_frequency.get("weight", 1.0)) > 0
-            if same_active and int(compute["batch_size"]) < 2:
-                raise ValueError("same-frequency coherence requires compute batch_size>=2")
-            evaluation_minimum = 3 if cross_active else 2 if same_active else 1
-            if int(config.get("evaluation", {}).get("max_samples", 1)) < evaluation_minimum:
-                raise ValueError(
-                    f"evaluation.max_samples must be >= {evaluation_minimum} for active spectral components"
-                )
-        elif family_name == "topology":
-            geometry = family.get("geometry", {})
-            _reject_unknown(
-                geometry,
-                {
-                    "grid_shape",
-                    "axes",
-                    "neighbors",
-                    "power",
-                    "periodic",
-                    "periods",
-                    "allow_projected_collisions",
-                },
-                "topology.geometry",
-            )
-            filtration = family.get("filtration", {})
-            _reject_unknown(
-                filtration,
-                {"quantiles", "dimensions", "directions", "sharpness", "smoothing_sigma"},
-                "topology.filtration",
-            )
+    _validate_coherence_families(coherence, compute, config)
 
     if int(config["optimization"].get("batch_size", 1)) < int(compute["batch_size"]):
         raise ValueError("optimization.batch_size must be >= coherence.compute_budget.batch_size")
@@ -896,3 +732,95 @@ def validate_config(config: Mapping[str, Any]) -> None:
         _validate_post_training(config)
     elif stage == "direct_physics":
         _validate_direct_physics(config)
+
+
+_COMMON_FAMILY_KEYS = {
+    "enabled",
+    "weight",
+    "target_use",
+    "units",
+    "fields",
+    "reference_bank",
+    "components",
+}
+_REFERENCE_BANK_KEYS = {"enabled", "path", "max_samples", "points_per_sample", "seed"}
+
+
+def _validate_coherence_families(
+    coherence: Mapping[str, Any], compute: Mapping[str, Any], config: Mapping[str, Any]
+) -> None:
+    """Validate `coherence.families` against the schemas the registered families declare.
+
+    The registry is imported here rather than at module level so that loading a
+    config never pulls in torch, and so an optional family package contributes its
+    schema only when it is actually present.
+    """
+    from ..coherence.registry import family_schemas
+
+    schemas = family_schemas()
+    families = coherence.get("families", {})
+    if not isinstance(families, Mapping) or not families:
+        raise ValueError("post-training coherence must configure at least one family")
+    unknown_families = sorted(set(families) - set(schemas))
+    if unknown_families:
+        raise ValueError(f"unsupported coherence families: {unknown_families}")
+    enabled_families = [name for name, settings in families.items() if bool(settings.get("enabled", True))]
+    if not enabled_families:
+        raise ValueError("post-training coherence must enable at least one family")
+    needs_fixed_shared = [name for name in enabled_families if schemas[name].requires_fixed_shared]
+    if needs_fixed_shared and compute.get("query_policy", "random_per_sample") != "fixed_shared":
+        raise ValueError(
+            f"{'/'.join(needs_fixed_shared)} coherence requires query_policy=fixed_shared"
+        )
+
+    for family_name, family in families.items():
+        if not isinstance(family, Mapping):
+            raise TypeError(f"coherence.families.{family_name} must be a mapping")
+        schema = schemas[family_name]
+        _reject_unknown(
+            family, _COMMON_FAMILY_KEYS | schema.keys, f"coherence.families.{family_name}"
+        )
+        family_weight = float(family.get("weight", 1.0))
+        family_enabled = bool(family.get("enabled", True))
+        if family_weight < 0 or (family_enabled and family_weight <= 0):
+            raise ValueError(f"enabled coherence family {family_name} weight must be positive")
+        target_use = family.get("target_use", "training_reference")
+        if target_use not in {"training_reference", "paired_supervised"}:
+            raise ValueError(f"{family_name}.target_use is invalid")
+        if family.get("units", "model_units") not in {"model_units", "physical_units"}:
+            raise ValueError(f"{family_name}.units is invalid")
+        reference = family.get("reference_bank", {})
+        _reject_unknown(reference, _REFERENCE_BANK_KEYS, f"{family_name}.reference_bank")
+        if target_use == "training_reference" and family_enabled:
+            if not bool(reference.get("enabled", True)):
+                raise ValueError("training_reference coherence requires an enabled reference bank")
+            if (
+                int(reference.get("max_samples", 0)) < 1
+                or int(reference.get("points_per_sample", 0)) < 2
+            ):
+                raise ValueError("reference bank requires max_samples>=1 and points_per_sample>=2")
+            if int(reference["points_per_sample"]) != int(compute["point_count"]):
+                raise ValueError("reference-bank and coherence compute point counts must match")
+
+        components = family.get("components", {})
+        if not isinstance(components, Mapping) or not components:
+            raise ValueError(f"{family_name}.components cannot be empty")
+        _reject_unknown(components, set(schema.components), f"{family_name}.components")
+        effective = False
+        for component_name, settings in components.items():
+            _reject_unknown(
+                settings,
+                set(schema.components[component_name]),
+                f"{family_name}.components.{component_name}",
+            )
+            component_weight = float(settings.get("weight", 1.0))
+            component_enabled = schema.component_enabled(component_name, settings)
+            if component_weight < 0 or (component_enabled and component_weight <= 0):
+                raise ValueError("enabled coherence component weights must be positive")
+            effective = effective or (component_enabled and component_weight > 0)
+        if family_enabled and not effective:
+            raise ValueError(
+                f"enabled coherence family {family_name} requires a positive enabled component"
+            )
+        if schema.check is not None:
+            schema.check(family, compute, config)

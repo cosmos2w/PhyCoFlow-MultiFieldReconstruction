@@ -156,7 +156,7 @@ def test_component_history_report_is_additive_across_inner_outer_and_calibration
 
 
 def test_component_history_report_supports_families_without_component_diagnostics() -> None:
-    path = "topology.self.betti_curves"
+    path = "topology.self.persistence_matching"
     result = FamilyResult(
         component_results={path: TermResult(None, torch.tensor(0.25))},
         per_sample_cost=None,
@@ -174,7 +174,7 @@ def test_component_history_report_supports_families_without_component_diagnostic
 
     report = _component_history_report(result, families)
 
-    prefix = "coherence_component/topology/self.betti_curves"
+    prefix = "coherence_component/topology/self.persistence_matching"
     assert report[f"{prefix}/raw"] == 0.25
     assert report[f"{prefix}/inner_weight"] == 5.0
     assert report[f"{prefix}/weighted_contribution"] == 7.5

@@ -1,0 +1,117 @@
+# Post-training profile: source model, objectives, rollout, and execution settings.
+#
+# EXPERIMENTAL -- topology only. This profile exists for continued
+# development of the topology term, not for formal results. Keep it on a focused
+# branch and record the justification for the pending term in the PR.
+#
+# Source is a native gl_rbf_cq base run. `inherit_base_config: true` means the
+# dataset, model and observations sections below are REPLACED at launch by the
+# source run's resolved_config.yaml; they are kept only so this file validates
+# standalone. Pass the run directory with --override source_run=...
+
+# Composition order; later files override earlier defaults.
+defaults:
+  - ../dataset.yaml
+  - ../sensors/T_only_random_192_384.yaml
+  - ../coherence/topology_native.yaml
+
+# Run identity. Choices: base_training | post_training | direct_physics.
+stage: post_training  # choices: base_training | post_training | direct_physics
+case: turbulent_combustion
+
+# Source checkpoint selection for post-training.
+# source_run is intentionally null: supply it per launch with --override.
+source_run: null
+source_checkpoint: best.pt
+inherit_base_config: true
+
+# Source adapter. kind choices: native_run | legacy_demo50.
+# allow_integration_source stays false so a one-step smoke checkpoint is refused.
+source: {kind: native_run, allow_integration_source: false}
+
+# Dataset source, representation, field schema, and normalization.
+# Inherited from the source run at launch; mirrored here for standalone validation.
+dataset:
+  normalization: mean_std  # choices: none | mean_std | robust_99
+  normalization_stats_path: configs/normalization/train_mean_std.json
+
+# Model family and architecture settings. Inherited from the source run at launch.
+model: {name: gl_rbf_cq, backbone: GL_rbf_ENH_CQ}
+
+# Enabled loss terms and their relative weights.
+objectives:
+  data_retention: {enabled: true, weight: 0.1}
+  coherence: {enabled: true, weight: 1.0}
+
+# Differentiable rollout. solver choices: euler | heun.
+rollout: {steps: 2, solver: euler}
+
+# Observation enforcement. mode choices: none | hard | endpoint | endpoint_smooth.
+observation_consistency:
+  mode: endpoint_smooth  # choices: none | hard | endpoint | endpoint_smooth
+  strength: 1.0
+  sigma: 0.05
+  schedule_power: 2.0
+  final_clamp: true
+  chunk_size: 4096
+
+# Trainable scope. Choices: full_model | named_modules.
+trainable: {scope: full_model}
+
+# Training duration, batch sizing, optimizer, and gradient controls.
+# batch_size must not fall below coherence.compute_budget.batch_size (8).
+optimization:
+  epochs: 1000
+  batch_size: 32
+  train_fraction: 0.25
+  lr: 5.0e-5
+  weight_decay: 1.0e-6
+  grad_clip: 1.0
+  gradient_balance: config  # choices: weighted_sum | config
+  config_missing_behavior: error  # choices: error | weighted_sum
+  config_data_grad_scale: 1.0
+  config_coherence_grad_scale: 1.0
+
+# Reproducibility and execution. data_strategy choices: auto | vram | async_cpu.
+runtime:
+  seed: 42
+  device: cuda:0  # choices: cpu | cuda[:index]
+  deterministic: true
+  num_workers: 0
+  data_strategy: async_cpu  # choices: auto | vram | async_cpu
+  progress: true
+  plot_every_steps: 1
+
+# Validation and preview policy. split choices: train | validation | test.
+evaluation:
+  split: validation  # choices: train | validation | test
+  max_samples: 32
+  query_points: 4096  # must equal coherence.compute_budget.point_count
+  generation_steps: 2
+  seed: 2027
+  preview:
+    enabled: true  # required by checkpointing.selection_metric: reconstruction_mse
+    loss_every_epochs: 10
+    reconstruct_every_epochs: 200
+    split: validation  # choices: train | validation | test
+    sample_index: 0
+    query_points: 4096
+    generation_steps: 2
+    seed: 2027
+    keep_history: true
+
+# Checkpoint enablement and save cadence.
+checkpointing:
+  enabled: true
+  every_epochs: 5
+  save_epoch_one: true
+  selection_metric: reconstruction_mse  # choices: native_validation_loss | reconstruction_mse
+
+# Guard against the coherence term degrading supervised fidelity.
+posttrain_fidelity:
+  max_relative_mse_increase: 0.05
+  behavior: report  # choices: report | warn | error
+
+# Stable experiment identifier used for the run directory.
+output:
+  experiment_name: tc_gl_rbf_cq_topology_posttrain

@@ -582,7 +582,7 @@ The implemented data-driven families are
 
 $$
 \mathfrak F=
-\{\text{global distribution},\text{cross-spectrum},\text{topology}\}.
+\{\text{global distribution},\text{cross-spectrum},\text{topology persistence}\}.
 $$
 
 For enabled family $F$ and component $k$, let $w_F$ and $w_{Fk}$ be configured nonnegative weights. A family produces
@@ -756,69 +756,66 @@ Current drawbacks:
 
 ### 7.4 Topology coherence
 
-Topology v1 projects coordinates to two dimensions and precomputes an inverse-distance linear raster map
+The topology family projects coordinates to two dimensions and precomputes an inverse-distance linear raster map
 
 $$
 \mathcal R:\mathbb R^{B\times N\times C}
 \longrightarrow\mathbb R^{B\times C\times H\times W}.
 $$
 
-Periodic cases tile coordinate images across seams before interpolation. Optional Gaussian smoothing is applied on the raster.
+The raster map can tile coordinate images across periodic seams, but this family rejects periodic geometry because creator separations are measured in the plain box. Optional Gaussian smoothing is applied on the raster.
 
-For threshold $\tau$, a superlevel filtration uses
+The `topology` family compares full persistence diagrams through an optimal partial matching. The matching carries transport gradients between bars, so it can move a feature rather than only shrink it, which is what a level-set count comparison cannot do. The family is experimental. A Betti-curve alternative is kept as an optional detached package under `families/topology_betti/`, which is gitignored rather than tracked; when that package is present it registers as `topology_betti`, and its definition lives in its own README rather than here.
 
-$$
-K_\tau^{+}=\{p:g(p)\ge\tau\},
-$$
-
-and a sublevel filtration uses
+Both fields are min-max normalized by the *reference* field's statistics, per sample, direction and field, so the compared diagrams live in a common box. For direction sign $\sigma$ ($+1$ sublevel, $-1$ superlevel), the lower-star filtration of $\sigma g$ on the cubical complex reduces to a persistence diagram
 
 $$
-K_\tau^{-}=\{p:g(p)\le\tau\}.
+D_d^{\sigma}(g)=\{(b_k,\,\delta_k,\,x_k)\}_k,
+\qquad d\in\mathcal D\subseteq\{0,1\},
 $$
 
-A detached union-find ordering obtains exact hard-forward connected-component births and deaths for $\beta_0(\tau)$. On the cubical grid,
+writing $b$ for birth, $\delta$ for death and $x_k$ for the bar's creator, the birth vertex carried through the reduction so the cost can see *where* a feature lives. Essential bars die at the larger of the two fields' maxima. Finite bars whose persistence $|\delta_k-b_k|$ falls below `matching.min_persistence`, a fraction of the reference's value range, are dropped at the reduction: a smoothed field's diagram is mostly such bars, they only ever match the diagonal, and removing them shrinks a cubic assignment.
+
+Between a generated bar $u$ and a reference bar $v$ the ground metric is L1 in birth and death, modified by the creator separation
 
 $$
-\chi(\tau)=V(\tau)-E(\tau)+F(\tau),
+\pi_{uv}=|b_u-b_v|+|\delta_u-\delta_v|,
+\qquad
+s_{uv}=\frac{\lVert x_u-x_v\rVert_1}{\operatorname{diag}},
 $$
 
-so
+with $\operatorname{diag}$ the bounding-box diagonal, so $s_{uv}=1$ means opposite corners. The two `matching.spatial_mode` choices are
 
 $$
-\beta_1(\tau)=\beta_0(\tau)-\chi(\tau)+\beta_2(\tau),
+c_{uv}=
+\begin{cases}
+\bigl(\pi_{uv}\,(1+\lambda s_{uv})\bigr)^{p} & \text{multiplicative},\\
+\bigl(\pi_{uv}+\lambda s_{uv}\bigr)^{p} & \text{additive},
+\end{cases}
 $$
 
-with the periodic full-domain $\beta_2$ correction where applicable. Straight-through sigmoid indicators preserve hard counts in the forward pass while supplying approximate gradients.
-
-For selected dimensions $d\in\mathcal D$ and thresholds $\tau_j$, `self.betti_curves` uses
+for `matching.order` $p$ and `matching.lambda_spatial` $\lambda$; $\lambda=0$ recovers plain matching exactly. Sending a bar to the diagonal costs its powered persistence, so for the optimal partial matching $M^{\star}$, `self.persistence_matching` is
 
 $$
-\mathcal L_{\mathrm{Betti}}
-=\frac{1}{|\mathcal D|J}
-\sum_{d\in\mathcal D}\sum_{j=1}^{J}
-\left(\beta_d^{X}(\tau_j)-\beta_d^{Y}(\tau_j)\right)^2.
+\mathcal L_{\mathrm{match}}
+=\Bigl(
+\sum_{(u,v)\in M^{\star}}c_{uv}
++\sum_{u\notin M^{\star}}|\delta_u-b_u|^{p}
++\sum_{v\notin M^{\star}}|\delta_v-b_v|^{p}
+\Bigr)^{1/p},
 $$
 
-For field pair $(i,j)$, `mutual.fibered_betti_curves` first standardizes both axes with detached reference moments. For a positive-slope line with origin $(s_0,t_0)$ and direction $(v_1,v_2)$, it reduces the two-parameter filtration to
+averaged over directions, fields and degrees. $M^{\star}$ is obtained from the reduced rectangular problem with entries $\min(c_{uv}-|\delta_u-b_u|^{p}-|\delta_v-b_v|^{p},\,0)$, so only strictly negative reduced costs are matched and every other bar resolves to the diagonal; ties resolve as "both to the diagonal", which has the same value either way. The assignment and the generators are computed on detached values, so the reported distance is exact and its gradient is the subgradient of the piecewise-constant matching. At an exactly zero distance, or an exactly zero term under a fractional power, the gradient is taken to be the zero subgradient rather than the NaN autograd produces from a root's infinite slope, which makes $p>1$ safe on identical fields.
 
-$$
-h(p)
-=\min\left(
-\frac{g_i(p)-s_0}{v_1},
-\frac{g_j(p)-t_0}{v_2}
-\right),
-$$
-
-then compares the induced $\beta_0$ and $\beta_1$ curves.
+For field pair $(i,j)$, `mutual.fibered_matching` restricts the two-parameter filtration to monotone lines through the lower-left corner of the reference-normalized value box, with angles drawn from $(\alpha,1-\alpha)\tfrac{\pi}{2}$ for `mutual.angle_margin` $\alpha$. Each line reduces the pair to one scalar field, whose barcode is matched as above, and the per-line distances are averaged. `line_sampling: stratified` draws one angle per equal bin and needs fewer lines for the same estimate; `uniform` draws them independently. Lines are redrawn on every call from a seeded generator whose state travels in the family artifact, so the term is a stochastic estimate of the sliced matching distance and a resumed run continues the same stream.
 
 Current drawbacks:
 
 - Rasterization can change topology, especially on irregular clouds, coarse grids, boundaries, and sparsely supported regions.
-- The implementation is two-dimensional and measures only configured $\beta_0/\beta_1$ curves; it does not localize features or compare full persistence diagrams.
-- Union-find order is detached and straight-through indicators have biased gradients. A loss decrease need not correspond to the true derivative of hard topology.
-- Thresholds are reference-quantile dependent, and mutual topology samples only a configured line fan through a two-parameter filtration.
-- Exact topology calculations over many thresholds, fields, and line slices can be expensive.
+- The matching is exact but its gradient is a subgradient of a piecewise-constant assignment: it is zero wherever the optimal pairing does not change, and it lives only at generator vertices, so no diagram loss can create a feature that is entirely absent.
+- A multiplicative spatial weight can block recovery of a removed feature by sending its candidate partner to the diagonal. A schedule that starts at $\lambda=0$ and raises it later avoids that; the additive mode does not.
+- Geometry must be nonperiodic, because creator separations are measured in the plain box.
+- The mutual term is a stochastic estimate, so its value fluctuates between calls at a fixed field pair even with a fixed seed stream.
 
 ### 7.5 Reference policies and target leakage boundary
 
