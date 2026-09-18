@@ -13,7 +13,11 @@ from phycoflow_reconstruction.coherence.families.cross_spectrum.family import (
 )
 from phycoflow_reconstruction.coherence.families.cross_spectrum.statistics import (
     auto_spectrum,
+    auto_spectrum_mean_square,
+    auto_spectrum_mean_square_values,
     graph_fourier,
+    self_spectrum_coherence,
+    self_spectrum_coherence_scores,
 )
 from phycoflow_reconstruction.contracts import DataSpec
 from phycoflow_reconstruction.data.normalization import FieldNormalizer
@@ -160,3 +164,166 @@ def test_self_spectrum_can_run_standalone_for_one_field_without_pairs() -> None:
     assert tuple(result.component_results) == (
         "cross_spectrum.self_spectrum.auto_spectrum",
     )
+
+
+def _spectral_coefficients() -> torch.Tensor:
+    """Deterministic [batch, mode, field] coefficients for self-spectrum tests."""
+    return torch.tensor(
+        [
+            [
+                [1.0, 2.0],
+                [2.0, 1.0],
+                [3.0, 4.0],
+            ],
+            [
+                [2.0, 1.0],
+                [1.0, 3.0],
+                [4.0, 2.0],
+            ],
+        ],
+        dtype=torch.float32,
+    )
+
+
+def test_auto_spectrum_mean_square_matches_per_field_mean() -> None:
+    reference = _spectral_coefficients()
+    generated = 1.5 * reference
+
+    values = auto_spectrum_mean_square_values(generated, reference)
+    aggregate = auto_spectrum_mean_square(generated, reference)
+
+    torch.testing.assert_close(aggregate, values.mean())
+
+
+def test_self_spectrum_coherence_exact_agreement_is_one() -> None:
+    reference = _spectral_coefficients()
+
+    scores = self_spectrum_coherence_scores(
+        reference,
+        reference,
+        eps=1.0e-8,
+    )
+    aggregate = self_spectrum_coherence(
+        reference,
+        reference,
+        eps=1.0e-8,
+    )
+
+    assert scores.shape == (reference.shape[-1],)
+    assert aggregate.ndim == 0
+
+    torch.testing.assert_close(scores, torch.ones_like(scores))
+    torch.testing.assert_close(
+        aggregate,
+        torch.tensor(1.0, dtype=aggregate.dtype),
+    )
+
+
+def test_self_spectrum_coherence_has_expected_scaled_power_score() -> None:
+    reference = _spectral_coefficients()
+    generated = 2.0 * reference
+
+    scores = self_spectrum_coherence_scores(
+        generated,
+        reference,
+        eps=1.0e-8,
+    )
+
+    # Scaling coefficients by 2 scales auto-spectrum power by 4:
+    #
+    #   score = 1 - ||4P - P|| / (||4P|| + ||P||)
+    #         = 1 - 3 / 5
+    #         = 0.4
+    expected = torch.full_like(scores, 0.4)
+
+    torch.testing.assert_close(
+        scores,
+        expected,
+        rtol=1.0e-5,
+        atol=1.0e-6,
+    )
+
+
+def test_self_spectrum_coherence_zero_power_is_finite() -> None:
+    reference = torch.zeros((2, 3, 2), dtype=torch.float32)
+    generated = torch.zeros_like(reference)
+
+    scores = self_spectrum_coherence_scores(
+        generated,
+        reference,
+        eps=1.0e-8,
+    )
+    aggregate = self_spectrum_coherence(
+        generated,
+        reference,
+        eps=1.0e-8,
+    )
+
+    assert torch.isfinite(scores).all()
+    assert torch.isfinite(aggregate)
+
+    torch.testing.assert_close(scores, torch.ones_like(scores))
+    torch.testing.assert_close(
+        aggregate,
+        torch.tensor(1.0, dtype=aggregate.dtype),
+    )
+
+
+def test_self_spectrum_coherence_is_symmetric_and_bounded() -> None:
+    reference = _spectral_coefficients()
+    generated = reference.clone()
+
+    generated[:, 0, 0] *= 4.0
+    generated[:, 1, 1] *= 0.25
+
+    forward = self_spectrum_coherence_scores(
+        generated,
+        reference,
+        eps=1.0e-8,
+    )
+    reverse = self_spectrum_coherence_scores(
+        reference,
+        generated,
+        eps=1.0e-8,
+    )
+
+    torch.testing.assert_close(forward, reverse)
+
+    assert torch.isfinite(forward).all()
+    assert torch.all(forward >= 0.0)
+    assert torch.all(forward <= 1.0)
+    assert torch.any(forward < 1.0)
+
+
+def test_self_spectrum_coherence_has_finite_gradients() -> None:
+    reference = _spectral_coefficients()
+
+    # Keep the statistic away from either clamp boundary so this tests
+    # differentiation through the interior of the agreement score.
+    generated = (1.5 * reference).clone().requires_grad_(True)
+
+    loss = 1.0 - self_spectrum_coherence(
+        generated,
+        reference,
+        eps=1.0e-8,
+    )
+    loss.backward()
+
+    assert generated.grad is not None
+    assert torch.isfinite(generated.grad).all()
+    assert generated.grad.abs().sum() > 0.0
+
+
+def test_self_spectrum_coherence_rejects_misaligned_coefficients() -> None:
+    generated = torch.zeros((2, 3, 2))
+    reference = torch.zeros((2, 3, 1))
+
+    with pytest.raises(
+        ValueError,
+        match=r"self-spectrum coefficients must align as \[B,K,C\]",
+    ):
+        self_spectrum_coherence_scores(
+            generated,
+            reference,
+            eps=1.0e-8,
+        )
