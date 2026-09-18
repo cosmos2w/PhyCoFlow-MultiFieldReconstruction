@@ -2,7 +2,7 @@
 
 PhyCoFlow reconstructs complete physical states from sparse, multi-field measurements. The primary research workflow studies whether data-driven physical-coherence post-training improves the coherence of a reconstructed state while preserving the immutable source checkpoint and the supervised data contract.
 
-> **Development status — please read before launching coherence runs.** The cross-spectrum `self_spectrum` term and the **entire `topology` coherence family** are pending further development by coworkers. The current self-spectrum raw-power calculation can be unstable, so `self_spectrum` is disabled by default and runs only when `enabled: true` is written explicitly. Topology code is present for continued development and compatibility work, but should be treated as experimental rather than a supported result-producing workflow. For normal experiments, start with `global_distribution` and/or the distinct-field cross-spectrum terms (`same_frequency` and `cross_frequency`). Record and justify any use of the pending terms in the run config and pull request.
+> **Development status — please read before launching coherence runs.** The cross-spectrum `self_spectrum` term and the **`topology` coherence family** are pending further development by coworkers. The current self-spectrum raw-power calculation can be unstable, so `self_spectrum` is disabled by default and runs only when `enabled: true` is written explicitly. Topology code is present for continued development and compatibility work, but should be treated as experimental rather than a supported result-producing workflow. For normal experiments, start with `global_distribution` and/or the distinct-field cross-spectrum terms (`same_frequency` and `cross_frequency`). Record and justify any use of the pending terms in the run config and pull request.
 
 The standard lifecycle is:
 
@@ -53,7 +53,7 @@ conda activate phycoflow_reconstruction
 python -m pip install -e '.[dev]'
 ```
 
-The optional `operator` extra provides `neuraloperator` for GeoFNO and the FNO PointCloudFFM backbone. The `posttrain` extra provides ConFIG gradient balancing, and `legacy` provides the optional Demo50 neighbor-search path. Install only the extras needed by the selected config, for example `python -m pip install -e '.[dev,operator,posttrain]'`.
+The optional `operator` extra provides `neuraloperator` for GeoFNO and the FNO PointCloudFFM backbone. The `posttrain` extra provides ConFIG gradient balancing, and `legacy` provides the optional Demo50 neighbor-search path. The `topology` extra provides GUDHI, which the `topology` family requires for its host-side cubical reduction; the family fails at construction without it. Its host work runs on a small thread pool sized from the process CPU affinity and capped at eight; set `PHYCOFLOW_TOPOLOGY_WORKERS` to pin that size, or to `1` to keep everything inline. Install only the extras needed by the selected config, for example `python -m pip install -e '.[dev,operator,posttrain]'`.
 
 ### 1.1 First successful local run
 
@@ -112,7 +112,7 @@ The reusable implementation is under `src/phycoflow_reconstruction/`:
 - `contracts.py` defines dataset, observation, reconstruction, loss, capability, coherence, and physics boundaries;
 - `data/` handles payload adapters, normalization, splits, manifests, and sensor protocols;
 - `models/` contains deterministic, generative, operator, flow, and isolated historical-compatibility adapters;
-- `coherence/` contains reference banks, family composition, observation consistency, and the global-distribution, cross-spectrum, and topology families;
+- `coherence/` contains reference banks, family composition, observation consistency, and the global-distribution, cross-spectrum, and topology-persistence families;
 - `training/` owns base training, coherence/physics post-training, direct physics, checkpoints, rollout, previews, and monitoring;
 - `evaluation/`, `physics/`, `config/`, and `cli.py` provide shared evaluation, case-independent physics interfaces, config composition, and command routing.
 
@@ -313,7 +313,7 @@ Stage 2 strictly loads and freezes the Stage-1 autoencoder. It is the sparse rec
 
 Post-training creates a child run from a completed, immutable base run. The selected source checkpoint is loaded strictly, while the dataset, model, observations, normalization, and provenance are inherited from the source run's `resolved_config.yaml`; the source run is hashed before and after training and is never modified.
 
-For current coworker-facing experiments, use `global_distribution`, `cross_spectrum.same_frequency`, and/or `cross_spectrum.cross_frequency`. The cross-spectrum `self_spectrum` term and every `topology` term remain development work; topology profiles and implementation are retained so coworkers can improve and test them, not as a recommendation for formal runs.
+For current coworker-facing experiments, use `global_distribution`, `cross_spectrum.same_frequency`, and/or `cross_spectrum.cross_frequency`. The cross-spectrum `self_spectrum` term and the topology term remain development work; the topology profiles and implementation are retained so coworkers can improve and test them, not as a recommendation for formal runs. The topology term is `topology`, which compares full persistence diagrams through an optimal matching. A Betti-curve alternative survives only as an optional detached package under `src/phycoflow_reconstruction/coherence/families/topology_betti/`, documented in its own README; nothing else in the repository refers to it. That directory is gitignored, so a fresh clone does not contain it and the `topology_betti` family is simply never registered.
 
 ### 6.1 Prepare a portable configuration
 
@@ -423,7 +423,7 @@ python cases/<case>/run.py post-train \
 
 Choose the checkpoint explicitly: `best.pt` starts from the best fixed-validation reconstruction, while `last.pt` starts from the final training state. Add `--override runtime.device=<device>` when the config's default device is unsuitable. A successful launch creates `cases/<case>/runs/<experiment_name>/<run-id>/` containing the resolved config, parent/checkpoint lineage and hashes, checkpoints, metrics, previews, and fidelity report. Use `--max-steps 1` only for an intentional smoke run; set `source.allow_integration_source=true` only when the source itself is explicitly an incomplete integration fixture.
 
-The implemented family names are `global_distribution`, `cross_spectrum`, and `topology`, and one leaf config can compose several families over the same differentiable reconstruction. Only the supported global-distribution and distinct-field cross-spectrum paths should be selected for normal runs; the entire topology family remains pending coworker development. The cleaned GL-RBF/CQ path follows this lifecycle while preserving state-dict keys, seeded behavior, cached-K/V execution, query microbatching, geometry/reconstruction caches, EMA state, and observation consistency.
+The implemented family names are `global_distribution`, `cross_spectrum`, and `topology`, and one leaf config can compose several families over the same differentiable reconstruction. Only the supported global-distribution and distinct-field cross-spectrum paths should be selected for normal runs; the topology family remains pending coworker development. The cleaned GL-RBF/CQ path follows this lifecycle while preserving state-dict keys, seeded behavior, cached-K/V execution, query microbatching, geometry/reconstruction caches, EMA state, and observation consistency.
 
 For a physics post-training route, use a case that exposes a differentiable `PhysicsProvider` (currently Brusselator):
 
@@ -626,7 +626,7 @@ The paired example below compares the source `last.pt` checkpoint with the AB po
 
 <p align="center"><em>Left: base source. Right: post-training checkpoint. The cross-frequency pair mean increases from 84.4% to 90.6% under the training-aligned estimator.</em></p>
 
-> **Pending topology development:** the entire topology coherence family—including its scientific terms, numerical behavior, training use, intuitive set-level evaluation, and visualization—requires further coworker development and validation. It is intentionally not exposed through `visualize-run --eval-coherence` and should not yet be treated as a supported formal workflow.
+> **Pending topology development:** the `topology` coherence family—its scientific terms, numerical behavior, training use, intuitive set-level evaluation, and visualization—requires further coworker development and validation. It is intentionally not exposed through `visualize-run --eval-coherence` and should not yet be treated as a supported formal workflow.
 
 During training, the fixed validation objective and qualitative reconstruction use independent `evaluation.preview.loss_every_epochs` and `reconstruct_every_epochs` cadences. Validation loss is added to `loss_history.png` and selects `best.pt`; periodic recovery writes only `last.pt`, plus explicitly requested epoch checkpoints. Re-render a portable preview payload with:
 

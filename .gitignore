@@ -68,3 +68,23 @@ local-experiments/
 
 # Optional historical source retained only for local compatibility checks.
 LegacyCoherence/
+
+# Slurm batch job logs written next to the submission directory.
+slurm-*.out
+
+# Personal Claude Code project instructions; not a shared repository contract.
+CLAUDE.local.md
+
+# Untracked historical topology snapshot, kept for reference development only.
+src/phycoflow_reconstruction/coherence/families/topology/oldterm/
+
+# Optional detached Betti-curve coherence package, kept local for continued
+# development only. It registers as `topology_betti` when present and nothing
+# else in the tree refers to it, so it may be absent without any other change.
+src/phycoflow_reconstruction/coherence/families/topology_betti/
+
+# Personal Slurm launch scripts. They carry per-machine partitions, accounts,
+# module lines and GPU indices, so each coworker keeps their own locally.
+# `scripts/slurm/train_tc_gl_rbf_cq_preemptable.sh` predates this rule and is still
+# tracked; ignoring it here has no effect until it is untracked with `git rm --cached`.
+scripts/slurm/*.sh

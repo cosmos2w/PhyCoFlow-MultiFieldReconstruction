@@ -9,6 +9,7 @@ from itertools import product
 import numpy as np
 import torch
 from scipy.spatial import cKDTree
+from torch.nn import functional
 
 
 def coordinate_digest(coordinates: torch.Tensor) -> str:
@@ -166,3 +167,27 @@ def rasterize_fields(
     values = (selected * neighbor_weights[None, :, :, None]).sum(dim=2)
     height, width = grid_shape
     return values.reshape(fields.shape[0], height, width, fields.shape[2]).permute(0, 3, 1, 2)
+
+
+def gaussian_blur(fields: torch.Tensor, sigma: float, periodic: bool) -> torch.Tensor:
+    """Separable Gaussian smoothing of `[B, C, H, W]` rasters; `sigma <= 0` is identity."""
+    if sigma <= 0:
+        return fields
+    radius = max(1, int(np.ceil(3.0 * sigma)))
+    axis = torch.arange(-radius, radius + 1, device=fields.device, dtype=fields.dtype)
+    kernel = torch.exp(-0.5 * (axis / float(sigma)).square())
+    kernel = kernel / kernel.sum()
+    channels = fields.shape[1]
+    horizontal = kernel.reshape(1, 1, 1, -1).expand(channels, 1, 1, -1)
+    vertical = kernel.reshape(1, 1, -1, 1).expand(channels, 1, -1, 1)
+    mode = "circular" if periodic else "reflect"
+    result = functional.conv2d(
+        functional.pad(fields, (radius, radius, 0, 0), mode=mode),
+        horizontal,
+        groups=channels,
+    )
+    return functional.conv2d(
+        functional.pad(result, (0, 0, radius, radius), mode=mode),
+        vertical,
+        groups=channels,
+    )

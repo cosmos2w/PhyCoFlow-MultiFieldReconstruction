@@ -21,11 +21,13 @@ operator = ["neuraloperator==2.0.0", "wrapt>=1.16,<2"]
 keops = ["pykeops==2.3"]
 legacy = ["pykeops==2.3"]
 posttrain = ["conflictfree==0.1.8"]
+topology = ["gudhi>=3.12"]
 plot = ["matplotlib>=3.7"]
 dev = ["pytest>=8", "ruff>=0.5"]
 all = [
   "matplotlib>=3.7",
   "conflictfree==0.1.8",
+  "gudhi>=3.12",
   "neuraloperator==2.0.0",
   "pykeops==2.3",
   "pytest>=8",
@@ -40,7 +42,9 @@ phycoflow-reconstruct = "phycoflow_reconstruction.cli:main"
 where = ["src"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+# The families root, not one package: a detached optional family carries its own
+# tests and may be absent, and pytest fails outright on a missing testpath.
+testpaths = ["tests", "src/phycoflow_reconstruction/coherence/families"]
 addopts = "-q"
 
 [tool.ruff]

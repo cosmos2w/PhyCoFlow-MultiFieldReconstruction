@@ -1,7 +1,8 @@
-"""Focused correctness checks for the unified three-family coherence runtime."""
+"""Focused correctness checks for the multi-family coherence runtime."""
 
 from __future__ import annotations
 
+import importlib.util
 from pathlib import Path
 
 import torch
@@ -10,7 +11,6 @@ from phycoflow_reconstruction.coherence import build_coherence_family
 from phycoflow_reconstruction.coherence.families.cross_spectrum.statistics import (
     symmetric_relative_coherence_score,
 )
-from phycoflow_reconstruction.coherence.families.topology.betti_curves import betti_curves
 from phycoflow_reconstruction.config import load_config
 from phycoflow_reconstruction.config.validate import validate_config
 from phycoflow_reconstruction.contracts import DataSpec, ModelCapabilities, ObservationBatch
@@ -80,32 +80,17 @@ def _cross_config() -> dict:
     }
 
 
-def _topology_config() -> dict:
+def _persistence_config() -> dict:
     return {
         "target_use": "paired_supervised",
         "units": "model_units",
         "fields": ["u", "v"],
-        "geometry": {
-            "grid_shape": [6, 6],
-            "axes": [0, 1],
-            "neighbors": 1,
-            "periodic": False,
-        },
-        "filtration": {
-            "quantiles": [0.25, 0.5, 0.75],
-            "dimensions": [0, 1],
-            "directions": ["superlevel"],
-            "sharpness": 12.0,
-            "smoothing_sigma": 0.0,
-        },
+        "geometry": {"grid_shape": [6, 6], "axes": [0, 1], "neighbors": 1, "periodic": False},
+        "filtration": {"dimensions": [0, 1], "directions": ["sublevel"], "smoothing_sigma": 0.0},
+        "matching": {"min_persistence": 0.0},
         "components": {
             "self": {"enabled": True, "weight": 1.0},
-            "mutual": {
-                "enabled": True,
-                "weight": 1.0,
-                "pairs": [["u", "v"]],
-                "lines": 2,
-            },
+            "mutual": {"enabled": True, "weight": 1.0, "pairs": [["u", "v"]], "lines": 2},
         },
     }
 
@@ -166,21 +151,7 @@ def test_cross_spectrum_is_ensemble_only_geometry_fixed_and_differentiable():
     assert torch.equal(restored.eigenvectors, family.eigenvectors)
 
 
-def test_exact_forward_betti_curves_distinguish_component_and_hole():
-    levels = torch.tensor([0.5])
-    full = torch.ones(5, 5)
-    full_curves = betti_curves(full, levels, (0, 1), sharpness=12.0, periodic=False)
-    assert full_curves[0].item() == 1
-    assert full_curves[1].item() == 0
-
-    ring = torch.ones(5, 5)
-    ring[1:4, 1:4] = 0
-    ring_curves = betti_curves(ring, levels, (0, 1), sharpness=12.0, periodic=False)
-    assert ring_curves[0].item() == 1
-    assert ring_curves[1].item() == 1
-
-
-def test_one_rollout_composes_all_three_families_and_backpropagates():
+def test_one_rollout_composes_every_registered_family_and_backpropagates():
     class ToyFlow(torch.nn.Module):
         capabilities = ModelCapabilities("point", True, True, False, True)
 
@@ -205,8 +176,12 @@ def test_one_rollout_composes_all_three_families_and_backpropagates():
         "cross_spectrum": build_coherence_family(
             "cross_spectrum", _cross_config(), spec, normalizer
         ),
-        "topology": build_coherence_family("topology", _topology_config(), spec, normalizer),
     }
+    if importlib.util.find_spec("gudhi") is not None:
+        # The topology term needs the optional extra; it joins the composition when present.
+        families["topology"] = build_coherence_family(
+            "topology", _persistence_config(), spec, normalizer
+        )
     coordinates = _coordinates().unsqueeze(0).expand(4, -1, -1)
     batch = ObservationBatch(
         obs_coords=coordinates[:, :2],
@@ -237,17 +212,18 @@ def test_one_rollout_composes_all_three_families_and_backpropagates():
     )
     assert reference_ids == ("a", "b", "c", "d")
     assert result.per_sample_cost is None
-    assert {path.split(".")[0] for path in result.component_results} == {
-        "global_distribution",
-        "cross_spectrum",
-        "topology",
-    }
+    assert {path.split(".")[0] for path in result.component_results} == set(families)
     result.scalar_loss.backward()
     assert model.scale.grad is not None and torch.isfinite(model.scale.grad)
-    restored_topology = build_coherence_family("topology", _topology_config(), spec, normalizer)
-    restored_topology.load_state_artifact(families["topology"].state_artifact())
-    assert restored_topology.geometry_sha256 == families["topology"].geometry_sha256
-    assert torch.equal(restored_topology.neighbor_indices, families["topology"].neighbor_indices)
+    if "topology" in families:
+        restored = build_coherence_family(
+            "topology", _persistence_config(), spec, normalizer
+        )
+        restored.load_state_artifact(families["topology"].state_artifact())
+        assert restored.geometry_sha256 == families["topology"].geometry_sha256
+        assert torch.equal(
+            restored.neighbor_indices, families["topology"].neighbor_indices
+        )
 
 
 def test_combined_demo50_template_satisfies_strict_config_contract():

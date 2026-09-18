@@ -2,22 +2,18 @@
 
 The compact reference calculations are independent of production primitives.
 They preserve the archived equations without requiring an optional sibling
-checkout, so every essential A/B/C parity gate runs in a clean CI clone.
+checkout, so every essential A/B parity gate runs in a clean CI clone.
 """
 
 from __future__ import annotations
 
 import math
 
-import pytest
 import torch
 
 from phycoflow_reconstruction.coherence import build_coherence_family
 from phycoflow_reconstruction.coherence.families.cross_spectrum.basis import (
     coordinate_digest,
-)
-from phycoflow_reconstruction.coherence.families.topology.betti_curves import (
-    betti_curves,
 )
 from phycoflow_reconstruction.contracts import DataSpec
 from phycoflow_reconstruction.data.normalization import FieldNormalizer
@@ -267,96 +263,3 @@ def test_cross_spectrum_restored_basis_matches_archived_zero_mode_and_bands() ->
         expected_energy,
     )
     torch.testing.assert_close(actual.scalar_loss, expected_same + expected_cross + expected_energy)
-
-
-def _neighbor_coordinates(
-    row: int, column: int, height: int, width: int, periodic: bool
-):
-    for delta_row, delta_column in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-        next_row = row + delta_row
-        next_column = column + delta_column
-        if periodic:
-            yield next_row % height, next_column % width
-        elif 0 <= next_row < height and 0 <= next_column < width:
-            yield next_row, next_column
-
-
-def _component_count(mask: torch.Tensor, periodic: bool) -> int:
-    height, width = mask.shape
-    seen: set[tuple[int, int]] = set()
-    components = 0
-    for row in range(height):
-        for column in range(width):
-            if not bool(mask[row, column]) or (row, column) in seen:
-                continue
-            components += 1
-            pending = [(row, column)]
-            seen.add((row, column))
-            while pending:
-                current_row, current_column = pending.pop()
-                for neighbor in _neighbor_coordinates(
-                    current_row, current_column, height, width, periodic
-                ):
-                    if bool(mask[neighbor]) and neighbor not in seen:
-                        seen.add(neighbor)
-                        pending.append(neighbor)
-    return components
-
-
-def _hard_betti_oracle(
-    field: torch.Tensor, levels: torch.Tensor, periodic: bool
-) -> dict[int, torch.Tensor]:
-    b0_values = []
-    b1_values = []
-    for level in levels:
-        mask = field >= level
-        b0 = _component_count(mask, periodic)
-        vertices = int(mask.sum())
-        if periodic:
-            horizontal = int((mask & torch.roll(mask, -1, dims=1)).sum())
-            vertical = int((mask & torch.roll(mask, -1, dims=0)).sum())
-            faces = int(
-                (
-                    mask
-                    & torch.roll(mask, -1, dims=1)
-                    & torch.roll(mask, -1, dims=0)
-                    & torch.roll(mask, shifts=(-1, -1), dims=(0, 1))
-                ).sum()
-            )
-            b2 = int(bool(mask.all()))
-        else:
-            horizontal = int((mask[:, :-1] & mask[:, 1:]).sum())
-            vertical = int((mask[:-1, :] & mask[1:, :]).sum())
-            faces = int(
-                (
-                    mask[:-1, :-1]
-                    & mask[:-1, 1:]
-                    & mask[1:, :-1]
-                    & mask[1:, 1:]
-                ).sum()
-            )
-            b2 = 0
-        euler = vertices - horizontal - vertical + faces
-        b0_values.append(b0)
-        b1_values.append(b0 - euler + b2)
-    return {
-        0: torch.tensor(b0_values, dtype=field.dtype),
-        1: torch.tensor(b1_values, dtype=field.dtype),
-    }
-
-
-@pytest.mark.parametrize("periodic", [False, True])
-def test_topology_hard_forward_betti_v1_matches_archived_kernel(periodic: bool) -> None:
-    field = torch.tensor(
-        [
-            [2.0, 2.0, -1.0, -1.0],
-            [2.0, 0.0, 0.0, -1.0],
-            [-1.0, 0.0, 0.0, 2.0],
-            [-1.0, -1.0, 2.0, 2.0],
-        ]
-    )
-    levels = torch.tensor([-1.0, 0.0, 1.0, 2.0])
-    actual = betti_curves(field, levels, (0, 1), sharpness=12.0, periodic=periodic)
-    expected = _hard_betti_oracle(field, levels, periodic)
-    for dimension in (0, 1):
-        torch.testing.assert_close(actual[dimension], expected[dimension])

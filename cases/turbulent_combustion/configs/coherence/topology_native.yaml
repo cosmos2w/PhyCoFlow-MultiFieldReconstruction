@@ -1,44 +1,61 @@
 # Coherence template: compute budget, target source, and enabled components.
+#
+# EXPERIMENTAL. The `topology` family is retained for continued
+# development and compatibility work, not for producing formal results. Any run
+# that uses it must record and justify that choice in the run config and the PR.
+# See CLAUDE.local.md "Research status" and the family README.
 
 # Coherence schedule, compute budget, and statistical families.
 coherence:
 
   # Activation, cadence, and warmup.
-  schedule:
-    start_epoch: 1
-    every_n_steps: 1
-    weight_warmup_epochs: 0
-    interval_rescale: false
+  schedule: {start_epoch: 1, every_n_steps: 1, weight_warmup_epochs: 0, interval_rescale: false}
 
-  # Coherence minibatch and query set. query_policy choices: random_per_sample | fixed_shared.
+  # Coherence minibatch and query set.
+  # topology requires query_policy: fixed_shared -- the point set and
+  # its order must stay fixed, and geometry.py checks it by SHA-256.
+  #
+  # HARD CONSTRAINT: point_count must equal evaluation.query_points in the
+  # profile that includes this file. The family builds its point->raster map on
+  # its first call, which is the pre-training evaluation (point set drawn with
+  # evaluation.query_points), and every later training call re-checks the
+  # coordinate digest (point set drawn with point_count). Both go through
+  # fixed_query_indices over the same logical grid, so unequal counts are
+  # different point sets and the run aborts with
+  # "coordinates changed after raster-map construction".
   compute_budget:
-    batch_size: 4
+    batch_size: 8
     point_count: 4096
     query_policy: fixed_shared  # choices: random_per_sample | fixed_shared
     query_seed: 100045
 
+  # Relative family scaling. Single-family run, so no balancing is applied.
+  family_balance: {mode: none}
+
   # Enabled families: global_distribution | cross_spectrum | topology.
   families:
 
-    # Spatially-aware cubical persistence alignment.
+    # Spatially-aware cubical persistence alignment (EXPERIMENTAL).
     topology:
       enabled: true
-      weight: 1.0
+      weight: 0.01
       target_use: paired_supervised  # choices: training_reference | paired_supervised
       units: model_units  # choices: model_units | physical_units
       fields: [CO, T]
 
-      # Reference target cache; required for training_reference targets.
+      # Reference target cache; required only for training_reference targets.
       reference_bank: {enabled: false}
 
-      # Topology grid and neighborhood geometry. Periodic rasters are not supported:
-      # creator separations are measured in the plain box.
+      # Point set -> raster map and neighborhood geometry. Periodic rasters are
+      # not supported: creator separations are measured in the plain box.
+      # 32x128 keeps the case's 100x403 logical aspect ratio at a tractable cost.
       geometry:
         grid_shape: [32, 128]
         axes: [0, 1]
         neighbors: 4
         power: 2.0
         periodic: false
+        allow_projected_collisions: false
 
       # Lower-star filtration. direction choices: superlevel | sublevel.
       filtration:
