@@ -30,7 +30,9 @@ class RasterMap:
 def _infer_period(values: np.ndarray, axis_name: str) -> float:
     unique = np.unique(values)
     if unique.size < 2:
-        raise ValueError(f"cannot infer topology period for {axis_name}: fewer than two coordinates")
+        raise ValueError(
+            f"cannot infer topology period for {axis_name}: fewer than two coordinates"
+        )
     gaps = np.diff(unique)
     pitch = float(np.median(gaps))
     tolerance = max(1e-10, abs(pitch) * 1e-5)
@@ -52,6 +54,7 @@ def build_raster_map(
     periodic: bool = False,
     periods: tuple[float, float] | None = None,
     allow_projected_collisions: bool = False,
+    antialias_downsample: bool = False,
 ) -> RasterMap:
     """Precompute inverse-distance weights; gradients flow only through field values."""
     if coordinates.ndim != 2 or coordinates.shape[0] < 4:
@@ -62,6 +65,8 @@ def build_raster_map(
     if height < 2 or width < 2:
         raise ValueError("topology grid_shape must contain dimensions >=2")
     coords = coordinates.detach().to(device="cpu", dtype=torch.float64)[:, axes].numpy()
+    if not np.isfinite(coords).all():
+        raise ValueError("topology coordinates must be finite")
     unique_coords = np.unique(coords, axis=0)
     unique_count = int(unique_coords.shape[0])
     collision_fraction = 1.0 - unique_count / float(coords.shape[0])
@@ -95,10 +100,14 @@ def build_raster_map(
             )
         else:
             if len(periods) != 2 or any(not np.isfinite(value) or value <= 0 for value in periods):
-                raise ValueError("topology geometry.periods must contain two positive finite values")
+                raise ValueError(
+                    "topology geometry.periods must contain two positive finite values"
+                )
             resolved_periods = (float(periods[0]), float(periods[1]))
         if any(resolved_periods[index] <= span[index] for index in range(2)):
-            raise ValueError("topology periodic periods must be greater than projected coordinate spans")
+            raise ValueError(
+                "topology periodic periods must be greater than projected coordinate spans"
+            )
     if periodic:
         x = minimum[0] + np.arange(width) * resolved_periods[0] / width
         y = minimum[1] + np.arange(height) * resolved_periods[1] / height
@@ -108,6 +117,28 @@ def build_raster_map(
     grid_y, grid_x = np.meshgrid(y, x, indexing="ij")
     grid = np.stack((grid_x, grid_y), axis=-1).reshape(-1, 2)
 
+    # Use every native lattice value when reducing a complete Cartesian grid.
+    # Express block averaging in the existing fixed linear-map contract so
+    # shuffled point order, checkpointing and autograd need no special path.
+    xs, ys = np.unique(coords[:, 0]), np.unique(coords[:, 1])
+    native_h, native_w = len(ys), len(xs)
+    area_indices = None
+    if (
+        antialias_downsample
+        and unique_count == len(coords) == native_h * native_w
+        and native_h >= height
+        and native_w >= width
+        and native_h % height == 0
+        and native_w % width == 0
+    ):
+        order = np.lexsort((coords[:, 0], coords[:, 1])).reshape(native_h, native_w)
+        factor_h, factor_w = native_h // height, native_w // width
+        area_indices = (
+            order.reshape(height, factor_h, width, factor_w)
+            .transpose(0, 2, 1, 3)
+            .reshape(height * width, factor_h * factor_w)
+        )
+
     source = coords
     source_ids = np.arange(coords.shape[0])
     if periodic:
@@ -115,26 +146,28 @@ def build_raster_map(
         copy_ids = []
         for shift_x, shift_y in product((-1, 0, 1), repeat=2):
             copies.append(
-                coords
-                + np.asarray(
-                    (shift_x * resolved_periods[0], shift_y * resolved_periods[1])
-                )
+                coords + np.asarray((shift_x * resolved_periods[0], shift_y * resolved_periods[1]))
             )
             copy_ids.append(source_ids)
         source = np.concatenate(copies, axis=0)
         source_ids = np.concatenate(copy_ids, axis=0)
-    count = min(max(int(neighbors), 1), coords.shape[0])
-    distances, indices = cKDTree(source).query(grid, k=count)
-    if count == 1:
-        distances = distances[:, None]
-        indices = indices[:, None]
-    indices = source_ids[indices]
-    exact = distances <= 1e-12
-    weights = 1.0 / np.maximum(distances, 1e-12) ** float(power)
-    exact_rows = exact.any(axis=1)
-    if exact_rows.any():
-        weights[exact_rows] = exact[exact_rows].astype(np.float64)
-    weights /= weights.sum(axis=1, keepdims=True)
+    if area_indices is not None:
+        indices = area_indices
+        weights = np.full(indices.shape, 1.0 / indices.shape[1])
+        grid = coords[indices].mean(axis=1)
+    else:
+        count = min(max(int(neighbors), 1), coords.shape[0])
+        distances, indices = cKDTree(source).query(grid, k=count)
+        if count == 1:
+            distances = distances[:, None]
+            indices = indices[:, None]
+        indices = source_ids[indices]
+        exact = distances <= 1e-12
+        weights = 1.0 / np.maximum(distances, 1e-12) ** float(power)
+        exact_rows = exact.any(axis=1)
+        if exact_rows.any():
+            weights[exact_rows] = exact[exact_rows].astype(np.float64)
+        weights /= weights.sum(axis=1, keepdims=True)
     return RasterMap(
         neighbor_indices=torch.from_numpy(indices.astype(np.int64)),
         neighbor_weights=torch.from_numpy(weights).float(),
@@ -149,6 +182,7 @@ def build_raster_map(
             "nearest_spacing_min": float(finite_nearest.min()),
             "nearest_spacing_median": float(np.median(finite_nearest)),
             "nearest_spacing_max": float(finite_nearest.max()),
+            "antialias_applied": int(area_indices is not None),
         },
     )
 

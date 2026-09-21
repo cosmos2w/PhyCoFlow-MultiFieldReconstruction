@@ -49,13 +49,16 @@ def _register_defaults() -> None:
         COHERENCE_FAMILY_REGISTRY.register(
             "topology",
             TopologyFamily,
-            version="1",
+            version="3",
             metadata={
                 "components": (
                     "self.betti_curves",
                     "mutual.fibered_betti_curves",
+                    "self.region", "self.connectivity", "anchor_self.spatial", "mutual.spatial",
+                    "self.persistence", "mutual.persistence",
                 ),
                 "aggregation": "per_sample",
+                "strategies": ("betti_curves", "spatial_self_mutual", "cubical_persistence"),
             },
         )
 

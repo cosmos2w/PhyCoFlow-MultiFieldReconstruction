@@ -14,6 +14,26 @@ from phycoflow_reconstruction.training.preview import (
 from phycoflow_reconstruction.training.run_store import RunStore
 
 
+def test_disabled_preview_is_safe_between_sparse_checkpoints(tmp_path):
+    from phycoflow_reconstruction.training.checkpointing import PeriodicCheckpointManager
+    config = {"evaluation": {"preview": {"enabled": False}},
+              "checkpointing": {"every_epochs": 2, "save_epoch_one": True}}
+    store = SimpleNamespace(run_dir=tmp_path)
+    preview = TrainingReconstructionPreview(config, store=store, steps_per_epoch=9,
+                                            device=torch.device("cpu"))
+    manager = PeriodicCheckpointManager(config, store=store, steps_per_epoch=9)
+    for step in (1, 9, 10, 18, 27):
+        assert not preview.due_loss(step)
+        assert not preview.due_reconstruction(step)
+        assert not preview.due(step)
+        assert manager.due_for_preview_or_checkpoint(step, preview) == (step in (9, 18))
+    assert preview.update(torch.nn.Linear(1, 1), global_step=18, force=True) is None
+    assert preview.last_validation_report is None
+    assert preview.dataset is None and preview.batch is None
+    assert not preview.output_dir.exists()
+    preview.close()
+
+
 def test_relative_l2_error_uses_field_reference_norm():
     truth = np.asarray([3.0, 4.0])
     estimate = np.asarray([0.0, 0.0])

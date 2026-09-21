@@ -1,0 +1,75 @@
+# Current topology method: native-grid sliced persistence.
+coherence:
+  schedule:
+    start_epoch: 1
+    every_n_steps: 1
+    weight_warmup_epochs: 0
+    interval_rescale: false
+  compute_budget:
+    batch_size: 8
+    point_count: 16384
+    query_policy: fixed_shared
+    query_seed: 100045
+  families:
+    topology:
+      enabled: true
+      strategy: cubical_persistence
+      weight: 1.0
+      target_use: paired_supervised
+      units: physical_units
+      fields:
+      - phi
+      - vx
+      - vy
+      reference_bank:
+        enabled: false
+      geometry:
+        grid_shape:
+        - 128
+        - 128
+        axes:
+        - 0
+        - 1
+        neighbors: 4
+        periodic: true
+        periods:
+        - 1.0078740157480315
+        - 1.0078740157480315
+        antialias_downsample: true
+      filtration:
+        directions:
+        - sublevel
+        - superlevel
+        dimensions:
+        - 0
+        - 1
+        smoothing_sigma: 0.0
+      persistence:
+        projections: 32
+        essential_weight: 0.1
+        scale_floor: 0.0001
+        descriptors:
+          vorticity:
+            provider: signed_vorticity
+            fields:
+            - vx
+            - vy
+        distance: sliced_wasserstein
+      components:
+        self:
+          enabled: true
+          weight: 1.0
+          fields:
+          - phi
+          - vx
+          - vy
+        mutual:
+          enabled: true
+          weight: 1.0
+          groups:
+          - - phi
+            - vorticity
+          lines: 4
+          seed: 1729
+          direction_floor: 0.25
+          offset_range: 1.0

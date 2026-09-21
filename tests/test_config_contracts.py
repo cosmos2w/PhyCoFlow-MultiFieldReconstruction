@@ -73,6 +73,7 @@ def test_shared_model_configs_are_the_single_architecture_source():
 def test_case_dataset_catalog_uses_the_canonical_lowercase_root():
     configs = tuple(sorted((PROJECT_ROOT / "cases").glob("*/configs/dataset.yaml")))
     assert {path.parents[1].name for path in configs} == {
+        "active_emulsion",
         "brusselator",
         "kolmogorov",
         "ks",
@@ -82,7 +83,10 @@ def test_case_dataset_catalog_uses_the_canonical_lowercase_root():
     for path in configs:
         dataset = load_config(path)["dataset"]
         assert str(dataset["path"]).startswith("../../datasets/")
-        assert (path.parent / dataset["path"]).resolve().parent.name == path.parents[1].name
+        case_dir = path.parents[1]
+        assert (case_dir / dataset["path"]).resolve().is_relative_to(
+            PROJECT_ROOT / "datasets" / case_dir.name
+        )
 
 
 def test_all_canonical_case_yaml_defaults_resolve():

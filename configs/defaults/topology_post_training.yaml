@@ -1,0 +1,77 @@
+# Sliced-persistence optimization; compose with a case dataset and topology family.
+stage: post_training
+source_run: null
+source_checkpoint: best.pt
+inherit_base_config: true
+source:
+  kind: native_run
+  allow_integration_source: false
+objectives:
+  data_retention:
+    enabled: false
+    weight: 1.0
+  endpoint:
+    enabled: false
+    weight: 1.0
+    variance_floor: 1.0e-08
+  source_anchor:
+    enabled: false
+    weight: 0.2
+    variance_floor: 1.0e-08
+  coherence:
+    enabled: true
+    weight: 1.0
+rollout:
+  steps: 8
+  solver: euler
+observation_consistency:
+  mode: none
+  final_clamp: false
+trainable:
+  scope: full_model
+optimization:
+  model_mode: eval
+  batch_size: 8
+  train_fraction: 1.0
+  lr: 1.0e-06
+  weight_decay: 0.0
+  grad_clip: 1.0
+  gradient_balance: topology_regularized
+  config_missing_behavior: error
+  component_constraints:
+    calibration_batches: 8
+    scale_floor: 0.0001
+    numerical_tolerance: 1.0e-05
+    fidelity_numerical_tolerance: 1.0e-07
+    max_source_anchor_nmse: 0.01
+    topology_reduction: batch_mean
+    fidelity_penalty_weight: 1.0
+    anchor_soft_fraction: 0.5
+    endpoint_soft_fraction: 0.9
+  epochs: 100
+  sampling: full_pass
+runtime:
+  seed: 42
+  device: cuda:0
+  deterministic: true
+  num_workers: 0
+  progress: false
+evaluation:
+  split: validation
+  sample_selection: uniform
+  native_topology: true
+  max_samples: 12
+  generation_steps: 8
+  seed: 2027
+  preview:
+    enabled: false
+checkpointing:
+  enabled: true
+  every_epochs: 1
+  selection_metric: topology_with_fidelity
+  validation_every_epochs: 1
+posttrain_fidelity:
+  max_relative_mse_increase: 0.05
+  max_relative_field_mse_increase: 0.05
+  max_relative_native_topology_increase: 0.0
+  behavior: report

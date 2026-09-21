@@ -18,5 +18,24 @@ notes:
   - Both post-training modes require objectives, rollout, observation_consistency, and trainable.
   - All data-driven families declare training_reference or paired_supervised target use.
   - cross_spectrum and topology require a fixed_shared query policy.
+  - Historical topology.strategy=spatial_self_mutual requires paired_supervised targets; components are self, anchor_self, and mutual.
+  - Historical spatial topology supports physical levels, derived anchors and antialias_downsample; exact_betti is evaluation-only.
+  - topology.strategy=cubical_persistence uses exact periodic cubical pairings and self/mutual persistent diagrams; requires the topology extra.
+  - cubical_persistence requires model_mode=eval, paired targets, matching rollout/evaluation steps, and passing production-rollout parity.
+  - Optional objectives.endpoint and objectives.source_anchor reuse the coherence-cadence rollout and are weighted inside data_retention.
+  - checkpointing.selection_metric=topology_with_fidelity requires a multi-sample validation panel and total/per-field source-relative fidelity budgets.
+  - evaluation.native_topology requires all native grid points; max_relative_native_topology_increase optionally guards its component distances.
   - Cross-frequency coherence requires a coherence ensemble batch of at least three.
   - Observation consistency is a rollout constraint, not a coherence family.
+  - structured_block_mean sensors require observation_consistency.mode=none and final_clamp=false.
+  - A gl_rbf_cq physical_field_transform keeps the native loss/integrator in source coordinates; rollout.solver must match model.ode_solver.
+  - Historical optimization.gradient_balance=component_constrained minimizes source-calibrated topology with explicit source-relative fidelity bounds and checked projected Adam updates.
+  - Historical component_constrained requires topology-only paired native-grid persistence every update, eval mode, fixed train-only calibration, and retention penalties disabled.
+  - optimization.component_constraints sets calibration_batches, scale_floor, max_corrections, max_active_gradients, proposal_objective, numerical_tolerance, fidelity_numerical_tolerance, minimum_relative_descent, projection_margin, and max_source_anchor_nmse.
+  - checkpointing.validation_every_epochs decouples topology panel selection from recovery saves; source and terminal saves always evaluate.
+  - The current topology recipe is cases/active_emulsion/configs/posttrain/topology.yaml with persistence.distance=sliced_wasserstein.
+  - optimization.gradient_balance=topology_regularized uses one batch-average topology/fidelity gradient per Adam update; validation gates select the best checkpoint.
+  - optimization.rollout_execution selects context_cache (none, condition, geometry, static_features) and activation checkpointing for physical CQ models; shared context requires eval mode.
+  - optimization.sampling=full_pass and training_subset select continuous shuffled coverage; steps_per_epoch changes reporting intervals without resetting sampling.
+  - Shared topology optimizer/runtime defaults are in configs/defaults/topology_post_training.yaml; source_run must be explicitly supplied.
+  - training_subset accepts strata_keys and trajectory_key/time_key/frame_key/split_key metadata mappings; default columns are trajectory_id/time/frame/split with no strata.

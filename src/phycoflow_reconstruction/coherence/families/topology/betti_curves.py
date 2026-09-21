@@ -186,10 +186,11 @@ def betti_curves(
     return result
 
 
-def gaussian_blur(fields: torch.Tensor, sigma: float, periodic: bool) -> torch.Tensor:
+def gaussian_blur(fields: torch.Tensor, sigma: float, periodic: bool, *,
+                  radius: int | None = None) -> torch.Tensor:
     if sigma <= 0:
         return fields
-    radius = max(1, int(np.ceil(3.0 * sigma)))
+    radius = max(1, int(np.ceil(3.0 * sigma))) if radius is None else radius
     axis = torch.arange(-radius, radius + 1, device=fields.device, dtype=fields.dtype)
     kernel = torch.exp(-0.5 * (axis / float(sigma)).square())
     kernel = kernel / kernel.sum()
