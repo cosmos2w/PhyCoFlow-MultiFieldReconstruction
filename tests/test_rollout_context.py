@@ -109,6 +109,26 @@ def test_rollout_execution_survives_source_inheritance(tmp_path):
     assert resolved["source"]["inherited_base_keys"] == ["dataset", "model", "observations"]
 
 
+def test_inherited_source_allows_live_ema_evaluation_for_persistence(tmp_path):
+    import yaml
+
+    from phycoflow_reconstruction.cli import _load_case_config
+
+    source = tmp_path / "source"
+    source.mkdir()
+    config = post_config(tmp_path / "synthetic.h5", source)
+    config["model"]["model_ema_eval"] = True
+    (source / "resolved_config.yaml").write_text(yaml.safe_dump(config))
+    config["model"] = {"model_ema_eval": False}
+    path = tmp_path / "posttrain.yaml"
+    path.write_text(yaml.safe_dump(config))
+
+    resolved = _load_case_config(path, tmp_path, "fixture", [])
+    assert resolved["model"]["model_ema_eval"] is False
+    assert resolved["model"]["name"] == "gl_rbf_cq"
+    assert resolved["source"]["config_origins"]["model.model_ema_eval"] == "child_config"
+
+
 @pytest.mark.parametrize("inherit", [False, True])
 def test_rollout_execution_rejects_resolved_model_without_physical_transform(tmp_path, inherit):
     from phycoflow_reconstruction.config import validate_config

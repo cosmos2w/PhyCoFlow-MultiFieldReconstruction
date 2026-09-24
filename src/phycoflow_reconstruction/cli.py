@@ -66,10 +66,13 @@ def _load_case_config(
                     source_config = load_config(source_config_path)
                     if source_config.get("case") != case_name:
                         raise ValueError("source run belongs to a different case")
+                    model_ema_eval = config.get("model", {}).get("model_ema_eval")
                     for key in ("dataset", "model", "observations"):
                         if key not in source_config:
                             raise ValueError(f"source run is missing inheritable section {key!r}")
                         config[key] = source_config[key]
+                    if model_ema_eval is not None:
+                        config["model"]["model_ema_eval"] = model_ema_eval
                     source = config.setdefault("source", {})
                     source["inherited_base_keys"] = ["dataset", "model", "observations"]
                     source["config_origins"] = {
@@ -78,6 +81,8 @@ def _load_case_config(
                         "observations": "source_run.resolved_config.yaml",
                         "post_training": "child_config",
                     }
+                    if model_ema_eval is not None:
+                        source["config_origins"]["model.model_ema_eval"] = "child_config"
                 elif config.get("source", {}).get("kind") == "legacy_demo50":
                     source = config.setdefault("source", {})
                     source["inherited_base_keys"] = [

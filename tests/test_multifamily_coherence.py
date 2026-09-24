@@ -66,6 +66,37 @@ def _topology_config() -> dict:
     }
 
 
+def _persistence_topology_config() -> dict:
+    return {
+        "strategy": "cubical_persistence",
+        "target_use": "paired_supervised",
+        "units": "model_units",
+        "fields": ["u", "v"],
+        "geometry": {
+            "grid_shape": [6, 6],
+            "axes": [0, 1],
+            "neighbors": 1,
+            "periodic": False,
+        },
+        "filtration": {
+            "dimensions": [0, 1],
+            "directions": ["sublevel", "superlevel"],
+            "smoothing_sigma": 0.0,
+        },
+        "persistence": {"distance": "sliced_wasserstein", "projections": 4},
+        "components": {
+            "self": {"enabled": True, "weight": 1.0},
+            "mutual": {
+                "enabled": True,
+                "weight": 0.5,
+                "groups": [["u", "v"]],
+                "lines": 2,
+                "seed": 11,
+            },
+        },
+    }
+
+
 def test_cross_spectrum_is_ensemble_only_geometry_fixed_and_differentiable():
     spec = DataSpec(("u", "v"), ("1", "1"), 2, (6, 6))
     family = build_coherence_family(
@@ -136,7 +167,9 @@ def test_exact_forward_betti_curves_distinguish_component_and_hole():
     assert ring_curves[1].item() == 1
 
 
-@pytest.mark.parametrize("topology_strategy", ["betti_curves", "spatial_self_mutual"])
+@pytest.mark.parametrize(
+    "topology_strategy", ["betti_curves", "spatial_self_mutual", "cubical_persistence"]
+)
 def test_one_rollout_composes_all_three_families_and_backpropagates(topology_strategy):
     class ToyFlow(torch.nn.Module):
         capabilities = ModelCapabilities("point", True, True, False, True)
@@ -153,11 +186,23 @@ def test_one_rollout_composes_all_three_families_and_backpropagates(topology_str
 
         def velocity(self, batch, state, time):
             assert batch.target_fields is None
-            return self.scale * torch.ones_like(state)
+            x, y = batch.query_coords.unbind(dim=-1)
+            pattern = torch.stack(
+                (
+                    torch.sin(torch.pi * x) * torch.sin(torch.pi * y),
+                    torch.cos(2.0 * torch.pi * x) * torch.sin(torch.pi * y),
+                ),
+                dim=-1,
+            )
+            return self.scale * pattern
 
     spec = DataSpec(("u", "v"), ("1", "1"), 2, (6, 6))
     normalizer = FieldNormalizer.identity(2)
-    topology_config = _topology_config()
+    if topology_strategy == "cubical_persistence":
+        pytest.importorskip("gudhi", reason="cubical persistence requires the topology extra")
+        topology_config = _persistence_topology_config()
+    else:
+        topology_config = _topology_config()
     if topology_strategy == "spatial_self_mutual":
         topology_config.update(
             {
@@ -194,7 +239,7 @@ def test_one_rollout_composes_all_three_families_and_backpropagates(topology_str
         obs_valid_mask=torch.ones(4, 2, dtype=torch.bool),
         query_coords=coordinates,
         query_valid_mask=torch.ones(4, 36, dtype=torch.bool),
-        target_fields=torch.randn(4, 36, 2),
+        target_fields=torch.randn(4, 36, 2, generator=torch.Generator().manual_seed(23)),
         sample_ids=("a", "b", "c", "d"),
         obs_indices=torch.tensor([[0, 1]]).expand(4, -1),
         logical_shapes=((6, 6),) * 4,
@@ -222,6 +267,12 @@ def test_one_rollout_composes_all_three_families_and_backpropagates(topology_str
         "cross_spectrum",
         "topology",
     }
+    family_losses = {
+        name: details["scalar_loss"] for name, details in result.diagnostics["families"].items()
+    }
+    assert set(family_losses) == {"global_distribution", "cross_spectrum", "topology"}
+    assert all(torch.isfinite(loss) and loss.item() > 0 for loss in family_losses.values())
+    torch.testing.assert_close(result.scalar_loss.detach(), sum(family_losses.values()))
     if topology_strategy == "spatial_self_mutual":
         assert {path for path in result.component_results if path.startswith("topology.")} == {
             "topology.self.region",
@@ -232,6 +283,15 @@ def test_one_rollout_composes_all_three_families_and_backpropagates(topology_str
         assert (
             len(result.component_results) == 10
         )  # Three distribution, three spectral, four topology.
+    if topology_strategy == "cubical_persistence":
+        assert result.diagnostics["families"]["topology"]["diagram_distance"] == (
+            "sliced_wasserstein"
+        )
+        for path in ("topology.self.persistence", "topology.mutual.persistence"):
+            term = result.component_results[path]
+            assert torch.isfinite(term.scalar_loss) and term.scalar_loss.item() > 0
+            gradient, = torch.autograd.grad(term.scalar_loss, model.scale, retain_graph=True)
+            assert torch.isfinite(gradient) and gradient.abs() > 0
     # The existing trainer receives one coherence scalar alongside its native data loss.
     data_loss = (model.scale - 0.5).square()
     optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
