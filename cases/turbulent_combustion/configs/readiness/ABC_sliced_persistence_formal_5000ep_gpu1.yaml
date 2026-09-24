@@ -3,7 +3,7 @@ defaults: [ABC_sliced_persistence_50ep_gpu1.yaml]
 
 optimization:
   epochs: 5000
-  batch_size: 16
+  batch_size: 32
   train_fraction: 0.15
 
 coherence:
