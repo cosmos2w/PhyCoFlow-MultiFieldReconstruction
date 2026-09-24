@@ -7,7 +7,7 @@ optimization:
   train_fraction: 0.15
 
 coherence:
-  compute_budget: {batch_size: 16, point_count: 4096, query_policy: fixed_shared, query_seed: 100045}
+  compute_budget: {batch_size: 32, point_count: 4096, query_policy: fixed_shared, query_seed: 100045}
 
 evaluation:
   max_samples: 32
