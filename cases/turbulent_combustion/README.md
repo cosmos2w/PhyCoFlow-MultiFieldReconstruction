@@ -14,9 +14,12 @@ The canonical loader verifies 403 unique x positions, 100 unique y positions, on
 
 `configs/readiness/C_sliced_persistence_smoke.yaml` is a one-epoch, topology-only smoke profile with a 0.1% training fraction and batch size 1. `configs/readiness/ABC_sliced_persistence_50ep_gpu1.yaml` preserves the `AB_balanced.yaml` global-distribution and cross-spectrum settings, adds nonperiodic CO/T cubical persistence with sliced Wasserstein distance, and runs exactly 50 epochs on GPU 1 with a 1% training fraction and batch size 8. It selects checkpoints every five epochs using topology with 5% total and per-field source-relative MSE budgets, logs validation loss every five epochs, and renders a reconstruction preview at epoch 50. Native-grid topology evaluation is disabled because this profile evaluates a reduced 4096-point query set. Both profiles pin the original GL-RBF/CQ source run to `last.pt` and use live evaluation weights for persistence rollout agreement; A+B explicitly keep `self_spectrum` disabled.
 
+`configs/readiness/ABC_sliced_persistence_ABscale_50ep_gpu1.yaml` repeats the 50-epoch A+B+C test with the completed A+B run's batch size 32, training fraction 0.25, 32-sample validation panel, and reconstruction-preview interval of 200 epochs. It keeps the A+B learning rate, data/coherence weights, and family calibration. This is a formal-scale test profile, not a 5000-epoch launch configuration.
+
 Validate from the repository root:
 
 ```bash
 python cases/turbulent_combustion/run.py validate --config configs/readiness/C_sliced_persistence_smoke.yaml
 python cases/turbulent_combustion/run.py validate --config configs/readiness/ABC_sliced_persistence_50ep_gpu1.yaml
+python cases/turbulent_combustion/run.py validate --config configs/readiness/ABC_sliced_persistence_ABscale_50ep_gpu1.yaml
 ```
