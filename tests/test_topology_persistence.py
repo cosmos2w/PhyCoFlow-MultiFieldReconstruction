@@ -1,5 +1,6 @@
 """Independent mathematical, gradient, fidelity and lifecycle regressions."""
 
+import os
 from copy import deepcopy
 
 import numpy as np
@@ -58,6 +59,43 @@ def test_pairing_and_projection_autograd_agrees_with_finite_difference():
         return sum(sliced_diagram_distance(diagrams[d], ref[d], projections=8) for d in (0, 1))
 
     assert torch.autograd.gradcheck(loss, (pred,), eps=1e-6, atol=1e-5, rtol=1e-4)
+
+
+def test_parallel_pairing_preserves_persistence_loss_and_gradients(monkeypatch):
+    generator = torch.Generator().manual_seed(123)
+    target = torch.randn(8, 12, 16, generator=generator, dtype=torch.float64)
+    prediction = target + 0.2 * torch.randn(target.shape, generator=generator, dtype=torch.float64)
+
+    def evaluate(workers):
+        monkeypatch.setenv("PHYCOFLOW_TOPOLOGY_WORKERS", str(workers))
+        x = prediction.clone().requires_grad_()
+        generated = cubical_diagrams(x, periodic=False)
+        reference = cubical_diagrams(target, periodic=False)
+        loss = sum(
+            sliced_diagram_distance(a[dim], b[dim], projections=16)
+            for a, b in zip(generated, reference)
+            for dim in (0, 1)
+        )
+        return loss.detach(), torch.autograd.grad(loss, x)[0]
+
+    serial_loss, serial_gradient = evaluate(1)
+    parallel_loss, parallel_gradient = evaluate(4)
+    torch.testing.assert_close(parallel_loss, serial_loss, rtol=0, atol=0)
+    torch.testing.assert_close(parallel_gradient, serial_gradient, rtol=0, atol=0)
+
+
+def test_persistence_training_uses_four_workers_unless_overridden(monkeypatch):
+    from phycoflow_reconstruction.training.post_training import _configure_persistence_workers
+
+    config = {"coherence": {"families": {"topology": {
+        "enabled": True, "strategy": "cubical_persistence"
+    }}}}
+    monkeypatch.delenv("PHYCOFLOW_TOPOLOGY_WORKERS", raising=False)
+    _configure_persistence_workers(config)
+    assert int(os.environ["PHYCOFLOW_TOPOLOGY_WORKERS"]) == min(4, os.cpu_count() or 1)
+    monkeypatch.setenv("PHYCOFLOW_TOPOLOGY_WORKERS", "2")
+    _configure_persistence_workers(config)
+    assert os.environ["PHYCOFLOW_TOPOLOGY_WORKERS"] == "2"
 
 
 def test_identity_stationary_and_mutual_reaches_all_fields():

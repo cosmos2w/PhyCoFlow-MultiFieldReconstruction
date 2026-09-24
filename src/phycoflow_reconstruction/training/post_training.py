@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import random
 import statistics
 import warnings
@@ -88,6 +89,18 @@ from .topology_constraints import (
 )
 from .topology_selection import fidelity_eligibility, topology_selection_report
 from .update_budget import post_training_steps_per_epoch, sample_exposure
+
+
+def _configure_persistence_workers(config: Mapping[str, Any]) -> None:
+    """Parallelize independent GUDHI pairings without changing their results.
+
+    Keep this execution setting outside the versioned persistence definition so
+    an existing run can resume after changing only the worker count. An explicit
+    environment setting remains authoritative.
+    """
+    topology = config.get("coherence", {}).get("families", {}).get("topology", {})
+    if topology.get("enabled") and topology.get("strategy") == "cubical_persistence":
+        os.environ.setdefault("PHYCOFLOW_TOPOLOGY_WORKERS", str(min(4, os.cpu_count() or 1)))
 
 
 def _slice_batch(batch: ObservationBatch, count: int) -> ObservationBatch:
@@ -1307,6 +1320,7 @@ def run_post_training(
         raise ValueError("run_post_training accepts only stage=post_training")
     if max_steps is not None and max_steps < 0:
         raise ValueError("max_steps must be non-negative")
+    _configure_persistence_workers(config)
     seed = int(config["runtime"].get("seed", 42))
     seed_everything(seed, bool(config["runtime"].get("deterministic", True)))
     device = torch.device(config["runtime"].get("device", "cpu"))
