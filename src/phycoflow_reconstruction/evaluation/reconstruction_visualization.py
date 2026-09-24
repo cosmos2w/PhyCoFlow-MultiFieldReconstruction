@@ -94,6 +94,8 @@ def render_reconstruction_payload(
     title: str | None = None,
     dpi: int = 300,
     contour_levels: int = 20,
+    field_units: tuple[str, ...] | None = None,
+    coordinate_labels: tuple[str, str] = ("x", "y"),
 ) -> Path:
     """Render physical target, reconstruction, and error fields from an evaluation payload."""
     import matplotlib
@@ -108,9 +110,20 @@ def render_reconstruction_payload(
     with np.load(payload_path, allow_pickle=False) as payload:
         prediction = np.asarray(payload["prediction_physical"])[0]
         target = np.asarray(payload["target_physical"])[0]
-        query_coords_physical = np.asarray(payload["query_coords_physical"])[0]
+        coordinate_space = (
+            "physical" if "query_coords_physical" in payload.files else "normalized"
+        )
+        coordinate_key = (
+            "query_coords_physical" if coordinate_space == "physical" else "query_coords"
+        )
+        query_coords_physical = np.asarray(payload[coordinate_key])[0]
         logical_shape = tuple(int(value) for value in payload["logical_shape"])
         field_names = tuple(str(value) for value in payload["field_names"])
+        payload_field_units = (
+            tuple(str(value) for value in payload["field_units"])
+            if "field_units" in payload.files
+            else None
+        )
         obs_indices = np.asarray(payload["obs_indices"])[0]
         obs_fields = np.asarray(payload["obs_field_ids"])[0]
         obs_valid = np.asarray(payload["obs_valid_mask"])[0].astype(bool)
@@ -118,6 +131,17 @@ def render_reconstruction_payload(
 
     if prediction.shape != target.shape:
         raise ValueError("prediction and target shapes do not match")
+    if prediction.ndim != 2 or prediction.shape[1] != len(field_names):
+        raise ValueError("prediction/target fields must align with the field names")
+    units = payload_field_units or field_units or ("unknown",) * len(field_names)
+    if len(units) != len(field_names):
+        raise ValueError("field units must align with the field names")
+    if len(coordinate_labels) != 2:
+        raise ValueError("two coordinate labels are required for a 2D reconstruction")
+    coordinate_suffix = " (normalized)" if coordinate_space == "normalized" else " (dataset units)"
+    coordinate_labels = tuple(f"{label} coordinate{coordinate_suffix}" for label in coordinate_labels)
+    if not np.isfinite(prediction).all() or not np.isfinite(target).all():
+        raise ValueError("physical predictions and targets must be finite")
     if prediction.shape[0] != math.prod(logical_shape):
         raise ValueError(
             "reconstruction visualization requires full-grid query points; "
@@ -137,17 +161,17 @@ def render_reconstruction_payload(
     if x_span <= 0.0 or y_span <= 0.0:
         raise ValueError("physical query coordinates must span both grid axes")
     domain_aspect = x_span / y_span
-    panel_width = 4.0
+    panel_width = 3.7
     panel_height = panel_width / domain_aspect
-    row_text_allowance = 0.52
-    figure_width = 3.0 * panel_width + 2.8
+    row_text_allowance = 0.62
+    figure_width = 3.0 * panel_width + 3.0
     figure_height = max(
         3.0,
         len(field_names) * (panel_height + row_text_allowance) + 0.75,
     )
     font_scale = max(0.82, min(1.0, 6.0 / max(len(field_names), 1)))
-    title_fontsize = 10.5 * font_scale
-    label_fontsize = 10.0 * font_scale
+    title_fontsize = 10.0 * font_scale
+    label_fontsize = 9.4 * font_scale
     tick_fontsize = 8.0 * font_scale
 
     plt.rcParams["svg.fonttype"] = "none"
@@ -156,8 +180,8 @@ def render_reconstruction_payload(
         len(field_names),
         5,
         width_ratios=(1.0, 1.0, 0.045, 1.0, 0.045),
-        hspace=0.12,
-        wspace=0.16,
+        hspace=0.16,
+        wspace=0.18,
     )
     axes = np.empty((len(field_names), 3), dtype=object)
     field_colorbar_axes = []
@@ -217,58 +241,67 @@ def render_reconstruction_payload(
                 norm=norm,
                 extend="max" if column_index == 2 else "both",
             )
-            line_low = float(values.min())
-            line_high = float(values.max())
-            line_low, line_high = _nondegenerate_range(line_low, line_high)
-            axis.contour(
-                x_grid,
-                y_grid,
-                values,
-                levels=np.linspace(line_low, line_high, contour_levels),
-                colors="lightgrey",
-                linewidths=0.35,
-                alpha=0.75,
-            )
             axis.set_aspect("equal", adjustable="box")
             axis.set_xlim(float(x_grid.min()), float(x_grid.max()))
             axis.set_ylim(float(y_grid.min()), float(y_grid.max()))
             axis.set_title(panel_title, fontsize=title_fontsize, pad=4.0)
             axis.tick_params(labelsize=tick_fontsize, pad=2.0)
+            if field_index == len(field_names) - 1:
+                axis.set_xlabel(coordinate_labels[0], fontsize=label_fontsize)
+            if column_index == 0:
+                axis.set_ylabel(
+                    f"{field_name}\n{coordinate_labels[1]}",
+                    fontsize=label_fontsize,
+                    labelpad=5.0,
+                )
         field_colorbar = figure.colorbar(
             ScalarMappable(norm=field_norm, cmap="viridis"),
             cax=field_colorbar_axes[field_index],
             ticks=field_colorbar_ticks,
+        )
+        unit = units[field_index]
+        unit_label = f" [{unit}]" if unit and unit.lower() != "unknown" else " [units not specified]"
+        field_colorbar.set_label(
+            f"{field_name}{unit_label}", fontsize=max(7.0, tick_fontsize - 0.2), labelpad=3.0
         )
         error_colorbar = figure.colorbar(
             ScalarMappable(norm=error_norm, cmap="magma"),
             cax=error_colorbar_axes[field_index],
             ticks=error_colorbar_ticks,
         )
+        error_colorbar.set_label(
+            f"|error|{unit_label}",
+            fontsize=max(7.0, tick_fontsize - 0.2),
+            labelpad=3.0,
+        )
         field_colorbar.ax.tick_params(labelsize=tick_fontsize, pad=2.0)
         error_colorbar.ax.tick_params(labelsize=tick_fontsize, pad=2.0)
-        axes[field_index, 0].set_ylabel(field_name, fontsize=label_fontsize, labelpad=4.0)
 
         sensor_mask = obs_valid & (obs_fields == field_index)
         if sensor_mask.any():
             point_ids = obs_indices[sensor_mask]
-            axes[field_index, 0].scatter(
+            axes[field_index, 1].scatter(
                 query_coords_physical[point_ids, 0],
                 query_coords_physical[point_ids, 1],
-                s=8,
+                s=12,
                 facecolors="none",
-                edgecolors="white",
-                linewidths=0.5,
+                edgecolors="#1D2933",
+                linewidths=0.6,
                 label="observations",
             )
-            axes[field_index, 0].legend(
-                loc="best",
-                frameon=False,
-                fontsize=max(6.5, 7.5 * font_scale),
-            )
+            if field_index == 0:
+                axes[field_index, 1].legend(
+                    loc="upper right",
+                    frameon=True,
+                    facecolor="white",
+                    edgecolor="none",
+                    framealpha=0.88,
+                    fontsize=max(6.5, 7.5 * font_scale),
+                )
 
     figure.suptitle(
         title or f"Sparse reconstruction — {sample_id}",
-        fontsize=12.5 * font_scale,
+        fontsize=11.5 * font_scale,
     )
     # Constrained layout reserves dedicated colorbar columns, while equal physical
     # aspect may shorten the contour axes inside each row. Align colorbars to the
@@ -287,6 +320,8 @@ def render_reconstruction_payload(
         )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(output_path, dpi=dpi, bbox_inches="tight")
+    figure.savefig(output_path.with_suffix(".pdf"), bbox_inches="tight")
+    figure.savefig(output_path.with_suffix(".svg"), bbox_inches="tight")
     plt.close(figure)
     return output_path
 
@@ -310,6 +345,7 @@ def visualize_run(
     run_dir = Path(run_dir).resolve()
     checkpoint_label = Path(checkpoint).stem
     report_name = f"reconstruction_{split}_{sample_index:04d}_{checkpoint_label}"
+    config = load_config(run_dir / "resolved_config.yaml")
     warn_if_cuda_memory_tight(
         run_dir,
         checkpoint=checkpoint,
@@ -346,6 +382,7 @@ def visualize_run(
         ),
         dpi=300,
         contour_levels=contour_levels,
+        field_units=tuple(config.get("dataset", {}).get("field_units", ())),
     )
     report["visualization"] = {
         "png": str(figure_path),
@@ -354,8 +391,12 @@ def visualize_run(
         "error_annotation": "per_field_relative_l2_physical",
         "filled_contour_levels": contour_levels,
         "colorbar_ticks": 4,
-        "line_contour_levels": contour_levels,
+        "field_units": list(config.get("dataset", {}).get("field_units", ())),
         "coordinate_space": "physical",
+        "vector_figures": {
+            "pdf": str(figure_path.with_suffix(".pdf")),
+            "svg": str(figure_path.with_suffix(".svg")),
+        },
     }
     report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return figure_path

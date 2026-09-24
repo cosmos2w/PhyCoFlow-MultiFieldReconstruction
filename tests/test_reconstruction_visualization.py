@@ -33,6 +33,7 @@ def _payload(path: Path, *, query_count: int = 6) -> Path:
         obs_valid_mask=np.asarray([[True, True]]),
         logical_shape=np.asarray([2, 3], dtype=np.int64),
         field_names=np.asarray(["u", "v"]),
+        field_units=np.asarray(["m/s", "K"]),
         sample_id=np.asarray("trajectory_0:9000"),
     )
     return path
@@ -43,28 +44,23 @@ def test_render_reconstruction_payload_writes_300_dpi_png(tmp_path, monkeypatch)
     output = tmp_path / "reconstruction.png"
     recorded: dict[str, object] = {}
     contourf_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
-    contour_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
     colorbar_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
     scatter_axes: list[object] = []
     recorded_figure: dict[str, matplotlib.figure.Figure] = {}
     original = matplotlib.figure.Figure.savefig
     original_contourf = plt.Axes.contourf
-    original_contour = plt.Axes.contour
     original_colorbar = matplotlib.figure.Figure.colorbar
     original_scatter = plt.Axes.scatter
     original_figure = plt.figure
 
     def capture_savefig(self, *args, **kwargs):
-        recorded["dpi"] = kwargs.get("dpi")
+        output = Path(args[0]) if args else Path(str(kwargs.get("fname")))
+        recorded.setdefault("formats", {})[output.suffix] = kwargs.get("dpi")
         return original(self, *args, **kwargs)
 
     def capture_contourf(self, *args, **kwargs):
         contourf_calls.append((args, kwargs))
         return original_contourf(self, *args, **kwargs)
-
-    def capture_contour(self, *args, **kwargs):
-        contour_calls.append((args, kwargs))
-        return original_contour(self, *args, **kwargs)
 
     def capture_colorbar(self, *args, **kwargs):
         colorbar_calls.append((args, kwargs))
@@ -81,7 +77,6 @@ def test_render_reconstruction_payload_writes_300_dpi_png(tmp_path, monkeypatch)
 
     monkeypatch.setattr(matplotlib.figure.Figure, "savefig", capture_savefig)
     monkeypatch.setattr(plt.Axes, "contourf", capture_contourf)
-    monkeypatch.setattr(plt.Axes, "contour", capture_contour)
     monkeypatch.setattr(matplotlib.figure.Figure, "colorbar", capture_colorbar)
     monkeypatch.setattr(plt.Axes, "scatter", capture_scatter)
     monkeypatch.setattr(plt, "figure", capture_figure)
@@ -91,15 +86,16 @@ def test_render_reconstruction_payload_writes_300_dpi_png(tmp_path, monkeypatch)
     assert result == output
     assert output.is_file()
     assert output.stat().st_size > 0
-    assert recorded["dpi"] == 300
+    assert output.with_suffix(".pdf").is_file()
+    assert output.with_suffix(".svg").is_file()
+    assert recorded["formats"] == {".png": 300, ".pdf": None, ".svg": None}
     assert all(len(call[1]["levels"]) == 17 for call in contourf_calls)
-    assert all(len(call[1]["levels"]) == 17 for call in contour_calls)
     np.testing.assert_array_equal(contourf_calls[0][0][0][0], [10.0, 20.0, 30.0])
     np.testing.assert_array_equal(contourf_calls[0][0][1][:, 0], [100.0, 110.0])
     figure = recorded_figure["figure"]
     plot_axes = [axis for axis in figure.axes if axis.get_title()]
     axes = np.asarray(plot_axes, dtype=object).reshape(2, 3)
-    assert scatter_axes == [axes[0, 0], axes[1, 0]]
+    assert scatter_axes == [axes[0, 1], axes[1, 1]]
     assert len(colorbar_calls) == 4
     assert all(len(call[1]["ticks"]) == 4 for call in colorbar_calls)
     colorbar_axes = [call[1]["cax"] for call in colorbar_calls]
@@ -108,7 +104,18 @@ def test_render_reconstruction_payload_writes_300_dpi_png(tmp_path, monkeypatch)
         assert colorbar_axis.get_position().height == pytest.approx(
             parent_axis.get_position().height, rel=1.0e-3
         )
+    assert [axis.get_ylabel() for axis in colorbar_axes] == [
+        "u [m/s]",
+        "|error| [m/s]",
+        "v [K]",
+        "|error| [K]",
+    ]
+    assert axes[-1, 0].get_xlabel() == "x coordinate (dataset units)"
     assert all(axis.get_aspect() == 1.0 for axis in axes.flat)
+    assert [axis.get_ylabel() for axis in axes[:, 0]] == [
+        "u\ny coordinate (dataset units)",
+        "v\ny coordinate (dataset units)",
+    ]
     row_gap = axes[0, 0].get_position().y0 - axes[1, 0].get_position().y1
     assert row_gap < axes[0, 0].get_position().height
     assert all(axis.title.get_fontsize() >= 8.0 for axis in axes.flat)
@@ -121,12 +128,47 @@ def test_render_reconstruction_payload_requires_full_grid(tmp_path):
         visualization.render_reconstruction_payload(payload, tmp_path / "unused.png")
 
 
+def test_renderer_marks_legacy_normalized_axes_explicitly(tmp_path, monkeypatch):
+    physical_payload = _payload(tmp_path / "physical.npz")
+    with np.load(physical_payload, allow_pickle=False) as saved:
+        arrays = {name: saved[name] for name in saved.files if name != "query_coords_physical"}
+        physical_coords = np.asarray(saved["query_coords_physical"])[0]
+    arrays["query_coords"] = np.column_stack(
+        tuple(
+            (physical_coords[:, index] - physical_coords[:, index].min())
+            / np.ptp(physical_coords[:, index])
+            for index in range(2)
+        )
+    )[None, ...]
+    normalized_payload = tmp_path / "normalized.npz"
+    np.savez_compressed(normalized_payload, **arrays)
+    import matplotlib.pyplot as plt
+
+    axis_labels = []
+    original_set_xlabel = plt.Axes.set_xlabel
+
+    def capture_xlabel(self, label, *args, **kwargs):
+        axis_labels.append(str(label))
+        return original_set_xlabel(self, label, *args, **kwargs)
+
+    monkeypatch.setattr(plt.Axes, "set_xlabel", capture_xlabel)
+
+    visualization.render_reconstruction_payload(
+        normalized_payload, tmp_path / "normalized.png", dpi=72
+    )
+
+    assert "x coordinate (normalized)" in axis_labels
+
+
 def test_visualize_run_defaults_to_best_first_test_snapshot(tmp_path, monkeypatch):
     run_dir = tmp_path / "runs" / "example" / "run-id"
     output_dir = run_dir / "evaluation" / "reconstruction_test_0000_best"
     output_dir.mkdir(parents=True)
     payload = _payload(output_dir / "reconstruction.npz")
     report_path = output_dir / "report.json"
+    (run_dir / "resolved_config.yaml").write_text(
+        "dataset:\n  field_units: [mol/mol, mol/mol]\n", encoding="utf-8"
+    )
     report_path.write_text(
         json.dumps(
             {
@@ -168,7 +210,9 @@ def test_visualize_run_defaults_to_best_first_test_snapshot(tmp_path, monkeypatc
     assert report["visualization"]["dpi"] == 300
     assert report["visualization"]["filled_contour_levels"] == 20
     assert report["visualization"]["colorbar_ticks"] == 4
-    assert report["visualization"]["line_contour_levels"] == 20
+    assert report["visualization"]["field_units"] == ["mol/mol", "mol/mol"]
+    assert report["visualization"]["coordinate_space"] == "physical"
+    assert set(report["visualization"]["vector_figures"]) == {"pdf", "svg"}
 
 
 def test_cuda_memory_preflight_warns_with_device_alternative(tmp_path, monkeypatch, capsys):

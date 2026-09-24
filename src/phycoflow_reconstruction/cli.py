@@ -192,16 +192,17 @@ def run_case_cli(case_name: str, case_dir: str | Path) -> int:
         default="log",
         help=(
             "vertical scale for reconstruction and discrepancy-distribution plots; "
-            "cross-spectrum coherence bars always use a bounded 0-1 scale (default: log)"
+            "cross-spectrum scores and topology diagnostics keep their own "
+            "labeled scales (default: log)"
         ),
     )
     visualizer.add_argument(
         "--eval-coherence",
         nargs="+",
-        choices=("global_distribution", "cross_spectrum"),
+        choices=("global_distribution", "cross_spectrum", "topology"),
         help=(
             "also evaluate selected coherence families over --eval-set; "
-            "currently supports global_distribution and cross_spectrum"
+            "supports global_distribution, cross_spectrum, and topology"
         ),
     )
     visualizer.add_argument(
@@ -219,7 +220,8 @@ def run_case_cli(case_name: str, case_dir: str | Path) -> int:
         action="store_true",
         help=(
             "add dedicated coherence-family views to --eval-coherence output; "
-            "currently renders global-distribution pairwise joint PDFs"
+            "currently enables global-distribution pairwise joint PDFs; "
+            "topology and spectral quality views render with their families"
         ),
     )
     visualizer.add_argument(

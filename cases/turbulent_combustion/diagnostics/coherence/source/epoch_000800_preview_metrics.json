@@ -1,0 +1,50 @@
+{
+  "figures": {
+    "pdf": "evaluation/training_preview/latest_reconstruction.pdf",
+    "png": "evaluation/training_preview/latest_reconstruction.png",
+    "svg": "evaluation/training_preview/latest_reconstruction.svg"
+  },
+  "generation_steps": 2,
+  "global_step": 30400,
+  "metrics": {
+    "mean_relative_l2": 0.41499313712120056,
+    "mse_normalized": 0.16611331701278687,
+    "mse_physical": 1739410.625,
+    "observed_entry_mse_normalized": 0.0,
+    "per_field_mse_normalized": {
+      "CH4": 0.05037616938352585,
+      "CO": 0.2311684936285019,
+      "T": 0.04690590128302574,
+      "U_1": 0.33227312564849854,
+      "p": 0.1698428988456726
+    },
+    "per_field_mse_physical": {
+      "CH4": 3.591130371205509e-05,
+      "CO": 2.0769726688740775e-05,
+      "T": 28203.986328125,
+      "U_1": 460.34906005859375,
+      "p": 8668389.0
+    },
+    "per_field_relative_l2": {
+      "CH4": 0.22892066836357117,
+      "CO": 0.46444764733314514,
+      "T": 0.2276635617017746,
+      "U_1": 0.5885992050170898,
+      "p": 0.4283366799354553
+    },
+    "per_field_relative_l2_physical": {
+      "CH4": 0.14313010610494045,
+      "CO": 0.38676856135622617,
+      "T": 0.1364711690079525,
+      "U_1": 0.5923483363397631,
+      "p": 0.02681316743992739
+    },
+    "unobserved_entry_mse_normalized": 0.1663244664669037,
+    "worst_field_relative_l2": 0.5885992050170898
+  },
+  "payload": "evaluation/training_preview/latest_reconstruction.npz",
+  "sample_id": "trajectory_000000:8000",
+  "seed": 2027,
+  "training_epoch": 800.0,
+  "weight_source": "configured_evaluation_weights"
+}

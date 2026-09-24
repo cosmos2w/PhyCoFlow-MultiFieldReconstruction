@@ -1,0 +1,44 @@
+{
+  "source_run_id": "20260924T030724Z_4208231c",
+  "source_run_name": "coherence_fix_ABC_sliced_persistence_formal_5000ep_gpu1",
+  "preview_epoch": 800.0,
+  "preview_global_step": 30400,
+  "preview_weight_source": "configured_evaluation_weights",
+  "sample_id": "trajectory_000000:8000",
+  "split": "validation",
+  "preview_seed": 2027,
+  "source_logical_shape": [
+    100,
+    403
+  ],
+  "topology_estimator": "cubical_persistence with exact H0/H1 Betti counts on signed, reference-standardized filtration rasters",
+  "topology_fields": [
+    "CO",
+    "T"
+  ],
+  "topology_units": "model_units, mean_std normalized",
+  "training_query_contract": {
+    "policy": "fixed_shared",
+    "point_count": 4096,
+    "seed": 100045
+  },
+  "preview_query_contract": {
+    "policy": "saved preview query_coords, identity order in pinned payload",
+    "point_count": 4096,
+    "seed": 2027,
+    "matches_training_fixed_shared_selector": false
+  },
+  "configured_raster": {
+    "grid_shape": [
+      32,
+      128
+    ],
+    "periodic": false,
+    "antialias_downsample_configured": true,
+    "antialias_downsample_applied": false
+  },
+  "payload_sha256": "f114765efb2f15451c2b9d960f465411ffd21cbcd3cb4b50aa747c63a33b20c5",
+  "preview_metrics_sha256": "632785d886d3cab7a29e4d8563badb92f2d56976ee720c473b2f0cecff3addba",
+  "resolved_config_sha256": "3fd77525df2a43a1d65721b03517dc1a265dc01953e449865e5a3d1d65d3999b",
+  "normalization_artifact_sha256": "77404844ea7698015fbe47d43ff89420d7827f0770505e11171111d7b1b05965"
+}

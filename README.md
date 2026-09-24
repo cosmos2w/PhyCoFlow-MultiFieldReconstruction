@@ -40,6 +40,7 @@ Physics-informed training and historical compatibility routes are available, but
   - [7.3 Multi-snapshot physical-coherence statistics](#73-multi-snapshot-physical-coherence-statistics)
     - [7.3.1 Global-distribution coherence](#731-global-distribution-coherence)
     - [7.3.2 Cross-spectrum coherence](#732-cross-spectrum-coherence)
+    - [7.3.3 Topology coherence](#733-topology-coherence)
 - [8. Benchmarks and reproducibility](#8-benchmarks-and-reproducibility)
 - [9. Contributing](#9-contributing)
   - [9.1 Find the right code boundary](#91-find-the-right-code-boundary)
@@ -315,7 +316,7 @@ Stage 2 strictly loads and freezes the Stage-1 autoencoder. It is the sparse rec
 
 Post-training creates a child run from a completed, immutable base run. The selected source checkpoint is loaded strictly, while the dataset, model, observations, normalization, and provenance are inherited from the source run's `resolved_config.yaml`; the source run is hashed before and after training and is never modified.
 
-The available coherence families are `global_distribution`, `cross_spectrum`, and `topology`. The current topology workflow uses `cubical_persistence` with `sliced_wasserstein` matching and the efficient regularized optimizer. It compares all native-grid H0/H1 bars and applies one differentiable update per batch. See [TOPOLOGY_POSTTRAINING.md](TOPOLOGY_POSTTRAINING.md) for the active recipe and [the topology family guide](src/phycoflow_reconstruction/coherence/families/topology/README.md) for its mathematical definition. Earlier Betti-curve and spatial implementations remain for explicit historical configurations. Cross-spectrum `self_spectrum` retains its existing development status.
+The available coherence families are `global_distribution`, `cross_spectrum`, and `topology`. The current topology family uses `cubical_persistence` with `sliced_wasserstein` diagram matching. [TOPOLOGY_POSTTRAINING.md](TOPOLOGY_POSTTRAINING.md) describes the single-family `topology_regularized` recipe on native grids; the turbulent-combustion A+B+C experiment instead composes the three families with `gradient_balance: config` and scores topology on its configured fixed-query raster. Both compare H0/H1 persistence with one differentiable update per batch. The [topology family guide](src/phycoflow_reconstruction/coherence/families/topology/README.md) defines the mathematics. Earlier Betti-curve and spatial implementations remain for explicit historical configurations. Cross-spectrum `self_spectrum` retains its existing development status.
 
 ### 6.1 Prepare a portable configuration
 
@@ -443,6 +444,11 @@ python cases/brusselator/run.py train-direct --config configs/direct_physics/pin
 
 ## 7. Evaluation and local outputs
 
+The [turbulent-combustion figure gallery](cases/turbulent_combustion/diagnostics/README.md)
+separates operational training monitors, field reconstruction, quantitative
+coherence evaluation, and explanatory coherence views. It records the
+comparison scales and provenance needed to interpret the examples below.
+
 Post-processing never retrains the model. Point it at an existing base or post-training run and choose the tool by output:
 
 | Need | Use | Typical output |
@@ -451,7 +457,8 @@ Post-processing never retrains the model. Point it at an existing base or post-t
 | One qualitative full-field reconstruction | `visualize-run` | 300-DPI reconstruction PNG plus portable NPZ payload |
 | Error distributions over many snapshots | `visualize-run --eval-set ...` | violin/scatter figure, CSV, NPZ, and JSON |
 | Supported physical-coherence comparisons | add `--eval-coherence ...` | family-specific figures and numerical artifacts |
-| Updated loss/coherence curves after a run | `render-history` | restart-safe history PNGs |
+| Re-render saved coherence components | `render-history` | `coherence_history.png` |
+| Review training objectives, gradients, and checkpoint gates | [diagnostic history gallery](cases/turbulent_combustion/diagnostics/history/README.md) | four figures plus a frozen numerical snapshot |
 | Re-render a saved preview without a model | visualization script with `--payload` | PNG from a portable NPZ |
 
 Start with `best` for the checkpoint selected by fixed validation, or choose `last` when the final optimization state is scientifically relevant. Use `--weight-selection configured` unless intentionally diagnosing live rather than configured/EMA weights. Keep the same split, sensor manifest, sample IDs, generation steps, and seeds for a fair comparison.
@@ -469,12 +476,14 @@ python cases/<case>/run.py evaluate-run \
 
 The evaluator records normalized/physical errors, observed/unobserved metrics, sample/query/sensor identities, diagnostics, timing, and provenance. Generated checkpoints, manifests, reports, previews, figures, caches, and histories stay under `cases/<case>/runs/` and are ignored by Git.
 
-Rebuild the standard training histories at any time without loading the model or dataset:
+Rebuild the saved coherence component history at any time without loading the model or dataset:
 
 ```bash
 python cases/<case>/run.py render-history \
   --run runs/<experiment>/<run-id>
 ```
+
+The [turbulent-combustion history renderer](cases/turbulent_combustion/diagnostics/history/README.md) also produces separate objective, gradient, and checkpoint-fidelity figures from a chosen cutoff of a run's saved metrics. It reads the active run without changing its training process.
 
 ### 7.1 Single-snapshot reconstruction figure
 
@@ -486,12 +495,12 @@ python cases/<case>/run.py visualize-run --run runs/<experiment>/<run-id>
 
 With no optional arguments, this loads `best.pt`, selects snapshot `0` relative to the test split, and uses the sparse observation protocol and generation settings in `resolved_config.yaml`. It always reconstructs the complete grid and writes a 300-DPI PNG.
 
-The fully explicit command used for the Senseiver example below is:
+The fully explicit command for the Senseiver example below is:
 
 ```bash
 python cases/turbulent_combustion/run.py visualize-run \
   --run runs/tc_senseiver_5000ep/20260828T190145Z_fea0fc25 \
-  --checkpoint last \
+  --checkpoint best \
   --split test \
   --snapshot-index 0 \
   --generation-steps 4 \
@@ -502,13 +511,15 @@ python cases/turbulent_combustion/run.py visualize-run \
 
 - `--snapshot-index` is relative to the selected split.
 - Omit `--sensor-config` and `--sensor-manifest` to use the observation protocol recorded by the run. Supplying either option overrides or replays that protocol.
-- `--contour-levels` controls both filled and thin grey contours. Colorbars are continuous with four labeled ticks.
+- `--contour-levels` controls the filled field and absolute-error contours. Target and reconstruction share one color scale per field, while absolute error starts at zero on its own scale.
 - Figure size, spacing, and text scale adapt to the physical-domain aspect ratio and field count.
 - A CUDA-memory warning appears before inference when the selected device may be tight; choose a different device with `--device`.
 
 Outputs are stored under `evaluation/reconstruction_<split>_<snapshot>_<checkpoint>/`: `reconstruction.png`, `report.json`, `sensor_manifest.json`, `query_indices.pt`, and the portable plotting payload `reconstruction.npz`. The former duplicate `reconstruction.pt` is no longer written.
 
-![Senseiver turbulent-combustion reconstruction on the first test snapshot](docs/assets/reconstruction_examples/senseiver_test_snapshot_0000_last.png)
+![Senseiver turbulent-combustion best-checkpoint reconstruction on the first test snapshot](cases/turbulent_combustion/diagnostics/reconstruction/senseiver_best_sample9000.png)
+
+The [pinned plotting payload and provenance](cases/turbulent_combustion/diagnostics/reconstruction/README.md) make this version reproducible without model inference.
 
 ### 7.2 Multi-snapshot reconstruction statistics
 
@@ -538,20 +549,22 @@ Outputs are written under `evaluation/reconstruction_set_<split>_<checkpoint>/` 
 
 When the target is a post-training run, statistical evaluation also evaluates the exact source checkpoint recorded by the run lineage. The base and post-training models use identical split-relative samples, sensor selections, generation settings, seeds, and coherence definitions. Current-run figures keep their standard names, while each base-run figure is written beside its counterpart with a `-base` suffix, for example `relative_l2_violin.png` and `relative_l2_violin-base.png`; corresponding reconstruction and distribution figures share the same vertical limits, while cross-spectrum figures retain the common bounded 0–1 score axis. `comparison_report.json` records both checkpoints, matched-input hashes, shared limits, and artifact paths. Add `--no-base-comparison` only when the extra source-checkpoint evaluation is intentionally unnecessary.
 
-<img src="docs/assets/reconstruction_examples/senseiver_test_best_relative_l2_violin.png" alt="Senseiver test-set relative L2 distributions" width="65%">
+<img src="cases/turbulent_combustion/diagnostics/reconstruction/senseiver_test_best_relative_l2.png" alt="Senseiver test-set relative L2 distributions from 200 saved samples" width="65%">
+
+The [diagnostic reconstruction suite](cases/turbulent_combustion/diagnostics/reconstruction/README.md) includes the saved 200-sample metrics, an A+B post-training fidelity example, and a fixed epoch-800 A+B+C preview. The A+B example is post-training only because its source-set metric payload was not retained.
 
 ### 7.3 Multi-snapshot physical-coherence statistics
 
-Add `--eval-coherence` to the same set evaluation to calculate paired reconstruction-to-ground-truth coherence metrics alongside the default relative-$L_2$ results. The shortest command for both currently supported statistical coherence families is:
+Add `--eval-coherence` to the same set evaluation to calculate paired reconstruction-to-ground-truth coherence metrics alongside the default relative-$L_2$ results. For the A+B+C run, request all three configured families:
 
 ```bash
 python cases/<case>/run.py visualize-run \
   --run runs/<experiment>/<run-id> \
   --eval-set test \
-  --eval-coherence global_distribution cross_spectrum
+  --eval-coherence global_distribution cross_spectrum topology
 ```
 
-Use one family name when only that evaluation is needed. `--eval-coherence` requires `--eval-set`, accepts `global_distribution`, `cross_spectrum`, or both, and writes each family into `evaluation/reconstruction_set_<split>_<checkpoint>/coherence/<family>/` so figures and numerical artifacts remain separated.
+Use one or several family names when only part of that evaluation is needed. `--eval-coherence` requires `--eval-set`, accepts `global_distribution`, `cross_spectrum`, and `topology`, and writes each family into `evaluation/reconstruction_set_<split>_<checkpoint>/coherence/<family>/` so figures and numerical artifacts remain separated. The topology set view requires a configured cubical-persistence family and the training `fixed_shared` query policy.
 
 For a post-training target, the same command automatically adds a matched `-base` figure beside each standard post-training coherence figure. The base calculation uses the child run's coherence evaluation contract and the same selected samples, sensor observations, inference settings, and plot limits, so corresponding figures are directly comparable. A requested family configured in the post-training run evaluates the coherence quantity used during training; a requested but unconfigured family uses the repository's paired-ground-truth default and should be interpreted as an auxiliary diagnostic. Use `--no-base-comparison` to skip source-checkpoint evaluation.
 
@@ -587,7 +600,7 @@ python cases/<case>/run.py visualize-run \
 
 The extra views are written under `coherence/global_distribution/global_distribution_extra/`. Each 300-DPI figure compares ground-truth and reconstruction joint densities on shared axes, bins, and density normalization and marks the Jensen–Shannon divergence in bits, where `0` is identical and `1` is maximally separated. The default evaluation pools deterministic spatial samples from all 200 selected snapshots; larger or full-set evaluations automatically reduce points per snapshot to keep memory bounded without dropping snapshots. For post-training runs, standard filenames represent the assigned checkpoint and adjacent `-base` files represent its source checkpoint, with the same samples and visualization scales. CSV, NPZ, and JSON artifacts retain the probability masses, bin edges, sampling contract, and divergence values.
 
-> **Extra-view support:** `--extraview-coherence` currently supports only `global_distribution`. Dedicated extra visualizations for `cross_spectrum` and `topology` are pending; the existing cross-spectrum statistical bar charts remain available through `--eval-coherence cross_spectrum`.
+> **Extra-view support:** `--extraview-coherence` adds the optional global-distribution joint-PDF gallery. Cross-spectrum band profiles and topology interpretation panels are produced directly by `--eval-coherence` for their respective families.
 
 The CO–T example below compares the source `last.pt` checkpoint with the AB post-training `last.pt` checkpoint over the same 200 test snapshots.
 
@@ -620,15 +633,26 @@ python cases/turbulent_combustion/run.py visualize-run \
 
 Cross-spectrum evaluation defaults to `--cross-spectrum-aggregation training_aligned`: it reads `coherence.compute_budget.batch_size` from the resolved configuration, divides the selected set into deterministic complete ensembles of that size, applies the same spectral calculations used during post-training to every ensemble, and reports their mean with ±1 standard-deviation whiskers. Incomplete trailing samples are excluded and recorded explicitly; for example, 200 selected snapshots with a coherence batch size of 16 produce 12 ensembles, 192 used samples, and 8 recorded as dropped. Use `--cross-spectrum-aggregation pooled` only when one all-snapshot diagnostic ensemble is intentionally required.
 
-The horizontal-bar figures report self-spectrum, same-frequency, and cross-frequency agreement scores on a fixed linear range from 0 to 1, where 1 means exact spectral agreement; `--stat-scale` therefore does not alter these charts. Self-spectrum bars are one per selected field, whereas the two distinct-field terms report one per configured pair. Per-ensemble values, averaged raw mean-squared discrepancies, normalized scores, spread statistics, ensemble membership, and dropped sample IDs are retained in `metrics.csv`, `metrics.npz`, and `report.json`. If spectral-band energy is enabled in the run's coherence configuration, its figure is generated in the same family directory.
+The horizontal-bar figures report the enabled self-spectrum, same-frequency, and cross-frequency agreement scores on a fixed linear range from 0 to 1, where 1 means exact spectral agreement; `--stat-scale` therefore does not alter these charts. When enabled, self-spectrum bars are one per selected field, whereas the two distinct-field terms report one per configured pair. The additional `spectral_band_profiles.png` shows reference and reconstruction energy fractions by graph-frequency band, which gives the bounded scores a more direct interpretation. Per-ensemble values, averaged raw mean-squared discrepancies, normalized scores, spread statistics, ensemble membership, and dropped sample IDs are retained in `metrics.csv`, `metrics.npz`, and `report.json`. If spectral-band energy is enabled in the run's coherence configuration, its score figure is generated in the same family directory.
 
-The paired example below compares the source `last.pt` checkpoint with the AB post-training `last.pt` checkpoint over the same 12 training ensembles. Both figures use the same samples, graph, field pairs, and bounded score axis; the whiskers show ±1 standard deviation across ensembles.
+The paired example below compares the source `last.pt` checkpoint with the AB post-training `last.pt` checkpoint over the same 12 training ensembles. It retains the two spectral terms enabled in the resolved training configuration, uses matched sample/query identities, and shows ±1 standard deviation across ensembles on one focused score axis.
 
-<p align="center"><img src="docs/assets/reconstruction_examples/ab_train_last_cross_spectrum_cross_frequency_base.png" alt="Base-source cross-frequency spectral coherence over 12 matched training ensembles" width="49%"> <img src="docs/assets/reconstruction_examples/ab_train_last_cross_spectrum_cross_frequency_posttraining.png" alt="AB post-training cross-frequency spectral coherence over the same 12 training ensembles" width="49%"></p>
+![Matched source and A+B post-training cross-spectrum coherence for the configured same-frequency and cross-frequency terms](cases/turbulent_combustion/diagnostics/coherence/ab_balanced_train_last/cross_spectrum_source_post_coherence.png)
 
-<p align="center"><em>Left: base source. Right: post-training checkpoint. The cross-frequency pair mean increases from 84.4% to 90.6% under the training-aligned estimator.</em></p>
+The saved cross-frequency component mean rises from 84.4% to 90.2%. The [pinned metrics and rendering provenance](cases/turbulent_combustion/diagnostics/coherence/README.md) identify the 192 used training snapshots and eight dropped by complete-ensemble grouping.
 
-> **Topology evaluation scope:** the synchronized family supplies exact H0/H1 diagnostics during the common post-training evaluation. Dedicated set-level topology evaluation and visualization remain pending, so topology is not exposed through `visualize-run --eval-coherence`. Formal efficacy claims still require case-specific validation.
+The historical A+B evaluation payload includes a self-spectrum score in its
+reported family aggregate, while that run's resolved training configuration and
+history enable only same-frequency and cross-frequency terms. The
+[matched term-level diagnostic](cases/turbulent_combustion/diagnostics/coherence/README.md)
+therefore compares the two configured terms and treats the historical aggregate
+as an evaluation artifact rather than a trained-objective result.
+
+#### 7.3.3 Topology coherence
+
+For a run configured with the cubical-persistence family, request `--eval-coherence topology` with `--eval-set`. The evaluator replays the run's deterministic `fixed_shared` point selection and configured topology raster, then compares each reconstructed snapshot with its paired dense target. It writes three complementary figures under `coherence/topology/`: `persistence_term_distributions.png` shows the configured sliced-Wasserstein H0/H1 objective components and their component-weighted total; `betti_curves.png` shows exact H0/H1 counts at reference-defined filtration quantiles; and `configured_grid_topology.png` shows paired median-level geometry and disagreement on the configured raster. The median-level image is an interpretation aid, not a persistence diagram or a native-grid topology claim. Each figure has PNG, PDF, and SVG forms, with CSV/NPZ/JSON numerical provenance.
+
+The component-weighted topology total is shown before the outer family weight. Its magnitude cannot establish the term's share of the parameter update; use the run's gradient diagnostics for update balance. The set plots evaluate paired references on the recorded reduced raster, so their conclusions are limited to that query and filtration contract. A post-training run gets matched `-base` source figures on the same sample set and plot scales. Formal efficacy still requires case-specific, held-out fidelity and topology evidence.
 
 During training, the fixed validation objective and qualitative reconstruction use independent `evaluation.preview.loss_every_epochs` and `reconstruct_every_epochs` cadences. Validation loss is added to `loss_history.png` and selects `best.pt`; periodic recovery writes only `last.pt`, plus explicitly requested epoch checkpoints. Re-render a portable preview payload with:
 

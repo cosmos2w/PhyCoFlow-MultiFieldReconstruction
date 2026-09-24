@@ -46,6 +46,7 @@ def test_distribution_renderer_overlays_violin_and_scatter(tmp_path, monkeypatch
     )
     calls = {"violin": 0, "scatter": 0}
     scatter_styles: list[dict[str, object]] = []
+    violin_inputs: list[object] = []
     import matplotlib.pyplot as plt
 
     original_violin = plt.Axes.violinplot
@@ -53,6 +54,7 @@ def test_distribution_renderer_overlays_violin_and_scatter(tmp_path, monkeypatch
 
     def capture_violin(self, *args, **kwargs):
         calls["violin"] += 1
+        violin_inputs.append(args[0])
         return original_violin(self, *args, **kwargs)
 
     def capture_scatter(self, *args, **kwargs):
@@ -67,11 +69,16 @@ def test_distribution_renderer_overlays_violin_and_scatter(tmp_path, monkeypatch
 
     assert result == output
     assert output.is_file()
+    assert output.with_suffix(".pdf").is_file()
+    assert output.with_suffix(".svg").is_file()
     assert calls == {"violin": 1, "scatter": 4}
-    assert scatter_styles[0]["s"] == 11
-    assert scatter_styles[0]["alpha"] == 0.48
-    assert scatter_styles[1]["marker"] == "D"
-    assert scatter_styles[1]["s"] == 31
+    np.testing.assert_allclose(
+        violin_inputs[0][0], np.log10(np.asarray([0.1, 0.2, 0.3]))
+    )
+    assert scatter_styles[0]["s"] == 12
+    assert scatter_styles[0]["alpha"] == 0.42
+    assert scatter_styles[2]["marker"] == "D"
+    assert scatter_styles[2]["s"] == 28
     assert reconstruction_set._publication_field_label("CH4") == r"CH$_{4}$"
     assert reconstruction_set._publication_field_label("U_1") == r"$U_{1}$"
     assert reconstruction_set._publication_field_label("concentration") == "concentration"
@@ -101,6 +108,73 @@ def test_distribution_renderer_supports_general_field_counts(tmp_path, field_nam
     )
 
     assert output.is_file()
+    assert output.with_suffix(".pdf").is_file()
+    assert output.with_suffix(".svg").is_file()
+
+
+def test_log_distribution_keeps_zero_errors_visible_at_floor(tmp_path):
+    payload = tmp_path / "zero_errors.npz"
+    output = tmp_path / "zero_errors.png"
+    np.savez_compressed(
+        payload,
+        per_field_relative_l2_physical=np.zeros((3, 1), dtype=np.float64),
+        field_names=np.asarray(["u"]),
+        sample_ids=np.asarray(["a", "b", "c"]),
+        split=np.asarray("test"),
+    )
+
+    reconstruction_set.render_reconstruction_set_distribution(payload, output, scale="log")
+
+    assert output.is_file()
+    assert reconstruction_set._relative_l2_distribution_limits(
+        np.zeros(3), "log"
+    ) == (1e-4, 1.0)
+
+
+def test_relative_l2_distribution_rejects_negative_values():
+    with pytest.raises(ValueError, match="nonnegative"):
+        reconstruction_set._relative_l2_distribution_limits(np.asarray([-0.1]), "linear")
+
+
+def test_source_comparison_overrides_only_requested_coherence_contracts():
+    source = {
+        "observations": {"seed": 11},
+        "model": {"width": 64},
+        "coherence": {
+            "compute_budget": {
+                "batch_size": 8,
+                "point_count": 1024,
+                "query_seed": 3,
+                "unrelated_budget": 91,
+            },
+            "families": {
+                "topology": {"fields": ["old"]},
+                "cross_spectrum": {"components": {"self_spectrum": {"weight": 2.0}}},
+            },
+            "source_only_setting": True,
+        },
+    }
+    current = {
+        "compute_budget": {"point_count": 4096, "query_seed": 100045},
+        "families": {"topology": {"fields": ["CO", "T"], "grid_shape": [32, 128]}},
+    }
+
+    merged = reconstruction_set._merge_coherence_evaluation_override(
+        source, current, ("topology",)
+    )
+
+    assert merged["observations"] == source["observations"]
+    assert merged["model"] == source["model"]
+    assert merged["coherence"]["source_only_setting"] is True
+    assert merged["coherence"]["families"]["topology"] == current["families"]["topology"]
+    assert merged["coherence"]["families"]["cross_spectrum"] == source["coherence"]["families"]["cross_spectrum"]
+    assert merged["coherence"]["compute_budget"] == {
+        "batch_size": 8,
+        "point_count": 4096,
+        "query_seed": 100045,
+        "unrelated_budget": 91,
+        "query_policy": "fixed_shared",
+    }
 
 
 def test_coherence_publication_labels_format_compound_field_pairs():
@@ -506,6 +580,10 @@ def test_posttraining_set_evaluation_builds_matched_source_comparison(tmp_path, 
     ):
         assert (cross_dir / f"{stem}.png").is_file()
         assert (cross_dir / f"{stem}-base.png").is_file()
+    assert (cross_dir / "spectral_band_profiles.png").is_file()
+    assert (cross_dir / "spectral_band_profiles-base.png").is_file()
+    assert (cross_dir / "spectral_band_profiles-base.pdf").is_file()
+    assert (cross_dir / "band_energy_profile-base.csv").is_file()
     assert (cross_dir / "metrics-base.csv").is_file()
     assert (cross_dir / "metrics-base.npz").is_file()
     assert (cross_dir / "report-base.json").is_file()
@@ -553,6 +631,191 @@ def test_posttraining_set_evaluation_builds_matched_source_comparison(tmp_path, 
         )
     }
     assert "density" in report["shared_axis_limits"]["global_distribution_extra"]["u–v"]
+    assert report["shared_axis_limits"]["cross_spectrum"]["graph_band_energy_fraction"] == [
+        0.0,
+        1.0,
+    ]
+    assert report["matched_coherence_contracts"]["cross_spectrum"]["units"] == "model_units"
     child_report = json.loads((output_dir / "report.json").read_text(encoding="utf-8"))
     assert child_report["comparison"]["enabled"] is True
     assert not (source_run / "evaluation").exists()
+
+
+def test_posttraining_topology_comparison_renders_paired_figures(tmp_path):
+    sample_ids = ("s0", "s1")
+    fields = ("CO",)
+    coordinates = np.asarray(
+        [[[0.0, 0.0], [1.0, 0.0]], [[0.0, 1.0], [1.0, 1.0]]], dtype=np.float64
+    )
+    reference_maps = [np.asarray([[[0.0, 1.0], [2.0, 3.0]]], dtype=np.float32)] * 2
+    base_predictions = [
+        np.asarray([[[0.0, 1.2], [1.8, 3.0]]], dtype=np.float32),
+        np.asarray([[[0.0, 1.1], [2.1, 3.0]]], dtype=np.float32),
+    ]
+    current_predictions = [
+        np.asarray([[[0.0, 0.8], [2.2, 3.0]]], dtype=np.float32),
+        np.asarray([[[0.0, 1.3], [1.7, 3.0]]], dtype=np.float32),
+    ]
+    query_contract = {
+        "policy": "fixed_shared",
+        "selector": "fixed_query_indices",
+        "seed": 100045,
+        "selected_point_count": 4,
+        "source_point_count": 4,
+        "selected_indices": [0, 1, 2, 3],
+        "coordinates_sha256": "same-query-coordinates",
+        "matches_training_fixed_shared_selector": True,
+    }
+    raster_contract = {
+        "grid_shape": [2, 2],
+        "source_grid_shape": [2, 2],
+        "periodic": False,
+        "geometry_sha256": "same-raster-geometry",
+        "interpretation": "configured raster, not dataset-native grid",
+    }
+    settings = {"grid_shape": [2, 2], "fields": ["CO"], "units": "model_units"}
+    component_names = np.asarray(["topology.self.persistence"])
+    reference_betti = np.asarray(
+        [
+            [[[2, 3, 1], [10, 20, 5]]],
+            [[[2, 3, 1], [10, 20, 5]]],
+        ],
+        dtype=np.int64,
+    )
+    filtration = {
+        "filtration_metric": np.asarray(["self.CO"]),
+        "filtration_kind": np.asarray(["self"]),
+        "filtration_direction": np.asarray(["sublevel"]),
+        "filtration_line_index": np.asarray([-1], dtype=np.int64),
+        "filtration_line_weight": np.asarray([1.0]),
+    }
+
+    def make_run(role, predictions, costs):
+        output_dir = tmp_path / role
+        topology_dir = output_dir / "coherence" / "topology"
+        topology_dir.mkdir(parents=True)
+        manifest = output_dir / "sensor_manifest.jsonl"
+        manifest.write_text("same manifest\n", encoding="utf-8")
+        relative_payload = output_dir / "relative_l2.npz"
+        np.savez_compressed(
+            relative_payload,
+            per_field_relative_l2_physical=np.asarray([[0.1], [0.2]]),
+            field_names=np.asarray(fields),
+            sample_ids=np.asarray(sample_ids),
+            split=np.asarray("test"),
+        )
+        report_payload = {
+            "units": "model_units",
+            "query_contract": query_contract,
+            "raster": raster_contract,
+            "objective": {"settings": settings},
+            "artifacts": {
+                "metrics_csv": "metrics.csv",
+                "metrics_payload": "metrics.npz",
+                "figures": {
+                    "persistence_term_distributions": "persistence_term_distributions.png",
+                    "betti_curves": "betti_curves.png",
+                    "configured_grid_topology": "configured_grid_topology.png",
+                },
+                "vector_figures": {
+                    key: {"pdf": f"{key}.pdf", "svg": f"{key}.svg"}
+                    for key in (
+                        "persistence_term_distributions",
+                        "betti_curves",
+                        "configured_grid_topology",
+                    )
+                },
+            },
+        }
+        (topology_dir / "report.json").write_text(
+            json.dumps(report_payload), encoding="utf-8"
+        )
+        (topology_dir / "metrics.csv").write_text("sample_id,value\n", encoding="utf-8")
+        reconstructed_betti = reference_betti.copy()
+        reconstructed_betti[:, 0, 0, 1] += 1 if role == "base" else 2
+        reconstructed_betti[:, 0, 1, 1] += 3 if role == "base" else 5
+        np.savez_compressed(
+            topology_dir / "metrics.npz",
+            sample_ids=np.asarray(sample_ids),
+            field_names=np.asarray(fields),
+            source_grid_shape=np.asarray([2, 2]),
+            configured_grid_shape=np.asarray([2, 2]),
+            query_indices=np.asarray([0, 1, 2, 3]),
+            query_coordinates=coordinates.reshape(-1, 2),
+            query_seed=np.asarray(100045),
+            query_point_count=np.asarray(4),
+            quantiles=np.asarray([0.25, 0.5, 0.75]),
+            objective_component_names=component_names,
+            objective_component_distances=np.asarray(costs).reshape(2, 1),
+            family_total_distance=np.asarray(costs),
+            filtration_metric=filtration["filtration_metric"],
+            filtration_kind=filtration["filtration_kind"],
+            filtration_direction=filtration["filtration_direction"],
+            filtration_line_index=filtration["filtration_line_index"],
+            filtration_line_weight=filtration["filtration_line_weight"],
+            reference_betti=reference_betti,
+            reconstruction_betti=reconstructed_betti,
+            grid_coordinates=coordinates,
+        )
+        accumulator = SimpleNamespace(
+            sample_ids=list(sample_ids),
+            field_names=fields,
+            reference_maps=reference_maps,
+            reconstruction_maps=predictions,
+            grid_coordinates=coordinates,
+        )
+        (output_dir / "report.json").write_text("{}\n", encoding="utf-8")
+        return reconstruction_set._SetEvaluationResult(
+            run_dir=output_dir,
+            output_dir=output_dir,
+            figure_path=output_dir / "relative_l2_violin.png",
+            payload_path=relative_payload,
+            report_path=output_dir / "report.json",
+            manifest_path=manifest,
+            checkpoint_path=output_dir / "best.pt",
+            checkpoint_label="best",
+            run_label=role,
+            split="test",
+            sample_ids=sample_ids,
+            field_names=fields,
+            dataset_fingerprint="same-dataset",
+            generation_steps=2,
+            evaluation_seed=7,
+            coherence_outputs={
+                "topology": {"family": "topology", "report": str(topology_dir / "report.json")}
+            },
+            coherence_accumulators={"topology": accumulator},
+        )
+
+    base = make_run("base", base_predictions, (0.1, 0.3))
+    current = make_run("current", current_predictions, (0.2, 0.4))
+
+    reconstruction_set._render_posttraining_comparison(
+        current,
+        base,
+        coherence_families=("topology",),
+        statistic_scale="log",
+    )
+
+    topology_dir = current.output_dir / "coherence" / "topology"
+    for stem in (
+        "persistence_term_distributions",
+        "betti_curves",
+        "configured_grid_topology",
+    ):
+        assert (topology_dir / f"{stem}-base.png").is_file()
+        assert (topology_dir / f"{stem}-base.pdf").is_file()
+        assert (topology_dir / f"{stem}-base.svg").is_file()
+    comparison = json.loads(
+        (current.output_dir / "comparison_report.json").read_text(encoding="utf-8")
+    )
+    betti_limits = comparison["shared_axis_limits"]["topology"][
+        "betti_count_by_dimension"
+    ]
+    assert betti_limits == {"h0": [0.0, 6.0], "h1": [0.0, 27.0]}
+    assert comparison["matched_coherence_contracts"]["topology"]["query_contract"][
+        "policy"
+    ] == "fixed_shared"
+    assert comparison["matched_coherence_contracts"]["topology"]["raster"][
+        "interpretation"
+    ] == "configured raster, not dataset-native grid"

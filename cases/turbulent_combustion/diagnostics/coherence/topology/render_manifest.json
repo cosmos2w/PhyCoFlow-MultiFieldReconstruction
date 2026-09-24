@@ -1,0 +1,14 @@
+{
+  "command": "OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHONPATH=src conda run -n phycoflow_env python cases/turbulent_combustion/diagnostics/coherence/render_epoch800_topology.py",
+  "device": "cpu",
+  "gudhi_version": "3.13.0",
+  "input_payload_sha256": "f114765efb2f15451c2b9d960f465411ffd21cbcd3cb4b50aa747c63a33b20c5",
+  "preview_epoch": 800.0,
+  "python_version": "3.10.19",
+  "sample_id": "trajectory_000000:8000",
+  "script_elapsed_seconds": 2.824,
+  "source_run_id": "20260924T030724Z_4208231c",
+  "torch_interop_threads": 1,
+  "torch_threads": 1,
+  "torch_version": "2.5.1+cu121"
+}

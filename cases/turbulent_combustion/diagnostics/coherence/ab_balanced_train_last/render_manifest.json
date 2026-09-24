@@ -1,0 +1,16 @@
+{
+  "command": "OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHONPATH=src conda run -n phycoflow_env python cases/turbulent_combustion/diagnostics/coherence/render_ab_train_last_cross_spectrum.py",
+  "device": "cpu",
+  "input_sha256": {
+    "comparison_report.json": "b94c680d9fec1918ace388dcbca6be222756dc7bf6f384da223057321cc658be",
+    "post_metrics.npz": "89353ab486b4e79275e79a3b1779baef155e50c76610fdbb10a50de30ac9315d",
+    "post_report.json": "28a6f4cd0091e67779c043324a0ca4f1b6fd9abf77aa9cc8f34f83382d4c5b78",
+    "resolved_config.yaml": "5b35674ccbaad6a716c0532b1ee1b79d64e5ec775e6d2f6fd302f53c312f818b",
+    "source_metrics.npz": "43d6285a8c7d0753697accaed51c74473ca35398d25f38c3957da2f3d2e219f5",
+    "source_report.json": "a5c12ff24adcff2daf0b9adb6d27df6e621364c18dd5bae1ff26d5a036bd394b"
+  },
+  "numpy_version": "2.2.6",
+  "python_version": "3.10.19",
+  "script_elapsed_seconds": 1.77,
+  "source_provenance": "../source/ab_balanced_train_last/provenance.json"
+}

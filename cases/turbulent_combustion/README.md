@@ -2,6 +2,10 @@
 
 Sparse measurable combustion fields condition reconstruction of all five fields. The single long trajectory uses chronological frames 0–7999 for train, 8000–8999 for validation, and 9000–9999 for test.
 
+The [diagnostic figure gallery](diagnostics/README.md) defines the roles,
+comparison rules, and reviewable examples for training, reconstruction,
+distribution, spectral, and topology figures.
+
 The legacy clock resets at frame 4000; sample identity and splitting therefore use saved frame indices while retaining the raw clock as provenance.
 
 New PointCloudFFM runs use `GL_rbf_ENH/topk_rbf`; Demo 50 uses the isolated legacy compatibility path with explicit `CO,T,U_0,U_1,p` field mapping. Run `python import_demo50.py` here to perform the strict non-destructive import and write its local compatibility manifest.

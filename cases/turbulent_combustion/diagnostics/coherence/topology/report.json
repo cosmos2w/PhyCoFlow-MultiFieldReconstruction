@@ -1,0 +1,431 @@
+{
+  "artifacts": {
+    "figures": {
+      "betti_curves": "betti_curves.png",
+      "configured_grid_topology": "configured_grid_topology.png",
+      "persistence_term_distributions": "persistence_term_distributions.png"
+    },
+    "metrics_csv": "metrics.csv",
+    "metrics_payload": "metrics.npz",
+    "vector_figures": {
+      "betti_curves": {
+        "pdf": "betti_curves.pdf",
+        "svg": "betti_curves.svg"
+      },
+      "configured_grid_topology": {
+        "pdf": "configured_grid_topology.pdf",
+        "svg": "configured_grid_topology.svg"
+      },
+      "persistence_term_distributions": {
+        "pdf": "persistence_term_distributions.pdf",
+        "svg": "persistence_term_distributions.svg"
+      }
+    }
+  },
+  "betti_curves": {
+    "aggregation": "per-snapshot exact counts; mutual curves average the fixed line restrictions for visualization; distance metrics preserve the configured line weights",
+    "definition": "exact H0/H1 counts from the same signed, reference-standardized scalar and mutual line filtrations used by the cubical persistence objective",
+    "periodic_boundary": false,
+    "reference_quantiles": [
+      0.1,
+      0.25,
+      0.5,
+      0.75,
+      0.9
+    ],
+    "statistics": {
+      "mutual.CO+T|sublevel": {
+        "h0": {
+          "mean_absolute_count_error": 3.9333333333333327,
+          "mean_absolute_count_error_by_quantile": [
+            3.666666666666666,
+            5.0,
+            7.666666666666666,
+            3.0,
+            0.3333333333333335
+          ],
+          "normalized_curve_l1_mean": 1.3409090909090906,
+          "normalized_curve_l1_standard_deviation": 0.0
+        },
+        "h1": {
+          "mean_absolute_count_error": 0.7999999999999997,
+          "mean_absolute_count_error_by_quantile": [
+            0.3333333333333333,
+            0.3333333333333333,
+            2.0,
+            1.0,
+            0.33333333333333215
+          ],
+          "normalized_curve_l1_mean": 0.32432432432432423,
+          "normalized_curve_l1_standard_deviation": 0.0
+        }
+      },
+      "mutual.CO+T|superlevel": {
+        "h0": {
+          "mean_absolute_count_error": 1.9333333333333331,
+          "mean_absolute_count_error_by_quantile": [
+            1.666666666666667,
+            3.333333333333333,
+            3.9999999999999996,
+            0.0,
+            0.6666666666666665
+          ],
+          "normalized_curve_l1_mean": 0.5471698113207546,
+          "normalized_curve_l1_standard_deviation": 0.0
+        },
+        "h1": {
+          "mean_absolute_count_error": 15.133333333333335,
+          "mean_absolute_count_error_by_quantile": [
+            0.3333333333333333,
+            0.3333333333333333,
+            4.333333333333333,
+            34.333333333333336,
+            36.333333333333336
+          ],
+          "normalized_curve_l1_mean": 0.9700854700854702,
+          "normalized_curve_l1_standard_deviation": 0.0
+        }
+      },
+      "self.CO|sublevel": {
+        "h0": {
+          "mean_absolute_count_error": 5.6,
+          "mean_absolute_count_error_by_quantile": [
+            7.0,
+            7.0,
+            13.0,
+            1.0,
+            0.0
+          ],
+          "normalized_curve_l1_mean": 3.111111111111111,
+          "normalized_curve_l1_standard_deviation": 0.0
+        },
+        "h1": {
+          "mean_absolute_count_error": 1.2,
+          "mean_absolute_count_error_by_quantile": [
+            1.0,
+            1.0,
+            2.0,
+            0.0,
+            2.0
+          ],
+          "normalized_curve_l1_mean": 1.2,
+          "normalized_curve_l1_standard_deviation": 0.0
+        }
+      },
+      "self.CO|superlevel": {
+        "h0": {
+          "mean_absolute_count_error": 3.4,
+          "mean_absolute_count_error_by_quantile": [
+            6.0,
+            1.0,
+            2.0,
+            4.0,
+            4.0
+          ],
+          "normalized_curve_l1_mean": 0.85,
+          "normalized_curve_l1_standard_deviation": 0.0
+        },
+        "h1": {
+          "mean_absolute_count_error": 45.6,
+          "mean_absolute_count_error_by_quantile": [
+            0.0,
+            1.0,
+            9.0,
+            109.0,
+            109.0
+          ],
+          "normalized_curve_l1_mean": 0.9743589743589743,
+          "normalized_curve_l1_standard_deviation": 0.0
+        }
+      },
+      "self.T|sublevel": {
+        "h0": {
+          "mean_absolute_count_error": 2.4,
+          "mean_absolute_count_error_by_quantile": [
+            1.0,
+            4.0,
+            5.0,
+            0.0,
+            2.0
+          ],
+          "normalized_curve_l1_mean": 1.5,
+          "normalized_curve_l1_standard_deviation": 0.0
+        },
+        "h1": {
+          "mean_absolute_count_error": 1.4,
+          "mean_absolute_count_error_by_quantile": [
+            0.0,
+            0.0,
+            2.0,
+            1.0,
+            4.0
+          ],
+          "normalized_curve_l1_mean": 2.3333333333333335,
+          "normalized_curve_l1_standard_deviation": 0.0
+        }
+      },
+      "self.T|superlevel": {
+        "h0": {
+          "mean_absolute_count_error": 2.8,
+          "mean_absolute_count_error_by_quantile": [
+            5.0,
+            1.0,
+            5.0,
+            2.0,
+            1.0
+          ],
+          "normalized_curve_l1_mean": 1.5555555555555556,
+          "normalized_curve_l1_standard_deviation": 0.0
+        },
+        "h1": {
+          "mean_absolute_count_error": 1.2,
+          "mean_absolute_count_error_by_quantile": [
+            0.0,
+            1.0,
+            2.0,
+            3.0,
+            0.0
+          ],
+          "normalized_curve_l1_mean": 6.0,
+          "normalized_curve_l1_standard_deviation": 0.0
+        }
+      }
+    },
+    "thresholds": "reference-filtration quantiles listed above; the persistence score itself integrates the full diagram"
+  },
+  "checkpoint_label": "epoch_000800",
+  "evaluation_mode": "auxiliary_saved_preview_queries_not_training_selector",
+  "family": "topology",
+  "metric": "paired_reconstruction_to_ground_truth_cubical_persistence_and_exact_betti_curves",
+  "normalization_method": "mean_std",
+  "objective": {
+    "component_distances_before_family_weight": {
+      "topology.mutual.persistence": {
+        "count": 1,
+        "maximum": 0.0006289224838837981,
+        "mean": 0.0006289224838837981,
+        "median": 0.0006289224838837981,
+        "minimum": 0.0006289224838837981,
+        "quartile_25": 0.0006289224838837981,
+        "quartile_75": 0.0006289224838837981,
+        "standard_deviation": 0.0
+      },
+      "topology.self.persistence": {
+        "count": 1,
+        "maximum": 0.004998255055397749,
+        "mean": 0.004998255055397749,
+        "median": 0.004998255055397749,
+        "minimum": 0.004998255055397749,
+        "quartile_25": 0.004998255055397749,
+        "quartile_75": 0.004998255055397749,
+        "standard_deviation": 0.0
+      }
+    },
+    "component_weighted_total_before_outer_family_weight": {
+      "count": 1,
+      "maximum": 0.005627177655696869,
+      "mean": 0.005627177655696869,
+      "median": 0.005627177655696869,
+      "minimum": 0.005627177655696869,
+      "quartile_25": 0.005627177655696869,
+      "quartile_75": 0.005627177655696869,
+      "standard_deviation": 0.0
+    },
+    "component_weights": {
+      "mutual.persistence": 1.0,
+      "self.persistence": 1.0
+    },
+    "dimension_distance_diagnostics": {
+      "topology.mutual.CO+T.h0": {
+        "count": 1,
+        "maximum": 0.0007893576403148472,
+        "mean": 0.0007893576403148472,
+        "median": 0.0007893576403148472,
+        "minimum": 0.0007893576403148472,
+        "quartile_25": 0.0007893576403148472,
+        "quartile_75": 0.0007893576403148472,
+        "standard_deviation": 0.0
+      },
+      "topology.mutual.CO+T.h1": {
+        "count": 1,
+        "maximum": 0.0004684871528297663,
+        "mean": 0.0004684871528297663,
+        "median": 0.0004684871528297663,
+        "minimum": 0.0004684871528297663,
+        "quartile_25": 0.0004684871528297663,
+        "quartile_75": 0.0004684871528297663,
+        "standard_deviation": 0.0
+      },
+      "topology.self.CO.h0": {
+        "count": 1,
+        "maximum": 0.01855326257646084,
+        "mean": 0.01855326257646084,
+        "median": 0.01855326257646084,
+        "minimum": 0.01855326257646084,
+        "quartile_25": 0.01855326257646084,
+        "quartile_75": 0.01855326257646084,
+        "standard_deviation": 0.0
+      },
+      "topology.self.CO.h1": {
+        "count": 1,
+        "maximum": 0.000563128967769444,
+        "mean": 0.000563128967769444,
+        "median": 0.000563128967769444,
+        "minimum": 0.000563128967769444,
+        "quartile_25": 0.000563128967769444,
+        "quartile_75": 0.000563128967769444,
+        "standard_deviation": 0.0
+      },
+      "topology.self.T.h0": {
+        "count": 1,
+        "maximum": 0.0007415759610012174,
+        "mean": 0.0007415759610012174,
+        "median": 0.0007415759610012174,
+        "minimum": 0.0007415759610012174,
+        "quartile_25": 0.0007415759610012174,
+        "quartile_75": 0.0007415759610012174,
+        "standard_deviation": 0.0
+      },
+      "topology.self.T.h1": {
+        "count": 1,
+        "maximum": 0.00013505364768207073,
+        "mean": 0.00013505364768207073,
+        "median": 0.00013505364768207073,
+        "minimum": 0.00013505364768207073,
+        "quartile_25": 0.00013505364768207073,
+        "quartile_75": 0.00013505364768207073,
+        "standard_deviation": 0.0
+      }
+    },
+    "distance_definition": "cubical persistence diagrams compared with finite-angle sliced-Wasserstein quadrature; essential classes are weighted as configured and distances are normalized by raster vertex count",
+    "family_weight": 1.0,
+    "objective_component_weights": {
+      "mutual.persistence": 1.0,
+      "self.persistence": 1.0
+    },
+    "outer_family_weight_applied": false,
+    "settings": {
+      "components": {
+        "mutual": {
+          "direction_floor": 0.25,
+          "enabled": true,
+          "groups": [
+            [
+              "CO",
+              "T"
+            ]
+          ],
+          "lines": 3,
+          "offset_range": 1.0,
+          "seed": 1729,
+          "weight": 1.0
+        },
+        "self": {
+          "enabled": true,
+          "fields": [
+            "CO",
+            "T"
+          ],
+          "weight": 1.0
+        }
+      },
+      "enabled": true,
+      "fields": [
+        "CO",
+        "T"
+      ],
+      "filtration": {
+        "dimensions": [
+          0,
+          1
+        ],
+        "directions": [
+          "sublevel",
+          "superlevel"
+        ],
+        "smoothing_sigma": 0.0
+      },
+      "geometry": {
+        "allow_projected_collisions": false,
+        "antialias_downsample": true,
+        "axes": [
+          0,
+          1
+        ],
+        "grid_shape": [
+          32,
+          128
+        ],
+        "neighbors": 4,
+        "periodic": false,
+        "power": 2.0
+      },
+      "persistence": {
+        "distance": "sliced_wasserstein",
+        "essential_weight": 0.1,
+        "projections": 32,
+        "scale_floor": 0.0001
+      },
+      "reference_bank": {
+        "enabled": false
+      },
+      "strategy": "cubical_persistence",
+      "target_use": "paired_supervised",
+      "units": "model_units",
+      "weight": 1.0
+    },
+    "strategy": "cubical_persistence"
+  },
+  "query_contract": {
+    "coordinates_sha256": "c843547d28f945609635aede3c8258f9270128a03253ef8bf42e3b4b6baf68f5",
+    "input_point_count": 4096,
+    "matches_training_fixed_shared_selector": false,
+    "policy": "preselected_saved_queries",
+    "seed": 2027,
+    "selected_indices": null,
+    "selected_point_count": 4096,
+    "selector": "saved training_preview query_coords; preview selection seed=2027 (identity order in pinned payload)",
+    "source_point_count": 40300
+  },
+  "raster": {
+    "antialias_downsample_applied": false,
+    "antialias_downsample_configured": true,
+    "geometry_diagnostics": {
+      "antialias_applied": 0,
+      "collision_fraction": 0.0,
+      "nearest_spacing_max": 0.034402203170019054,
+      "nearest_spacing_median": 0.006638315049010975,
+      "nearest_spacing_min": 0.0007780860178172588,
+      "point_count": 4096,
+      "unique_projected_count": 4096
+    },
+    "geometry_sha256": "e5783936925e9b54a32194f54e9c2783fbf85bea25ebe76552274af66a3ec80b",
+    "grid_shape": [
+      32,
+      128
+    ],
+    "interpretation": "configured topology raster produced from already sampled preview query coordinates; not the training fixed_shared estimator or dataset-native grid",
+    "periodic": false,
+    "source_grid_shape": [
+      100,
+      403
+    ]
+  },
+  "representative_visualization": {
+    "component_weighted_total_before_outer_family_weight": 0.005627177655696869,
+    "level_set": "superlevel at the paired reference median for each configured self field",
+    "policy": "stable median of per-snapshot component-weighted total before outer family weight",
+    "reference_median_thresholds": {
+      "CO": -0.7505130767822266,
+      "T": -0.9174257516860962
+    },
+    "sample_id": "trajectory_000000:8000",
+    "value_units": "model units (mean_std normalized)"
+  },
+  "run_label": "coherence_fix_ABC_sliced_persistence_formal_5000ep_gpu1",
+  "sample_count": 1,
+  "split": "validation",
+  "target_use": "paired_supervised",
+  "units": "model_units",
+  "visualization_scale": "linear natural scale; statistical log/linear scale option does not apply"
+}

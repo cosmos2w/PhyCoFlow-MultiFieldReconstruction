@@ -43,6 +43,36 @@ def _absolute_error_title(relative_l2: float | None) -> str:
     return f"Absolute error\nRelative $L_2$ = {metric}"
 
 
+def _coordinates_in_dataset_units(
+    coordinates: np.ndarray,
+    normalized_reference: np.ndarray,
+    physical_reference: np.ndarray,
+) -> np.ndarray:
+    """Undo the dataset's per-axis min-max coordinate scaling for display."""
+    coordinates64 = np.asarray(coordinates, dtype=np.float64)
+    normalized64 = np.asarray(normalized_reference, dtype=np.float64)
+    physical64 = np.asarray(physical_reference, dtype=np.float64)
+    if normalized64.ndim != 2 or physical64.shape != normalized64.shape:
+        raise ValueError("reference coordinate arrays must align as [points, dimensions]")
+    if coordinates64.ndim != 2 or coordinates64.shape[1] != normalized64.shape[1]:
+        raise ValueError("display coordinates must align with the dataset coordinate dimension")
+    result = np.empty_like(coordinates64)
+    for dimension in range(coordinates64.shape[1]):
+        normalized_min = float(normalized64[:, dimension].min())
+        normalized_span = float(np.ptp(normalized64[:, dimension]))
+        physical_min = float(physical64[:, dimension].min())
+        physical_span = float(np.ptp(physical64[:, dimension]))
+        if normalized_span <= np.finfo(np.float64).eps:
+            result[:, dimension] = physical_min
+        else:
+            result[:, dimension] = physical_min + (
+                (coordinates64[:, dimension] - normalized_min)
+                * physical_span
+                / normalized_span
+            )
+    return result.astype(np.float32)
+
+
 def _plot_preview(
     path_stem: Path,
     *,
@@ -56,22 +86,63 @@ def _plot_preview(
     field_names: tuple[str, ...],
     logical_shape: tuple[int, ...],
     epoch: float,
+    field_units: tuple[str, ...] | None = None,
+    coordinate_space: str = "normalized",
+    sample_id: str | None = None,
 ) -> tuple[Path, ...]:
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from matplotlib.cm import ScalarMappable
+    from matplotlib.colors import Normalize
 
     plt.rcParams["svg.fonttype"] = "none"
     fields = len(field_names)
+    if prediction.shape != target.shape or prediction.ndim != 2:
+        raise ValueError("preview fields must align as [query_points, fields]")
+    if prediction.shape[1] != fields or len(logical_shape) not in {1, 2}:
+        raise ValueError("preview fields and logical grid metadata do not align")
+    if query_coords.shape[0] != prediction.shape[0] or obs_coords.shape[1] != query_coords.shape[1]:
+        raise ValueError("preview query and observation coordinates do not align")
+    if obs_values.shape != obs_fields.shape or obs_fields.shape != obs_valid.shape:
+        raise ValueError("preview observations do not align")
+    units = field_units or ("unknown",) * fields
+    if len(units) != fields:
+        raise ValueError("preview field units do not align with field names")
+
+    coordinate_dim = query_coords.shape[1]
+    if coordinate_dim == 1:
+        coordinate_names = ("coordinate",)
+    else:
+        coordinate_names = ("x coordinate", "y coordinate")
+    suffix = (
+        " (normalized)"
+        if coordinate_space == "normalized"
+        else " (dataset units)"
+    )
+    axis_labels = tuple(f"{name}{suffix}" for name in coordinate_names)
+
     figure, axes = plt.subplots(
         fields,
         3,
-        figsize=(12.0, max(3.2, 2.8 * fields)),
+        figsize=(12.6, max(2.8, 2.55 * fields)),
         squeeze=False,
-        constrained_layout=True,
+        layout="constrained",
+        gridspec_kw={"wspace": 0.18, "hspace": 0.16},
     )
     complete_grid = prediction.shape[0] == math.prod(logical_shape)
+
+    if len(logical_shape) == 2 and coordinate_dim >= 2 and complete_grid:
+        coordinate_grid = query_coords.reshape(*logical_shape, coordinate_dim)
+        x_grid = coordinate_grid[..., 0]
+        y_grid = coordinate_grid[..., 1]
+        rectilinear = np.allclose(x_grid, x_grid[:1, :], rtol=1e-5, atol=1e-7) and np.allclose(
+            y_grid, y_grid[:, :1], rtol=1e-5, atol=1e-7
+        )
+    else:
+        coordinate_grid = None
+        rectilinear = False
 
     for field_index, field_name in enumerate(field_names):
         truth = target[:, field_index]
@@ -79,80 +150,167 @@ def _plot_preview(
         error = np.abs(estimate - truth)
         error_title = _absolute_error_title(_relative_l2_error(estimate, truth))
         field_sensor_mask = obs_valid & (obs_fields == field_index)
+        field_low = float(min(np.min(truth), np.min(estimate)))
+        field_high = float(max(np.max(truth), np.max(estimate)))
+        if field_high <= field_low:
+            field_padding = max(abs(field_low), 1.0) * 1e-6
+            field_low -= field_padding
+            field_high += field_padding
+        error_high = max(float(np.max(error)), np.finfo(np.float64).eps)
+        unit = units[field_index]
+        unit_label = (
+            f" [{unit}]" if unit and unit.lower() != "unknown" else " [units not specified]"
+        )
+        error_colorbar = ScalarMappable(
+            norm=Normalize(vmin=0.0, vmax=error_high), cmap="YlOrRd"
+        )
 
-        if len(logical_shape) == 1 and complete_grid:
+        if len(logical_shape) == 1:
             x = query_coords[:, 0]
             order = np.argsort(x)
             panels = ((truth, "Target"), (estimate, "Reconstruction"), (error, error_title))
             for column, (values, title) in enumerate(panels):
-                axes[field_index, column].plot(x[order], values[order], linewidth=1.4)
-                axes[field_index, column].set_title(title)
-            axes[field_index, 1].scatter(
-                obs_coords[field_sensor_mask, 0],
-                obs_values[field_sensor_mask],
-                s=15,
-                facecolors="none",
-                edgecolors="black",
-                linewidths=0.8,
-                label="sensors",
-                zorder=3,
-            )
-        elif len(logical_shape) == 2 and complete_grid:
-            truth_grid = truth.reshape(logical_shape)
-            estimate_grid = estimate.reshape(logical_shape)
-            error_grid = error.reshape(logical_shape)
-            low = float(min(truth.min(), estimate.min()))
-            high = float(max(truth.max(), estimate.max()))
-            panels = (
-                (truth_grid, "Target", "viridis", low, high),
-                (estimate_grid, "Reconstruction", "viridis", low, high),
-                (error_grid, error_title, "magma", 0.0, None),
-            )
-            for column, (values, title, cmap, vmin, vmax) in enumerate(panels):
-                image = axes[field_index, column].imshow(
-                    values,
-                    origin="lower",
-                    aspect="auto",
-                    cmap=cmap,
-                    vmin=vmin,
-                    vmax=vmax,
-                )
-                axes[field_index, column].set_title(title)
-                figure.colorbar(image, ax=axes[field_index, column], fraction=0.046, pad=0.03)
+                axis = axes[field_index, column]
+                if complete_grid:
+                    axis.plot(
+                        x[order],
+                        values[order],
+                        color="#2878A5" if column < 2 else "#9C3D36",
+                        linewidth=1.1,
+                    )
+                else:
+                    axis.scatter(
+                        x,
+                        values,
+                        s=10,
+                        alpha=0.75,
+                        color="#2878A5" if column < 2 else "#9C3D36",
+                        edgecolors="none",
+                        rasterized=True,
+                    )
+                if column < 2 and field_index == 0:
+                    axis.set_title(title)
             if field_sensor_mask.any():
-                rows, columns = logical_shape
                 axes[field_index, 1].scatter(
-                    obs_coords[field_sensor_mask, 0] * max(columns - 1, 1),
-                    obs_coords[field_sensor_mask, 1] * max(rows - 1, 1),
-                    s=8,
-                    facecolors="none",
-                    edgecolors="white",
-                    linewidths=0.5,
-                    label="sensors",
+                    obs_coords[field_sensor_mask, 0],
+                    obs_values[field_sensor_mask],
+                    s=20,
+                    marker="o",
+                    facecolors="white",
+                    edgecolors="#1D2933",
+                    linewidths=0.65,
+                    label="conditioned observations",
+                    zorder=3,
                 )
+            axes[field_index, 0].set_ylim(field_low, field_high)
+            axes[field_index, 1].set_ylim(field_low, field_high)
+            axes[field_index, 2].set_ylim(0.0, error_high)
+            axes[field_index, 2].set_title(error_title)
+            axes[field_index, 0].set_xlabel(axis_labels[0])
+            axes[field_index, 1].set_xlabel(axis_labels[0])
+            axes[field_index, 2].set_xlabel(axis_labels[0])
+            axes[field_index, 0].set_ylabel(f"{field_name}{unit_label}\nfield value")
+            axes[field_index, 2].set_title(error_title)
+            if field_sensor_mask.any() and field_index == 0:
+                axes[field_index, 1].legend(frameon=False, fontsize=7.5, loc="best")
         else:
-            x = query_coords[:, 0]
-            y = query_coords[:, 1] if query_coords.shape[1] > 1 else np.zeros_like(x)
-            panels = (
-                (truth, "Target", "viridis"),
-                (estimate, "Reconstruction", "viridis"),
-                (error, error_title, "magma"),
+            is_spatial = len(logical_shape) == 2 and coordinate_dim >= 2
+            x = coordinate_grid[..., 0] if rectilinear and coordinate_grid is not None else query_coords[:, 0]
+            y = coordinate_grid[..., 1] if rectilinear and coordinate_grid is not None else (
+                query_coords[:, 1] if coordinate_dim >= 2 else np.zeros_like(x)
             )
-            for column, (values, title, cmap) in enumerate(panels):
-                points = axes[field_index, column].scatter(x, y, c=values, s=8, cmap=cmap)
-                axes[field_index, column].set_title(title)
-                figure.colorbar(points, ax=axes[field_index, column], fraction=0.046, pad=0.03)
-
-        axes[field_index, 0].set_ylabel(field_name)
+            panel_values = (truth, estimate, error)
+            panel_titles = ("Target", "Reconstruction", error_title)
+            for column, (values, panel_title) in enumerate(zip(panel_values, panel_titles)):
+                axis = axes[field_index, column]
+                if rectilinear:
+                    image = axis.pcolormesh(
+                        x,
+                        y,
+                        values.reshape(logical_shape),
+                        shading="auto",
+                        cmap="viridis" if column < 2 else "YlOrRd",
+                        vmin=field_low if column < 2 else 0.0,
+                        vmax=field_high if column < 2 else error_high,
+                        rasterized=True,
+                    )
+                else:
+                    image = axis.scatter(
+                        x,
+                        y,
+                        c=values,
+                        s=5.0 if not complete_grid else 8.0,
+                        alpha=0.82 if column < 2 else 0.76,
+                        cmap="viridis" if column < 2 else "YlOrRd",
+                        vmin=field_low if column < 2 else 0.0,
+                        vmax=field_high if column < 2 else error_high,
+                        linewidths=0.0,
+                        rasterized=True,
+                    )
+                if is_spatial:
+                    if field_index == len(field_names) - 1:
+                        axis.set_xlabel(axis_labels[0])
+                    axis.set_ylabel(axis_labels[1] if column == 0 else "")
+                    if not rectilinear:
+                        axis.set_xlim(float(np.min(x)), float(np.max(x)))
+                        axis.set_ylim(float(np.min(y)), float(np.max(y)))
+                    axis.set_aspect("equal", adjustable="box")
+                if column < 2 and field_index == 0:
+                    axis.set_title(panel_title)
+                elif column == 2:
+                    axis.set_title(error_title)
+            if is_spatial:
+                figure.colorbar(
+                    ScalarMappable(norm=Normalize(vmin=field_low, vmax=field_high), cmap="viridis"),
+                    ax=axes[field_index, :2],
+                    fraction=0.035,
+                    pad=0.025,
+                    label=f"Field value{unit_label}",
+                )
+                figure.colorbar(
+                    error_colorbar,
+                    ax=axes[field_index, 2],
+                    fraction=0.055,
+                    pad=0.03,
+                    label=f"Absolute error{unit_label}",
+                )
+                if field_sensor_mask.any():
+                    axes[field_index, 1].scatter(
+                        obs_coords[field_sensor_mask, 0],
+                        obs_coords[field_sensor_mask, 1],
+                        s=8,
+                        marker="o",
+                        facecolors="none",
+                        edgecolors="#1D2933",
+                        linewidths=0.35,
+                        alpha=0.62,
+                        label="conditioned observations",
+                        zorder=3,
+                    )
+                    if field_index == 0:
+                        axes[field_index, 1].legend(
+                            frameon=True,
+                            facecolor="white",
+                            edgecolor="none",
+                            framealpha=0.88,
+                            fontsize=7.5,
+                            loc="upper right",
+                        )
+            else:
+                figure.colorbar(image, ax=axes[field_index, 2], fraction=0.055, pad=0.03)
         for axis in axes[field_index]:
-            axis.tick_params(labelsize=8)
-        if field_sensor_mask.any():
-            axes[field_index, 1].legend(loc="best", frameon=False, fontsize=7)
+            axis.tick_params(labelsize=8.2, width=0.75, length=3, pad=2)
+            axis.spines["top"].set_visible(False)
+            axis.spines["right"].set_visible(False)
+        if len(logical_shape) == 2:
+            axes[field_index, 0].set_ylabel(f"{field_name}{unit_label}\n{axis_labels[1]}")
 
-    figure.suptitle(f"Sparse reconstruction preview — epoch {epoch:.3f}")
+    sample_label = f" — {sample_id}" if sample_id else ""
+    figure.suptitle(f"Reconstruction preview — epoch {epoch:g}{sample_label}", fontsize=11.5)
     outputs = tuple(path_stem.with_suffix(suffix) for suffix in (".png", ".svg", ".pdf"))
+    path_stem.parent.mkdir(parents=True, exist_ok=True)
     for output in outputs:
-        figure.savefig(output, dpi=160)
+        figure.savefig(output, dpi=300, bbox_inches="tight")
     plt.close(figure)
     return outputs
 
@@ -166,18 +324,35 @@ def render_preview_payload(
     """Re-render a saved training preview without model inference."""
     payload_path = Path(payload_path)
     with np.load(payload_path, allow_pickle=False) as payload:
+        query_coords = np.asarray(payload["query_coords"])
+        obs_coords = np.asarray(payload["obs_coords"])
+        coordinate_space = "normalized"
+        if "query_coords_physical" in payload.files:
+            query_coords = np.asarray(payload["query_coords_physical"])
+            coordinate_space = "dataset"
+        if "obs_coords_physical" in payload.files:
+            obs_coords = np.asarray(payload["obs_coords_physical"])
+        field_units = (
+            tuple(str(value) for value in payload["field_units"])
+            if "field_units" in payload.files
+            else None
+        )
+        sample_id = str(payload["sample_id"]) if "sample_id" in payload.files else None
         return _plot_preview(
             Path(output_stem) if output_stem is not None else payload_path.with_suffix(""),
             prediction=payload["prediction_physical"],
             target=payload["target_physical"],
-            query_coords=payload["query_coords"],
-            obs_coords=payload["obs_coords"],
+            query_coords=query_coords,
+            obs_coords=obs_coords,
             obs_values=payload["obs_values_physical"],
             obs_fields=payload["obs_field_ids"],
             obs_valid=payload["obs_valid_mask"].astype(bool),
             field_names=tuple(str(value) for value in payload["field_names"]),
             logical_shape=tuple(int(value) for value in payload["logical_shape"]),
             epoch=float(epoch),
+            field_units=field_units,
+            coordinate_space=coordinate_space,
+            sample_id=sample_id,
         )
 
 
@@ -200,6 +375,9 @@ class TrainingReconstructionPreview:
         self.settings = settings
         self.dataset = None
         self.batch = None
+        self.field_units: tuple[str, ...] = ()
+        self.query_coords_physical: np.ndarray | None = None
+        self.obs_coords_physical: np.ndarray | None = None
         self.output_dir = store.run_dir / "evaluation" / "training_preview"
         self.generation_steps = int(
             settings.get(
@@ -233,6 +411,19 @@ class TrainingReconstructionPreview:
             ),
             query_points=None if query_points is None else int(query_points),
         ).to(device)
+        self.field_units = tuple(self.dataset.data_spec.field_units)
+        normalized_reference = sample.coordinates.detach().cpu().numpy()
+        physical_reference = sample.coordinates_raw.detach().cpu().numpy()
+        self.query_coords_physical = _coordinates_in_dataset_units(
+            self.batch.query_coords[0].detach().cpu().numpy(),
+            normalized_reference,
+            physical_reference,
+        )
+        self.obs_coords_physical = _coordinates_in_dataset_units(
+            self.batch.obs_coords[0].detach().cpu().numpy(),
+            normalized_reference,
+            physical_reference,
+        )
         # The preview batch is now self-contained. Close the lazy HDF5 handle
         # before DataLoader workers may fork so no unrelated descriptor is
         # inherited by the asynchronous training path.
@@ -334,7 +525,9 @@ class TrainingReconstructionPreview:
             prediction_physical=prediction_physical.numpy(),
             target_physical=target_physical.numpy(),
             query_coords=self.batch.query_coords[0].detach().cpu().numpy(),
+            query_coords_physical=self.query_coords_physical,
             obs_coords=self.batch.obs_coords[0].detach().cpu().numpy(),
+            obs_coords_physical=self.obs_coords_physical,
             obs_values_physical=_physical_observations(
                 self.batch, self.dataset.normalizer
             ).numpy(),
@@ -342,6 +535,9 @@ class TrainingReconstructionPreview:
             obs_valid_mask=self.batch.obs_valid_mask[0].detach().cpu().numpy(),
             logical_shape=np.asarray(self.dataset.data_spec.logical_shape),
             field_names=np.asarray(self.dataset.field_names),
+            field_units=np.asarray(self.field_units),
+            coordinate_space=np.asarray("dataset"),
+            sample_id=np.asarray(self.batch.sample_ids[0]),
         )
         figure_paths = render_preview_payload(
             npz_path,
@@ -391,8 +587,11 @@ class TrainingReconstructionPreview:
             f"- **Training epoch:** `{epoch:.3f}`\n"
             f"- **Sample:** `{report['sample_id']}` from the configured preview split.\n"
             "- **Panels:** physical target, reconstruction, and absolute error; "
-            "each error panel reports its field-wise relative L2 error, and white circles "
+            "target and reconstruction share a field scale, while absolute error starts at zero. "
+            "Each error panel reports its field-wise relative L2 error, and open circles "
             "mark conditioned sensors.\n"
+            "- **Axes and units:** coordinates use raw dataset coordinates; field values use "
+            "physical units listed in the saved payload when declared.\n"
             f"- **Metrics:** `{report_path.name}`; reusable arrays: `{npz_path.name}`.\n"
             "- **Caveat:** this fixed-sample diagnostic is not an aggregate benchmark.\n",
             encoding="utf-8",

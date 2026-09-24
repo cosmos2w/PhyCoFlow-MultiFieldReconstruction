@@ -77,7 +77,7 @@ def test_monitor_loads_history_and_updates_loss_figure(tmp_path):
     assert validation_history["validation_loss"] == 2.5
 
 
-def test_loss_figure_combines_terms_and_gives_each_an_independent_panel(tmp_path):
+def test_loss_figure_uses_independent_panels_without_duplicate_overview(tmp_path):
     matplotlib = pytest.importorskip("matplotlib")
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -89,7 +89,7 @@ def test_loss_figure_combines_terms_and_gives_each_an_independent_panel(tmp_path
         final_step=2,
         configured_steps=2,
         steps_per_epoch=1,
-        description="test:post-training",
+        description="post_training:fixture",
         enabled=False,
         plot_every_steps=10,
     )
@@ -112,19 +112,18 @@ def test_loss_figure_combines_terms_and_gives_each_an_independent_panel(tmp_path
 
     figure = monitor._build_loss_figure(plt)
     assert len(figure.axes) == 4
-    combined, data_axis, coherence_axis, validation_axis = figure.axes
-    assert len(combined.lines) == 3
-    assert combined.get_title() == "test · post-training objective history"
+    title_axis, data_axis, _coherence_axis, validation_axis = figure.axes
+    assert [text.get_text() for text in title_axis.texts] == [
+        "Post-training objectives",
+        "Independent y axes · heights are not additive or a measure of gradient/update influence",
+    ]
     assert [axis.get_title(loc="left") for axis in figure.axes[1:]] == [
-        "Training data objective",
-        "Coherence objective",
+        "Data objective · pre-update weight",
+        "Coherence objective · family-weighted",
         "Fixed validation objective",
     ]
     assert all(len(axis.lines) == 1 for axis in figure.axes[1:])
-    assert all(axis.get_yscale() == "log" for axis in figure.axes)
-    assert combined.lines[0].get_color() == data_axis.lines[0].get_color()
-    assert combined.lines[1].get_color() == coherence_axis.lines[0].get_color()
-    assert combined.lines[2].get_color() == validation_axis.lines[0].get_color()
+    assert all(axis.get_yscale() == "log" for axis in figure.axes[1:])
     assert validation_axis.lines[0].get_marker() == "o"
     assert [text.get_text() for text in validation_axis.texts] == [
         "Native model objective · one fixed validation sample"
@@ -138,7 +137,7 @@ def test_loss_figure_combines_terms_and_gives_each_an_independent_panel(tmp_path
     monitor.close()
 
 
-def test_coherence_panel_shows_multiple_family_contributions(tmp_path):
+def test_loss_figure_keeps_family_breakdown_in_the_coherence_figure(tmp_path):
     matplotlib = pytest.importorskip("matplotlib")
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -168,15 +167,52 @@ def test_coherence_panel_shows_multiple_family_contributions(tmp_path):
         )
 
     figure = monitor._build_loss_figure(plt)
-    coherence_axis = figure.axes[1]
-    assert coherence_axis.get_title(loc="left") == "Coherence objective"
-    assert [line.get_label() for line in coherence_axis.lines] == [
-        "Total coherence",
-        "Cross spectrum",
-        "Global distribution",
-    ]
-    assert len({line.get_linestyle() for line in coherence_axis.lines}) == 3
+    coherence_axis = next(axis for axis in figure.axes if axis.get_title(loc="left") == "Coherence")
+    assert len(coherence_axis.lines) == 1
+    assert not any(line.get_label().startswith("coherence_family/") for axis in figure.axes for line in axis.lines)
     assert coherence_axis.get_yscale() == "log"
+    plt.close(figure)
+    monitor.close()
+
+
+def test_optimization_figure_separates_gradient_norms_alignment_and_conflict(tmp_path):
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    (tmp_path / "metrics").mkdir()
+    monitor = TrainingMonitor(
+        tmp_path,
+        start_step=0,
+        final_step=2,
+        configured_steps=2,
+        steps_per_epoch=1,
+        description="post:fixture",
+        enabled=False,
+    )
+    for step, cosine, conflict in ((1, 0.2, 0.0), (2, -0.4, 0.5)):
+        monitor._capture(
+            {
+                "step": step,
+                "data_grad_norm": 4.0 / step,
+                "coherence_grad_norm": 2.0 / step,
+                "combined_grad_norm": 5.0 / step,
+                "gradient_cosine": cosine,
+                "gradient_conflict_fraction": conflict,
+            }
+        )
+
+    figure = monitor._build_optimization_figure(plt)
+    assert figure is not None
+    assert len(figure.axes) == 3
+    norm_axis, cosine_axis, conflict_axis = figure.axes
+    assert norm_axis.get_title(loc="left") == "Gradient norms · epoch means"
+    assert len(norm_axis.lines) == 3
+    assert cosine_axis.get_ylim() == (-1.0, 1.0)
+    assert cosine_axis.get_ylabel() == "Mean cosine"
+    assert conflict_axis.get_ylim() == (0.0, 1.0)
+    assert conflict_axis.get_ylabel() == "Updates with conflict"
+    figure.canvas.draw()
     plt.close(figure)
     monitor.close()
 

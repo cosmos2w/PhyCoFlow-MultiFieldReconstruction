@@ -1,0 +1,461 @@
+{
+  "artifacts": {
+    "base": {
+      "cross_spectrum": {
+        "cross_frequency": "coherence/cross_spectrum/cross_frequency_coherence-base.png",
+        "metrics_csv": "coherence/cross_spectrum/metrics-base.csv",
+        "metrics_payload": "coherence/cross_spectrum/metrics-base.npz",
+        "report": "coherence/cross_spectrum/report-base.json",
+        "same_frequency": "coherence/cross_spectrum/same_frequency_coherence-base.png",
+        "self_spectrum": "coherence/cross_spectrum/self_spectrum_coherence-base.png"
+      },
+      "global_distribution": {
+        "joint_top_tail": "coherence/global_distribution/joint_top_tail_distributions-base.png",
+        "marginal": "coherence/global_distribution/marginal_field_distributions-base.png",
+        "pairwise": "coherence/global_distribution/pairwise_field_distributions-base.png"
+      },
+      "global_distribution_extra": {
+        "CH4\u2013CO": "coherence/global_distribution/global_distribution_extra/joint_pdf_CH4-CO-base.png",
+        "CH4\u2013T": "coherence/global_distribution/global_distribution_extra/joint_pdf_CH4-T-base.png",
+        "CH4\u2013U_1": "coherence/global_distribution/global_distribution_extra/joint_pdf_CH4-U_1-base.png",
+        "CH4\u2013p": "coherence/global_distribution/global_distribution_extra/joint_pdf_CH4-p-base.png",
+        "CO\u2013T": "coherence/global_distribution/global_distribution_extra/joint_pdf_CO-T-base.png",
+        "CO\u2013U_1": "coherence/global_distribution/global_distribution_extra/joint_pdf_CO-U_1-base.png",
+        "CO\u2013p": "coherence/global_distribution/global_distribution_extra/joint_pdf_CO-p-base.png",
+        "T\u2013U_1": "coherence/global_distribution/global_distribution_extra/joint_pdf_T-U_1-base.png",
+        "T\u2013p": "coherence/global_distribution/global_distribution_extra/joint_pdf_T-p-base.png",
+        "U_1\u2013p": "coherence/global_distribution/global_distribution_extra/joint_pdf_U_1-p-base.png"
+      },
+      "relative_l2": "relative_l2_violin-base.png"
+    },
+    "post_training": {
+      "cross_spectrum": {
+        "cross_frequency": "coherence/cross_spectrum/cross_frequency_coherence.png",
+        "same_frequency": "coherence/cross_spectrum/same_frequency_coherence.png",
+        "self_spectrum": "coherence/cross_spectrum/self_spectrum_coherence.png"
+      },
+      "global_distribution": {
+        "joint_top_tail": "coherence/global_distribution/joint_top_tail_distributions.png",
+        "marginal": "coherence/global_distribution/marginal_field_distributions.png",
+        "pairwise": "coherence/global_distribution/pairwise_field_distributions.png"
+      },
+      "global_distribution_extra": {
+        "CH4\u2013CO": "coherence/global_distribution/global_distribution_extra/joint_pdf_CH4-CO.png",
+        "CH4\u2013T": "coherence/global_distribution/global_distribution_extra/joint_pdf_CH4-T.png",
+        "CH4\u2013U_1": "coherence/global_distribution/global_distribution_extra/joint_pdf_CH4-U_1.png",
+        "CH4\u2013p": "coherence/global_distribution/global_distribution_extra/joint_pdf_CH4-p.png",
+        "CO\u2013T": "coherence/global_distribution/global_distribution_extra/joint_pdf_CO-T.png",
+        "CO\u2013U_1": "coherence/global_distribution/global_distribution_extra/joint_pdf_CO-U_1.png",
+        "CO\u2013p": "coherence/global_distribution/global_distribution_extra/joint_pdf_CO-p.png",
+        "T\u2013U_1": "coherence/global_distribution/global_distribution_extra/joint_pdf_T-U_1.png",
+        "T\u2013p": "coherence/global_distribution/global_distribution_extra/joint_pdf_T-p.png",
+        "U_1\u2013p": "coherence/global_distribution/global_distribution_extra/joint_pdf_U_1-p.png"
+      },
+      "relative_l2": "relative_l2_violin.png"
+    }
+  },
+  "kind": "post_training_source_comparison",
+  "matched_inputs": {
+    "dataset_fingerprint": "8c49936567eced7ab94887c336b9b35aaf7ec70dea7479aee83434ff970455d5",
+    "evaluation_seed": 2027,
+    "generation_steps": 2,
+    "sample_ids": [
+      "trajectory_000000:0",
+      "trajectory_000000:40",
+      "trajectory_000000:80",
+      "trajectory_000000:120",
+      "trajectory_000000:160",
+      "trajectory_000000:200",
+      "trajectory_000000:241",
+      "trajectory_000000:281",
+      "trajectory_000000:321",
+      "trajectory_000000:361",
+      "trajectory_000000:401",
+      "trajectory_000000:442",
+      "trajectory_000000:482",
+      "trajectory_000000:522",
+      "trajectory_000000:562",
+      "trajectory_000000:602",
+      "trajectory_000000:643",
+      "trajectory_000000:683",
+      "trajectory_000000:723",
+      "trajectory_000000:763",
+      "trajectory_000000:803",
+      "trajectory_000000:844",
+      "trajectory_000000:884",
+      "trajectory_000000:924",
+      "trajectory_000000:964",
+      "trajectory_000000:1004",
+      "trajectory_000000:1045",
+      "trajectory_000000:1085",
+      "trajectory_000000:1125",
+      "trajectory_000000:1165",
+      "trajectory_000000:1205",
+      "trajectory_000000:1246",
+      "trajectory_000000:1286",
+      "trajectory_000000:1326",
+      "trajectory_000000:1366",
+      "trajectory_000000:1406",
+      "trajectory_000000:1447",
+      "trajectory_000000:1487",
+      "trajectory_000000:1527",
+      "trajectory_000000:1567",
+      "trajectory_000000:1607",
+      "trajectory_000000:1648",
+      "trajectory_000000:1688",
+      "trajectory_000000:1728",
+      "trajectory_000000:1768",
+      "trajectory_000000:1808",
+      "trajectory_000000:1849",
+      "trajectory_000000:1889",
+      "trajectory_000000:1929",
+      "trajectory_000000:1969",
+      "trajectory_000000:2009",
+      "trajectory_000000:2049",
+      "trajectory_000000:2090",
+      "trajectory_000000:2130",
+      "trajectory_000000:2170",
+      "trajectory_000000:2210",
+      "trajectory_000000:2250",
+      "trajectory_000000:2291",
+      "trajectory_000000:2331",
+      "trajectory_000000:2371",
+      "trajectory_000000:2411",
+      "trajectory_000000:2451",
+      "trajectory_000000:2492",
+      "trajectory_000000:2532",
+      "trajectory_000000:2572",
+      "trajectory_000000:2612",
+      "trajectory_000000:2652",
+      "trajectory_000000:2693",
+      "trajectory_000000:2733",
+      "trajectory_000000:2773",
+      "trajectory_000000:2813",
+      "trajectory_000000:2853",
+      "trajectory_000000:2894",
+      "trajectory_000000:2934",
+      "trajectory_000000:2974",
+      "trajectory_000000:3014",
+      "trajectory_000000:3054",
+      "trajectory_000000:3095",
+      "trajectory_000000:3135",
+      "trajectory_000000:3175",
+      "trajectory_000000:3215",
+      "trajectory_000000:3255",
+      "trajectory_000000:3296",
+      "trajectory_000000:3336",
+      "trajectory_000000:3376",
+      "trajectory_000000:3416",
+      "trajectory_000000:3456",
+      "trajectory_000000:3497",
+      "trajectory_000000:3537",
+      "trajectory_000000:3577",
+      "trajectory_000000:3617",
+      "trajectory_000000:3657",
+      "trajectory_000000:3698",
+      "trajectory_000000:3738",
+      "trajectory_000000:3778",
+      "trajectory_000000:3818",
+      "trajectory_000000:3858",
+      "trajectory_000000:3899",
+      "trajectory_000000:3939",
+      "trajectory_000000:3979",
+      "trajectory_000000:4019",
+      "trajectory_000000:4059",
+      "trajectory_000000:4099",
+      "trajectory_000000:4140",
+      "trajectory_000000:4180",
+      "trajectory_000000:4220",
+      "trajectory_000000:4260",
+      "trajectory_000000:4300",
+      "trajectory_000000:4341",
+      "trajectory_000000:4381",
+      "trajectory_000000:4421",
+      "trajectory_000000:4461",
+      "trajectory_000000:4501",
+      "trajectory_000000:4542",
+      "trajectory_000000:4582",
+      "trajectory_000000:4622",
+      "trajectory_000000:4662",
+      "trajectory_000000:4702",
+      "trajectory_000000:4743",
+      "trajectory_000000:4783",
+      "trajectory_000000:4823",
+      "trajectory_000000:4863",
+      "trajectory_000000:4903",
+      "trajectory_000000:4944",
+      "trajectory_000000:4984",
+      "trajectory_000000:5024",
+      "trajectory_000000:5064",
+      "trajectory_000000:5104",
+      "trajectory_000000:5145",
+      "trajectory_000000:5185",
+      "trajectory_000000:5225",
+      "trajectory_000000:5265",
+      "trajectory_000000:5305",
+      "trajectory_000000:5346",
+      "trajectory_000000:5386",
+      "trajectory_000000:5426",
+      "trajectory_000000:5466",
+      "trajectory_000000:5506",
+      "trajectory_000000:5547",
+      "trajectory_000000:5587",
+      "trajectory_000000:5627",
+      "trajectory_000000:5667",
+      "trajectory_000000:5707",
+      "trajectory_000000:5748",
+      "trajectory_000000:5788",
+      "trajectory_000000:5828",
+      "trajectory_000000:5868",
+      "trajectory_000000:5908",
+      "trajectory_000000:5949",
+      "trajectory_000000:5989",
+      "trajectory_000000:6029",
+      "trajectory_000000:6069",
+      "trajectory_000000:6109",
+      "trajectory_000000:6149",
+      "trajectory_000000:6190",
+      "trajectory_000000:6230",
+      "trajectory_000000:6270",
+      "trajectory_000000:6310",
+      "trajectory_000000:6350",
+      "trajectory_000000:6391",
+      "trajectory_000000:6431",
+      "trajectory_000000:6471",
+      "trajectory_000000:6511",
+      "trajectory_000000:6551",
+      "trajectory_000000:6592",
+      "trajectory_000000:6632",
+      "trajectory_000000:6672",
+      "trajectory_000000:6712",
+      "trajectory_000000:6752",
+      "trajectory_000000:6793",
+      "trajectory_000000:6833",
+      "trajectory_000000:6873",
+      "trajectory_000000:6913",
+      "trajectory_000000:6953",
+      "trajectory_000000:6994",
+      "trajectory_000000:7034",
+      "trajectory_000000:7074",
+      "trajectory_000000:7114",
+      "trajectory_000000:7154",
+      "trajectory_000000:7195",
+      "trajectory_000000:7235",
+      "trajectory_000000:7275",
+      "trajectory_000000:7315",
+      "trajectory_000000:7355",
+      "trajectory_000000:7396",
+      "trajectory_000000:7436",
+      "trajectory_000000:7476",
+      "trajectory_000000:7516",
+      "trajectory_000000:7556",
+      "trajectory_000000:7597",
+      "trajectory_000000:7637",
+      "trajectory_000000:7677",
+      "trajectory_000000:7717",
+      "trajectory_000000:7757",
+      "trajectory_000000:7798",
+      "trajectory_000000:7838",
+      "trajectory_000000:7878",
+      "trajectory_000000:7918",
+      "trajectory_000000:7958",
+      "trajectory_000000:7999"
+    ],
+    "sensor_manifest_sha256": "29207b0944c3ecc78c5ff119deecfeb7372e5067e86dc4290f21049a89f9a1c3"
+  },
+  "runs": {
+    "base": {
+      "checkpoint": "/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/runs/tc_gl_rbf_cq_cached_kv_5000ep/20260826T212231Z_7b68c461/checkpoints/last.pt",
+      "run": "/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/runs/tc_gl_rbf_cq_cached_kv_5000ep/20260826T212231Z_7b68c461"
+    },
+    "post_training": {
+      "checkpoint": "/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/runs/coherence_fix_AB_balanced/20260829T235221Z_b3b586c4/checkpoints/last.pt",
+      "run": "/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/runs/coherence_fix_AB_balanced/20260829T235221Z_b3b586c4"
+    }
+  },
+  "sample_count": 200,
+  "shared_axis_limits": {
+    "cross_spectrum": {
+      "coherence_score": [
+        0.0,
+        1.0
+      ],
+      "displayed_coherence_score_by_component": {
+        "cross_frequency": [
+          0.65,
+          1.0
+        ],
+        "same_frequency": [
+          0.75,
+          1.0
+        ],
+        "self_spectrum": [
+          0.75,
+          1.0
+        ]
+      }
+    },
+    "global_distribution": {
+      "joint_top_tail": [
+        0.000231228354095947,
+        0.06499988026916981
+      ],
+      "marginal": [
+        3.9139785258157644e-05,
+        0.06499988026916981
+      ],
+      "pairwise": [
+        5.782370499218814e-05,
+        0.06499988026916981
+      ]
+    },
+    "global_distribution_extra": {
+      "CH4\u2013CO": {
+        "density": [
+          0.0011453181395568136,
+          114.53181395568134
+        ],
+        "x": [
+          -1.3205834913253784,
+          1.0933312463760376
+        ],
+        "y": [
+          -1.0491119182109834,
+          5.357025400400162
+        ]
+      },
+      "CH4\u2013T": {
+        "density": [
+          0.0023269345026680557,
+          232.69345026680554
+        ],
+        "x": [
+          -1.3205834913253784,
+          1.0933312463760376
+        ],
+        "y": [
+          -1.3327427911758423,
+          1.6416538763046264
+        ]
+      },
+      "CH4\u2013U_1": {
+        "density": [
+          0.00015789061133032978,
+          15.789061133032977
+        ],
+        "x": [
+          -1.3205834913253784,
+          1.0933312463760376
+        ],
+        "y": [
+          -9.275645484924317,
+          11.5858890914917
+        ]
+      },
+      "CH4\u2013p": {
+        "density": [
+          0.00021105886275612297,
+          4.831770545075951
+        ],
+        "x": [
+          -1.3205834913253784,
+          1.0933312463760376
+        ],
+        "y": [
+          -5.388757553100586,
+          4.425206985473633
+        ]
+      },
+      "CO\u2013T": {
+        "density": [
+          0.0008373029562333097,
+          83.73029562333096
+        ],
+        "x": [
+          -1.0491119182109834,
+          5.357025400400162
+        ],
+        "y": [
+          -1.3327427911758423,
+          1.6416538763046264
+        ]
+      },
+      "CO\u2013U_1": {
+        "density": [
+          5.7419137066297243e-05,
+          5.741913706629724
+        ],
+        "x": [
+          -1.0491119182109834,
+          5.357025400400162
+        ],
+        "y": [
+          -9.275645484924317,
+          11.5858890914917
+        ]
+      },
+      "CO\u2013p": {
+        "density": [
+          7.952968754656032e-05,
+          1.7216586760079533
+        ],
+        "x": [
+          -1.0491119182109834,
+          5.357025400400162
+        ],
+        "y": [
+          -5.388757553100586,
+          4.425206985473633
+        ]
+      },
+      "T\u2013U_1": {
+        "density": [
+          0.00011604020025339658,
+          11.604020025339658
+        ],
+        "x": [
+          -1.3327427911758423,
+          1.6416538763046264
+        ],
+        "y": [
+          -9.275645484924317,
+          11.5858890914917
+        ]
+      },
+      "T\u2013p": {
+        "density": [
+          0.00017128787995888592,
+          3.7011885101516375
+        ],
+        "x": [
+          -1.3327427911758423,
+          1.6416538763046264
+        ],
+        "y": [
+          -5.388757553100586,
+          4.425206985473633
+        ]
+      },
+      "U_1\u2013p": {
+        "density": [
+          2.4421889840523584e-05,
+          0.3994688521214487
+        ],
+        "x": [
+          -9.275645484924317,
+          11.5858890914917
+        ],
+        "y": [
+          -5.388757553100586,
+          4.425206985473633
+        ]
+      }
+    },
+    "relative_l2": [
+      0.0030873081414029002,
+      0.491362065076828
+    ]
+  },
+  "split": "train",
+  "statistic_scale": "log"
+}
