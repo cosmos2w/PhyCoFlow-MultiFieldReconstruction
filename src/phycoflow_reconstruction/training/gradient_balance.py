@@ -57,17 +57,20 @@ def data_only_update(
 ) -> dict[str, Any]:
     optimizer.zero_grad(set_to_none=True)
     (float(weight) * loss).backward()
-    norm = (
-        stable_clip_grad_norm_(model.parameters(), grad_clip)
-        if grad_clip
-        else torch.tensor(float("nan"))
-    )
+    if grad_clip:
+        norm = stable_clip_grad_norm_(model.parameters(), grad_clip)
+    else:
+        norms = [p.grad.detach().abs().double().square().sum() for p in model.parameters()
+                 if p.grad is not None]
+        norm = torch.stack(norms).sum().sqrt() if norms else loss.new_tensor(0.)
+        if not torch.isfinite(norm):
+            raise FloatingPointError("data-only gradient is non-finite; refusing optimizer update")
     optimizer.step()
     return {
         "update_mode": "data_only",
         "data_grad_norm": float(norm),
-        "coherence_grad_norm": float("nan"),
-        "gradient_cosine": float("nan"),
+        "coherence_grad_norm": None,
+        "gradient_cosine": None,
         "gradient_conflict": False,
         "combined_grad_norm": float(norm),
         "config_fallback_used": False,

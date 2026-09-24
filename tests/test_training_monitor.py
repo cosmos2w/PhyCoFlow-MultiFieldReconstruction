@@ -7,6 +7,25 @@ import pytest
 from phycoflow_reconstruction.training.monitoring import TrainingMonitor
 
 
+def test_sparse_coherence_epochs_ignore_missing_gradients_and_count_updates(tmp_path):
+    (tmp_path / "metrics").mkdir()
+    monitor = TrainingMonitor(tmp_path, start_step=0, final_step=3, configured_steps=3,
+                              steps_per_epoch=3, description="test", enabled=False)
+    for step, value in enumerate((float("nan"), 2., None), 1):
+        monitor._accumulate_epoch({"step": step, "coherence_grad_norm": value,
+                                  "coherence_applied": step == 2,
+                                  "update_mode": "weighted_sum" if step == 2 else "data_only"})
+    row = monitor._flush_epoch(epoch=1, step=3)
+    assert row["coherence_grad_norm"] == 2.
+    assert row["finite_counts"]["coherence_grad_norm"] == 1
+    assert row["coherence_applied"] is True
+    assert row["coherence_applied_fraction"] == pytest.approx(1/3)
+    assert row["update_mode"] == "mixed"
+    assert row["update_mode_counts"] == {"weighted_sum": 1, "data_only": 2}
+    assert "NaN" not in (tmp_path / "metrics/history.jsonl").read_text()
+    monitor.close()
+
+
 def test_monitor_loads_history_and_updates_loss_figure(tmp_path):
     metrics = tmp_path / "metrics"
     metrics.mkdir()
@@ -43,6 +62,8 @@ def test_monitor_loads_history_and_updates_loss_figure(tmp_path):
         "step": 2,
         "total": 2.0,
         "coherence_loss": 4.0,
+        "finite_counts": {"total": 2, "coherence_loss": 1},
+        "update_mode_counts": {},
     }
     assert (tmp_path / "loss_history.png").stat().st_size > 0
     assert monitor.last_epoch_report is not None

@@ -1,0 +1,9 @@
+observations:
+  protocol: structured_block_mean
+  seed: 42
+  fields:
+    phi: {count: 256}  # 8 x 8 blocks
+    vx: {count: 64}    # 16 x 16 blocks
+    vy: {count: 64}
+  phase: 0
+  requires_validated_grid_mapping: true

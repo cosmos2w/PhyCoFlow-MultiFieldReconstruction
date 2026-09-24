@@ -2,7 +2,9 @@
 
 PhyCoFlow reconstructs complete physical states from sparse, multi-field measurements. The primary research workflow studies whether data-driven physical-coherence post-training improves the coherence of a reconstructed state while preserving the immutable source checkpoint and the supervised data contract.
 
-> **Development status — please read before launching coherence runs.** The cross-spectrum `self_spectrum` term and the **entire `topology` coherence family** are pending further development by coworkers. The current self-spectrum raw-power calculation can be unstable, so `self_spectrum` is disabled by default and runs only when `enabled: true` is written explicitly. Topology code is present for continued development and compatibility work, but should be treated as experimental rather than a supported result-producing workflow. For normal experiments, start with `global_distribution` and/or the distinct-field cross-spectrum terms (`same_frequency` and `cross_frequency`). Record and justify any use of the pending terms in the run config and pull request.
+> **Current topology method:** efficient sliced-persistence post-training is the active workflow in this main repository. Start with [TOPOLOGY_POSTTRAINING.md](TOPOLOGY_POSTTRAINING.md) for its objective, canonical recipe, launch command and verification.
+
+The cross-spectrum `self_spectrum` term remains opt-in because its raw-power calculation can be unstable. Topology includes several research strategies; the active-emulsion recipe uses native periodic `cubical_persistence`. Its execution and training updates have been verified; scientific efficacy depends on the selected checkpoint and held-out evaluation.
 
 The standard lifecycle is:
 
@@ -313,7 +315,7 @@ Stage 2 strictly loads and freezes the Stage-1 autoencoder. It is the sparse rec
 
 Post-training creates a child run from a completed, immutable base run. The selected source checkpoint is loaded strictly, while the dataset, model, observations, normalization, and provenance are inherited from the source run's `resolved_config.yaml`; the source run is hashed before and after training and is never modified.
 
-For current coworker-facing experiments, use `global_distribution`, `cross_spectrum.same_frequency`, and/or `cross_spectrum.cross_frequency`. The cross-spectrum `self_spectrum` term and every `topology` term remain development work; topology profiles and implementation are retained so coworkers can improve and test them, not as a recommendation for formal runs.
+The available coherence families are `global_distribution`, `cross_spectrum`, and `topology`. The current topology workflow uses `cubical_persistence` with `sliced_wasserstein` matching and the efficient regularized optimizer. It compares all native-grid H0/H1 bars and applies one differentiable update per batch. See [TOPOLOGY_POSTTRAINING.md](TOPOLOGY_POSTTRAINING.md) for the active recipe and [the topology family guide](src/phycoflow_reconstruction/coherence/families/topology/README.md) for its mathematical definition. Earlier Betti-curve and spatial implementations remain for explicit historical configurations. Cross-spectrum `self_spectrum` retains its existing development status.
 
 ### 6.1 Prepare a portable configuration
 
@@ -403,7 +405,7 @@ python cases/<case>/run.py render-history \
   --run runs/<experiment>/<run-id>
 ```
 
-Use `target_use: paired_supervised` with `reference_bank.enabled: false` when every reconstruction is compared with its own dense target. Use `target_use: training_reference` with an enabled reference bank when matching an independently sampled training distribution; its `points_per_sample` must equal `coherence.compute_budget.point_count`. Cross-spectrum requires `query_policy: fixed_shared`; same-frequency requires coherence batch size at least 2, cross-frequency requires at least 3, and `optimization.batch_size` must not be smaller than the coherence batch size. The pending topology family also requires fixed shared queries when a coworker is developing it. For a single supported family, `family_balance.mode: none` is the clear default; for multiple families with different raw scales, use `initial_grad_norm` and record its calibration settings.
+Use `target_use: paired_supervised` with `reference_bank.enabled: false` when every reconstruction is compared with its own dense target. Use `target_use: training_reference` with an enabled reference bank when matching an independently sampled training distribution; its `points_per_sample` must equal `coherence.compute_budget.point_count`. Cross-spectrum requires `query_policy: fixed_shared`; same-frequency requires coherence batch size at least 2, cross-frequency requires at least 3, and `optimization.batch_size` must not be smaller than the coherence batch size. Topology also requires fixed shared queries. For a single supported family, `family_balance.mode: none` is the clear default; for multiple families with different raw scales, use `initial_grad_norm` and record its calibration settings.
 
 ### 6.2 Validate and launch
 
@@ -423,7 +425,7 @@ python cases/<case>/run.py post-train \
 
 Choose the checkpoint explicitly: `best.pt` starts from the best fixed-validation reconstruction, while `last.pt` starts from the final training state. Add `--override runtime.device=<device>` when the config's default device is unsuitable. A successful launch creates `cases/<case>/runs/<experiment_name>/<run-id>/` containing the resolved config, parent/checkpoint lineage and hashes, checkpoints, metrics, previews, and fidelity report. Use `--max-steps 1` only for an intentional smoke run; set `source.allow_integration_source=true` only when the source itself is explicitly an incomplete integration fixture.
 
-The implemented family names are `global_distribution`, `cross_spectrum`, and `topology`, and one leaf config can compose several families over the same differentiable reconstruction. Only the supported global-distribution and distinct-field cross-spectrum paths should be selected for normal runs; the entire topology family remains pending coworker development. The cleaned GL-RBF/CQ path follows this lifecycle while preserving state-dict keys, seeded behavior, cached-K/V execution, query microbatching, geometry/reconstruction caches, EMA state, and observation consistency.
+The implemented family names are `global_distribution`, `cross_spectrum`, and `topology`, and one leaf config can compose several families over the same differentiable reconstruction. Efficient topology post-training uses the common lifecycle with `optimization.gradient_balance: topology_regularized`; its native-grid, source-fidelity and held-out selection requirements are documented in the topology guide. The cleaned GL-RBF/CQ path preserves state-dict keys, seeded behavior, cached-K/V execution, query microbatching, geometry/reconstruction caches, EMA state, and observation consistency.
 
 For a physics post-training route, use a case that exposes a differentiable `PhysicsProvider` (currently Brusselator):
 
@@ -626,7 +628,7 @@ The paired example below compares the source `last.pt` checkpoint with the AB po
 
 <p align="center"><em>Left: base source. Right: post-training checkpoint. The cross-frequency pair mean increases from 84.4% to 90.6% under the training-aligned estimator.</em></p>
 
-> **Pending topology development:** the entire topology coherence family—including its scientific terms, numerical behavior, training use, intuitive set-level evaluation, and visualization—requires further coworker development and validation. It is intentionally not exposed through `visualize-run --eval-coherence` and should not yet be treated as a supported formal workflow.
+> **Topology evaluation scope:** the synchronized family supplies exact H0/H1 diagnostics during the common post-training evaluation. Dedicated set-level topology evaluation and visualization remain pending, so topology is not exposed through `visualize-run --eval-coherence`. Formal efficacy claims still require case-specific validation.
 
 During training, the fixed validation objective and qualitative reconstruction use independent `evaluation.preview.loss_every_epochs` and `reconstruct_every_epochs` cadences. Validation loss is added to `loss_history.png` and selects `best.pt`; periodic recovery writes only `last.pt`, plus explicitly requested epoch checkpoints. Re-render a portable preview payload with:
 
@@ -672,7 +674,7 @@ Start with [CONTRIBUTING.md](CONTRIBUTING.md), [docs/architecture.md](docs/archi
 
 Shared modules must not import a named case. Keep `run.py` thin, keep scientific field meaning case-local, and keep reusable logic in the installed package. Preserve model names, state-dict keys, field order, normalization, sensor semantics, EMA behavior, and checkpoint loading unless an explicitly reviewed migration changes that contract.
 
-For the pending `self_spectrum` or topology work, use a focused branch and experimental config. Include a minimal reproducer, stability/gradient tests, before/after numerical evidence, and an explanation of when the term is scientifically safe to enable. Do not change its readiness label based only on a successful smoke run.
+For new `self_spectrum` or topology methods, use a focused branch and experimental config. Include a minimal reproducer, stability/gradient tests, before/after numerical evidence, and an explanation of when the term is scientifically safe to enable. Do not change its readiness label based only on a successful smoke run.
 
 ### 9.2 Make and verify a change
 

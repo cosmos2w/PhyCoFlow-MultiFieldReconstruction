@@ -201,6 +201,19 @@ class TrainingReconstructionPreview:
         self.dataset = None
         self.batch = None
         self.output_dir = store.run_dir / "evaluation" / "training_preview"
+        self.generation_steps = int(
+            settings.get(
+                "generation_steps",
+                config.get("evaluation", {}).get("generation_steps", 2),
+            )
+        )
+        legacy_every = int(settings.get("every_epochs", 10))
+        self.loss_every_epochs = int(settings.get("loss_every_epochs", legacy_every))
+        self.reconstruct_every_epochs = int(
+            settings.get("reconstruct_every_epochs", legacy_every)
+        )
+        self.keep_history = bool(settings.get("keep_history", False))
+        self.last_validation_report: dict[str, Any] | None = None
         if not self.enabled:
             return
 
@@ -224,19 +237,6 @@ class TrainingReconstructionPreview:
         # before DataLoader workers may fork so no unrelated descriptor is
         # inherited by the asynchronous training path.
         self.dataset.close()
-        self.generation_steps = int(
-            settings.get(
-                "generation_steps",
-                config.get("evaluation", {}).get("generation_steps", 2),
-            )
-        )
-        legacy_every = int(settings.get("every_epochs", 10))
-        self.loss_every_epochs = int(settings.get("loss_every_epochs", legacy_every))
-        self.reconstruct_every_epochs = int(
-            settings.get("reconstruct_every_epochs", legacy_every)
-        )
-        self.keep_history = bool(settings.get("keep_history", False))
-        self.last_validation_report: dict[str, Any] | None = None
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
     def _epoch_due(self, global_step: int, every_epochs: int) -> bool:

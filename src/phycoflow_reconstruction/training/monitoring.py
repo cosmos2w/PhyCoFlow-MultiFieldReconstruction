@@ -101,6 +101,9 @@ class TrainingMonitor:
         self._epoch_sums: dict[str, float] = defaultdict(float)
         self._epoch_counts: dict[str, int] = defaultdict(int)
         self._epoch_latest: dict[str, Any] = {}
+        self._epoch_booleans: dict[str, int] = defaultdict(int)
+        self._epoch_modes: dict[str, int] = defaultdict(int)
+        self._epoch_missing: set[str] = set()
         self._epoch_batch_count_seen = 0
         self._last_step: int | None = None
         self._last_epoch: int | None = None
@@ -175,9 +178,15 @@ class TrainingMonitor:
         for key, value in row.items():
             if key == "step":
                 continue
-            if isinstance(value, (int, float)) and not isinstance(value, bool):
+            if isinstance(value, bool):
+                self._epoch_booleans[key] += int(value)
+            elif isinstance(value, (int, float)) and math.isfinite(float(value)):
                 self._epoch_sums[key] += float(value)
                 self._epoch_counts[key] += 1
+            elif value is None or isinstance(value, (int, float)):
+                self._epoch_missing.add(key)
+            elif key == "update_mode":
+                self._epoch_modes[str(value)] += 1
             else:
                 self._epoch_latest[key] = value
 
@@ -195,13 +204,24 @@ class TrainingMonitor:
                 for key, value in self._epoch_sums.items()
             },
             **self._epoch_latest,
+            **{key: None for key in self._epoch_missing if key not in self._epoch_counts},
+            **{key: count > 0 for key, count in self._epoch_booleans.items()},
+            **{f"{key}_fraction": count / batches for key, count in self._epoch_booleans.items()},
+            "finite_counts": dict(self._epoch_counts),
+            "update_mode_counts": dict(self._epoch_modes),
         }
+        if self._epoch_modes:
+            row["update_mode"] = (next(iter(self._epoch_modes))
+                                  if len(self._epoch_modes) == 1 else "mixed")
         with self.history_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(row, sort_keys=True) + "\n")
         self._capture(row)
         self._epoch_sums.clear()
         self._epoch_counts.clear()
         self._epoch_latest.clear()
+        self._epoch_booleans.clear()
+        self._epoch_modes.clear()
+        self._epoch_missing.clear()
         self._epoch_batch_count_seen = 0
         return row
 

@@ -27,6 +27,8 @@ class PeriodicCheckpointManager:
         settings = config.get("checkpointing", {})
         self.enabled = bool(settings.get("enabled", True))
         self.every_epochs = int(settings.get("every_epochs", 10))
+        self.every_steps = settings.get("every_steps")
+        self.validation_every_epochs = settings.get("validation_every_epochs")
         self.save_epoch_one = bool(settings.get("save_epoch_one", False))
         configured_epochs = settings.get("epochs")
         self.checkpoint_epochs = (
@@ -42,6 +44,10 @@ class PeriodicCheckpointManager:
         self.best_name, self.best_value = self._existing_best_metric()
         self.last_validation_report: dict[str, Any] | None = None
         self.last_best_checked = False
+        self.panel_evaluator = None
+        manifest_path = self.store.run_dir / "run_manifest.json"
+        manifest = json.loads(manifest_path.read_text()) if manifest_path.is_file() else {}
+        self.best_fidelity_value = float(manifest.get("best_panel_mse", math.inf))
 
     def _existing_best_metric(self) -> tuple[str, float]:
         manifest_path = self.store.run_dir / "run_manifest.json"
@@ -61,7 +67,11 @@ class PeriodicCheckpointManager:
     def last_due(self, global_step: int) -> bool:
         """Return whether the rolling recovery checkpoint should be refreshed."""
         epoch = self._epoch(global_step)
-        if not self.enabled or epoch is None:
+        if not self.enabled:
+            return False
+        if self.every_steps is not None and global_step > 0 and global_step % self.every_steps == 0:
+            return True
+        if epoch is None:
             return False
         return (self.save_epoch_one and epoch == 1) or epoch % self.every_epochs == 0
 
@@ -77,7 +87,7 @@ class PeriodicCheckpointManager:
 
     def due(self, global_step: int) -> bool:
         """Return whether any checkpoint file independent of validation is due."""
-        if not self.enabled or global_step % self.steps_per_epoch:
+        if not self.enabled:
             return False
         return self.last_due(global_step) or self.milestone_due(global_step)
 
@@ -87,7 +97,10 @@ class PeriodicCheckpointManager:
         preview: TrainingReconstructionPreview,
     ) -> bool:
         """Return whether either independent epoch cadence needs saved weights."""
-        return self.due(global_step) or preview.due(global_step)
+        epoch = self._epoch(global_step)
+        panel_due = (self.enabled and self.validation_every_epochs is not None and epoch is not None
+                     and epoch % int(self.validation_every_epochs) == 0)
+        return self.due(global_step) or preview.due(global_step) or panel_due
 
     def save(
         self,
@@ -124,7 +137,30 @@ class PeriodicCheckpointManager:
         self.last_validation_report = validation_report
         metric_name = "training_loss"
         metric_value = float(fallback_metric)
-        if self.selection_metric == "reconstruction_mse":
+        panel_report = None
+        fidelity_improved = False
+        epoch = self._epoch(global_step)
+        panel_due = (force or self.validation_every_epochs is None or
+                     (epoch is not None and epoch % int(self.validation_every_epochs) == 0))
+        if self.selection_metric == "topology_with_fidelity" and not panel_due:
+            eligible_for_best = False
+        elif self.selection_metric == "topology_with_fidelity":
+            if self.panel_evaluator is None:
+                raise ValueError("topology checkpoint selection requires a fixed-panel evaluator")
+            panel_report = self.panel_evaluator(global_step)
+            metric_name = "fixed_panel_topology_with_fidelity"
+            metric_value = float(panel_report["metric"])
+            eligible_for_best = bool(panel_report["eligible"])
+            mse = float(panel_report["mse"])
+            fidelity_improved = math.isfinite(mse) and mse < self.best_fidelity_value
+            if fidelity_improved:
+                self.best_fidelity_value = mse
+            self.last_validation_report = {"global_step": global_step, "loss": metric_value,
+                "training_epoch": global_step / self.steps_per_epoch,
+                "topology_selection_eligible": eligible_for_best}
+            with (self.store.run_dir / "metrics" / "topology_validation.jsonl").open("a") as handle:
+                handle.write(json.dumps({"step": global_step, **panel_report}) + "\n")
+        elif self.selection_metric == "reconstruction_mse":
             if reconstruction_report is not None:
                 metric_name = "fixed_validation_reconstruction_mse"
                 metric_value = float(reconstruction_report["metrics"]["mse_normalized"])
@@ -137,7 +173,7 @@ class PeriodicCheckpointManager:
             # that explicitly disabled previews.
             eligible_for_best = validation_report is not None or not preview.enabled
 
-        self.last_best_checked = eligible_for_best
+        self.last_best_checked = panel_report is not None or eligible_for_best
         improved = (
             eligible_for_best
             and math.isfinite(metric_value)
@@ -152,6 +188,9 @@ class PeriodicCheckpointManager:
         }
         checkpoint["best_metric_value"] = self.best_value
         checkpoint["best_metric_name"] = self.best_name
+        if panel_report is not None:
+            checkpoint["topology_selection"] = {key: value for key, value in panel_report.items()
+                                                if key != "metrics"}
         last_path = self.store.save_checkpoint("last", checkpoint) if last_due else None
         milestone_path = None
         if milestone_due:
@@ -160,9 +199,14 @@ class PeriodicCheckpointManager:
         best_path = self.store.save_checkpoint("best", checkpoint) if improved else None
         best_fidelity_path = (
             self.store.save_checkpoint("best_fidelity", checkpoint)
-            if improved and self.selection_metric == "reconstruction_mse"
+            if fidelity_improved or (improved and self.selection_metric == "reconstruction_mse")
             else None
         )
+        if improved and panel_report is not None:
+            self.store.write_json("evaluation/selected.json", {
+                "global_step": global_step, "is_source_baseline": global_step == 0,
+                **panel_report,
+            })
 
         checkpoint_hashes = {}
         if last_path is not None:
@@ -187,6 +231,8 @@ class PeriodicCheckpointManager:
             "checkpoint_hashes": checkpoint_hashes,
             "best_metric": {"name": self.best_name, "value": self.best_value},
         }
+        if panel_report is not None:
+            manifest_details["best_panel_mse"] = self.best_fidelity_value
         if last_path is not None:
             manifest_details.update(
                 last_checkpoint_step=int(global_step),
