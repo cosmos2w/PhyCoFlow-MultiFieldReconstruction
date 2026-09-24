@@ -16,7 +16,7 @@ The canonical loader verifies 403 unique x positions, 100 unique y positions, on
 
 `configs/readiness/ABC_sliced_persistence_ABscale_50ep_gpu1.yaml` repeats the 50-epoch A+B+C test with the completed A+B run's batch size 32, training fraction 0.25, 32-sample validation panel, and reconstruction-preview interval of 200 epochs. It keeps the A+B learning rate, data/coherence weights, and family calibration. This is a formal-scale test profile, not a 5000-epoch launch configuration.
 
-Cubical-persistence post-training uses up to four CPU workers for independent GUDHI pairings by default; `PHYCOFLOW_TOPOLOGY_WORKERS` overrides this count. The AB-scale continuation from step 660 uses `PHYCOFLOW_TOPOLOGY_REFERENCE_CACHE=24000` so repeated target rasters can remain cached across epochs. These settings only affect execution; the persistence definition, diagrams, and gradients are unchanged. Pair extraction remains on the CPU, while sliced diagram distances run on the configured PyTorch device.
+Cubical-persistence post-training uses up to four CPU workers for independent GUDHI pairings by default; `PHYCOFLOW_TOPOLOGY_WORKERS` overrides this count. The AB-scale continuation from step 660 uses `PHYCOFLOW_TOPOLOGY_REFERENCE_CACHE=24000`; from the epoch-25 checkpoint at step 1575 it uses `PHYCOFLOW_TOPOLOGY_REFERENCE_CACHE=100000` so the 8000-frame training set's ten reference filtrations per frame can remain cached. These settings only affect execution; the persistence definition, diagrams, and gradients are unchanged. Pair extraction remains on the CPU, while sliced diagram distances run on the configured PyTorch device.
 
 Validate from the repository root:
 
