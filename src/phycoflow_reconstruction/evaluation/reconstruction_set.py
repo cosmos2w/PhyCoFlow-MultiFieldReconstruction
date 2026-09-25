@@ -1814,6 +1814,10 @@ def evaluate_reconstruction_set(
         statistic_scale=statistic_scale,
     )
     if source is None:
+        if "topology" in families:
+            from .explanatory_coherence import render_saved_coherence_explanatory
+
+            render_saved_coherence_explanatory(current.output_dir, families=families)
         return current.figure_path
 
     source_run, source_checkpoint = source
@@ -1844,4 +1848,8 @@ def evaluate_reconstruction_set(
             coherence_families=families,
             statistic_scale=statistic_scale,
         )
+        if {"cross_spectrum", "topology"} & set(families):
+            from .explanatory_coherence import render_saved_coherence_explanatory
+
+            render_saved_coherence_explanatory(current.output_dir, families=families)
     return current.figure_path

@@ -179,6 +179,11 @@ def run_case_cli(case_name: str, case_dir: str | Path) -> int:
     history_renderer.add_argument("--run", type=Path, required=True)
     history_renderer.add_argument("--output", type=Path)
 
+    explanatory_renderer = subparsers.add_parser("render-coherence-explanatory")
+    explanatory_renderer.add_argument("--run", type=Path, required=True)
+    explanatory_renderer.add_argument("--split", choices=("train", "validation", "test"), default="validation")
+    explanatory_renderer.add_argument("--checkpoint", default="best")
+
     visualizer = subparsers.add_parser("visualize-run")
     visualizer.add_argument("--run", type=Path, required=True)
     visualizer.add_argument("--checkpoint", default="best")
@@ -242,6 +247,15 @@ def run_case_cli(case_name: str, case_dir: str | Path) -> int:
     )
 
     args = parser.parse_args()
+    if args.command == "render-coherence-explanatory":
+        from .evaluation.explanatory_coherence import render_saved_coherence_explanatory
+
+        run_dir = args.run.resolve() if args.run.is_absolute() else (case_dir / args.run).resolve()
+        checkpoint_label = Path(args.checkpoint).stem
+        output_dir = run_dir / "evaluation" / f"reconstruction_set_{args.split}_{checkpoint_label}"
+        print(render_saved_coherence_explanatory(output_dir))
+        return 0
+
     if args.command == "render-history":
         from .training.coherence_history import render_coherence_history
 

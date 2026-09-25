@@ -602,6 +602,18 @@ The extra views are written under `coherence/global_distribution/global_distribu
 
 > **Extra-view support:** `--extraview-coherence` adds the optional global-distribution joint-PDF gallery. Cross-spectrum band profiles and topology interpretation panels are produced directly by `--eval-coherence` for their respective families.
 
+The standard set evaluator also adds three explanatory views when their saved inputs exist: `cross_spectrum/cross_pair_scores.png` compares every field pair and labels the post-minus-source score change in percentage points; `cross_spectrum/cross_band_error.png` compares graph-band energy errors against one reference; and `topology/diagrams/<field>.png` shows the representative sample's finite birth–death diagrams with the configured per-panel persistence distance. Band-energy error is a descriptive diagnostic even when that loss term is disabled. PNG, PDF, and SVG are written beside one another. Their numerical provenance is in `coherence/explanatory_report.json`. These views require no additional model inference and are automatically included with the corresponding `--eval-coherence` families.
+
+To add or refresh these views from an **existing** run-local set evaluation without loading a checkpoint, run:
+
+```bash
+python cases/turbulent_combustion/run.py render-coherence-explanatory \
+  --run runs/<experiment>/<run-id> \
+  --split validation --checkpoint best
+```
+
+The command reads `evaluation/reconstruction_set_validation_best/coherence/` and writes its figures there. Source and post-training topology diagrams each use their own saved representative raster; their sample IDs are printed on the figures, and `explanatory_report.json` records whether those examples are the same snapshot. Use the set-level distributions and Betti curves for matched-sample aggregate comparisons.
+
 The CO–T example below compares the source `last.pt` checkpoint with the AB post-training `last.pt` checkpoint over the same 200 test snapshots.
 
 <p align="center"><img src="docs/assets/reconstruction_examples/ab_test_last_global_distribution_joint_pdf_CO-T_base.png" alt="Base-source CO-T joint probability density comparison over 200 test snapshots" width="49%"> <img src="docs/assets/reconstruction_examples/ab_test_last_global_distribution_joint_pdf_CO-T_posttraining.png" alt="AB post-training CO-T joint probability density comparison over the same 200 test snapshots" width="49%"></p>
@@ -639,11 +651,11 @@ The current paired example compares the source checkpoint with the A+B+C formal 
 
 ![Matched source and A+B+C cross-spectrum scores by configured field pair](cases/turbulent_combustion/diagnostics/ExampleVisual/explanatory/cross_pair_scores.png)
 
-The [full coherence gallery and pinned metrics](cases/turbulent_combustion/diagnostics/ExampleVisual/README.md) also show reference/source/A+B+C band-energy profiles and their percentage-point differences.
+The [full coherence gallery and pinned metrics](cases/turbulent_combustion/diagnostics/ExampleVisual/README.md) also show reference/source/A+B+C band-energy profiles. The paired percentage-point deviation heatmap is now part of standard run-local post-processing.
 
 #### 7.3.3 Topology coherence
 
-For a run configured with the cubical-persistence family, request `--eval-coherence topology` with `--eval-set`. The evaluator replays the run's deterministic `fixed_shared` point selection and configured topology raster, then compares each reconstructed snapshot with its paired dense target. It writes three complementary figures under `coherence/topology/`: `persistence_term_distributions.png` shows the configured sliced-Wasserstein H0/H1 objective components and their component-weighted total; `betti_curves.png` shows exact H0/H1 counts at reference-defined filtration quantiles; and `configured_grid_topology.png` shows paired median-level geometry and disagreement on the configured raster. The median-level image is an interpretation aid, not a persistence diagram or a native-grid topology claim. Each figure has PNG, PDF, and SVG forms, with CSV/NPZ/JSON numerical provenance.
+For a run configured with the cubical-persistence family, request `--eval-coherence topology` with `--eval-set`. The evaluator replays the run's deterministic `fixed_shared` point selection and configured topology raster, then compares each reconstructed snapshot with its paired dense target. It writes three complementary figures under `coherence/topology/`: `persistence_term_distributions.png` shows the configured sliced-Wasserstein H0/H1 objective components and their component-weighted total; `betti_curves.png` shows exact H0/H1 counts and panel count MAE at reference-defined filtration quantiles; and `configured_grid_topology.png` shows paired median-level geometry, mask disagreement, and the representative persistence distance on the configured raster. The added `diagrams/` category shows exact finite H0/H1 birth–death pairs and the configured distance for each enabled self-persistence field. The median-level image is an interpretation aid, not a persistence diagram or a native-grid topology claim. Each figure has PNG, PDF, and SVG forms, with CSV/NPZ/JSON numerical provenance.
 
 The component-weighted topology total is shown before the outer family weight. Its magnitude cannot establish the term's share of the parameter update; use the run's gradient diagnostics for update balance. The set plots evaluate paired references on the recorded reduced raster, so their conclusions are limited to that query and filtration contract. A post-training run gets matched `-base` source figures on the same sample set and plot scales. Formal efficacy still requires case-specific, held-out fidelity and topology evidence.
 
