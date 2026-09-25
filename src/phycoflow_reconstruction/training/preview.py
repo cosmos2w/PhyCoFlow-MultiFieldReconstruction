@@ -123,10 +123,17 @@ def _plot_preview(
     )
     axis_labels = tuple(f"{name}{suffix}" for name in coordinate_names)
 
+    if coordinate_dim >= 2 and coordinate_space == "dataset":
+        x_span = float(np.ptp(query_coords[:, 0]))
+        y_span = float(np.ptp(query_coords[:, 1]))
+        domain_aspect = x_span / y_span if y_span > 0 else 1.0
+        figure_height = max(3.0, fields * (3.35 / max(domain_aspect, 1.0) + 0.26) + 0.7)
+    else:
+        figure_height = max(2.8, 2.55 * fields)
     figure, axes = plt.subplots(
         fields,
         3,
-        figsize=(12.6, max(2.8, 2.55 * fields)),
+        figsize=(12.6, figure_height),
         squeeze=False,
         layout="constrained",
         gridspec_kw={"wspace": 0.18, "hspace": 0.16},
@@ -148,7 +155,8 @@ def _plot_preview(
         truth = target[:, field_index]
         estimate = prediction[:, field_index]
         error = np.abs(estimate - truth)
-        error_title = _absolute_error_title(_relative_l2_error(estimate, truth))
+        relative_l2 = _relative_l2_error(estimate, truth)
+        error_title = _absolute_error_title(relative_l2)
         field_sensor_mask = obs_valid & (obs_fields == field_index)
         field_low = float(min(np.min(truth), np.min(estimate)))
         field_high = float(max(np.max(truth), np.max(estimate)))
@@ -158,9 +166,7 @@ def _plot_preview(
             field_high += field_padding
         error_high = max(float(np.max(error)), np.finfo(np.float64).eps)
         unit = units[field_index]
-        unit_label = (
-            f" [{unit}]" if unit and unit.lower() != "unknown" else " [units not specified]"
-        )
+        unit_label = f" [{unit}]" if unit and unit.lower() != "unknown" else ""
         error_colorbar = ScalarMappable(
             norm=Normalize(vmin=0.0, vmax=error_high), cmap="YlOrRd"
         )
@@ -250,7 +256,7 @@ def _plot_preview(
                 if is_spatial:
                     if field_index == len(field_names) - 1:
                         axis.set_xlabel(axis_labels[0])
-                    axis.set_ylabel(axis_labels[1] if column == 0 else "")
+                    axis.set_ylabel(field_name if column == 0 else "")
                     if not rectilinear:
                         axis.set_xlim(float(np.min(x)), float(np.max(x)))
                         axis.set_ylim(float(np.min(y)), float(np.max(y)))
@@ -258,21 +264,33 @@ def _plot_preview(
                 if column < 2 and field_index == 0:
                     axis.set_title(panel_title)
                 elif column == 2:
-                    axis.set_title(error_title)
+                    if field_index == 0:
+                        axis.set_title("Absolute error")
+                    metric = "N/A" if relative_l2 is None else f"{relative_l2:.3f}"
+                    axis.text(
+                        0.98, 0.96, f"relative $L_2$ {metric}",
+                        transform=axis.transAxes, ha="right", va="top",
+                        color="white", fontsize=7.3,
+                        bbox={"facecolor": "#1A2530", "edgecolor": "none", "alpha": 0.76, "pad": 1.5},
+                    )
+                axis.tick_params(
+                    labelbottom=field_index == len(field_names) - 1,
+                    labelleft=column == 0,
+                )
             if is_spatial:
                 figure.colorbar(
                     ScalarMappable(norm=Normalize(vmin=field_low, vmax=field_high), cmap="viridis"),
                     ax=axes[field_index, :2],
                     fraction=0.035,
                     pad=0.025,
-                    label=f"Field value{unit_label}",
+                    label=f"Value{unit_label}",
                 )
                 figure.colorbar(
                     error_colorbar,
                     ax=axes[field_index, 2],
                     fraction=0.055,
                     pad=0.03,
-                    label=f"Absolute error{unit_label}",
+                    label=f"|error|{unit_label}",
                 )
                 if field_sensor_mask.any():
                     axes[field_index, 1].scatter(
@@ -303,8 +321,10 @@ def _plot_preview(
             axis.spines["top"].set_visible(False)
             axis.spines["right"].set_visible(False)
         if len(logical_shape) == 2:
-            axes[field_index, 0].set_ylabel(f"{field_name}{unit_label}\n{axis_labels[1]}")
+            axes[field_index, 0].set_ylabel(field_name)
 
+    if len(logical_shape) == 2 and coordinate_dim >= 2:
+        figure.supylabel(axis_labels[1], x=0.007, fontsize=9.0)
     sample_label = f" — {sample_id}" if sample_id else ""
     figure.suptitle(f"Reconstruction preview — epoch {epoch:g}{sample_label}", fontsize=11.5)
     outputs = tuple(path_stem.with_suffix(suffix) for suffix in (".png", ".svg", ".pdf"))

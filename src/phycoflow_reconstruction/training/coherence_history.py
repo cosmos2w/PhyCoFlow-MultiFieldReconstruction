@@ -294,24 +294,34 @@ def build_coherence_history_figure(data: CoherenceHistoryData, plt, *, descripti
         fontweight="medium",
     )
 
-    summary = subfigures[0].subplots()
-    summary_values = list(data.total_values)
+    total_axis, family_axis = subfigures[0].subplots(
+        1, 2, gridspec_kw={"width_ratios": [1.0, 1.55], "wspace": 0.22}
+    )
     if data.total_values:
-        summary.plot(
+        total_axis.plot(
             data.total_epochs,
             data.total_values,
             color=_SUMMARY_COLOR,
             linewidth=2.2,
             label="Total coherence",
         )
+    total_axis.set_title(
+        "Total coherence", loc="left", color=HISTORY_TEXT_COLOR,
+        fontsize=11.5, fontweight="medium", pad=8,
+    )
+    total_axis.set_xlabel("Training epoch")
+    total_axis.set_ylabel("Weighted objective")
+    style_history_axis(total_axis, data.total_values, x_max=epoch_max)
+
+    family_values: list[float] = []
     if data.family_totals:
         for index, family in enumerate(data.family_order):
             if family not in data.family_totals:
                 continue
             epochs, values = data.family_totals[family]
-            summary_values.extend(values)
+            family_values.extend(values)
             color, linestyle = history_family_style(family, index)
-            summary.plot(
+            family_axis.plot(
                 epochs,
                 values,
                 color=color,
@@ -319,26 +329,26 @@ def build_coherence_history_figure(data: CoherenceHistoryData, plt, *, descripti
                 linewidth=1.8,
                 label=_display_name(family),
             )
-    summary.set_title(
-        "Coherence objective and weighted family contributions",
+    family_axis.set_title(
+        "Weighted family contributions",
         loc="left",
         color=HISTORY_TEXT_COLOR,
         fontsize=11.5,
         fontweight="medium",
         pad=8,
     )
-    summary.set_xlabel("Training epoch")
-    summary.set_ylabel("Objective value")
-    style_history_axis(summary, summary_values, x_max=epoch_max)
-    if summary.lines:
-        summary.legend(
+    family_axis.set_xlabel("Training epoch")
+    family_axis.set_ylabel("Weighted objective")
+    style_history_axis(family_axis, family_values, x_max=epoch_max)
+    if family_axis.lines:
+        family_axis.legend(
             loc="upper right",
             frameon=True,
             facecolor="white",
             edgecolor="#D4D9E2",
             framealpha=0.96,
             fontsize=8.2,
-            ncol=min(3, len(summary.lines)),
+            ncol=min(3, len(family_axis.lines)),
             handlelength=2.4,
             columnspacing=1.2,
         )

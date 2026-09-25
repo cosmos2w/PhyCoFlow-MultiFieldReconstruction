@@ -572,6 +572,13 @@ def test_posttraining_set_evaluation_builds_matched_source_comparison(tmp_path, 
     ):
         assert (global_dir / f"{stem}.png").is_file()
         assert (global_dir / f"{stem}-base.png").is_file()
+    for name in ("metrics-base.npz", "metrics-base.csv", "report-base.json"):
+        assert (global_dir / name).is_file()
+    with (
+        np.load(global_dir / "metrics.npz", allow_pickle=False) as current_global,
+        np.load(global_dir / "metrics-base.npz", allow_pickle=False) as base_global,
+    ):
+        np.testing.assert_array_equal(current_global["sample_ids"], base_global["sample_ids"])
     cross_dir = output_dir / "coherence" / "cross_spectrum"
     for stem in (
         "self_spectrum_coherence",

@@ -1188,6 +1188,27 @@ def _render_posttraining_comparison(
             )
         shared_limits["global_distribution"] = family_limits
 
+        # Retain the matched source's numerical evidence alongside its figures.
+        # The source evaluation otherwise lives only in a TemporaryDirectory.
+        global_destination = current.output_dir / "coherence" / "global_distribution"
+        base_global_files = {
+            "metrics_payload": (base_payload, global_destination / "metrics-base.npz"),
+            "metrics_csv": (
+                base.output_dir / "coherence" / "global_distribution" / "metrics.csv",
+                global_destination / "metrics-base.csv",
+            ),
+            "report": (
+                base.output_dir / "coherence" / "global_distribution" / "report.json",
+                global_destination / "report-base.json",
+            ),
+        }
+        for source_path, destination_path in base_global_files.values():
+            shutil.copy2(source_path, destination_path)
+        artifacts["base"]["global_distribution_metrics"] = {
+            label: str(destination.relative_to(current.output_dir))
+            for label, (_, destination) in base_global_files.items()
+        }
+
         current_extra = current.coherence_accumulators.get("global_distribution")
         base_extra = base.coherence_accumulators.get("global_distribution")
         if current_extra is not None and getattr(current_extra, "extra_view", False):

@@ -93,32 +93,33 @@ def test_render_reconstruction_payload_writes_300_dpi_png(tmp_path, monkeypatch)
     np.testing.assert_array_equal(contourf_calls[0][0][0][0], [10.0, 20.0, 30.0])
     np.testing.assert_array_equal(contourf_calls[0][0][1][:, 0], [100.0, 110.0])
     figure = recorded_figure["figure"]
-    plot_axes = [axis for axis in figure.axes if axis.get_title()]
+    colorbar_axes = [call[1]["cax"] for call in colorbar_calls]
+    plot_axes = [axis for axis in figure.axes if axis not in colorbar_axes]
     axes = np.asarray(plot_axes, dtype=object).reshape(2, 3)
     assert scatter_axes == [axes[0, 1], axes[1, 1]]
     assert len(colorbar_calls) == 4
     assert all(len(call[1]["ticks"]) == 4 for call in colorbar_calls)
-    colorbar_axes = [call[1]["cax"] for call in colorbar_calls]
     expected_parents = [axes[0, 1], axes[0, 2], axes[1, 1], axes[1, 2]]
     for colorbar_axis, parent_axis in zip(colorbar_axes, expected_parents):
         assert colorbar_axis.get_position().height == pytest.approx(
             parent_axis.get_position().height, rel=1.0e-3
         )
     assert [axis.get_ylabel() for axis in colorbar_axes] == [
-        "u [m/s]",
+        "Value [m/s]",
         "|error| [m/s]",
-        "v [K]",
+        "Value [K]",
         "|error| [K]",
     ]
-    assert axes[-1, 0].get_xlabel() == "x coordinate (dataset units)"
+    assert axes[-1, 0].get_xlabel() == "x (dataset units)"
     assert all(axis.get_aspect() == 1.0 for axis in axes.flat)
     assert [axis.get_ylabel() for axis in axes[:, 0]] == [
-        "u\ny coordinate (dataset units)",
-        "v\ny coordinate (dataset units)",
+        "u\ny (dataset units)",
+        "v\ny (dataset units)",
     ]
     row_gap = axes[0, 0].get_position().y0 - axes[1, 0].get_position().y1
     assert row_gap < axes[0, 0].get_position().height
-    assert all(axis.title.get_fontsize() >= 8.0 for axis in axes.flat)
+    assert all(axis.title.get_fontsize() >= 8.0 for axis in axes[0])
+    assert all(not axis.get_title() for axis in axes[1])
 
 
 def test_render_reconstruction_payload_requires_full_grid(tmp_path):
@@ -157,7 +158,7 @@ def test_renderer_marks_legacy_normalized_axes_explicitly(tmp_path, monkeypatch)
         normalized_payload, tmp_path / "normalized.png", dpi=72
     )
 
-    assert "x coordinate (normalized)" in axis_labels
+    assert "x (normalized)" in axis_labels
 
 
 def test_visualize_run_defaults_to_best_first_test_snapshot(tmp_path, monkeypatch):

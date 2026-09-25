@@ -199,15 +199,17 @@ def test_adaptive_figure_uses_family_groups_and_independent_component_scales() -
 
     figure = build_coherence_history_figure(data, plt, description="post:fixture")
 
-    assert len(figure.axes) == 4  # summary + three adaptive component panels
-    assert figure.axes[0].get_title(loc="left") == "Coherence objective and weighted family contributions"
-    component_titles = [axis.get_title(loc="left") for axis in figure.axes[1:] if axis.axison]
+    assert len(figure.axes) == 5  # separate total/family summaries + three component panels
+    assert figure.axes[0].get_title(loc="left") == "Total coherence"
+    assert figure.axes[1].get_title(loc="left") == "Weighted family contributions"
+    component_titles = [axis.get_title(loc="left") for axis in figure.axes[2:] if axis.axison]
     assert component_titles == [
         "Self spectrum · Auto spectrum",
         "Same frequency · Magnitude squared",
         "Cross frequency · Band energy coupling",
     ]
-    assert all(axis.get_yscale() == "log" for axis in figure.axes if axis.axison)
+    assert all(axis.get_yscale() == "log" for axis in (figure.axes[0], *figure.axes[2:]))
+    assert figure.axes[1].get_yscale() == "linear"  # legacy rows have no family totals
     assert len(figure.subfigs) == 2
     assert figure.subfigs[1]._suptitle.get_text() == "Cross spectrum"
     plt.close(figure)
@@ -238,14 +240,14 @@ def test_family_summary_displays_all_weighted_families_in_stable_colors() -> Non
     data = extract_coherence_history(rows, _config())
     figure = build_coherence_history_figure(data, plt, description="post:fixture")
 
-    summary = figure.axes[0]
-    assert [line.get_label() for line in summary.lines] == [
-        "Total coherence",
+    total, families = figure.axes[:2]
+    assert [line.get_label() for line in total.lines] == ["Total coherence"]
+    assert [line.get_label() for line in families.lines] == [
         "Global distribution",
         "Cross spectrum",
         "Topology",
     ]
-    family_colors = {line.get_label(): line.get_color() for line in summary.lines}
+    family_colors = {line.get_label(): line.get_color() for line in families.lines}
     assert family_colors["Global distribution"] == "#D95F59"
     assert family_colors["Cross spectrum"] == "#3B6EA8"
     assert family_colors["Topology"] == "#B58900"

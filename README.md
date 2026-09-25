@@ -458,7 +458,7 @@ Post-processing never retrains the model. Point it at an existing base or post-t
 | Error distributions over many snapshots | `visualize-run --eval-set ...` | violin/scatter figure, CSV, NPZ, and JSON |
 | Supported physical-coherence comparisons | add `--eval-coherence ...` | family-specific figures and numerical artifacts |
 | Re-render saved coherence components | `render-history` | `coherence_history.png` |
-| Review training objectives, gradients, and checkpoint gates | [diagnostic history gallery](cases/turbulent_combustion/diagnostics/history/README.md) | four figures plus a frozen numerical snapshot |
+| Review training objectives, gradients, and checkpoint gates | [A+B+C diagnostic gallery](cases/turbulent_combustion/diagnostics/ExampleVisual/README.md) | four history figures plus frozen numerical evidence |
 | Re-render a saved preview without a model | visualization script with `--payload` | PNG from a portable NPZ |
 
 Start with `best` for the checkpoint selected by fixed validation, or choose `last` when the final optimization state is scientifically relevant. Use `--weight-selection configured` unless intentionally diagnosing live rather than configured/EMA weights. Keep the same split, sensor manifest, sample IDs, generation steps, and seeds for a fair comparison.
@@ -483,7 +483,7 @@ python cases/<case>/run.py render-history \
   --run runs/<experiment>/<run-id>
 ```
 
-The [turbulent-combustion history renderer](cases/turbulent_combustion/diagnostics/history/README.md) also produces separate objective, gradient, and checkpoint-fidelity figures from a chosen cutoff of a run's saved metrics. It reads the active run without changing its training process.
+The [turbulent-combustion history renderer](cases/turbulent_combustion/diagnostics/ExampleVisual/README.md) also produces separate objective, gradient, and checkpoint-fidelity figures from a chosen cutoff of a run's saved metrics. It reads the active run without changing its training process.
 
 ### 7.1 Single-snapshot reconstruction figure
 
@@ -495,7 +495,7 @@ python cases/<case>/run.py visualize-run --run runs/<experiment>/<run-id>
 
 With no optional arguments, this loads `best.pt`, selects snapshot `0` relative to the test split, and uses the sparse observation protocol and generation settings in `resolved_config.yaml`. It always reconstructs the complete grid and writes a 300-DPI PNG.
 
-The fully explicit command for the Senseiver example below is:
+A historical fully explicit Senseiver command is:
 
 ```bash
 python cases/turbulent_combustion/run.py visualize-run \
@@ -517,9 +517,9 @@ python cases/turbulent_combustion/run.py visualize-run \
 
 Outputs are stored under `evaluation/reconstruction_<split>_<snapshot>_<checkpoint>/`: `reconstruction.png`, `report.json`, `sensor_manifest.json`, `query_indices.pt`, and the portable plotting payload `reconstruction.npz`. The former duplicate `reconstruction.pt` is no longer written.
 
-![Senseiver turbulent-combustion best-checkpoint reconstruction on the first test snapshot](cases/turbulent_combustion/diagnostics/reconstruction/senseiver_best_sample9000.png)
+![A+B+C formal epoch-1440 full-grid reconstruction on a validation snapshot with physical coordinates](cases/turbulent_combustion/diagnostics/ExampleVisual/reconstruction/fullgrid_validation_frame8000.png)
 
-The [pinned plotting payload and provenance](cases/turbulent_combustion/diagnostics/reconstruction/README.md) make this version reproducible without model inference.
+The [pinned plotting payload and provenance](cases/turbulent_combustion/diagnostics/ExampleVisual/README.md) make this epoch-1440 A+B+C example reproducible without model inference. The Senseiver command above remains a historical command example.
 
 ### 7.2 Multi-snapshot reconstruction statistics
 
@@ -530,7 +530,7 @@ python cases/<case>/run.py visualize-run \
   --run runs/<experiment>/<run-id> --eval-set test
 ```
 
-The fully explicit command used for the Senseiver example below is:
+A historical fully explicit Senseiver set-evaluation command is:
 
 ```bash
 python cases/turbulent_combustion/run.py visualize-run \
@@ -549,9 +549,9 @@ Outputs are written under `evaluation/reconstruction_set_<split>_<checkpoint>/` 
 
 When the target is a post-training run, statistical evaluation also evaluates the exact source checkpoint recorded by the run lineage. The base and post-training models use identical split-relative samples, sensor selections, generation settings, seeds, and coherence definitions. Current-run figures keep their standard names, while each base-run figure is written beside its counterpart with a `-base` suffix, for example `relative_l2_violin.png` and `relative_l2_violin-base.png`; corresponding reconstruction and distribution figures share the same vertical limits, while cross-spectrum figures retain the common bounded 0–1 score axis. `comparison_report.json` records both checkpoints, matched-input hashes, shared limits, and artifact paths. Add `--no-base-comparison` only when the extra source-checkpoint evaluation is intentionally unnecessary.
 
-<img src="cases/turbulent_combustion/diagnostics/reconstruction/senseiver_test_best_relative_l2.png" alt="Senseiver test-set relative L2 distributions from 200 saved samples" width="65%">
+<img src="cases/turbulent_combustion/diagnostics/ExampleVisual/postprocessing/relative_l2_violin.png" alt="A+B+C formal epoch-1440 validation relative L2 distributions from 64 matched snapshots" width="65%">
 
-The [diagnostic reconstruction suite](cases/turbulent_combustion/diagnostics/reconstruction/README.md) includes the saved 200-sample metrics, an A+B post-training fidelity example, and a fixed epoch-800 A+B+C preview. The A+B example is post-training only because its source-set metric payload was not retained.
+The [current diagnostic suite](cases/turbulent_combustion/diagnostics/ExampleVisual/README.md) includes matched 64-snapshot source/A+B+C metrics, a physical-coordinate full-grid reconstruction, and a fixed 4,096-point illustrative view from the same full-grid inference.
 
 ### 7.3 Multi-snapshot physical-coherence statistics
 
@@ -635,18 +635,11 @@ Cross-spectrum evaluation defaults to `--cross-spectrum-aggregation training_ali
 
 The horizontal-bar figures report the enabled self-spectrum, same-frequency, and cross-frequency agreement scores on a fixed linear range from 0 to 1, where 1 means exact spectral agreement; `--stat-scale` therefore does not alter these charts. When enabled, self-spectrum bars are one per selected field, whereas the two distinct-field terms report one per configured pair. The additional `spectral_band_profiles.png` shows reference and reconstruction energy fractions by graph-frequency band, which gives the bounded scores a more direct interpretation. Per-ensemble values, averaged raw mean-squared discrepancies, normalized scores, spread statistics, ensemble membership, and dropped sample IDs are retained in `metrics.csv`, `metrics.npz`, and `report.json`. If spectral-band energy is enabled in the run's coherence configuration, its score figure is generated in the same family directory.
 
-The paired example below compares the source `last.pt` checkpoint with the AB post-training `last.pt` checkpoint over the same 12 training ensembles. It retains the two spectral terms enabled in the resolved training configuration, uses matched sample/query identities, and shows ±1 standard deviation across ensembles on one focused score axis.
+The current paired example compares the source checkpoint with the A+B+C formal epoch-1440 checkpoint over two matched 32-snapshot validation ensembles. It shows every configured field pair and both enabled spectral terms on the same bounded score axis.
 
-![Matched source and A+B post-training cross-spectrum coherence for the configured same-frequency and cross-frequency terms](cases/turbulent_combustion/diagnostics/coherence/ab_balanced_train_last/cross_spectrum_source_post_coherence.png)
+![Matched source and A+B+C cross-spectrum scores by configured field pair](cases/turbulent_combustion/diagnostics/ExampleVisual/explanatory/cross_pair_scores.png)
 
-The saved cross-frequency component mean rises from 84.4% to 90.2%. The [pinned metrics and rendering provenance](cases/turbulent_combustion/diagnostics/coherence/README.md) identify the 192 used training snapshots and eight dropped by complete-ensemble grouping.
-
-The historical A+B evaluation payload includes a self-spectrum score in its
-reported family aggregate, while that run's resolved training configuration and
-history enable only same-frequency and cross-frequency terms. The
-[matched term-level diagnostic](cases/turbulent_combustion/diagnostics/coherence/README.md)
-therefore compares the two configured terms and treats the historical aggregate
-as an evaluation artifact rather than a trained-objective result.
+The [full coherence gallery and pinned metrics](cases/turbulent_combustion/diagnostics/ExampleVisual/README.md) also show reference/source/A+B+C band-energy profiles and their percentage-point differences.
 
 #### 7.3.3 Topology coherence
 

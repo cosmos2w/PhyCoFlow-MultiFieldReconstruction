@@ -139,7 +139,7 @@ def render_reconstruction_payload(
     if len(coordinate_labels) != 2:
         raise ValueError("two coordinate labels are required for a 2D reconstruction")
     coordinate_suffix = " (normalized)" if coordinate_space == "normalized" else " (dataset units)"
-    coordinate_labels = tuple(f"{label} coordinate{coordinate_suffix}" for label in coordinate_labels)
+    coordinate_labels = tuple(f"{label}{coordinate_suffix}" for label in coordinate_labels)
     if not np.isfinite(prediction).all() or not np.isfinite(target).all():
         raise ValueError("physical predictions and targets must be finite")
     if prediction.shape[0] != math.prod(logical_shape):
@@ -163,11 +163,11 @@ def render_reconstruction_payload(
     domain_aspect = x_span / y_span
     panel_width = 3.7
     panel_height = panel_width / domain_aspect
-    row_text_allowance = 0.62
+    row_text_allowance = 0.25
     figure_width = 3.0 * panel_width + 3.0
     figure_height = max(
         3.0,
-        len(field_names) * (panel_height + row_text_allowance) + 0.75,
+        len(field_names) * (panel_height + row_text_allowance) + 0.68,
     )
     font_scale = max(0.82, min(1.0, 6.0 / max(len(field_names), 1)))
     title_fontsize = 10.0 * font_scale
@@ -180,7 +180,7 @@ def render_reconstruction_payload(
         len(field_names),
         5,
         width_ratios=(1.0, 1.0, 0.045, 1.0, 0.045),
-        hspace=0.16,
+        hspace=0.08,
         wspace=0.18,
     )
     axes = np.empty((len(field_names), 3), dtype=object)
@@ -197,6 +197,7 @@ def render_reconstruction_payload(
         truth = target[:, field_index]
         estimate = prediction[:, field_index]
         error = np.abs(estimate - truth)
+        relative_l2 = _relative_l2_error(estimate, truth)
         low = float(min(truth.min(), estimate.min()))
         high = float(max(truth.max(), estimate.max()))
         low, high = _nondegenerate_range(low, high)
@@ -224,7 +225,7 @@ def render_reconstruction_payload(
             ),
             (
                 error.reshape(logical_shape),
-                _error_title(_relative_l2_error(estimate, truth)),
+                _error_title(relative_l2),
                 "magma",
                 error_contour_levels,
                 error_norm,
@@ -244,8 +245,25 @@ def render_reconstruction_payload(
             axis.set_aspect("equal", adjustable="box")
             axis.set_xlim(float(x_grid.min()), float(x_grid.max()))
             axis.set_ylim(float(y_grid.min()), float(y_grid.max()))
-            axis.set_title(panel_title, fontsize=title_fontsize, pad=4.0)
-            axis.tick_params(labelsize=tick_fontsize, pad=2.0)
+            if field_index == 0:
+                axis.set_title(
+                    "Absolute error" if column_index == 2 else panel_title,
+                    fontsize=title_fontsize, pad=4.0,
+                )
+            if column_index == 2:
+                relative_label = "N/A" if relative_l2 is None else f"{relative_l2:.3f}"
+                axis.text(
+                    0.98, 0.96,
+                    f"relative $L_2$ {relative_label}",
+                    transform=axis.transAxes, ha="right", va="top",
+                    color="white", fontsize=max(7.0, tick_fontsize - 0.4),
+                    bbox={"facecolor": "#1A2530", "edgecolor": "none", "alpha": 0.76, "pad": 1.6},
+                )
+            axis.tick_params(
+                labelsize=tick_fontsize, pad=2.0,
+                labelbottom=field_index == len(field_names) - 1,
+                labelleft=column_index == 0,
+            )
             if field_index == len(field_names) - 1:
                 axis.set_xlabel(coordinate_labels[0], fontsize=label_fontsize)
             if column_index == 0:
@@ -260,9 +278,9 @@ def render_reconstruction_payload(
             ticks=field_colorbar_ticks,
         )
         unit = units[field_index]
-        unit_label = f" [{unit}]" if unit and unit.lower() != "unknown" else " [units not specified]"
+        unit_label = f" [{unit}]" if unit and unit.lower() != "unknown" else ""
         field_colorbar.set_label(
-            f"{field_name}{unit_label}", fontsize=max(7.0, tick_fontsize - 0.2), labelpad=3.0
+            f"Value{unit_label}", fontsize=max(7.0, tick_fontsize - 0.2), labelpad=3.0
         )
         error_colorbar = figure.colorbar(
             ScalarMappable(norm=error_norm, cmap="magma"),
