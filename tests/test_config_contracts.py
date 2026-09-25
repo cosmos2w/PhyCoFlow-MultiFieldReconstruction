@@ -1,5 +1,6 @@
 """Focused Phase-1 checks for config separation and shared dataclass shapes."""
 
+import os
 from pathlib import Path
 
 import pytest
@@ -84,7 +85,9 @@ def test_case_dataset_catalog_uses_the_canonical_lowercase_root():
         dataset = load_config(path)["dataset"]
         assert str(dataset["path"]).startswith("../../datasets/")
         case_dir = path.parents[1]
-        assert (case_dir / dataset["path"]).resolve().is_relative_to(
+        # Check the catalog entry, not an optional symlink's external payload.
+        catalog_entry = Path(os.path.abspath(case_dir / dataset["path"]))
+        assert catalog_entry.is_relative_to(
             PROJECT_ROOT / "datasets" / case_dir.name
         )
 
