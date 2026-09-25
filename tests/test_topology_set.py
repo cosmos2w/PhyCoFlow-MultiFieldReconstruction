@@ -140,6 +140,52 @@ def test_betti_curves_support_single_direction_and_close_figure(tmp_path):
     assert set(plt.get_fignums()) == before
 
 
+def test_betti_panels_report_count_error(tmp_path, monkeypatch):
+    from phycoflow_reconstruction.evaluation import topology_set
+
+    titles = []
+    original_save = topology_set._save_publication_figure
+
+    def capture(figure, output_path, *, dpi=300):
+        titles.extend(axis.get_title(loc="left") for axis in figure.axes)
+        return original_save(figure, output_path, dpi=dpi)
+
+    monkeypatch.setattr(topology_set, "_save_publication_figure", capture)
+    reference = np.asarray([[[[2, 2, 1], [1, 0, 0]]]], dtype=np.int64)
+    reconstruction = np.asarray([[[[2, 1, 1], [1, 0, 0]]]], dtype=np.int64)
+    topology_set.render_topology_betti_curves(
+        reference, reconstruction,
+        ({"metric": "self.u", "direction": "sublevel"},),
+        ("self.u",), ("sublevel",), (0.1, 0.5, 0.9),
+        tmp_path / "betti.png", title="Betti", subtitle="validation",
+    )
+    assert "count MAE=0.33" in titles[0]
+    assert "count MAE=0.00" in titles[1]
+
+
+def test_configured_grid_reports_matched_sample_error(tmp_path, monkeypatch):
+    from phycoflow_reconstruction.evaluation import topology_set
+
+    labels = []
+    original_save = topology_set._save_publication_figure
+
+    def capture(figure, output_path, *, dpi=300):
+        labels.extend(text.get_text() for text in figure.texts)
+        return original_save(figure, output_path, dpi=dpi)
+
+    monkeypatch.setattr(topology_set, "_save_publication_figure", capture)
+    x, y = np.meshgrid(np.linspace(0, 1, 4), np.linspace(0, 1, 4))
+    reference = np.asarray([x + y])
+    reconstruction = reference + 0.1
+    topology_set.render_configured_grid_topology(
+        reference, reconstruction, np.stack((x, y), axis=-1), ("u",), "sample-7",
+        units="model units", sample_epoch="best", output_path=tmp_path / "grid.png",
+        objective_distance=0.01234, role="Post-training",
+    )
+    assert any("sample sample-7" in label and "0.01234" in label for label in labels)
+    assert any("mask error=" in label for label in labels)
+
+
 def test_betti_curves_accept_dimension_specific_limits(tmp_path, monkeypatch):
     from phycoflow_reconstruction.evaluation import topology_set
 

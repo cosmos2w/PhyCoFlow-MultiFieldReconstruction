@@ -892,7 +892,7 @@ def _cross_spectrum_comparison_subtitle(
         ensemble_summary = f"one pooled ensemble · n={used_count}"
         estimate_summary = "single pooled estimate"
     return (
-        f"{role} · {result.run_label.replace('_', ' ')} · {result.split} · "
+        f"{role} · {result.split} · "
         f"{result.checkpoint_label}.pt · {ensemble_summary} · {estimate_summary}"
     )
 
@@ -1434,6 +1434,8 @@ def _render_posttraining_comparison(
                 units=str(current_topology_report["units"]),
                 sample_epoch=f"{role} · {paired_cost_summary} · cost={cost:.4g}",
                 output_path=destination,
+                objective_distance=float(cost),
+                role=role,
             )
 
         persistence_path = topology_dir / "persistence_term_distributions.png"

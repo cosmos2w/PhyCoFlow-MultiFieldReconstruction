@@ -361,6 +361,7 @@ def render_topology_betti_curves(
         for direction_index, direction in enumerate(directions):
             axis = axes[dimension, direction_index]
             axis.set_facecolor("white")
+            panel_errors = []
             for metric_index, metric in enumerate(metric_labels):
                 color = colors[metric_index % len(colors)]
                 reference_curves = _aggregate_rows(
@@ -369,6 +370,7 @@ def render_topology_betti_curves(
                 reconstruction_curves = _aggregate_rows(
                     reconstruction[:, :, dimension, :], metadata, metric=metric, direction=direction
                 )
+                panel_errors.append(np.abs(reference_curves - reconstruction_curves).mean())
                 ref_mean = reference_curves.mean(axis=0)
                 pred_mean = reconstruction_curves.mean(axis=0)
                 ref_std = reference_curves.std(axis=0, ddof=1) if len(reference_curves) > 1 else np.zeros_like(ref_mean)
@@ -378,7 +380,10 @@ def render_topology_betti_curves(
                 if len(reference_curves) > 1:
                     axis.fill_between(quantiles, ref_mean - ref_std, ref_mean + ref_std, color=color, alpha=0.10, linewidth=0)
                     axis.fill_between(quantiles, pred_mean - pred_std, pred_mean + pred_std, color=color, alpha=0.08, linewidth=0)
-            axis.set_title(f"$\\beta_{dimension}$ · {direction}", loc="left", fontsize=9.8, fontweight="semibold", color="#26323D")
+            axis.set_title(
+                f"$\\beta_{dimension}$ · {direction} · count MAE={np.mean(panel_errors):.2f}",
+                loc="left", fontsize=9.8, fontweight="semibold", color="#26323D",
+            )
             axis.set_ylabel("Betti count", fontsize=8.7, color="#374151")
             axis.set_xticks(quantiles, [f"{value:.2g}" for value in quantiles])
             axis.tick_params(axis="both", labelsize=8.2, colors="#56616D", width=0.65, length=3)
@@ -403,7 +408,7 @@ def render_topology_betti_curves(
     figure.text(
         0.01,
         0.94,
-        f"{subtitle} · solid circles: reference; dashed squares: reconstruction",
+        subtitle,
         ha="left",
         va="top",
         fontsize=7.9,
@@ -413,6 +418,11 @@ def render_topology_betti_curves(
         Line2D([], [], color=colors[index % len(colors)], marker="o", linewidth=1.7, label=_publication_label(metric))
         for index, metric in enumerate(metric_labels)
     ]
+    figure.text(
+        0.105, 0.12,
+        "Solid circles: reference · dashed squares: reconstruction · panel MAE: mean absolute Betti-count error",
+        ha="left", va="center", fontsize=7.9, color="#66717C",
+    )
     figure.legend(
         handles=legend,
         loc="lower center",
@@ -437,6 +447,8 @@ def render_configured_grid_topology(
     units: str,
     sample_epoch: str,
     output_path: str | Path,
+    objective_distance: float | None = None,
+    role: str | None = None,
     dpi: int = 300,
 ) -> Path:
     """Render paired q50 masks and contour disagreement on the configured raster."""
@@ -459,6 +471,10 @@ def render_configured_grid_topology(
         raise ValueError("configured topology coordinates do not align with raster maps")
     if not np.isfinite(reference_fields).all() or not np.isfinite(reconstruction_fields).all():
         raise ValueError("configured topology maps must be finite")
+    if objective_distance is not None and (
+        not np.isfinite(objective_distance) or objective_distance < 0.0
+    ):
+        raise ValueError("topology objective distance must be finite and non-negative")
 
     figure, axes = plt.subplots(
         len(field_names), 3, figsize=(9.2, max(3.0, 2.65 * len(field_names))),
@@ -478,6 +494,7 @@ def render_configured_grid_topology(
         ref_mask = ref >= level
         pred_mask = pred >= level
         xor = np.logical_xor(ref_mask, pred_mask)
+        disagreement_pct = 100.0 * float(xor.mean())
         masks = (ref_mask, pred_mask)
         for panel in range(3):
             axis = axes[field_index, panel]
@@ -536,7 +553,7 @@ def render_configured_grid_topology(
                 figure.text(
                     0.012,
                     0.91 - 0.70 * (field_index + 0.5) / len(field_names),
-                    f"{_publication_label(field_name)}\nq50={level:.3g}",
+                    f"{_publication_label(field_name)}\nq50={level:.3g}\nmask error={disagreement_pct:.1f}%",
                     ha="left",
                     va="center",
                     fontsize=8.0,
@@ -557,10 +574,13 @@ def render_configured_grid_topology(
         f"Configured topology raster · {reference_fields.shape[-2]}×{reference_fields.shape[-1]} · {units}",
         ha="left", va="top", fontsize=11.4, fontweight="semibold", color="#1F2937",
     )
-    # Provenance and interpretation are recorded in report.json/README so that
-    # the image header can stay clear at journal-column size.
-    del sample_id, units, sample_epoch
-    figure.subplots_adjust(left=0.18, right=0.99, top=0.91, bottom=0.21, wspace=0.08, hspace=0.25)
+    if objective_distance is not None:
+        figure.text(
+            0.01, 0.948,
+            f"{role or sample_epoch} · sample {sample_id} · persistence distance / raster vertex={objective_distance:.5f}",
+            ha="left", va="top", fontsize=8.0, color="#52606D",
+        )
+    figure.subplots_adjust(left=0.18, right=0.99, top=0.89, bottom=0.21, wspace=0.08, hspace=0.25)
     return _save_publication_figure(figure, output_path, dpi=dpi)
 
 
@@ -958,6 +978,7 @@ class TopologySetAccumulator:
             units=units_label,
             sample_epoch=f"{checkpoint_label} · q50 level-set interpretation",
             output_path=figures["configured_grid_topology"],
+            objective_distance=representative_metric,
         )
 
         payload_path = destination / "metrics.npz"

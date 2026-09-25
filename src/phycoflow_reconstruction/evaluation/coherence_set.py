@@ -196,13 +196,16 @@ def _publication_label(name: str) -> str:
     return name.replace("_", " ")
 
 
-def _save_publication_figure(figure: Any, output_path: str | Path, *, dpi: int = 300) -> Path:
+def _save_publication_figure(
+    figure: Any, output_path: str | Path, *, dpi: int = 300, tight: bool = True
+) -> Path:
     """Write a publication PNG and editable vector companions with one stem."""
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    figure.savefig(output_path, dpi=dpi, bbox_inches="tight", facecolor="white")
-    figure.savefig(output_path.with_suffix(".pdf"), bbox_inches="tight", facecolor="white")
-    figure.savefig(output_path.with_suffix(".svg"), bbox_inches="tight", facecolor="white")
+    bbox = "tight" if tight else None
+    figure.savefig(output_path, dpi=dpi, bbox_inches=bbox, facecolor="white")
+    figure.savefig(output_path.with_suffix(".pdf"), bbox_inches=bbox, facecolor="white")
+    figure.savefig(output_path.with_suffix(".svg"), bbox_inches=bbox, facecolor="white")
     import matplotlib.pyplot as plt
 
     plt.close(figure)
@@ -556,7 +559,9 @@ def render_cross_spectrum_score_bars(
     axis.spines["left"].set_visible(False)
     axis.spines["bottom"].set_color("#9AA1AA")
     axis.spines["bottom"].set_linewidth(0.75)
-    output_path = _save_publication_figure(figure, output_path, dpi=dpi)
+    # The paired charts share a fixed canvas; a tight bounding box otherwise
+    # grows with the checkpoint subtitle and changes the apparent bar scale.
+    output_path = _save_publication_figure(figure, output_path, dpi=dpi, tight=False)
     plt.close(figure)
     return output_path
 

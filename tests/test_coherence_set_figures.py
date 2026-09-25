@@ -5,7 +5,26 @@ import numpy as np
 from phycoflow_reconstruction.evaluation.coherence_set import (
     render_cross_spectrum_band_profiles,
     render_cross_spectrum_paired_score_bars,
+    render_cross_spectrum_score_bars,
 )
+
+
+def test_separate_cross_spectrum_comparison_keeps_same_canvas(tmp_path):
+    from PIL import Image
+
+    labels = ("same-frequency", "family total")
+    roles = ("detail", "family_total")
+    outputs = (tmp_path / "base.png", tmp_path / "post.png")
+    for path, title, subtitle in (
+        (outputs[0], "Base source", "validation · last.pt · 2×32 ensembles"),
+        (outputs[1], "Post-training", "validation · best.pt · 2×32 ensembles · mean ±1 SD"),
+    ):
+        render_cross_spectrum_score_bars(
+            np.asarray([0.78, 0.86]), labels, roles, path,
+            title=title, subtitle=subtitle, score_limits=(0.7, 1.0),
+        )
+    with Image.open(outputs[0]) as base, Image.open(outputs[1]) as post:
+        assert base.size == post.size
 
 
 def test_graph_band_profile_uses_validated_per_field_fractions_and_vectors(tmp_path):
