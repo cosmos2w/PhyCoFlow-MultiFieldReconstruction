@@ -1,0 +1,12 @@
+{
+  "checkpoint_epoch": 1440,
+  "source_payload": "source/fullgrid_validation_frame8000.npz",
+  "sparse_payload": "source/sparse_preview_from_fullgrid.npz",
+  "sparse_query_count": 4096,
+  "sparse_query_seed": 2027,
+  "sparse_view_contract": "fixed 4096-point subset of a full-grid evaluation, not the trainer's direct sparse-preview inference",
+  "figures": [
+    "reconstruction/fullgrid_validation_frame8000.png",
+    "reconstruction/sparse_preview_from_fullgrid.png"
+  ]
+}

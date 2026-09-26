@@ -1,0 +1,69 @@
+# MIMONet baseline using the same normalized combustion data and training budget
+# as the other deterministic 5,000-epoch profiles.
+
+defaults:
+  - ../../../../configs/defaults/base_training.yaml
+  - ../dataset.yaml
+  - ../sensors/T_only_random.yaml
+  - ../../../../configs/models/mimonet.yaml
+
+stage: base_training
+case: turbulent_combustion
+
+# The two MIMONet branches receive exactly 256 T values and their locations.
+# Canonical point-index packing is supplied by configs/models/mimonet.yaml.
+# No other observed field or condition is passed to the model.
+model:
+  conditioning_fields: [T]
+  sensor_capacities: [256]
+  query_points: 4096
+
+dataset:
+  normalization: mean_std
+  normalization_stats_path: configs/normalization/train_mean_std.json
+
+optimization:
+  epochs: 5000
+  batch_size: 128
+  lr: 1.0e-4
+  weight_decay: 1.0e-6
+  grad_clip: 1.0
+  backward_loss_scale: 1.0
+
+runtime:
+  seed: 42
+  deterministic: true
+  num_workers: 4
+  data_strategy: async_cpu
+  progress: true
+  plot_every_steps: 50
+
+evaluation:
+  split: validation
+  max_samples: 20
+  query_points: 4096
+  generation_steps: 4
+  seed: 2027
+  preview:
+    enabled: true
+    loss_every_epochs: 10
+    reconstruct_every_epochs: 500
+    split: validation
+    sample_index: 0
+    query_points: 4096
+    generation_steps: 4
+    seed: 2027
+    keep_history: true
+
+checkpointing:
+  enabled: true
+  every_epochs: 10
+  epochs: [100, 500, 1000, 2000, 5000]
+  save_epoch_one: false
+
+benchmark_telemetry:
+  enabled: true
+  sample_steps: 5
+
+output:
+  experiment_name: tc_mimonet_point_index_256t_5000ep_gpu0

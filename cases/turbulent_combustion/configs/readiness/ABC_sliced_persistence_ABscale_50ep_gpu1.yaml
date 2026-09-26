@@ -1,0 +1,18 @@
+# Formal-scale 50-epoch test: preserve the A+B optimization and sampling size.
+defaults: [ABC_sliced_persistence_50ep_gpu1.yaml]
+
+optimization:
+  epochs: 50
+  batch_size: 32
+  train_fraction: 0.25
+
+coherence:
+  compute_budget: {batch_size: 32, point_count: 4096, query_policy: fixed_shared, query_seed: 100045}
+
+evaluation:
+  max_samples: 32
+  preview:
+    loss_every_epochs: 10
+    reconstruct_every_epochs: 200
+
+output: {experiment_name: coherence_fix_ABC_sliced_persistence_ABscale_50ep_gpu1}

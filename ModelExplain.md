@@ -15,8 +15,9 @@ This document describes the mathematical contract implemented by `phycoflow_reco
   - [3.1 Coordinate MLP](#31-coordinate-mlp)
   - [3.2 MLP-RBF](#32-mlp-rbf)
   - [3.3 Sparse DeepONet](#33-sparse-deeponet)
-  - [3.4 Senseiver regressor](#34-senseiver-regressor)
-  - [3.5 GeoFNO regressor](#35-geofno-regressor)
+  - [3.4 MIMONet operator](#34-mimonet-operator)
+  - [3.5 Senseiver regressor](#35-senseiver-regressor)
+  - [3.6 GeoFNO regressor](#36-geofno-regressor)
 - [4. Generative and flow reconstruction models](#4-generative-and-flow-reconstruction-models)
   - [4.1 Conditional DiffusionPDE model](#41-conditional-diffusionpde-model)
   - [4.2 Two-stage latent flow matching](#42-two-stage-latent-flow-matching)
@@ -55,6 +56,7 @@ Configuration has three layers. Shared architecture defaults live in [`configs/m
 | `coordinate_mlp` | [`deterministic/coordinate_mlp.py`](src/phycoflow_reconstruction/models/deterministic/coordinate_mlp.py) | masked field MSE | direct point prediction |
 | `mlp_rbf` | [`deterministic/mlp_rbf.py`](src/phycoflow_reconstruction/models/deterministic/mlp_rbf.py) | masked field MSE | direct point prediction with local RBF features |
 | `deeponet` | [`deterministic/deeponet.py`](src/phycoflow_reconstruction/models/deterministic/deeponet.py) | masked field MSE | sparse branch and coordinate trunk |
+| `mimonet` | [`operators/mimonet.py`](src/phycoflow_reconstruction/models/operators/mimonet.py) | masked field MSE | fixed sensor slots, fused value/location branches, coordinate trunk |
 | `senseiver` | [`deterministic/senseiver.py`](src/phycoflow_reconstruction/models/deterministic/senseiver.py) | masked field MSE | latent cross-attention |
 | `geofno` | [`operators/geofno.py`](src/phycoflow_reconstruction/models/operators/geofno.py) | masked field MSE | rasterized values and masks on a complete grid |
 | `diffusion_pde` | [`generative/diffusion_pde.py`](src/phycoflow_reconstruction/models/generative/diffusion_pde.py) | noise-prediction MSE | differentiable DDIM-style reconstruction |
@@ -67,13 +69,14 @@ The historical Demo50 adapter is deliberately isolated in [`models/compatibility
 
 ### 0.2 Canonical model settings
 
-The following is a compact snapshot of the maintained fragments in `configs/models/` as of 2026-08-28. Case files can override these values.
+The following is a compact snapshot of the maintained fragments in `configs/models/` as of 2026-09-26. Case files can override these values.
 
 | Model fragment | Current architecture settings |
 |---|---|
 | `coordinate_mlp` | hidden width 128; 16 Fourier bands; 4096 query points |
 | `mlp_rbf` | hidden width 128; RBF sigma 0.08; 16 Fourier bands; 4096 query points |
 | `deeponet` | width 128; basis dimension 64; 4096 query points |
+| `mimonet` | basis dimension 256; three 512-wide ReLU branch hidden layers; three 256-wide ReLU trunk hidden layers; multiplicative branch merge; canonical point-index sensor ordering for new runs |
 | `senseiver` | width 128; 64 latents; 4 heads; depth 3; 4096 query points |
 | `geofno` | 32 hidden channels; modes `[16,16]`; 4 layers |
 | `diffusion_pde` | conditional U-Net; base width 64; multipliers `[1,2,4,8]`; 2 residual blocks/level; attention at levels 2–3 with 4 heads; time embedding 256; 1000 diffusion training steps (legacy `plain_cnn` optional) |
@@ -97,18 +100,19 @@ These settings map through `_portable_config` in the adapter to the preserved po
 
 The source profile is [`gl_rbf_cq_cached_kv_5000ep.yaml`](cases/turbulent_combustion/configs/base/gl_rbf_cq_cached_kv_5000ep.yaml). It trains the canonical `gl_rbf_cq` model for 5000 epochs with AdamW batch size 128, learning rate $10^{-4}$, weight decay $10^{-6}$, and clip norm 1.0. The state has five output fields in order `CH4, CO, T, U_1, p` on a $100\times403$ grid with training mean/std normalization. Its only sparse input field is `T`, sampled uniformly at 192--384 locations per snapshot. Base training uses 4096 queries and an RFF rectified-flow source; configured evaluation uses four Euler generation steps and EMA weights.
 
-The readiness matrix is rooted at [`readiness/_common.yaml`](cases/turbulent_combustion/configs/readiness/_common.yaml). It selects `best.pt` and inherits the dataset, model, and observations from the immutable source run and trains the full model for 1000 epochs with learning rate $5\times10^{-5}$, weight decay $10^{-6}$, and gradient clipping at 1.0. The A, B, and ABC profiles use optimization batch size 16 and 20% of the training split. C uses batch size 32 and 10% of the split, while its coherence compute budget remains 16 samples. Each update retains the native source-model loss with weight 0.1. The outer coherence-objective weight is 1.0. Coherence starts at epoch 1, runs every step without warmup or interval rescaling, and uses a two-step Euler rollout over a fixed shared set of 4096 query points. Smooth endpoint observation consistency uses strength 1.0, sigma 0.05, schedule power 2, and a final exact clamp.
+The older A/B/C readiness matrix is rooted at [`readiness/_common.yaml`](cases/turbulent_combustion/configs/readiness/_common.yaml). Its leaf files retain their own scientific definitions: in particular, [`C_topology.yaml`](cases/turbulent_combustion/configs/readiness/C_topology.yaml) and [`ABC_balanced.yaml`](cases/turbulent_combustion/configs/readiness/ABC_balanced.yaml) use the historical Betti-curve strategy. They must not be read as the settings of the sliced-persistence run. The current three-family sliced-persistence profile is [`ABC_sliced_persistence_formal_5000ep_gpu1.yaml`](cases/turbulent_combustion/configs/readiness/ABC_sliced_persistence_formal_5000ep_gpu1.yaml), which inherits its family definitions from [`ABC_sliced_persistence_50ep_gpu1.yaml`](cases/turbulent_combustion/configs/readiness/ABC_sliced_persistence_50ep_gpu1.yaml). The launched run's `resolved_config.yaml` remains authoritative.
 
-The current A/B/C/ABC profiles select these family definitions:
-
-| Profile | Active loss terms and settings |
+| Formal A+B+C setting | Resolved value |
 |---|---|
-| A: global distribution | all five fields; marginal W2, pairwise SWD with 8 directions, and joint top-tail SWD with 16 Sobol directions and top fraction 0.1 |
-| B: cross spectrum | all five fields; pairs `(CO,T)`, `(T,CH4)`, `(T,U_1)`, `(CH4,U_1)`; 16-neighbor graph, 48 retained modes, zero mode excluded, low/mid/high bands; modewise per-field auto-spectrum, same-frequency, and cross-frequency terms enabled; coarse log band-power disabled |
-| C: topology | family weight 0.01; fields `CO,T`; nonperiodic $32\times128$ raster, 4 interpolation neighbors, power 2, smoothing sigma 0.8; 7 quantile thresholds, dimensions 0 and 1, super/sublevel filtrations; 3 mutual lines |
-| ABC | all three definitions above; fixed `initial_grad_norm` family scaling calibrated over two batches |
+| Source and update | source `last.pt`, live rather than EMA evaluation weights; full-model AdamW, 5000 epochs, batch 32, 15% of training snapshots, learning rate $5\times10^{-5}$, weight decay $10^{-6}$, clip norm 1 |
+| Native data and rollout | adapter-native data loss weight 0.1; aggregate coherence weight 1.0; two Euler steps; smooth endpoint observation consistency with strength 1.0, sigma 0.05, schedule power 2, and final clamp |
+| Shared coherence query | 32 samples per update; 4096 `fixed_shared` query points; `paired_supervised` references in model units with no reference bank |
+| A: global distribution | all five fields; marginal $W_2^2$, pairwise sliced $W_2^2$ with 8 directions, and joint top-tail sliced $W_2^2$ with 16 directions and top fraction 0.1 |
+| B: cross spectrum | four pairs `(CO,T)`, `(T,CH4)`, `(T,U_1)`, `(CH4,U_1)`; 16-neighbor graph, 48 retained modes, low/mid/high bands; same- and cross-frequency terms enabled; `self_spectrum` and band-energy loss disabled |
+| C: topology | `cubical_persistence` with sliced-Wasserstein distance; CO/T on a nonperiodic $32\times128$ raster, H0/H1, sublevel/superlevel, no Gaussian smoothing; 32 diagram projections, self CO/T and three mutual CO--T lines |
+| Combination and selection | family weights 1/1/1 with two-batch `initial_grad_norm` calibration; `gradient_balance: config` for native-data versus aggregate-coherence gradients; `topology_with_fidelity` selects on fixed validation topology subject to 5% total and per-field relative-MSE limits |
 
-Every readiness family uses `target_use: paired_supervised`, `model_units`, and no reference bank. Consequently these experiments are supervised structural regularization, not target-free refinement. The single-family A, B, and C profiles use no family rescaling; ABC calibrates a fixed scale for each family from its source-checkpoint gradient norm. All profiles set `gradient_balance: config`, which means ConFIG is attempted only when the weighted native-data and aggregate-coherence gradients conflict.
+The older A/B/C and `ABC_balanced` files remain valid historical profiles. For example, the older C file has family weight 0.01, reference-quantile Betti curves, and smoothing sigma 0.8; the sliced-persistence C term above has family weight 1.0 and no threshold-sampled Betti loss. The standalone topology-only native-grid recipe instead uses `gradient_balance: topology_regularized`, as documented in [`TOPOLOGY_POSTTRAINING.md`](TOPOLOGY_POSTTRAINING.md). It is a different optimizer contract from three-family A+B+C training.
 
 ### 0.4 End-to-end code path
 
@@ -347,7 +351,37 @@ Current drawbacks:
 - The fixed basis dimension $P$ imposes a low-rank bottleneck that may underrepresent sharp or multiscale fields.
 - All output fields share the same pooled observation set, and the model does not enforce observations exactly.
 
-### 3.4 Senseiver regressor
+### 3.4 MIMONet operator
+
+The [released MIMONet class](https://zenodo.org/records/21986357) accepts a list of fully connected branches, merges their $P$-dimensional outputs, and contracts the result with a query-coordinate trunk. Its published lid-driven-cavity example uses **one** branch and three outputs. The local turbulent-combustion demo and this adapter instantiate that general design with **two** branches, one for temperature values and one for sensor locations, and five output fields. Thus the combustion input construction is a task adaptation, while the ReLU FCN blocks, branch fusion, trunk reshape, contraction, and learned field bias follow the released class. The paper is [Kobayashi et al., *Nature Communications* (2026)](https://doi.org/10.1038/s41467-026-77463-7).
+
+For the maintained [`mimonet_5000ep.yaml`](cases/turbulent_combustion/configs/base/mimonet_5000ep.yaml) profile, $M=256$ valid temperature sensors have normalized values $y_{bm}$ and normalized two-dimensional coordinates $\mathbf r_{bm}$. Each branch slot includes a validity bit $v_{bm}$, so padding differs from a measured zero. Within the declared field, the current template orders sampled sensors by ascending canonical point index before flattening; each slot is the sensor's rank within the selected set, and the value and location branches use the same order. Historical configs without `model.sensor_order` retain their input order for checkpoint compatibility.
+
+$$
+\mathbf u_b=\operatorname{flatten}([v_{bm}y_{bm},v_{bm}]_{m=1}^{M}),
+\qquad
+\mathbf g_b=\operatorname{flatten}([v_{bm}\mathbf r_{bm},v_{bm}]_{m=1}^{M}),
+$$
+
+$$
+\mathbf h_b=\operatorname{Branch}_{\rm value}(\mathbf u_b)
+\odot\operatorname{Branch}_{\rm location}(\mathbf g_b),
+\qquad
+\widehat X_{bqc}=\sum_{p=1}^{P}h_{bp}
+\operatorname{Trunk}(\mathbf q_{bq})_{pc}+a_c.
+$$
+
+Here $P=256$, $C=5$, and the trunk sees query coordinates only. The value branch has layer widths `[512,512,512,512,256]`; the location branch has `[768,512,512,512,256]`; the trunk has `[2,256,256,256,1280]`. Each FCN has three ReLU hidden layers and a linear output. The two-dimensional case omits the stored constant $z$ coordinate, giving 2,430,981 trainable parameters. No other measured field, operating condition, or dense target enters either branch. The same 256-dimensional shared branch vector decodes all five fields; its width is not forced to equal another model's parameter count.
+
+The repo trains this deterministic model with masked normalized MSE, 4,096 random query points per update, batch size 128, AdamW at fixed learning rate $10^{-4}$ and weight decay $10^{-6}$, gradient clipping at 1, and a configured 5,000 epochs. It uses the case's chronological 8,000/1,000/1,000 train/validation/test frames and training-only mean/std normalization. The training preview plots one fixed validation snapshot every ten epochs. The local demo run used 192--384 T sensors during training (256 only for fixed diagnostics), sorted them by its stored point index, used the stored three-dimensional coordinates with constant $z$, a random 9,000/1,000 train/validation split, and Adam with cosine annealing. Its validation loss averages all 1,000 held-out snapshots. Those curves therefore measure different data and input protocols. Configs created before `sensor_order` retain input order for checkpoint compatibility; the earlier random-slot-order experiment was retired after diagnosis.
+
+Current drawbacks:
+
+- The fixed branch input capacity and positional FCNs require a consistent sensor-slot convention; changing `sensor_order` changes model semantics even though checkpoint tensor shapes are unchanged.
+- A single $P$-dimensional vector carries every sensor and is shared across all output fields. The model has no exact sensor interpolation, uncertainty head, or spatially local query interaction.
+- Masked MSE alone does not enforce conservation laws or physical constraints; post-training must supply those objectives separately.
+
+### 3.5 Senseiver regressor
 
 Sensor tokens are embedded as
 
@@ -383,7 +417,7 @@ Current drawbacks:
 - Output attention costs $\mathcal O(BQL)$ for $L$ latents, and the current Senseiver implementation does not chunk large query sets.
 - The compact architecture has no explicit local interpolation branch or exact sensor constraint.
 
-### 3.5 GeoFNO regressor
+### 3.6 GeoFNO regressor
 
 GeoFNO receives the regular-grid tensor
 
@@ -758,8 +792,8 @@ The YAML-to-code-to-math mapping is exact:
 | `cross_spectrum.components.same_frequency` | [`cross_spectrum/family.py`](src/phycoflow_reconstruction/coherence/families/cross_spectrum/family.py) and [`statistics.py`](src/phycoflow_reconstruction/coherence/families/cross_spectrum/statistics.py) | graph-mode magnitude-squared coherence for distinct field pairs |
 | `cross_spectrum.components.cross_frequency` | same files | off-diagonal cross-band energy coupling |
 | `cross_spectrum.components.band_energy` | same files | log spectral-band power |
-| `topology.components.self` | [`topology/family.py`](src/phycoflow_reconstruction/coherence/families/topology/family.py) and [`betti_curves.py`](src/phycoflow_reconstruction/coherence/families/topology/betti_curves.py) | single-field Betti curves |
-| `topology.components.mutual` | same files | fibered two-field Betti curves |
+| `topology.components.self` with `strategy: cubical_persistence` | [`topology/persistence_objective.py`](src/phycoflow_reconstruction/coherence/families/topology/persistence_objective.py) and [`persistence.py`](src/phycoflow_reconstruction/coherence/families/topology/persistence.py) | self-field H0/H1 persistence-diagram distances |
+| `topology.components.mutual` with the same strategy | same files | persistence distances along fixed positive-line restrictions of joint filtrations |
 
 For enabled family $F$ and component $k$, let $w_F$ and $w_{Fk}$ be configured nonnegative weights. A family produces
 
@@ -962,75 +996,69 @@ Current drawbacks:
 
 ### 7.4 Topology coherence
 
-Topology v1 projects coordinates to two dimensions and precomputes an inverse-distance linear raster map
+The current method explicitly selects `strategy: cubical_persistence` and `persistence.distance: sliced_wasserstein`. It compares full finite H0/H1 persistence diagrams and essential births rather than sampled Betti-curve values. [`topology/family.py`](src/phycoflow_reconstruction/coherence/families/topology/family.py) maps values onto a fixed two-dimensional raster; [`persistence_objective.py`](src/phycoflow_reconstruction/coherence/families/topology/persistence_objective.py) constructs the self and mutual filtrations; and [`persistence.py`](src/phycoflow_reconstruction/coherence/families/topology/persistence.py) obtains pairings and diagram distances.
+
+For a fixed shared query set, rasterization is a linear map of field values,
 
 $$
 \mathcal R:\mathbb R^{B\times N\times C}
 \longrightarrow\mathbb R^{B\times C\times H\times W}.
 $$
 
-When `geometry.periodic: true`, the rasterizer tiles coordinate images across seams before interpolation. Optional Gaussian smoothing is applied on the raster.
+The coordinate map uses a compatible full Cartesian grid's area averages when `antialias_downsample` applies; otherwise it uses fixed inverse-distance neighbor weights. Periodic configurations include wrapped coordinate copies. The turbulent-combustion A+B+C profile selects 4096 shared points and a nonperiodic $32\times128$ raster with four interpolation neighbors; its `antialias_downsample: true` flag does not turn those sparse queries into native-grid topology.
 
-For threshold $\tau$, a superlevel filtration uses
-
-$$
-K_\tau^{+}=\{p:g(p)\ge\tau\},
-$$
-
-and a sublevel filtration uses
+For each selected scalar field, the reference raster determines a detached per-sample mean $\mu^Y_c$ and scale $s^Y_c=\max(\operatorname{std}(\mathcal R(Y)_c),\epsilon)$. Generated and reference values use the **same** standardization:
 
 $$
-K_\tau^{-}=\{p:g(p)\le\tau\}.
+z^X_c(p)=\frac{\mathcal R(X)_c(p)-\mu^Y_c}{s^Y_c},
+\qquad
+z^Y_c(p)=\frac{\mathcal R(Y)_c(p)-\mu^Y_c}{s^Y_c}.
 $$
 
-A detached union-find ordering obtains exact hard-forward connected-component births and deaths for $\beta_0(\tau)$. On the cubical grid,
+A sublevel filtration uses $f_c=z_c$; a superlevel filtration uses $f_c=-z_c$ as a lower-star filtration. For threshold $t$, its cubical subcomplex is $K_t(f)=\{\text{cells admitted by }f\le t\}$. GUDHI computes the exact cubical pairing for each configured homology dimension $d\in\{0,1\}$, retaining every positive-persistence finite birth--death pair $D_d(f)$ and essential birth $E_d(f)$. There is no top-$k$ bar truncation or training-time threshold sampling.
+
+For a mutual group of fields, each fixed Sobol line has positive direction $a_i$ and offset $b_i$. The restriction of the joint sublevel filtration is the scalar field
 
 $$
-\chi(\tau)=V(\tau)-E(\tau)+F(\tau),
+h_{a,b}(p)
+=\max_i\frac{f_i(p)-b_i}{a_i},
+\qquad a_i>0.
 $$
 
-so
+The same lines and reference-derived standardization are used for generated and reference rasters. In the formal A+B+C profile, one CO--T group uses three such lines for each filtration direction. Each line distance is multiplied by $\min_i a_i$ before aggregation. These finite line restrictions summarize a two-parameter filtration; they do not determine the full multiparameter persistence module.
+
+For generated and reference diagrams $D^X_d,D^Y_d$, let $\Delta(D)$ project each finite pair to the diagonal, and let $\pi_{\theta}$ project a point in birth--death space onto angle $\theta$. With $R$ fixed angles $\theta_r=(r-\tfrac12)\pi/R$, the implemented distance is
 
 $$
-\beta_1(\tau)=\beta_0(\tau)-\chi(\tau)+\beta_2(\tau),
+\begin{aligned}
+\delta_d(X,Y)
+={}&\frac{1}{HW R}\sum_{r=1}^{R}
+\left\|\operatorname{sort}\pi_{\theta_r}
+\bigl(D^X_d\cup\Delta(D^Y_d)\bigr)
+-\operatorname{sort}\pi_{\theta_r}
+\bigl(D^Y_d\cup\Delta(D^X_d)\bigr)\right\|_1 \\
+&+\eta\left\|\operatorname{sort}E^X_d-\operatorname{sort}E^Y_d\right\|_1.
+\end{aligned}
 $$
 
-with the periodic full-domain $\beta_2$ correction where applicable. Straight-through sigmoid indicators preserve hard counts in the forward pass while supplying approximate gradients.
+The first term is a fixed-angle sliced Wasserstein-1 approximation with cross-diagonal augmentation, not an exact diagram assignment; $HW$ normalizes its finite-bar sum. Essential births cannot match the diagonal and have separate weight $\eta$. The formal profile uses $R=32$ and $\eta=0.1$. The code averages $\delta_d$ over H0/H1 and then over selected self fields and directions or mutual groups, lines, and directions. Their component-weighted sum is the topology family loss $\mathcal L_{\mathrm{top}}$; Section 7.1 applies the outer family weight and fixed family calibration afterward.
 
-For selected dimensions $d\in\mathcal D$ and thresholds $\tau_j$, `self.betti_curves` uses
+GUDHI pairing runs on the CPU. The implementation batches transfers and pairing jobs, caches reference pairings by exact raster content, and evaluates packed sliced distances with PyTorch on the input device. `PHYCOFLOW_TOPOLOGY_WORKERS` sets CPU pairing workers (default 1), and `PHYCOFLOW_TOPOLOGY_REFERENCE_CACHE` bounds cached reference pairings (default 4096 entries); these controls do not change the objective. Only the discrete pairing indices are detached: birth and death values are gathered from the live generated raster, so gradients follow the implemented distance within each region of fixed pairings. Ties or pairing changes are nonsmooth. Neither a GPU-only pairing claim nor a straight-through Betti-gradient claim applies to this method.
 
-$$
-\mathcal L_{\mathrm{Betti}}
-=\frac{1}{|\mathcal D|J}
-\sum_{d\in\mathcal D}\sum_{j=1}^{J}
-\left(\beta_d^{X}(\tau_j)-\beta_d^{Y}(\tau_j)\right)^2.
-$$
-
-For field pair $(i,j)$, `mutual.fibered_betti_curves` first standardizes both axes with detached reference moments. For a positive-slope line with origin $(s_0,t_0)$ and direction $(v_1,v_2)$, it reduces the two-parameter filtration to
-
-$$
-h(p)
-=\min\left(
-\frac{g_i(p)-s_0}{v_1},
-\frac{g_j(p)-t_0}{v_2}
-\right),
-$$
-
-then compares the induced $\beta_0$ and $\beta_1$ curves.
+Historical saved configurations remain explicit. Omitted `topology.strategy` retains the v1 `betti_curves` interpretation, with reference-quantile thresholds and straight-through count gradients; `spatial_self_mutual` is another compatibility strategy, while `spatial_wasserstein` is an explicit alternative diagram-distance mode for cubical persistence. Their losses and gradients must not be compared as if they were the sliced-persistence objective. The topology-only native-grid recipe combines persistence with source-relative endpoint and anchor penalties through `topology_regularized`; the A+B+C profile uses the `config` two-objective gradient combiner and selects `best.pt` by validation topology subject to total and per-field source-relative MSE limits.
 
 Current drawbacks:
 
-- Rasterization can change topology, especially on irregular clouds, coarse grids, boundaries, and sparsely supported regions.
-- The implementation is two-dimensional and measures only configured $\beta_0/\beta_1$ curves; it does not localize features or compare full persistence diagrams.
-- Union-find order is detached and straight-through indicators have biased gradients. A loss decrease need not correspond to the true derivative of hard topology.
-- Thresholds are reference-quantile dependent, and mutual topology samples only a configured line fan through a two-parameter filtration.
-- Exact topology calculations over many thresholds, fields, and line slices can be expensive.
+- The fixed query set, interpolation, raster size, field selection, boundary convention, and optional smoothing define the topology being measured. A reduced-raster result is not a native-grid guarantee.
+- Finite-angle sliced Wasserstein is an approximation; positive-line restrictions sample rather than fully characterize joint topology.
+- Pairing changes and tied critical values are nonsmooth, and exact CPU pairing across many rasters remains costly even with worker and reference-cache acceleration.
+- A smaller topology loss does not ensure improved held-out fidelity, every H0/H1 component, or every field. Inspect the selected checkpoint and matched held-out metrics separately.
 
 ### 7.5 Reference policies and target leakage boundary
 
 With `target_use: training_reference`, a frozen empirical bank is fitted only from the training split. It records dataset fingerprint, split policy, sample IDs, point indices, seed, field order, normalization, and units. Geometry-aware families require a fixed shared query set and verify its point indices against the bank.
 
-With `target_use: paired_supervised`, the reference is the dense target of the current training sample. This is supervised structural regularization, not target-free physical refinement.
+With `target_use: paired_supervised`, the reference is the dense target of the current training sample. This is supervised structural regularization, not target-free physical refinement. The current `cubical_persistence` strategy requires this policy; it does not train against an independently sampled reference bank.
 
 This target policy is independent of the cross-spectrum component choice: in either policy, `self_spectrum` remains a per-field modewise power comparison. Only the source of the reference ensemble changes—paired current-sample target versus an independently selected frozen training reference.
 
@@ -1057,7 +1085,7 @@ $$
 
 Consequently, component contributions sum to the plotted coherence objective before the separate optimizer-level coherence schedule weight is applied. Metrics use family-independent keys of the form `coherence_component/<family>/<component>/raw` and `.../weighted_contribution`; the historical flat `<family>.<component>` raw keys remain available for compatibility.
 
-`loss_history.png` intentionally remains the compact top-level optimization view. Data-driven post-training additionally writes `coherence_history.png`. Its first panel shows total coherence and calibrated weighted family totals, while subsequent family-grouped small multiples give every enabled component its own adaptive vertical scale. This is necessary because valid component losses can differ by many orders of magnitude. Disabled terms are absent, unevaluated epochs are not fabricated, partial epochs receive open markers, and resume collisions use the last recorded value at a given epoch. The standalone `render-history` command reconstructs the figure from `resolved_config.yaml` and `metrics/history.jsonl` without loading a checkpoint or dataset, including for runs created before the namespaced component history contract.
+`loss_history.png` intentionally remains the compact top-level optimization view. Data-driven post-training additionally writes `coherence_history.png`. Its first row separates total coherence on the left from calibrated weighted family totals on the right, while subsequent family-grouped small multiples give every enabled component its own adaptive vertical scale. This is necessary because valid component losses can differ by many orders of magnitude. Disabled terms are absent, unevaluated epochs are not fabricated, partial epochs receive open markers, and resume collisions use the last recorded value at a given epoch. The standalone `render-history` command reconstructs the figure from `resolved_config.yaml` and `metrics/history.jsonl` without loading a checkpoint or dataset, including for runs created before the namespaced component history contract.
 
 ## 8. Differentiable reconstruction and observation consistency
 
@@ -1204,7 +1232,7 @@ $$
 \left(\widehat{\mathbf X}^{(s)}-\overline{\mathbf X}\right)^2.
 $$
 
-Case-owned diagnostics are evaluated in addition to these shared metrics. Brusselator reports differentiable PDE residuals; Kolmogorov, KS, turbulent combustion, and mass transport currently provide diagnostic-only physical checks. Reproducible evaluation stores the checkpoint hash, resolved config hash, dataset fingerprint, sensor manifest, query indices, sample IDs, metrics, and portable plotting arrays.
+Case-owned diagnostics are evaluated in addition to these shared metrics. Brusselator reports differentiable PDE residuals; Kolmogorov, KS, turbulent combustion, and mass transport currently provide diagnostic-only physical checks. For a configured cubical-persistence family, set evaluation reports paired self/mutual persistence distances on the recorded raster, exact H0/H1 Betti-count curves as an interpretation diagnostic, and representative birth--death diagrams. Source and post-training set metrics use matched samples; representative diagram panels may select different snapshots and identify them explicitly. Reproducible evaluation stores the checkpoint hash, resolved config hash, dataset fingerprint, sensor manifest, query indices, sample IDs, metrics, and portable plotting arrays.
 
 ## 12. Cross-cutting limitations
 

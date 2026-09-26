@@ -16,7 +16,7 @@ from .deterministic import (
 )
 from .flows import GLRbfCQ, PointCloudFFM
 from .generative import DiffusionPDEModel, LatentFlowModel
-from .operators import GeoFNORegressor
+from .operators import GeoFNORegressor, MIMONetOperator
 
 
 def _register_defaults() -> None:
@@ -82,6 +82,17 @@ def _register_defaults() -> None:
         },
     )
     MODEL_REGISTRY.register(
+        "mimonet",
+        MIMONetOperator,
+        metadata={
+            "family": "deterministic_operator",
+            "license": "MIT",
+            "upstream_reference": "https://zenodo.org/records/21986357",
+            "upstream_code": "https://github.com/kkazuma19/MIMONet",
+            "stages": ("base_training", "post_training"),
+        },
+    )
+    MODEL_REGISTRY.register(
         "diffusion_pde",
         DiffusionPDEModel,
         metadata={
@@ -135,8 +146,11 @@ def build_model(config: Mapping[str, Any], data_spec: DataSpec, physics_provider
         "pinn",
         "pointcloud_ffm",
         "gl_rbf_cq",
+        "mimonet",
     }:
         common["coordinate_dim"] = data_spec.coordinate_dim
+    if name == "mimonet":
+        common["field_names"] = data_spec.field_names
     if name in {
         "geofno",
         "diffusion_pde",
@@ -153,6 +167,15 @@ def build_model(config: Mapping[str, Any], data_spec: DataSpec, physics_provider
         "deeponet": {"width", "basis_dim"},
         "senseiver": {"width", "num_latents", "heads", "depth"},
         "geofno": {"hidden_channels", "modes", "layers"},
+        "mimonet": {
+            "conditioning_fields",
+            "sensor_capacities",
+            "basis_dim",
+            "branch_hidden_dim",
+            "trunk_hidden_dim",
+            "merge_type",
+            "sensor_order",
+        },
         "diffusion_pde": {
             "backbone",
             "hidden_channels",
@@ -185,6 +208,10 @@ def build_model(config: Mapping[str, Any], data_spec: DataSpec, physics_provider
             "rff_lengthscale",
         },
         "gl_rbf_cq": {
+            "physical_field_transform",
+            "data_query_points",
+            "rollout_checkpointing",
+            "rollout_context_cache",
             "backbone",
             "prior",
             "sigma_min",
@@ -276,6 +303,17 @@ def build_model(config: Mapping[str, Any], data_spec: DataSpec, physics_provider
             kwargs[key] = tuple(int(v) for v in kwargs[key])
     if name == "pinn":
         kwargs["physics_provider"] = physics_provider
+    if name == "gl_rbf_cq" and "physical_field_transform" in kwargs:
+        from .compatibility.physical_gl_rbf_cq import PhysicalGLRbfCQ
+
+        return PhysicalGLRbfCQ(**common, **kwargs)
+    if name == "gl_rbf_cq" and kwargs.get("rollout_checkpointing"):
+        raise ValueError("rollout_checkpointing requires physical_field_transform")
+    kwargs.pop("rollout_checkpointing", None)
+    if kwargs.pop("rollout_context_cache", "none") != "none":
+        raise ValueError("rollout_context_cache requires physical_field_transform")
+    if "data_query_points" in kwargs:
+        raise ValueError("data_query_points requires physical_field_transform")
     return MODEL_REGISTRY.build(name, **common, **kwargs)
 
 

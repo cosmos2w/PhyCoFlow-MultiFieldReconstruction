@@ -199,17 +199,62 @@ def test_adaptive_figure_uses_family_groups_and_independent_component_scales() -
 
     figure = build_coherence_history_figure(data, plt, description="post:fixture")
 
-    assert len(figure.axes) == 4  # summary + three adaptive component panels
-    assert figure.axes[0].get_title(loc="left") == "Weighted coherence objective"
-    component_titles = [axis.get_title(loc="left") for axis in figure.axes[1:] if axis.axison]
+    assert len(figure.axes) == 5  # separate total/family summaries + three component panels
+    assert figure.axes[0].get_title(loc="left") == "Total coherence"
+    assert figure.axes[1].get_title(loc="left") == "Weighted family contributions"
+    component_titles = [axis.get_title(loc="left") for axis in figure.axes[2:] if axis.axison]
     assert component_titles == [
         "Self spectrum · Auto spectrum",
         "Same frequency · Magnitude squared",
         "Cross frequency · Band energy coupling",
     ]
-    assert all(axis.get_yscale() == "log" for axis in figure.axes if axis.axison)
+    assert all(axis.get_yscale() == "log" for axis in (figure.axes[0], *figure.axes[2:]))
+    assert figure.axes[1].get_yscale() == "linear"  # legacy rows have no family totals
     assert len(figure.subfigs) == 2
     assert figure.subfigs[1]._suptitle.get_text() == "Cross spectrum"
+    plt.close(figure)
+
+
+def test_family_summary_displays_all_weighted_families_in_stable_colors() -> None:
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    from matplotlib import pyplot as plt
+
+    rows = []
+    for epoch, multiplier in ((1, 1.0), (2, 0.8)):
+        rows.append(
+            {
+                "epoch": epoch,
+                "coherence_loss": 0.006 * multiplier,
+                "coherence_family/global_distribution/weighted_contribution": 0.002 * multiplier,
+                "coherence_family/cross_spectrum/weighted_contribution": 0.001 * multiplier,
+                "coherence_family/topology/weighted_contribution": 0.003 * multiplier,
+                "coherence_component/global_distribution/self.marginal_w2/raw": 0.5 * multiplier,
+                "coherence_component/global_distribution/self.marginal_w2/weighted_contribution": 0.2 * multiplier,
+                "coherence_component/cross_spectrum/same_frequency.magnitude_squared/raw": 0.1 * multiplier,
+                "coherence_component/cross_spectrum/same_frequency.magnitude_squared/weighted_contribution": 0.1 * multiplier,
+                "coherence_component/topology/self.persistence.h0/raw": 0.3 * multiplier,
+                "coherence_component/topology/self.persistence.h0/weighted_contribution": 0.3 * multiplier,
+            }
+        )
+    data = extract_coherence_history(rows, _config())
+    figure = build_coherence_history_figure(data, plt, description="post:fixture")
+
+    total, families = figure.axes[:2]
+    assert [line.get_label() for line in total.lines] == ["Total coherence"]
+    assert [line.get_label() for line in families.lines] == [
+        "Global distribution",
+        "Cross spectrum",
+        "Topology",
+    ]
+    family_colors = {line.get_label(): line.get_color() for line in families.lines}
+    assert family_colors["Global distribution"] == "#D95F59"
+    assert family_colors["Cross spectrum"] == "#3B6EA8"
+    assert family_colors["Topology"] == "#B58900"
+    topology_axis = next(axis for axis in figure.axes if axis.get_title(loc="left") == "Self · Persistence · H0")
+    assert "raw 2.40e-01 · weighted 2.40e-01" in [text.get_text() for text in topology_axis.texts]
+    assert figure.get_size_inches()[1] < 10.0
+    figure.canvas.draw()
     plt.close(figure)
 
 

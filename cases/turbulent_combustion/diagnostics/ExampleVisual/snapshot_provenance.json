@@ -1,0 +1,12 @@
+{
+  "source_run": "/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/runs/coherence_fix_ABC_sliced_persistence_formal_5000ep_gpu1/20260924T030724Z_4208231c",
+  "snapshot_run": "/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/diagnostics/ExampleVisual/.work/run_snapshot",
+  "checkpoint": "checkpoints/last.pt",
+  "checkpoint_sha256": "7e39fa0322b4bc21db4ec612cef7c221fe490eba78545b9a1783b53bd37c9038",
+  "checkpoint_epoch": 1440.0,
+  "checkpoint_step": 54720,
+  "run_manifest_last_sha256": "7e39fa0322b4bc21db4ec612cef7c221fe490eba78545b9a1783b53bd37c9038",
+  "resolved_config_sha256": "3fd77525df2a43a1d65721b03517dc1a265dc01953e449865e5a3d1d65d3999b",
+  "capture_utc": "2026-09-25T00:07:53Z",
+  "snapshot_policy": "stable SHA-256 copy of last.pt; all evaluation writes are confined to ExampleVisual/.work"
+}

@@ -15,8 +15,6 @@ from typing import Any
 from tqdm.auto import tqdm
 
 from .history_plotting import (
-    HISTORY_FAMILY_COLORS,
-    HISTORY_FAMILY_LINESTYLES,
     HISTORY_MUTED_TEXT_COLOR,
     HISTORY_TEXT_COLOR,
     style_history_axis,
@@ -46,10 +44,22 @@ _LOSS_COLORS = {
 }
 _COHERENCE_FAMILY_PREFIX = "coherence_family/"
 _COHERENCE_FAMILY_SUFFIX = "/weighted_contribution"
-_COHERENCE_FAMILY_COLORS = HISTORY_FAMILY_COLORS
-_COHERENCE_FAMILY_LINESTYLES = HISTORY_FAMILY_LINESTYLES
+_OPTIMIZATION_KEYS = (
+    "data_grad_norm",
+    "coherence_grad_norm",
+    "combined_grad_norm",
+    "gradient_cosine",
+    "gradient_conflict_fraction",
+)
 _TEXT_COLOR = HISTORY_TEXT_COLOR
 _MUTED_TEXT_COLOR = HISTORY_MUTED_TEXT_COLOR
+_OPTIMIZATION_COLORS = {
+    "data_grad_norm": "#2563A6",
+    "coherence_grad_norm": "#16827C",
+    "combined_grad_norm": "#384252",
+    "gradient_cosine": "#3B6EA8",
+    "gradient_conflict_fraction": "#D95F59",
+}
 
 
 def _format_duration(seconds: float) -> str:
@@ -86,6 +96,7 @@ class TrainingMonitor:
         self.history_path = self.run_dir / "metrics" / "history.jsonl"
         self.validation_history_path = self.run_dir / "metrics" / "validation_history.jsonl"
         self.plot_path = self.run_dir / "loss_history.png"
+        self.optimization_plot_path = self.run_dir / "optimization_diagnostics.png"
         self.final_step = int(final_step)
         self.configured_steps = int(configured_steps)
         self.steps_per_epoch = max(1, int(steps_per_epoch))
@@ -101,6 +112,9 @@ class TrainingMonitor:
         self._epoch_sums: dict[str, float] = defaultdict(float)
         self._epoch_counts: dict[str, int] = defaultdict(int)
         self._epoch_latest: dict[str, Any] = {}
+        self._epoch_booleans: dict[str, int] = defaultdict(int)
+        self._epoch_modes: dict[str, int] = defaultdict(int)
+        self._epoch_missing: set[str] = set()
         self._epoch_batch_count_seen = 0
         self._last_step: int | None = None
         self._last_epoch: int | None = None
@@ -160,7 +174,7 @@ class TrainingMonitor:
             if key.startswith(_COHERENCE_FAMILY_PREFIX)
             and key.endswith(_COHERENCE_FAMILY_SUFFIX)
         )
-        for key in (*_LOSS_KEYS, *family_keys):
+        for key in (*_LOSS_KEYS, *_OPTIMIZATION_KEYS, *family_keys):
             value = row.get(key)
             if isinstance(value, (int, float)) and math.isfinite(float(value)):
                 self._steps[key].append(step)
@@ -175,9 +189,15 @@ class TrainingMonitor:
         for key, value in row.items():
             if key == "step":
                 continue
-            if isinstance(value, (int, float)) and not isinstance(value, bool):
+            if isinstance(value, bool):
+                self._epoch_booleans[key] += int(value)
+            elif isinstance(value, (int, float)) and math.isfinite(float(value)):
                 self._epoch_sums[key] += float(value)
                 self._epoch_counts[key] += 1
+            elif value is None or isinstance(value, (int, float)):
+                self._epoch_missing.add(key)
+            elif key == "update_mode":
+                self._epoch_modes[str(value)] += 1
             else:
                 self._epoch_latest[key] = value
 
@@ -195,13 +215,24 @@ class TrainingMonitor:
                 for key, value in self._epoch_sums.items()
             },
             **self._epoch_latest,
+            **{key: None for key in self._epoch_missing if key not in self._epoch_counts},
+            **{key: count > 0 for key, count in self._epoch_booleans.items()},
+            **{f"{key}_fraction": count / batches for key, count in self._epoch_booleans.items()},
+            "finite_counts": dict(self._epoch_counts),
+            "update_mode_counts": dict(self._epoch_modes),
         }
+        if self._epoch_modes:
+            row["update_mode"] = (next(iter(self._epoch_modes))
+                                  if len(self._epoch_modes) == 1 else "mixed")
         with self.history_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(row, sort_keys=True) + "\n")
         self._capture(row)
         self._epoch_sums.clear()
         self._epoch_counts.clear()
         self._epoch_latest.clear()
+        self._epoch_booleans.clear()
+        self._epoch_modes.clear()
+        self._epoch_missing.clear()
         self._epoch_batch_count_seen = 0
         return row
 
@@ -355,7 +386,7 @@ class TrainingMonitor:
         self._plot()
 
     def _plot(self) -> None:
-        if not self._plot_available or not any(self._values.values()):
+        if not self._plot_available or not self._values:
             return
         try:
             import matplotlib
@@ -373,13 +404,25 @@ class TrainingMonitor:
 
         plt.rcParams["svg.fonttype"] = "none"
         figure = self._build_loss_figure(plt)
-        temporary = self.plot_path.with_name(f".{self.plot_path.name}.tmp")
-        figure.savefig(temporary, dpi=180, format="png")
-        plt.close(figure)
-        os.replace(temporary, self.plot_path)
+        if figure is not None:
+            temporary = self.plot_path.with_name(f".{self.plot_path.name}.tmp")
+            figure.savefig(temporary, dpi=180, format="png")
+            plt.close(figure)
+            os.replace(temporary, self.plot_path)
+        optimization_figure = self._build_optimization_figure(plt)
+        if optimization_figure is not None:
+            temporary = self.optimization_plot_path.with_name(
+                f".{self.optimization_plot_path.name}.tmp"
+            )
+            optimization_figure.savefig(temporary, dpi=180, format="png")
+            plt.close(optimization_figure)
+            os.replace(temporary, self.optimization_plot_path)
         from .coherence_history import render_coherence_history
 
         render_coherence_history(self.run_dir, description=self.description, pyplot=plt)
+        from .fidelity_history import render_fidelity_history
+
+        render_fidelity_history(self.run_dir, pyplot=plt)
 
     def _shown_loss_series(self, key: str) -> tuple[list[float], list[float]]:
         values = self._values[key]
@@ -387,79 +430,69 @@ class TrainingMonitor:
         stride = max(1, math.ceil(len(values) / 4000))
         return self._epoch_coordinates(steps[::stride]), values[::stride]
 
-    def _coherence_family_keys(self) -> list[str]:
-        """Return stable keys for families contributing to the coherence objective."""
-        return sorted(
-            key
-            for key, values in self._values.items()
-            if values
-            and key.startswith(_COHERENCE_FAMILY_PREFIX)
-            and key.endswith(_COHERENCE_FAMILY_SUFFIX)
-        )
-
-    @staticmethod
-    def _coherence_family_label(key: str) -> str:
-        name = key[len(_COHERENCE_FAMILY_PREFIX) : -len(_COHERENCE_FAMILY_SUFFIX)]
-        return name.replace("_", " ").capitalize()
-
-    @staticmethod
-    def _style_loss_axis(axis, values: list[float]) -> None:
-        style_history_axis(axis, values)
+    def _stage_label(self) -> str:
+        stage = self.description.partition(":")[0].replace("_", " ").strip()
+        labels = {
+            "base": "Base training",
+            "base training": "Base training",
+            "post": "Post-training",
+            "post training": "Post-training",
+            "physics post": "Physics post-training",
+            "physics post training": "Physics post-training",
+        }
+        return labels.get(stage, stage.title() or "Training")
 
     def _build_loss_figure(self, plt):
-        """Build one combined panel plus independently scaled term panels."""
+        """Build a non-redundant small-multiples view of scalar objectives."""
         available = [key for key in _LOSS_KEYS if self._values.get(key)]
+        if not available:
+            return None
         individual_rows = math.ceil(len(available) / 2)
+        epoch_max = max(
+            (
+                max(self._epoch_coordinates(self._steps[key]))
+                for key in available
+                if self._steps.get(key)
+            ),
+            default=1.0,
+        )
         figure = plt.figure(
-            figsize=(12.4, 3.5 + 3.1 * individual_rows),
+            figsize=(12.4, 3.0 + 2.55 * individual_rows),
             constrained_layout=True,
             facecolor="white",
         )
         grid = figure.add_gridspec(
-            1 + individual_rows,
+            individual_rows + 1,
             2,
-            height_ratios=[1.25, *([1.0] * individual_rows)],
+            # Reserve visible breathing room between the figure heading and
+            # the first row's left-aligned panel titles.
+            height_ratios=(0.34, *([1.0] * individual_rows)),
         )
-        combined = figure.add_subplot(grid[0, :])
-        combined_values: list[float] = []
-        series: dict[str, tuple[list[float], list[float]]] = {}
-        for key in available:
-            shown_epochs, shown_values = self._shown_loss_series(key)
-            series[key] = (shown_epochs, shown_values)
-            combined_values.extend(shown_values)
-            combined.plot(
-                shown_epochs,
-                shown_values,
-                color=_LOSS_COLORS[key],
-                linewidth=2.0,
-                marker="o" if key == "validation_loss" else None,
-                markersize=4.5 if key == "validation_loss" else None,
-                markerfacecolor="white" if key == "validation_loss" else None,
-                markeredgewidth=1.2 if key == "validation_loss" else None,
-                label=_PLOT_LABELS[key],
-            )
-        combined.set_ylabel("Objective value (shared scale)", color=_TEXT_COLOR)
-        combined.set_title(
-            f"{self.description.replace(':', ' · ').replace('_', ' ')} objective history",
+        title_axis = figure.add_subplot(grid[0, :])
+        title_axis.set_axis_off()
+        title_axis.text(
+            0.5,
+            0.64,
+            f"{self._stage_label()} objectives",
+            ha="center",
+            va="center",
             color=_TEXT_COLOR,
-            fontsize=15,
+            fontsize=14,
             fontweight="medium",
-            pad=10,
         )
-        self._style_loss_axis(combined, combined_values)
-        combined.legend(
-            loc="lower center",
-            bbox_to_anchor=(0.5, 0.08),
-            frameon=True,
-            facecolor="white",
-            edgecolor="#D4D9E2",
-            framealpha=0.94,
-            fontsize=9.5,
-            ncol=min(4, len(available)),
-            handlelength=2.5,
-            columnspacing=1.6,
+        title_axis.text(
+            0.5,
+            0.08,
+            "Independent y axes · heights are not additive or a measure of gradient/update influence",
+            ha="center",
+            va="bottom",
+            color=_MUTED_TEXT_COLOR,
+            fontsize=8.3,
         )
-
+        post_training = (
+            self.description.partition(":")[0].replace("_", " ").strip().lower()
+            == "post training"
+        )
         for index, key in enumerate(available):
             row = 1 + index // 2
             column = index % 2
@@ -469,67 +502,38 @@ class TrainingMonitor:
                 else grid[row, column]
             )
             axis = figure.add_subplot(grid_cell)
-            shown_epochs, shown_values = series[key]
+            shown_epochs, shown_values = self._shown_loss_series(key)
             axis.plot(
                 shown_epochs,
                 shown_values,
                 color=_LOSS_COLORS[key],
-                linewidth=2.2 if key == "coherence_loss" else 1.9,
+                linewidth=1.7,
                 marker="o" if key == "validation_loss" else None,
-                markersize=5.5 if key == "validation_loss" else None,
+                markersize=4.3 if key == "validation_loss" else None,
                 markerfacecolor="white" if key == "validation_loss" else None,
-                markeredgewidth=1.3 if key == "validation_loss" else None,
-                label="Total coherence" if key == "coherence_loss" else None,
+                markeredgewidth=1.1 if key == "validation_loss" else None,
             )
-            panel_values = list(shown_values)
-            family_keys = self._coherence_family_keys() if key == "coherence_loss" else []
-            if len(family_keys) > 1:
-                for family_index, family_key in enumerate(family_keys):
-                    family_epochs, family_values = self._shown_loss_series(family_key)
-                    panel_values.extend(family_values)
-                    axis.plot(
-                        family_epochs,
-                        family_values,
-                        color=_COHERENCE_FAMILY_COLORS[
-                            family_index % len(_COHERENCE_FAMILY_COLORS)
-                        ],
-                        linewidth=1.65,
-                        linestyle=_COHERENCE_FAMILY_LINESTYLES[
-                            family_index % len(_COHERENCE_FAMILY_LINESTYLES)
-                        ],
-                        alpha=0.9,
-                        label=self._coherence_family_label(family_key),
-                    )
-            axis.set_xlabel("Training epoch")
-            axis.set_ylabel("Objective value")
+            axis.set_xlabel("Training epoch", labelpad=3)
+            axis.set_ylabel("Objective value", labelpad=3)
             if key == "validation_loss":
                 title = "Fixed validation objective"
-            elif len(family_keys) > 1:
-                title = "Coherence objective"
+            elif post_training and key == "total":
+                title = "Weighted combined objective"
+            elif post_training and key == "data_loss":
+                title = "Data objective · pre-update weight"
+            elif post_training and key == "coherence_loss":
+                title = "Coherence objective · family-weighted"
             else:
-                title = f"{_PLOT_LABELS[key].capitalize()} objective"
+                title = _PLOT_LABELS[key]
             axis.set_title(
                 title,
                 loc="left",
                 color=_TEXT_COLOR,
-                fontsize=12.5,
+                fontsize=11.2,
                 fontweight="medium",
-                pad=10,
+                pad=7,
             )
-            self._style_loss_axis(axis, panel_values)
-            if len(family_keys) > 1:
-                axis.legend(
-                    loc="center",
-                    bbox_to_anchor=(0.5, 0.57),
-                    frameon=True,
-                    facecolor="white",
-                    edgecolor="#D4D9E2",
-                    framealpha=0.94,
-                    fontsize=8.3,
-                    ncol=min(3, 1 + len(family_keys)),
-                    handlelength=2.3,
-                    columnspacing=1.1,
-                )
+            style_history_axis(axis, shown_values, x_max=epoch_max)
             if key == "validation_loss":
                 axis.text(
                     1.0,
@@ -539,8 +543,95 @@ class TrainingMonitor:
                     ha="right",
                     va="bottom",
                     color=_MUTED_TEXT_COLOR,
-                    fontsize=8.8,
+                    fontsize=8.1,
                 )
+        return figure
+
+    def _build_optimization_figure(self, plt):
+        """Plot gradient magnitudes and alignment separately from objective losses."""
+        norm_keys = [
+            key
+            for key in ("data_grad_norm", "coherence_grad_norm", "combined_grad_norm")
+            if self._values.get(key)
+        ]
+        cosine_available = bool(self._values.get("gradient_cosine"))
+        conflict_available = bool(self._values.get("gradient_conflict_fraction"))
+        if not (norm_keys or cosine_available or conflict_available):
+            return None
+        epoch_max = max(
+            (
+                max(self._epoch_coordinates(self._steps[key]))
+                for key in _OPTIMIZATION_KEYS
+                if self._steps.get(key)
+            ),
+            default=1.0,
+        )
+        figure = plt.figure(figsize=(12.4, 6.8), constrained_layout=True, facecolor="white")
+        grid = figure.add_gridspec(2, 2, height_ratios=(1.15, 1.0))
+        norm_axis = figure.add_subplot(grid[0, :])
+        cosine_axis = figure.add_subplot(grid[1, 0])
+        conflict_axis = figure.add_subplot(grid[1, 1])
+        figure.suptitle("Optimization diagnostics", color=_TEXT_COLOR, fontsize=14, fontweight="medium")
+        labels = {
+            "data_grad_norm": "Data objective",
+            "coherence_grad_norm": "Coherence objective",
+            "combined_grad_norm": "Combined update",
+        }
+        norm_values: list[float] = []
+        for key in norm_keys:
+            epochs, values = self._shown_loss_series(key)
+            norm_values.extend(values)
+            norm_axis.plot(
+                epochs,
+                values,
+                color=_OPTIMIZATION_COLORS[key],
+                linewidth=1.6,
+                label=labels[key],
+            )
+        norm_axis.set_title("Gradient norms · epoch means", loc="left", color=_TEXT_COLOR, fontsize=11.2)
+        norm_axis.set_ylabel("Gradient norm")
+        norm_axis.set_xlabel("Training epoch")
+        style_history_axis(norm_axis, norm_values, x_max=epoch_max)
+        if norm_axis.lines:
+            norm_axis.legend(loc="upper right", frameon=False, ncol=len(norm_axis.lines), fontsize=8.4)
+
+        if cosine_available:
+            epochs, values = self._shown_loss_series("gradient_cosine")
+            cosine_axis.plot(
+                epochs,
+                values,
+                color=_OPTIMIZATION_COLORS["gradient_cosine"],
+                linewidth=1.5,
+            )
+            cosine_axis.axhline(0.0, color="#667085", linewidth=0.85, linestyle="--", zorder=0)
+            style_history_axis(cosine_axis, values, x_max=epoch_max)
+            cosine_axis.set_yscale("linear")
+            cosine_axis.set_ylim(-1.0, 1.0)
+            cosine_axis.set_title("Data / coherence gradient cosine", loc="left", color=_TEXT_COLOR, fontsize=10.6)
+            cosine_axis.set_ylabel("Mean cosine")
+            cosine_axis.set_xlabel("Training epoch")
+        else:
+            cosine_axis.set_visible(False)
+
+        if conflict_available:
+            from matplotlib.ticker import PercentFormatter
+
+            epochs, values = self._shown_loss_series("gradient_conflict_fraction")
+            conflict_axis.plot(
+                epochs,
+                values,
+                color=_OPTIMIZATION_COLORS["gradient_conflict_fraction"],
+                linewidth=1.5,
+            )
+            style_history_axis(conflict_axis, values, x_max=epoch_max)
+            conflict_axis.set_yscale("linear")
+            conflict_axis.set_ylim(0.0, 1.0)
+            conflict_axis.yaxis.set_major_formatter(PercentFormatter(xmax=1.0))
+            conflict_axis.set_title("Gradient conflict frequency", loc="left", color=_TEXT_COLOR, fontsize=10.6)
+            conflict_axis.set_ylabel("Updates with conflict")
+            conflict_axis.set_xlabel("Training epoch")
+        else:
+            conflict_axis.set_visible(False)
         return figure
 
     def close(

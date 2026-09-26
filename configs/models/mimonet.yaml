@@ -1,0 +1,9 @@
+# Released MIMONet FCN widths and basis, adapted to the combustion inputs.
+
+model:
+  name: mimonet
+  basis_dim: 256
+  branch_hidden_dim: 512
+  trunk_hidden_dim: 256
+  merge_type: mul
+  sensor_order: point_index

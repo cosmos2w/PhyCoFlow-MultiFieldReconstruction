@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
+from contextlib import nullcontext
+from copy import deepcopy
 from itertools import combinations
 from math import ceil, cos, pi, sin
 from typing import Any
@@ -21,6 +24,10 @@ from ....data.normalization import FieldNormalizer
 from ...base import require_field_tensor
 from .betti_curves import betti_curves, gaussian_blur
 from .geometry import build_raster_map, coordinate_digest, rasterize_fields
+from .persistence import persistence_source
+from .persistence_objective import PersistenceTopologyObjective
+from .provenance import SOURCE_SNAPSHOT
+from .spatial_objective import SpatialTopologyObjective
 
 
 class TopologyFamily(nn.Module):
@@ -34,11 +41,21 @@ class TopologyFamily(nn.Module):
         normalizer: FieldNormalizer,
     ) -> None:
         super().__init__()
-        self.config = dict(config)
+        self.config = deepcopy(dict(config))
+        config = self.config
+        # Old resolved configurations retain their scientific definition and v1 artifacts.
+        self.strategy = str(config.get("strategy", "betti_curves"))
+        if self.strategy not in {"betti_curves", "spatial_self_mutual", "cubical_persistence"}:
+            raise ValueError("unknown topology.strategy")
+        self.version = {
+            "betti_curves": "1",
+            "spatial_self_mutual": "2",
+            "cubical_persistence": "3",
+        }[self.strategy]
         self.target_use = str(config.get("target_use", "paired_supervised"))
         self.units = str(config.get("units", "model_units"))
         self.family_weight = float(config.get("weight", 1.0))
-        if self.family_weight <= 0:
+        if not math.isfinite(self.family_weight) or self.family_weight <= 0:
             raise ValueError("topology.weight must be positive")
         if self.target_use not in {"training_reference", "paired_supervised"}:
             raise ValueError("topology.target_use is invalid")
@@ -71,9 +88,12 @@ class TopologyFamily(nn.Module):
         self.periods = None if configured_periods is None else tuple(map(float, configured_periods))
         if not self.periodic and self.periods is not None:
             raise ValueError("topology geometry.periods requires periodic=true")
-        self.allow_projected_collisions = bool(
-            geometry.get("allow_projected_collisions", False)
-        )
+        self.allow_projected_collisions = bool(geometry.get("allow_projected_collisions", False))
+        self.antialias_downsample = geometry.get("antialias_downsample", False)
+        if not isinstance(self.antialias_downsample, bool):
+            raise TypeError("topology geometry.antialias_downsample must be boolean")
+        if self.antialias_downsample and self.strategy == "betti_curves":
+            raise ValueError("topology antialias_downsample requires topology v2 or v3")
         self.register_buffer("neighbor_indices", torch.empty(0, 0, dtype=torch.long))
         self.register_buffer("neighbor_weights", torch.empty(0, 0))
         self.register_buffer("grid_coordinates", torch.empty(0, 0, 2))
@@ -105,15 +125,39 @@ class TopologyFamily(nn.Module):
             raise ValueError("topology filtration directions are invalid")
         self.sharpness = float(filtration.get("sharpness", 12.0))
         self.smoothing_sigma = float(filtration.get("smoothing_sigma", 0.8))
-        if self.sharpness <= 0 or self.smoothing_sigma < 0:
+        if (
+            not math.isfinite(self.sharpness)
+            or not math.isfinite(self.smoothing_sigma)
+            or self.sharpness <= 0
+            or self.smoothing_sigma < 0
+        ):
             raise ValueError("topology sharpness must be positive and smoothing non-negative")
-        smoothing_radius = ceil(3.0 * self.smoothing_sigma)
-        if not self.periodic and self.smoothing_sigma > 0 and (
-            smoothing_radius >= self.grid_shape[0] or smoothing_radius >= self.grid_shape[1]
+        self.smoothing_radius = (
+            max(1, round(3.0 * self.smoothing_sigma))
+            if self.strategy == "spatial_self_mutual"
+            else None
+        )
+        smoothing_radius = self.smoothing_radius or ceil(3.0 * self.smoothing_sigma)
+        if (
+            not self.periodic
+            and self.smoothing_sigma > 0
+            and (smoothing_radius >= self.grid_shape[0] or smoothing_radius >= self.grid_shape[1])
         ):
             raise ValueError(
                 "topology nonperiodic smoothing radius must be smaller than both grid dimensions"
             )
+
+        self.spatial_objective = None
+        if self.strategy == "cubical_persistence":
+            self.spatial_objective = PersistenceTopologyObjective(config, data_spec.field_names)
+            self.component_weights = dict(self.spatial_objective.weights)
+            self.spec = self.spatial_objective.spec
+            return
+        if self.strategy == "spatial_self_mutual":
+            self.spatial_objective = SpatialTopologyObjective(config, data_spec.field_names)
+            self.component_weights = dict(self.spatial_objective.weights)
+            self.spec = self.spatial_objective.spec
+            return
 
         components = config.get("components", {})
         self_settings = components.get("self", {})
@@ -135,7 +179,9 @@ class TopologyFamily(nn.Module):
             )
         if bool(mutual_settings.get("enabled", len(self.field_names) >= 2)):
             self.component_weights["mutual"] = float(mutual_settings.get("weight", 1.0))
-            configured_pairs = mutual_settings.get("pairs") or list(combinations(self.field_names, 2))
+            configured_pairs = mutual_settings.get("pairs") or list(
+                combinations(self.field_names, 2)
+            )
             try:
                 self.mutual_pairs = tuple(
                     (self.field_names.index(left), self.field_names.index(right))
@@ -172,7 +218,9 @@ class TopologyFamily(nn.Module):
             self.fibered_lines = 0
             self.theta_min_degrees = 15.0
             self.mutual_axis_tolerance = 1e-6
-        if not self.component_weights or any(value < 0 for value in self.component_weights.values()):
+        if not self.component_weights or any(
+            value < 0 for value in self.component_weights.values()
+        ):
             raise ValueError("topology must enable non-negative component weights")
         if not any(self.component_weights.values()):
             raise ValueError("topology must have a positive-weight component")
@@ -200,6 +248,7 @@ class TopologyFamily(nn.Module):
                 periodic=self.periodic,
                 periods=self.periods,
                 allow_projected_collisions=self.allow_projected_collisions,
+                antialias_downsample=self.antialias_downsample,
             )
             self.neighbor_indices = mapping.neighbor_indices.to(coordinates.device)
             self.neighbor_weights = mapping.neighbor_weights.to(coordinates.device)
@@ -218,6 +267,9 @@ class TopologyFamily(nn.Module):
             scale = self.normalization_scale.to(generated)
             generated = generated * scale + offset
             reference = reference * scale + offset
+        if self.spatial_objective is not None:
+            # Self fields, carrier and derived anchor can use different dataset channels.
+            return generated, reference
         return generated[..., self.field_ids], reference[..., self.field_ids]
 
     def _curve_cost(
@@ -333,28 +385,87 @@ class TopologyFamily(nn.Module):
         coordinates: torch.Tensor | None = None,
         context: Any | None = None,
     ) -> FamilyResult:
+        reference_cache = (context or {}).get("persistence_cache")
+        if reference_cache is not None:
+            if self.strategy != "cubical_persistence":
+                raise ValueError("reference caching requires cubical_persistence")
+            signature = (
+                id(self),
+                id(reference),
+                reference._version,
+                id(coordinates),
+                coordinates._version if coordinates is not None else None,
+            )
+            reference_cache.setdefault("reference_identity", (reference, coordinates))
+            if reference_cache.setdefault("signature", signature) != signature:
+                raise ValueError("persistence reference cache target/coordinates changed")
         require_field_tensor("generated", generated)
         require_field_tensor("reference", reference)
         if generated.shape != reference.shape:
             raise ValueError("topology generated/reference shapes differ")
         if coordinates is None or coordinates.shape[:2] != generated.shape[:2]:
             raise ValueError("topology requires coordinates aligned with [B,N]")
+        if self.spatial_objective is not None:
+            if not torch.isfinite(generated).all() or not torch.isfinite(reference).all():
+                raise FloatingPointError("topology generated/reference fields must be finite")
+            reference = reference.detach()
+            # Quantiles and topology arithmetic remain FP32 under mixed-precision rollouts.
+            if generated.dtype in {torch.float16, torch.bfloat16}:
+                generated = generated.float()
+            reference = reference.to(generated)
         self._raster_map(coordinates)
         generated, reference = self._units_and_fields(generated, reference)
-        generated_grid = rasterize_fields(
-            generated,
-            self.neighbor_indices,
-            self.neighbor_weights.to(generated),
-            self.grid_shape,
+        precision = (
+            torch.autocast(device_type=generated.device.type, enabled=False)
+            if self.spatial_objective is not None
+            else nullcontext()
         )
-        reference_grid = rasterize_fields(
-            reference,
-            self.neighbor_indices,
-            self.neighbor_weights.to(reference),
-            self.grid_shape,
-        )
-        generated_grid = gaussian_blur(generated_grid, self.smoothing_sigma, self.periodic)
-        reference_grid = gaussian_blur(reference_grid, self.smoothing_sigma, self.periodic)
+        with precision:
+            generated_grid = rasterize_fields(
+                generated,
+                self.neighbor_indices,
+                self.neighbor_weights.to(generated),
+                self.grid_shape,
+            )
+            reference_grid = rasterize_fields(
+                reference,
+                self.neighbor_indices,
+                self.neighbor_weights.to(reference),
+                self.grid_shape,
+            )
+            generated_grid = gaussian_blur(
+                generated_grid, self.smoothing_sigma, self.periodic, radius=self.smoothing_radius
+            )
+            reference_grid = gaussian_blur(
+                reference_grid, self.smoothing_sigma, self.periodic, radius=self.smoothing_radius
+            )
+        if self.spatial_objective is not None:
+            with torch.autocast(device_type=generated.device.type, enabled=False):
+                kwargs = (
+                    {"reference_cache": reference_cache}
+                    if self.strategy == "cubical_persistence"
+                    else {}
+                )
+                result = self.spatial_objective(
+                    generated_grid.float(), reference_grid.float(), **kwargs
+                )
+            result.diagnostics.update(
+                {
+                    "family": self.family_name,
+                    "version": self.version,
+                    "aggregation": "per_sample",
+                    "target_use": self.target_use,
+                    "units": self.units,
+                    "fields": self.field_names,
+                    "grid_shape": self.grid_shape,
+                    "periodic": self.periodic,
+                    "periods": self.periods,
+                    "geometry_sha256": self.geometry_sha256,
+                    "geometry": dict(self.geometry_diagnostics),
+                    "component_weights": dict(self.component_weights),
+                }
+            )
+            return result
         results: dict[str, TermResult] = {}
         per_sample = generated.sum(dim=(1, 2)) * 0.0
         if self.component_weights.get("self", 0.0) > 0:
@@ -419,10 +530,14 @@ class TopologyFamily(nn.Module):
         return {
             "family": self.family_name,
             "version": self.version,
-            "scientific_source": {
+            "scientific_source": persistence_source()
+            if self.version == "3"
+            else dict(SOURCE_SNAPSHOT)
+            if self.version == "2"
+            else {
                 "repository": "https://github.com/jachen25/PhyCoFlow_dev/tree/main/src",
                 "revision": "ab49ea37a",
-                "license_status": "not_declared; independent implementation",
+                "license_status": "Project-supervised contribution; see docs/provenance.md",
             },
             "config": self.config,
             "field_names": self.field_names,
@@ -439,6 +554,12 @@ class TopologyFamily(nn.Module):
             raise ValueError("topology family artifact identity mismatch")
         if dict(artifact.get("config", {})) != self.config:
             raise ValueError("topology family artifact config mismatch")
+        if self.version == "2" and artifact.get("scientific_source") != SOURCE_SNAPSHOT:
+            raise ValueError(
+                "topology family artifact scientific source mismatch; rebuild the artifact"
+            )
+        if self.version == "3" and artifact.get("scientific_source") != persistence_source():
+            raise ValueError("persistence family source/backend mismatch; start a new experiment")
         state = artifact["state_dict"]
         device = self.normalization_offset.device
         self.neighbor_indices = state["neighbor_indices"].to(device)

@@ -1,0 +1,228 @@
+{
+  "available_sample_count": 1000,
+  "coherence": {
+    "cross_spectrum": {
+      "band_energy_profile_csv": "/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/diagnostics/ExampleVisual/.work/run_snapshot/evaluation/reconstruction_set_validation_last/coherence/cross_spectrum/band_energy_profile.csv",
+      "directory": "/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/diagnostics/ExampleVisual/.work/run_snapshot/evaluation/reconstruction_set_validation_last/coherence/cross_spectrum",
+      "family": "cross_spectrum",
+      "figures": {
+        "band_energy_profile": "/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/diagnostics/ExampleVisual/.work/run_snapshot/evaluation/reconstruction_set_validation_last/coherence/cross_spectrum/spectral_band_profiles.png",
+        "cross_frequency": "/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/diagnostics/ExampleVisual/.work/run_snapshot/evaluation/reconstruction_set_validation_last/coherence/cross_spectrum/cross_frequency_coherence.png",
+        "same_frequency": "/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/diagnostics/ExampleVisual/.work/run_snapshot/evaluation/reconstruction_set_validation_last/coherence/cross_spectrum/same_frequency_coherence.png"
+      },
+      "report": "/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/diagnostics/ExampleVisual/.work/run_snapshot/evaluation/reconstruction_set_validation_last/coherence/cross_spectrum/report.json"
+    },
+    "global_distribution": {
+      "directory": "/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/diagnostics/ExampleVisual/.work/run_snapshot/evaluation/reconstruction_set_validation_last/coherence/global_distribution",
+      "extra": {
+        "directory": "/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/diagnostics/ExampleVisual/.work/run_snapshot/evaluation/reconstruction_set_validation_last/coherence/global_distribution/global_distribution_extra",
+        "figures": {
+          "CH4\u2013CO": "/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/diagnostics/ExampleVisual/.work/run_snapshot/evaluation/reconstruction_set_validation_last/coherence/global_distribution/global_distribution_extra/joint_pdf_CH4-CO.png",
+          "CH4\u2013T": "/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/diagnostics/ExampleVisual/.work/run_snapshot/evaluation/reconstruction_set_validation_last/coherence/global_distribution/global_distribution_extra/joint_pdf_CH4-T.png",
+          "CH4\u2013U_1": "/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/diagnostics/ExampleVisual/.work/run_snapshot/evaluation/reconstruction_set_validation_last/coherence/global_distribution/global_distribution_extra/joint_pdf_CH4-U_1.png",
+          "CH4\u2013p": "/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/diagnostics/ExampleVisual/.work/run_snapshot/evaluation/reconstruction_set_validation_last/coherence/global_distribution/global_distribution_extra/joint_pdf_CH4-p.png",
+          "CO\u2013T": "/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/diagnostics/ExampleVisual/.work/run_snapshot/evaluation/reconstruction_set_validation_last/coherence/global_distribution/global_distribution_extra/joint_pdf_CO-T.png",
+          "CO\u2013U_1": "/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/diagnostics/ExampleVisual/.work/run_snapshot/evaluation/reconstruction_set_validation_last/coherence/global_distribution/global_distribution_extra/joint_pdf_CO-U_1.png",
+          "CO\u2013p": "/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/diagnostics/ExampleVisual/.work/run_snapshot/evaluation/reconstruction_set_validation_last/coherence/global_distribution/global_distribution_extra/joint_pdf_CO-p.png",
+          "T\u2013U_1": "/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/diagnostics/ExampleVisual/.work/run_snapshot/evaluation/reconstruction_set_validation_last/coherence/global_distribution/global_distribution_extra/joint_pdf_T-U_1.png",
+          "T\u2013p": "/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/diagnostics/ExampleVisual/.work/run_snapshot/evaluation/reconstruction_set_validation_last/coherence/global_distribution/global_distribution_extra/joint_pdf_T-p.png",
+          "U_1\u2013p": "/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/diagnostics/ExampleVisual/.work/run_snapshot/evaluation/reconstruction_set_validation_last/coherence/global_distribution/global_distribution_extra/joint_pdf_U_1-p.png"
+        },
+        "jensen_shannon_divergence_bits": {
+          "CH4\u2013CO": 0.17481183616327256,
+          "CH4\u2013T": 0.2174845699219747,
+          "CH4\u2013U_1": 0.16374538849685416,
+          "CH4\u2013p": 0.1813314322873639,
+          "CO\u2013T": 0.042245629325170814,
+          "CO\u2013U_1": 0.013206949859552564,
+          "CO\u2013p": 0.027216030152089083,
+          "T\u2013U_1": 0.028386015899746223,
+          "T\u2013p": 0.04620943297700741,
+          "U_1\u2013p": 0.025183127949399545
+        },
+        "metrics_csv": "/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/diagnostics/ExampleVisual/.work/run_snapshot/evaluation/reconstruction_set_validation_last/coherence/global_distribution/global_distribution_extra/joint_pdf_metrics.csv",
+        "metrics_payload": "/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/diagnostics/ExampleVisual/.work/run_snapshot/evaluation/reconstruction_set_validation_last/coherence/global_distribution/global_distribution_extra/joint_pdf_metrics.npz",
+        "report": "/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/diagnostics/ExampleVisual/.work/run_snapshot/evaluation/reconstruction_set_validation_last/coherence/global_distribution/global_distribution_extra/report.json"
+      },
+      "family": "global_distribution",
+      "figures": {
+        "joint_top_tail": "/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/diagnostics/ExampleVisual/.work/run_snapshot/evaluation/reconstruction_set_validation_last/coherence/global_distribution/joint_top_tail_distributions.png",
+        "marginal": "/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/diagnostics/ExampleVisual/.work/run_snapshot/evaluation/reconstruction_set_validation_last/coherence/global_distribution/marginal_field_distributions.png",
+        "pairwise": "/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/diagnostics/ExampleVisual/.work/run_snapshot/evaluation/reconstruction_set_validation_last/coherence/global_distribution/pairwise_field_distributions.png"
+      },
+      "report": "/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/diagnostics/ExampleVisual/.work/run_snapshot/evaluation/reconstruction_set_validation_last/coherence/global_distribution/report.json"
+    },
+    "topology": {
+      "directory": "/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/diagnostics/ExampleVisual/.work/run_snapshot/evaluation/reconstruction_set_validation_last/coherence/topology",
+      "family": "topology",
+      "figures": {
+        "betti_curves": "/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/diagnostics/ExampleVisual/.work/run_snapshot/evaluation/reconstruction_set_validation_last/coherence/topology/betti_curves.png",
+        "configured_grid_topology": "/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/diagnostics/ExampleVisual/.work/run_snapshot/evaluation/reconstruction_set_validation_last/coherence/topology/configured_grid_topology.png",
+        "persistence_term_distributions": "/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/diagnostics/ExampleVisual/.work/run_snapshot/evaluation/reconstruction_set_validation_last/coherence/topology/persistence_term_distributions.png"
+      },
+      "metrics_csv": "/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/diagnostics/ExampleVisual/.work/run_snapshot/evaluation/reconstruction_set_validation_last/coherence/topology/metrics.csv",
+      "metrics_payload": "/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/diagnostics/ExampleVisual/.work/run_snapshot/evaluation/reconstruction_set_validation_last/coherence/topology/metrics.npz",
+      "report": "/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/diagnostics/ExampleVisual/.work/run_snapshot/evaluation/reconstruction_set_validation_last/coherence/topology/report.json"
+    }
+  },
+  "comparison": {
+    "enabled": true,
+    "report": "evaluation/reconstruction_set_validation_last/comparison_report.json",
+    "source_checkpoint": "/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/runs/tc_gl_rbf_cq_cached_kv_5000ep/20260826T212231Z_7b68c461/checkpoints/last.pt",
+    "source_run": "/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/runs/tc_gl_rbf_cq_cached_kv_5000ep/20260826T212231Z_7b68c461"
+  },
+  "compute": {
+    "inference_seconds": 46.941958425566554,
+    "inference_seconds_per_sample": 0.7334681003994774,
+    "peak_cuda_memory_bytes": 0,
+    "total_seconds": 91.9126190142706
+  },
+  "field_names": [
+    "CH4",
+    "CO",
+    "T",
+    "U_1",
+    "p"
+  ],
+  "metric": "per_sample_per_field_relative_l2_physical",
+  "per_field_statistics": {
+    "CH4": {
+      "count": 64,
+      "maximum": 0.2984650433063507,
+      "mean": 0.21748226543422788,
+      "median": 0.2168733850121498,
+      "minimum": 0.09789123386144638,
+      "quartile_25": 0.19791952148079872,
+      "quartile_75": 0.23935174569487572,
+      "standard_deviation": 0.03173390798244608
+    },
+    "CO": {
+      "count": 64,
+      "maximum": 0.6003737449645996,
+      "mean": 0.5010086540132761,
+      "median": 0.500006765127182,
+      "minimum": 0.2780613899230957,
+      "quartile_25": 0.46999068558216095,
+      "quartile_75": 0.5341106653213501,
+      "standard_deviation": 0.05180248492556466
+    },
+    "T": {
+      "count": 64,
+      "maximum": 0.23600952327251434,
+      "mean": 0.17931342171505094,
+      "median": 0.17722370475530624,
+      "minimum": 0.09531509876251221,
+      "quartile_25": 0.16756464168429375,
+      "quartile_75": 0.19248869642615318,
+      "standard_deviation": 0.02225193616655705
+    },
+    "U_1": {
+      "count": 64,
+      "maximum": 1.5601065158843994,
+      "mean": 1.0415408569388092,
+      "median": 1.0463334918022156,
+      "minimum": 0.3359955847263336,
+      "quartile_25": 0.9145226329565048,
+      "quartile_75": 1.1454035937786102,
+      "standard_deviation": 0.19989791203099125
+    },
+    "p": {
+      "count": 64,
+      "maximum": 0.07359761744737625,
+      "mean": 0.038499982649227604,
+      "median": 0.03532620705664158,
+      "minimum": 0.010634157806634903,
+      "quartile_25": 0.030924757476896048,
+      "quartile_75": 0.04804154671728611,
+      "standard_deviation": 0.013140242116235278
+    }
+  },
+  "sample_count": 64,
+  "selection": {
+    "policy": "evenly_spaced_split_subset",
+    "requested_max_samples": 64,
+    "split_relative_indices": [
+      0,
+      15,
+      31,
+      47,
+      63,
+      79,
+      95,
+      111,
+      126,
+      142,
+      158,
+      174,
+      190,
+      206,
+      222,
+      237,
+      253,
+      269,
+      285,
+      301,
+      317,
+      333,
+      348,
+      364,
+      380,
+      396,
+      412,
+      428,
+      444,
+      459,
+      475,
+      491,
+      507,
+      523,
+      539,
+      555,
+      570,
+      586,
+      602,
+      618,
+      634,
+      650,
+      666,
+      681,
+      697,
+      713,
+      729,
+      745,
+      761,
+      777,
+      792,
+      808,
+      824,
+      840,
+      856,
+      872,
+      888,
+      903,
+      919,
+      935,
+      951,
+      967,
+      983,
+      999
+    ]
+  },
+  "split": "validation",
+  "statistic_scale": "log",
+  "trace": {
+    "checkpoint": "checkpoints/last.pt",
+    "checkpoint_sha256": "7e39fa0322b4bc21db4ec612cef7c221fe490eba78545b9a1783b53bd37c9038",
+    "dataset_fingerprint": "8c49936567eced7ab94887c336b9b35aaf7ec70dea7479aee83434ff970455d5",
+    "figure": "/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/diagnostics/ExampleVisual/.work/run_snapshot/evaluation/reconstruction_set_validation_last/relative_l2_violin.png",
+    "generation_seed_policy": "base_seed_plus_split_relative_sample_index",
+    "generation_steps": 2,
+    "metrics_csv": "evaluation/reconstruction_set_validation_last/relative_l2.csv",
+    "metrics_payload": "evaluation/reconstruction_set_validation_last/relative_l2.npz",
+    "resolved_config_sha256": "3fd77525df2a43a1d65721b03517dc1a265dc01953e449865e5a3d1d65d3999b",
+    "run": "diagnostics/ExampleVisual/.work/run_snapshot",
+    "sensor_manifest": "evaluation/reconstruction_set_validation_last/sensor_manifest.jsonl",
+    "sensor_manifest_sha256": "230227b4ae94f1eb2aa9862f0eaaacff364aa3d5a4a5794c16b5768ff4b48346",
+    "weight_selection": "configured"
+  }
+}

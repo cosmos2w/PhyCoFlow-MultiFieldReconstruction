@@ -1,5 +1,6 @@
 """Focused Phase-1 checks for config separation and shared dataclass shapes."""
 
+import os
 from pathlib import Path
 
 import pytest
@@ -58,6 +59,7 @@ def test_shared_model_configs_are_the_single_architecture_source():
         "coordinate_mlp",
         "mlp_rbf",
         "deeponet",
+        "mimonet",
         "senseiver",
         "geofno",
         "diffusion_pde",
@@ -73,6 +75,7 @@ def test_shared_model_configs_are_the_single_architecture_source():
 def test_case_dataset_catalog_uses_the_canonical_lowercase_root():
     configs = tuple(sorted((PROJECT_ROOT / "cases").glob("*/configs/dataset.yaml")))
     assert {path.parents[1].name for path in configs} == {
+        "active_emulsion",
         "brusselator",
         "kolmogorov",
         "ks",
@@ -82,7 +85,12 @@ def test_case_dataset_catalog_uses_the_canonical_lowercase_root():
     for path in configs:
         dataset = load_config(path)["dataset"]
         assert str(dataset["path"]).startswith("../../datasets/")
-        assert (path.parent / dataset["path"]).resolve().parent.name == path.parents[1].name
+        case_dir = path.parents[1]
+        # Check the catalog entry, not an optional symlink's external payload.
+        catalog_entry = Path(os.path.abspath(case_dir / dataset["path"]))
+        assert catalog_entry.is_relative_to(
+            PROJECT_ROOT / "datasets" / case_dir.name
+        )
 
 
 def test_all_canonical_case_yaml_defaults_resolve():

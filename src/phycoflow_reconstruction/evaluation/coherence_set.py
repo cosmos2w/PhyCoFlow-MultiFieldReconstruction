@@ -29,8 +29,9 @@ from ..coherence.families.cross_spectrum.statistics import (
 )
 from ..coherence.registry import build_coherence_family
 from ..data.training_batches import fixed_query_indices
+from .topology_set import TopologySetAccumulator
 
-SUPPORTED_COHERENCE_FAMILIES = ("global_distribution", "cross_spectrum")
+SUPPORTED_COHERENCE_FAMILIES = ("global_distribution", "cross_spectrum", "topology")
 
 
 def _finite_summary(values: np.ndarray) -> dict[str, float | int | None]:
@@ -159,12 +160,19 @@ def _evaluation_family_config(
         if isinstance(run_config.get("coherence", {}), Mapping)
         else None
     )
-    defaults = (
-        _default_global_distribution_config(field_names)
-        if family_name == "global_distribution"
-        else _default_cross_spectrum_config(field_names)
-    )
-    settings = deepcopy(dict(configured)) if isinstance(configured, Mapping) else defaults
+    if family_name == "topology":
+        if not isinstance(configured, Mapping):
+            raise ValueError(
+                "topology set evaluation requires a resolved topology family configuration"
+            )
+        settings = deepcopy(dict(configured))
+    else:
+        defaults = (
+            _default_global_distribution_config(field_names)
+            if family_name == "global_distribution"
+            else _default_cross_spectrum_config(field_names)
+        )
+        settings = deepcopy(dict(configured)) if isinstance(configured, Mapping) else defaults
     settings["enabled"] = True
     # Statistical checkpoint evaluation has a natural sample-aligned reference:
     # the dense ground truth already used by reconstruction evaluation.
@@ -186,6 +194,29 @@ def _publication_label(name: str) -> str:
     if trailing_index:
         return rf"{trailing_index.group(1)}$_{{{trailing_index.group(2)}}}$"
     return name.replace("_", " ")
+
+
+def _save_publication_figure(
+    figure: Any, output_path: str | Path, *, dpi: int = 300, tight: bool = True
+) -> Path:
+    """Write a publication PNG and editable vector companions with one stem."""
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    bbox = "tight" if tight else None
+    figure.savefig(output_path, dpi=dpi, bbox_inches=bbox, facecolor="white")
+    figure.savefig(output_path.with_suffix(".pdf"), bbox_inches=bbox, facecolor="white")
+    figure.savefig(output_path.with_suffix(".svg"), bbox_inches=bbox, facecolor="white")
+    import matplotlib.pyplot as plt
+
+    plt.close(figure)
+    return output_path
+
+
+def _vector_figure_paths(figures: Mapping[str, Path]) -> dict[str, dict[str, str]]:
+    return {
+        name: {format_name: str(path.with_suffix(f".{format_name}")) for format_name in ("pdf", "svg")}
+        for name, path in figures.items()
+    }
 
 
 def render_coherence_distribution(
@@ -220,8 +251,8 @@ def render_coherence_distribution(
         raise ValueError("statistical plot scale must be 'log' or 'linear'")
 
     role_colors = {
-        "detail": "#0072B2",
-        "component_total": "#E69F00",
+        "detail": "#D96855",
+        "component_total": "#A94739",
         "family_total": "#3F3F46",
     }
     colors = tuple(role_colors[role] for role in roles)
@@ -329,7 +360,7 @@ def render_coherence_distribution(
     axis.spines["right"].set_visible(False)
     axis.spines["left"].set_linewidth(0.8)
     axis.spines["bottom"].set_linewidth(0.8)
-    axis.legend(
+    figure.legend(
         handles=(
             Patch(facecolor=role_colors["detail"], alpha=0.20, label="Sub-term density"),
             Patch(
@@ -360,9 +391,7 @@ def render_coherence_distribution(
         handlelength=1.1,
         columnspacing=1.0,
     )
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    figure.savefig(output_path, dpi=dpi, bbox_inches="tight")
+    output_path = _save_publication_figure(figure, output_path, dpi=dpi)
     plt.close(figure)
     return output_path
 
@@ -412,13 +441,13 @@ def render_cross_spectrum_score_bars(
         raise ValueError("cross-spectrum score limits must include every lower whisker")
 
     role_colors = {
-        "detail": "#4C78A8",
-        "component_total": "#D99100",
+        "detail": "#28769B",
+        "component_total": "#16516F",
         "family_total": "#354052",
     }
     role_edges = {
-        "detail": "#315D83",
-        "component_total": "#9A6500",
+        "detail": "#1C5A79",
+        "component_total": "#103E56",
         "family_total": "#202938",
     }
     detail_count = roles.count("detail")
@@ -530,9 +559,9 @@ def render_cross_spectrum_score_bars(
     axis.spines["left"].set_visible(False)
     axis.spines["bottom"].set_color("#9AA1AA")
     axis.spines["bottom"].set_linewidth(0.75)
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    figure.savefig(output_path, dpi=dpi, bbox_inches="tight")
+    # The paired charts share a fixed canvas; a tight bounding box otherwise
+    # grows with the checkpoint subtitle and changes the apparent bar scale.
+    output_path = _save_publication_figure(figure, output_path, dpi=dpi, tight=False)
     plt.close(figure)
     return output_path
 
@@ -565,6 +594,307 @@ def adaptive_coherence_score_limits(
     margin = max(0.025, 0.15 * (1.0 - lower_extent))
     rounded = np.floor(max(0.0, lower_extent - margin) / 0.05) * 0.05
     return float(min(0.75, rounded)), 1.0
+
+
+def render_cross_spectrum_paired_score_bars(
+    source_metrics: Mapping[str, np.ndarray],
+    post_metrics: Mapping[str, np.ndarray],
+    output_path: str | Path,
+    *,
+    title: str,
+    subtitle: str,
+    component_filter: Sequence[str] | None = None,
+    include_family_aggregate: bool = True,
+    dpi: int = 300,
+) -> Path:
+    """Render matched source/post scores from retained ensemble summaries.
+
+    The two payloads must have identical snapshot IDs, ensemble membership, and
+    graph query indices. The focused score range is computed jointly, so every
+    row uses the same bounded [0, 1] agreement scale.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+
+    for key in ("sample_ids", "ensemble_sample_ids", "query_indices"):
+        if key not in source_metrics or key not in post_metrics:
+            raise ValueError(f"paired spectral metrics are missing {key!r}")
+        if not np.array_equal(source_metrics[key], post_metrics[key]):
+            raise ValueError(f"paired spectral source/post {key} differ")
+
+    all_component_names = tuple(str(value) for value in source_metrics["component_names"])
+    if all_component_names != tuple(str(value) for value in post_metrics["component_names"]):
+        raise ValueError("paired spectral component names or order differ")
+    all_source_means = np.asarray(source_metrics["component_coherence_scores"], dtype=np.float64)
+    all_post_means = np.asarray(post_metrics["component_coherence_scores"], dtype=np.float64)
+    all_source_std = np.asarray(source_metrics["component_coherence_score_std"], dtype=np.float64)
+    all_post_std = np.asarray(post_metrics["component_coherence_score_std"], dtype=np.float64)
+    expected_shape = (len(all_component_names),)
+    if any(value.shape != expected_shape for value in (all_source_means, all_post_means, all_source_std, all_post_std)):
+        raise ValueError("paired spectral component metrics do not align with component labels")
+    if component_filter is None:
+        selected_names = all_component_names
+    else:
+        selected_names = tuple(str(value) for value in component_filter)
+        if not selected_names or len(set(selected_names)) != len(selected_names):
+            raise ValueError("component_filter must contain unique spectral component names")
+        missing = tuple(name for name in selected_names if name not in all_component_names)
+        if missing:
+            raise ValueError(f"paired spectral metrics are missing requested components: {missing}")
+    selected_indices = np.asarray([all_component_names.index(name) for name in selected_names])
+    source_means = all_source_means[selected_indices]
+    post_means = all_post_means[selected_indices]
+    source_std = all_source_std[selected_indices]
+    post_std = all_post_std[selected_indices]
+    if include_family_aggregate:
+        source_means = np.concatenate((source_means, [float(source_metrics["family_coherence_score"])]))
+        post_means = np.concatenate((post_means, [float(post_metrics["family_coherence_score"])]))
+        source_std = np.concatenate((source_std, [float(source_metrics["family_coherence_score_std"])]))
+        post_std = np.concatenate((post_std, [float(post_metrics["family_coherence_score_std"])]))
+    if any(not np.isfinite(value).all() for value in (source_means, post_means, source_std, post_std)):
+        raise ValueError("paired spectral score summaries must be finite")
+    if any(np.any((value < 0.0) | (value > 1.0)) for value in (source_means, post_means)):
+        raise ValueError("paired spectral coherence scores must lie in [0, 1]")
+    if np.any(source_std < 0.0) or np.any(post_std < 0.0):
+        raise ValueError("paired spectral score spreads must be non-negative")
+
+    labels = [
+        {
+            "self_spectrum": "Self spectrum",
+            "same_frequency": "Same-frequency",
+            "cross_frequency": "Cross-frequency",
+            "band_energy": "Band energy",
+        }.get(name, _publication_label(name))
+        for name in selected_names
+    ]
+    if include_family_aggregate:
+        labels.append("Family aggregate")
+    combined_means = np.concatenate((source_means, post_means))
+    combined_std = np.concatenate((source_std, post_std))
+    x_limits = adaptive_coherence_score_limits(combined_means, combined_std)
+
+    positions = np.arange(len(labels), dtype=np.float64)
+    offset = 0.12
+    figure, axis = plt.subplots(figsize=(8.4, max(3.8, 0.78 * len(labels) + 1.35)))
+    figure.patch.set_facecolor("white")
+    axis.set_facecolor("white")
+    source_color = "#9BC4D8"
+    post_color = "#16516F"
+    for index, position in enumerate(positions):
+        axis.plot(
+            (source_means[index], post_means[index]),
+            (position - offset, position + offset),
+            color="#A7B0B8",
+            linewidth=1.1,
+            zorder=2,
+        )
+        axis.errorbar(
+            source_means[index],
+            position - offset,
+            xerr=np.asarray([[min(source_std[index], source_means[index])], [min(source_std[index], 1.0 - source_means[index])]]),
+            fmt="o",
+            markersize=5.4,
+            color=source_color,
+            markeredgecolor="#49778E",
+            markeredgewidth=0.75,
+            ecolor="#49778E",
+            elinewidth=1.0,
+            capsize=2.4,
+            capthick=0.9,
+            zorder=3,
+        )
+        axis.errorbar(
+            post_means[index],
+            position + offset,
+            xerr=np.asarray([[min(post_std[index], post_means[index])], [min(post_std[index], 1.0 - post_means[index])]]),
+            fmt="s",
+            markersize=5.0,
+            color=post_color,
+            markeredgecolor="#103E56",
+            markeredgewidth=0.75,
+            ecolor="#103E56",
+            elinewidth=1.0,
+            capsize=2.4,
+            capthick=0.9,
+            zorder=4,
+        )
+
+    axis.set_yticks(positions, labels)
+    for index, tick in enumerate(axis.get_yticklabels()):
+        tick.set_fontweight(
+            "semibold" if include_family_aggregate and index == len(labels) - 1 else "normal"
+        )
+        tick.set_color("#27313D")
+    axis.invert_yaxis()
+    lower, upper = x_limits
+    axis.set_xlim(lower, min(1.035, upper + 0.035))
+    axis.set_xticks(np.arange(lower, upper + 0.025, 0.05).clip(lower, upper))
+    axis.xaxis.set_major_formatter(lambda value, _: f"{value:.0%}")
+    axis.tick_params(axis="both", labelsize=8.8, colors="#56606D", width=0.7, length=3.5)
+    axis.set_xlabel(
+        f"Bounded spectral agreement score (focused {lower:.0%}–{upper:.0%} view)",
+        fontsize=9.5,
+        color="#374151",
+        labelpad=8,
+    )
+    axis.set_title(title, fontsize=12.2, fontweight="semibold", color="#1F2937", loc="left", pad=27)
+    axis.text(0.0, 1.018, subtitle, transform=axis.transAxes, ha="left", va="bottom", fontsize=8.6, color="#66707C")
+    axis.axvline(lower, color="#9AA1AA", linewidth=0.75, zorder=1)
+    axis.axvline(upper, color="#68717D", linewidth=0.85, linestyle=(0, (3, 3)), zorder=1)
+    if include_family_aggregate and len(labels) > 1:
+        axis.axhline(len(labels) - 1.5, color="#D4D8DE", linewidth=0.75, zorder=1)
+    axis.grid(axis="x", color="#E4E7EB", linewidth=0.65)
+    axis.set_axisbelow(True)
+    axis.spines["top"].set_visible(False)
+    axis.spines["right"].set_visible(False)
+    axis.spines["left"].set_visible(False)
+    axis.spines["bottom"].set_color("#9AA1AA")
+    axis.spines["bottom"].set_linewidth(0.75)
+    figure.legend(
+        handles=(
+            Line2D([], [], marker="o", color=source_color, markeredgecolor="#49778E", linestyle="none", label="Source model"),
+            Line2D([], [], marker="s", color=post_color, markeredgecolor="#103E56", linestyle="none", label="Post-training"),
+        ),
+        loc="lower center",
+        bbox_to_anchor=(0.5, 0.025),
+        ncol=2,
+        frameon=False,
+        fontsize=8.4,
+        columnspacing=1.4,
+    )
+    figure.subplots_adjust(left=0.22, right=0.985, top=0.82, bottom=0.24)
+    return _save_publication_figure(figure, output_path, dpi=dpi)
+
+
+def render_cross_spectrum_band_profiles(
+    reference_fraction: np.ndarray,
+    reconstruction_fraction: np.ndarray,
+    band_names: Sequence[str],
+    field_names: Sequence[str],
+    output_path: str | Path,
+    *,
+    reference_std: np.ndarray | None = None,
+    reconstruction_std: np.ndarray | None = None,
+    title: str,
+    subtitle: str,
+    dpi: int = 300,
+) -> Path:
+    """Render matched reference/reconstruction graph-band energy fractions."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.ticker import PercentFormatter
+
+    reference_fraction = np.asarray(reference_fraction, dtype=np.float64)
+    reconstruction_fraction = np.asarray(reconstruction_fraction, dtype=np.float64)
+    band_names = tuple(str(value) for value in band_names)
+    field_names = tuple(str(value) for value in field_names)
+    expected_shape = (len(band_names), len(field_names))
+    if reference_fraction.shape != expected_shape or reconstruction_fraction.shape != expected_shape:
+        raise ValueError("graph-band profiles must align as [band, field]")
+    if not band_names or not field_names or not np.isfinite(reference_fraction).all() or not np.isfinite(reconstruction_fraction).all():
+        raise ValueError("graph-band profiles require finite values and non-empty labels")
+    if np.any(reference_fraction < 0.0) or np.any(reconstruction_fraction < 0.0):
+        raise ValueError("graph-band energy fractions must be non-negative")
+    if not np.allclose(reference_fraction.sum(axis=0), 1.0, atol=1e-5) or not np.allclose(
+        reconstruction_fraction.sum(axis=0), 1.0, atol=1e-5
+    ):
+        raise ValueError("defined graph-band energy fractions must sum to one per field")
+    if reference_std is None:
+        reference_std = np.zeros(expected_shape, dtype=np.float64)
+    else:
+        reference_std = np.asarray(reference_std, dtype=np.float64)
+    if reconstruction_std is None:
+        reconstruction_std = np.zeros(expected_shape, dtype=np.float64)
+    else:
+        reconstruction_std = np.asarray(reconstruction_std, dtype=np.float64)
+    if reference_std.shape != expected_shape or reconstruction_std.shape != expected_shape:
+        raise ValueError("graph-band ensemble spread must align as [band, field]")
+    if not np.isfinite(reference_std).all() or not np.isfinite(reconstruction_std).all() or np.any(reference_std < 0) or np.any(reconstruction_std < 0):
+        raise ValueError("graph-band ensemble spread must be finite and non-negative")
+
+    columns = min(3, len(field_names))
+    rows = int(np.ceil(len(field_names) / columns))
+    figure, axes = plt.subplots(
+        rows,
+        columns,
+        figsize=(3.0 * columns, 2.8 * rows),
+        squeeze=False,
+        sharex=True,
+        sharey=True,
+    )
+    figure.patch.set_facecolor("white")
+    x = np.arange(len(band_names), dtype=np.float64)
+    for field_index, field_name in enumerate(field_names):
+        row, column = divmod(field_index, columns)
+        axis = axes[row, column]
+        axis.set_facecolor("white")
+        axis.errorbar(
+            x,
+            reference_fraction[:, field_index],
+            yerr=reference_std[:, field_index],
+            color="#4B5B6B",
+            marker="o",
+            markersize=4.0,
+            linewidth=1.55,
+            capsize=2.2,
+            elinewidth=0.8,
+            label="Ground truth",
+            zorder=3,
+        )
+        axis.errorbar(
+            x,
+            reconstruction_fraction[:, field_index],
+            yerr=reconstruction_std[:, field_index],
+            color="#28769B",
+            marker="s",
+            markersize=3.8,
+            linewidth=1.55,
+            linestyle="--",
+            capsize=2.2,
+            elinewidth=0.8,
+            label="Reconstruction",
+            zorder=3,
+        )
+        axis.set_title(_publication_label(field_name), loc="left", fontsize=9.4, fontweight="semibold", color="#28333E", pad=7)
+        axis.set_xticks(x, tuple(_publication_label(name) for name in band_names))
+        axis.set_ylim(0.0, 1.0)
+        axis.yaxis.set_major_formatter(PercentFormatter(xmax=1.0, decimals=0))
+        axis.tick_params(axis="both", labelsize=8.2, colors="#58636F", width=0.65, length=3)
+        axis.grid(axis="y", color="#E2E6E9", linewidth=0.6, linestyle="--")
+        axis.set_axisbelow(True)
+        axis.spines["top"].set_visible(False)
+        axis.spines["right"].set_visible(False)
+        axis.spines["left"].set_color("#9AA3AB")
+        axis.spines["bottom"].set_color("#9AA3AB")
+        axis.spines["left"].set_linewidth(0.7)
+        axis.spines["bottom"].set_linewidth(0.7)
+        if column == 0:
+            axis.set_ylabel("Fraction of graph spectral energy", fontsize=8.2, labelpad=5)
+        if row == rows - 1:
+            axis.set_xlabel("Graph spectral band", fontsize=8.2, labelpad=5)
+    for empty_index in range(len(field_names), rows * columns):
+        axes.flat[empty_index].set_visible(False)
+    handles, labels = axes.flat[0].get_legend_handles_labels()
+    figure.legend(
+        handles,
+        labels,
+        loc="lower center",
+        bbox_to_anchor=(0.5, 0.035),
+        ncol=2,
+        frameon=False,
+        fontsize=7.9,
+        handlelength=1.5,
+        columnspacing=0.9,
+    )
+    figure.text(0.01, 0.985, title, ha="left", va="top", fontsize=11.6, fontweight="semibold", color="#1F2937")
+    figure.text(0.01, 0.94, subtitle, ha="left", va="top", fontsize=7.9, color="#66717C")
+    figure.subplots_adjust(left=0.11, right=0.99, top=0.84, bottom=0.20, wspace=0.17, hspace=0.29)
+    return _save_publication_figure(figure, output_path, dpi=dpi)
 
 
 def _padded_finite_range(*values: np.ndarray) -> tuple[float, float]:
@@ -744,9 +1074,7 @@ def render_global_distribution_joint_pdf(
         y=1.025,
         va="bottom",
     )
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    figure.savefig(output_path, dpi=dpi, bbox_inches="tight")
+    output_path = _save_publication_figure(figure, output_path, dpi=dpi)
     plt.close(figure)
     return output_path
 
@@ -1138,7 +1466,7 @@ class GlobalDistributionAccumulator:
             (*self.field_names, "Marginal total", "Family total"),
             (*("detail" for _ in self.field_names), "component_total", "family_total"),
             figures["marginal"],
-            title=f"{run_label} — marginal field-distribution coherence",
+            title="Marginal field distributions",
             subtitle=subtitle,
             scale=scale,
         )
@@ -1157,7 +1485,7 @@ class GlobalDistributionAccumulator:
             (*self.pair_labels, "Pairwise total", "Family total"),
             (*("detail" for _ in self.pair_labels), "component_total", "family_total"),
             figures["pairwise"],
-            title=f"{run_label} — pairwise field-distribution coherence",
+            title="Pairwise field distributions",
             subtitle=subtitle,
             scale=scale,
         )
@@ -1167,7 +1495,7 @@ class GlobalDistributionAccumulator:
             ("Joint/top-tail", "Joint total", "Family total"),
             ("detail", "component_total", "family_total"),
             figures["joint_top_tail"],
-            title=f"{run_label} — joint/top-tail distribution coherence",
+            title="Joint/top-tail distribution",
             subtitle=subtitle,
             scale=scale,
         )
@@ -1206,6 +1534,13 @@ class GlobalDistributionAccumulator:
                 "metrics_csv": csv_path.name,
                 "metrics_payload": payload_path.name,
                 "figures": {name: path.name for name, path in figures.items()},
+                "vector_figures": {
+                    name: {
+                        "pdf": path.with_suffix(".pdf").name,
+                        "svg": path.with_suffix(".svg").name,
+                    }
+                    for name, path in figures.items()
+                },
                 "extra": extra_output,
             },
         }
@@ -1375,9 +1710,40 @@ class CrossSpectrumAccumulator:
 
         used_sample_ids = ordered_sample_ids[:used_sample_count]
         dropped_sample_ids = ordered_sample_ids[used_sample_count:]
+        band_ids = self.family.band_ids.detach().cpu()
+        band_profile_reference_rows = []
+        band_profile_reconstruction_rows = []
+        for ensemble_slice in ensemble_slices:
+            reference_energy = band_energies(reference[ensemble_slice], band_ids)
+            reconstruction_energy = band_energies(generated[ensemble_slice], band_ids)
+            reference_total = reference_energy.sum(dim=1, keepdim=True)
+            reconstruction_total = reconstruction_energy.sum(dim=1, keepdim=True)
+            if torch.any(reference_total <= self.family.eps) or torch.any(
+                reconstruction_total <= self.family.eps
+            ):
+                raise ValueError(
+                    "graph-band energy fractions are undefined for a zero-energy field"
+                )
+            reference_fraction = reference_energy / reference_total
+            reconstruction_fraction = reconstruction_energy / reconstruction_total
+            band_profile_reference_rows.append(reference_fraction.mean(dim=0).numpy())
+            band_profile_reconstruction_rows.append(reconstruction_fraction.mean(dim=0).numpy())
+        band_profile_reference_by_ensemble = np.stack(band_profile_reference_rows)
+        band_profile_reconstruction_by_ensemble = np.stack(band_profile_reconstruction_rows)
+        band_profile_reference_mean = band_profile_reference_by_ensemble.mean(axis=0)
+        band_profile_reconstruction_mean = band_profile_reconstruction_by_ensemble.mean(axis=0)
+        band_profile_reference_std = (
+            band_profile_reference_by_ensemble.std(axis=0, ddof=1)
+            if ensemble_count > 1
+            else np.zeros_like(band_profile_reference_mean)
+        )
+        band_profile_reconstruction_std = (
+            band_profile_reconstruction_by_ensemble.std(axis=0, ddof=1)
+            if ensemble_count > 1
+            else np.zeros_like(band_profile_reconstruction_mean)
+        )
         absolute_lists: dict[str, list[np.ndarray]] = {}
         score_lists: dict[str, list[np.ndarray]] = {}
-        band_ids = self.family.band_ids.detach().cpu()
         for ensemble_slice in ensemble_slices:
             ensemble_generated = generated[ensemble_slice]
             ensemble_reference = reference[ensemble_slice]
@@ -1590,6 +1956,13 @@ class CrossSpectrumAccumulator:
             band_energy_coherence_score_by_ensemble=scores_by_ensemble.get(
                 "band_energy", np.empty((ensemble_count, 0))
             ),
+            graph_band_names=np.asarray(self.family.band_names),
+            graph_band_energy_fraction_reference_by_ensemble=band_profile_reference_by_ensemble,
+            graph_band_energy_fraction_reconstruction_by_ensemble=band_profile_reconstruction_by_ensemble,
+            graph_band_energy_fraction_reference_mean=band_profile_reference_mean,
+            graph_band_energy_fraction_reference_std=band_profile_reference_std,
+            graph_band_energy_fraction_reconstruction_mean=band_profile_reconstruction_mean,
+            graph_band_energy_fraction_reconstruction_std=band_profile_reconstruction_std,
             component_absolute_totals=np.asarray(
                 [component_absolute_totals[key] for key in component_absolute_totals]
             ),
@@ -1680,7 +2053,7 @@ class CrossSpectrumAccumulator:
             ensemble_summary = f"one pooled ensemble · n={used_sample_count}"
             estimate_summary = "single pooled estimate"
         subtitle = (
-            f"{run_label} · {split} · {checkpoint_label}.pt · {ensemble_summary} · "
+            f"{split} · {checkpoint_label}.pt · {ensemble_summary} · "
             f"{self.query_indices.numel():,} graph points · {estimate_summary}"
         )
         definitions = {
@@ -1728,6 +2101,44 @@ class CrossSpectrumAccumulator:
                 ),
             )
 
+        figures["band_energy_profile"] = destination / "spectral_band_profiles.png"
+        render_cross_spectrum_band_profiles(
+            band_profile_reference_mean,
+            band_profile_reconstruction_mean,
+            self.family.band_names,
+            self.family.field_names,
+            figures["band_energy_profile"],
+            reference_std=band_profile_reference_std,
+            reconstruction_std=band_profile_reconstruction_std,
+            title="Graph spectral energy across bands",
+            subtitle=f"{subtitle} · per-snapshot energy fractions normalized by field",
+        )
+        band_profile_csv = destination / "band_energy_profile.csv"
+        with band_profile_csv.open("w", encoding="utf-8", newline="") as stream:
+            writer = csv.writer(stream)
+            writer.writerow(
+                (
+                    "field",
+                    "band",
+                    "reference_energy_fraction_mean",
+                    "reference_energy_fraction_ensemble_sd",
+                    "reconstruction_energy_fraction_mean",
+                    "reconstruction_energy_fraction_ensemble_sd",
+                )
+            )
+            for field_index, field_name in enumerate(self.family.field_names):
+                for band_index, band_name in enumerate(self.family.band_names):
+                    writer.writerow(
+                        (
+                            field_name,
+                            band_name,
+                            band_profile_reference_mean[band_index, field_index],
+                            band_profile_reference_std[band_index, field_index],
+                            band_profile_reconstruction_mean[band_index, field_index],
+                            band_profile_reconstruction_std[band_index, field_index],
+                        )
+                    )
+
         statistics = {
             key: {
                 "sub_terms": {
@@ -1751,6 +2162,26 @@ class CrossSpectrumAccumulator:
             "weighted_absolute_discrepancy_std": family_absolute_std,
             "coherence_score": family_score,
             "coherence_score_std": family_score_std,
+        }
+        statistics["graph_band_energy_profile"] = {
+            field_name: {
+                band_name: {
+                    "reference_fraction_mean": float(
+                        band_profile_reference_mean[band_index, field_index]
+                    ),
+                    "reference_fraction_ensemble_sd": float(
+                        band_profile_reference_std[band_index, field_index]
+                    ),
+                    "reconstruction_fraction_mean": float(
+                        band_profile_reconstruction_mean[band_index, field_index]
+                    ),
+                    "reconstruction_fraction_ensemble_sd": float(
+                        band_profile_reconstruction_std[band_index, field_index]
+                    ),
+                }
+                for band_index, band_name in enumerate(self.family.band_names)
+            }
+            for field_index, field_name in enumerate(self.family.field_names)
         }
         report = {
             "family": "cross_spectrum",
@@ -1776,6 +2207,11 @@ class CrossSpectrumAccumulator:
                 "definition": "1 - ||S_reconstruction - S_ground_truth||_2 / "
                 "max(||S_reconstruction||_2 + ||S_ground_truth||_2, epsilon)",
                 "absolute_discrepancy": "mean squared spectral difference",
+            },
+            "graph_band_energy_profile": {
+                "definition": "per-snapshot graph Fourier energy summed within each configured eigenvalue band, normalized to a fraction per field, then averaged within the selected ensemble",
+                "bands": list(self.family.band_names),
+                "uncertainty": "mean and sample standard deviation across ensembles; zero spread for one pooled ensemble",
             },
             "split": split,
             "selected_sample_count": selected_sample_count,
@@ -1836,6 +2272,14 @@ class CrossSpectrumAccumulator:
                 "metrics_csv": csv_path.name,
                 "metrics_payload": payload_path.name,
                 "figures": {name: path.name for name, path in figures.items()},
+                "vector_figures": {
+                    name: {
+                        "pdf": path.with_suffix(".pdf").name,
+                        "svg": path.with_suffix(".svg").name,
+                    }
+                    for name, path in figures.items()
+                },
+                "band_energy_profile_csv": band_profile_csv.name,
             },
         }
         report_path = destination / "report.json"
@@ -1846,6 +2290,7 @@ class CrossSpectrumAccumulator:
             "family": "cross_spectrum",
             "directory": str(destination),
             "report": str(report_path),
+            "band_energy_profile_csv": str(band_profile_csv),
             "figures": {name: str(path) for name, path in figures.items()},
         }
 
@@ -1873,9 +2318,11 @@ def build_coherence_accumulators(
                 extra_view=extra_views,
                 evaluated_sample_count=evaluated_sample_count,
             )
-        else:
+        elif name == "cross_spectrum":
             accumulators[name] = CrossSpectrumAccumulator.build(
                 runtime,
                 aggregation=cross_spectrum_aggregation,
             )
+        else:
+            accumulators[name] = TopologySetAccumulator.build(runtime)
     return accumulators

@@ -1,0 +1,32 @@
+{
+  "description": "post_training:gl_rbf_cq",
+  "figures": [
+    "loss_history.png",
+    "optimization_diagnostics.png",
+    "coherence_history.png",
+    "checkpoint_fidelity.png"
+  ],
+  "last_included_epoch": 1440.0,
+  "last_included_step": 54720,
+  "resolved_config_sha256": "3fd77525df2a43a1d65721b03517dc1a265dc01953e449865e5a3d1d65d3999b",
+  "run_id": "20260924T030724Z_4208231c",
+  "selected_candidate_epoch": 1300.0,
+  "selected_candidate_step": 49400,
+  "snapshot_created_utc": "2026-09-25T00:14:52+00:00",
+  "snapshot_rows": {
+    "history": 1440,
+    "topology_validation": 289,
+    "validation_history": 288
+  },
+  "source_history_sha256": "9fd49f2225769f6e74f48e4c2f8ee85e046eef6d326a24686d738d95eaac87b5",
+  "source_rows": {
+    "history": 1440,
+    "topology_validation": 289,
+    "validation_history": 288
+  },
+  "source_run_dir": "/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/runs/coherence_fix_ABC_sliced_persistence_formal_5000ep_gpu1/20260924T030724Z_4208231c",
+  "source_topology_validation_sha256": "3199cae9f974dc5f7cf96b3e77936d00258019bb32d2ab87339f52cf68c89afa",
+  "source_validation_history_sha256": "140fde04a01ba2803a73dc9c31713fe4c5ca6fa649ddee84ecedf659363f0516",
+  "steps_per_epoch": 38,
+  "through_epoch": 1440
+}
