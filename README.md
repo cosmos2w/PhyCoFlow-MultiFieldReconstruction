@@ -290,17 +290,21 @@ Each run stores the resolved config, checkpoints, metrics, provenance, histories
 
 ### 5.4 Model-specific examples
 
-The MIMONet turbulent-combustion profile uses the released 256-dimensional basis, multiplicative branch fusion, ReLU fully connected networks, and all five dataset outputs. Its input information budget is fixed at 256 temperature values and their 256 locations; no other observed field or operating condition enters the model. The profile uses 4,096 training queries and 5,000 epochs. The repository trainer uses AdamW with a fixed learning rate of $10^{-4}$ and weight decay $10^{-6}$; this follows the other repository base profiles and differs from the separate demo wrapper's Adam plus cosine schedule:
+The MIMONet turbulent-combustion profile instantiates the [released branch--trunk operator](https://zenodo.org/records/21986357) with two ReLU FCN branches: one receives temperature values and validity bits, and the other receives the paired two-dimensional sensor locations and validity bits. Their 256-dimensional outputs multiply elementwise. A query-coordinate trunk supplies a separate 256-term basis for each of the five output fields. This is the local combustion adaptation of the general MIMONet class; the paper's lid-driven-cavity example uses one branch and three outputs. The maintained profile fixes the input at **256 T sensors per training sample**, sorts their slots by canonical point index, uses 4,096 training queries, and configures 5,000 epochs. No other measured field or operating condition enters the branches. The repository trainer uses AdamW at a fixed $10^{-4}$ learning rate with $10^{-6}$ weight decay and clip norm 1:
 
 ```bash
 python cases/turbulent_combustion/run.py validate \
   --config configs/base/mimonet_5000ep.yaml
 python cases/turbulent_combustion/run.py train-base \
   --config configs/base/mimonet_5000ep.yaml \
-  --override runtime.device=cuda:1
+  --override runtime.device=cuda:0
 ```
 
-The architecture keeps MIMONet's 256-dimensional internal basis. That dimension is model-specific; the matched comparison input budget is the same 256 temperature measurements and locations. Check the resolved sensor profile of every other run before treating its information budget as identical.
+The branch widths are 512 and the trunk width is 256, with three ReLU hidden layers in each FCN. The active two-dimensional coordinates and fixed 256-slot capacity give 2,430,981 trainable parameters. The shared 256-dimensional basis is an architectural choice, not a parameter-count matching target. The intended comparison budget is 256 T values with their locations; check each other run's resolved sensor profile before claiming that budget is matched. See [ModelExplain.md](ModelExplain.md#34-mimonet-operator) for the exact packing and contraction equations.
+
+The earlier `tc_mimonet_5000ep/20260926T043014Z_0cda7ef7` run used the historical input-slot order: random sensor selection gave random positions to a position-sensitive FCN. Its resolved config has no `model.sensor_order` key, so old checkpoints retain that behavior. The current template uses `point_index` order and writes to a new experiment directory; the earlier run is a historical random-slot-order run, not the corrected baseline.
+
+The local `0_demo_TurbulentCombustion` Cond_T run has a different training contract. It trains with **192--384** T sensors and a 384-slot branch, using exactly 256 only in fixed reconstruction diagnostics. It sorts slots by the stored point index, includes the constant third coordinate, trains on a random 9,000-frame split with Adam and cosine annealing, and averages validation loss over all 1,000 random holdouts. This repository trains on the chronological first 8,000 frames; its training-preview validation curve is one fixed later frame, evaluated every ten epochs. The two loss curves therefore cannot be interpreted as a controlled model comparison. Field normalization is mean/std in both runs, but each uses statistics from its own training split.
 
 The tracked Senseiver example below shows the total training objective and fixed-validation loss over a completed 5,000-epoch turbulent-combustion base run. Each run writes its current `loss_history.png` at the run root.
 

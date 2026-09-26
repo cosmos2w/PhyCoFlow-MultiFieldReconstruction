@@ -1,4 +1,4 @@
-# Reusable MIMONet architecture defaults, following the released combustion setup.
+# Released MIMONet FCN widths and basis, adapted to the combustion inputs.
 
 model:
   name: mimonet
@@ -6,3 +6,4 @@ model:
   branch_hidden_dim: 512
   trunk_hidden_dim: 256
   merge_type: mul
+  sensor_order: point_index

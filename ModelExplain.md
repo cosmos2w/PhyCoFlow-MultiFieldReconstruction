@@ -15,8 +15,9 @@ This document describes the mathematical contract implemented by `phycoflow_reco
   - [3.1 Coordinate MLP](#31-coordinate-mlp)
   - [3.2 MLP-RBF](#32-mlp-rbf)
   - [3.3 Sparse DeepONet](#33-sparse-deeponet)
-  - [3.4 Senseiver regressor](#34-senseiver-regressor)
-  - [3.5 GeoFNO regressor](#35-geofno-regressor)
+  - [3.4 MIMONet operator](#34-mimonet-operator)
+  - [3.5 Senseiver regressor](#35-senseiver-regressor)
+  - [3.6 GeoFNO regressor](#36-geofno-regressor)
 - [4. Generative and flow reconstruction models](#4-generative-and-flow-reconstruction-models)
   - [4.1 Conditional DiffusionPDE model](#41-conditional-diffusionpde-model)
   - [4.2 Two-stage latent flow matching](#42-two-stage-latent-flow-matching)
@@ -55,6 +56,7 @@ Configuration has three layers. Shared architecture defaults live in [`configs/m
 | `coordinate_mlp` | [`deterministic/coordinate_mlp.py`](src/phycoflow_reconstruction/models/deterministic/coordinate_mlp.py) | masked field MSE | direct point prediction |
 | `mlp_rbf` | [`deterministic/mlp_rbf.py`](src/phycoflow_reconstruction/models/deterministic/mlp_rbf.py) | masked field MSE | direct point prediction with local RBF features |
 | `deeponet` | [`deterministic/deeponet.py`](src/phycoflow_reconstruction/models/deterministic/deeponet.py) | masked field MSE | sparse branch and coordinate trunk |
+| `mimonet` | [`operators/mimonet.py`](src/phycoflow_reconstruction/models/operators/mimonet.py) | masked field MSE | fixed sensor slots, fused value/location branches, coordinate trunk |
 | `senseiver` | [`deterministic/senseiver.py`](src/phycoflow_reconstruction/models/deterministic/senseiver.py) | masked field MSE | latent cross-attention |
 | `geofno` | [`operators/geofno.py`](src/phycoflow_reconstruction/models/operators/geofno.py) | masked field MSE | rasterized values and masks on a complete grid |
 | `diffusion_pde` | [`generative/diffusion_pde.py`](src/phycoflow_reconstruction/models/generative/diffusion_pde.py) | noise-prediction MSE | differentiable DDIM-style reconstruction |
@@ -67,13 +69,14 @@ The historical Demo50 adapter is deliberately isolated in [`models/compatibility
 
 ### 0.2 Canonical model settings
 
-The following is a compact snapshot of the maintained fragments in `configs/models/` as of 2026-08-28. Case files can override these values.
+The following is a compact snapshot of the maintained fragments in `configs/models/` as of 2026-09-26. Case files can override these values.
 
 | Model fragment | Current architecture settings |
 |---|---|
 | `coordinate_mlp` | hidden width 128; 16 Fourier bands; 4096 query points |
 | `mlp_rbf` | hidden width 128; RBF sigma 0.08; 16 Fourier bands; 4096 query points |
 | `deeponet` | width 128; basis dimension 64; 4096 query points |
+| `mimonet` | basis dimension 256; three 512-wide ReLU branch hidden layers; three 256-wide ReLU trunk hidden layers; multiplicative branch merge; canonical point-index sensor ordering for new runs |
 | `senseiver` | width 128; 64 latents; 4 heads; depth 3; 4096 query points |
 | `geofno` | 32 hidden channels; modes `[16,16]`; 4 layers |
 | `diffusion_pde` | conditional U-Net; base width 64; multipliers `[1,2,4,8]`; 2 residual blocks/level; attention at levels 2–3 with 4 heads; time embedding 256; 1000 diffusion training steps (legacy `plain_cnn` optional) |
@@ -348,7 +351,37 @@ Current drawbacks:
 - The fixed basis dimension $P$ imposes a low-rank bottleneck that may underrepresent sharp or multiscale fields.
 - All output fields share the same pooled observation set, and the model does not enforce observations exactly.
 
-### 3.4 Senseiver regressor
+### 3.4 MIMONet operator
+
+The [released MIMONet class](https://zenodo.org/records/21986357) accepts a list of fully connected branches, merges their $P$-dimensional outputs, and contracts the result with a query-coordinate trunk. Its published lid-driven-cavity example uses **one** branch and three outputs. The local turbulent-combustion demo and this adapter instantiate that general design with **two** branches, one for temperature values and one for sensor locations, and five output fields. Thus the combustion input construction is a task adaptation, while the ReLU FCN blocks, branch fusion, trunk reshape, contraction, and learned field bias follow the released class. The paper is [Kobayashi et al., *Nature Communications* (2026)](https://doi.org/10.1038/s41467-026-77463-7).
+
+For the maintained [`mimonet_5000ep.yaml`](cases/turbulent_combustion/configs/base/mimonet_5000ep.yaml) profile, $M=256$ valid temperature sensors have normalized values $y_{bm}$ and normalized two-dimensional coordinates $\mathbf r_{bm}$. Each branch slot includes a validity bit $v_{bm}$, so padding differs from a measured zero. Within the declared field, the current template orders slots by ascending canonical point index before flattening; this restores a consistent slot order to the positional FCNs. Historical configs without `model.sensor_order` retain their input order for checkpoint compatibility.
+
+$$
+\mathbf u_b=\operatorname{flatten}([v_{bm}y_{bm},v_{bm}]_{m=1}^{M}),
+\qquad
+\mathbf g_b=\operatorname{flatten}([v_{bm}\mathbf r_{bm},v_{bm}]_{m=1}^{M}),
+$$
+
+$$
+\mathbf h_b=\operatorname{Branch}_{\rm value}(\mathbf u_b)
+\odot\operatorname{Branch}_{\rm location}(\mathbf g_b),
+\qquad
+\widehat X_{bqc}=\sum_{p=1}^{P}h_{bp}
+\operatorname{Trunk}(\mathbf q_{bq})_{pc}+a_c.
+$$
+
+Here $P=256$, $C=5$, and the trunk sees query coordinates only. The value branch has layer widths `[512,512,512,512,256]`; the location branch has `[768,512,512,512,256]`; the trunk has `[2,256,256,256,1280]`. Each FCN has three ReLU hidden layers and a linear output. The two-dimensional case omits the stored constant $z$ coordinate, giving 2,430,981 trainable parameters. No other measured field, operating condition, or dense target enters either branch. The same 256-dimensional shared branch vector decodes all five fields; its width is not forced to equal another model's parameter count.
+
+The repo trains this deterministic model with masked normalized MSE, 4,096 random query points per update, batch size 128, AdamW at fixed learning rate $10^{-4}$ and weight decay $10^{-6}$, gradient clipping at 1, and a configured 5,000 epochs. It uses the case's chronological 8,000/1,000/1,000 train/validation/test frames and training-only mean/std normalization. The training preview plots one fixed validation snapshot every ten epochs. The local demo run used 192--384 T sensors during training (256 only for fixed diagnostics), sorted them by its stored point index, used the stored three-dimensional coordinates with constant $z$, a random 9,000/1,000 train/validation split, and Adam with cosine annealing. Its validation loss averages all 1,000 held-out snapshots. Those curves therefore measure different data and input protocols. The earlier repo run whose resolved config lacks `sensor_order` also used random slot order; its checkpoint must be interpreted with that historical behavior.
+
+Current drawbacks:
+
+- The fixed branch input capacity and positional FCNs require a consistent sensor-slot convention; changing `sensor_order` changes model semantics even though checkpoint tensor shapes are unchanged.
+- A single $P$-dimensional vector carries every sensor and is shared across all output fields. The model has no exact sensor interpolation, uncertainty head, or spatially local query interaction.
+- Masked MSE alone does not enforce conservation laws or physical constraints; post-training must supply those objectives separately.
+
+### 3.5 Senseiver regressor
 
 Sensor tokens are embedded as
 
@@ -384,7 +417,7 @@ Current drawbacks:
 - Output attention costs $\mathcal O(BQL)$ for $L$ latents, and the current Senseiver implementation does not chunk large query sets.
 - The compact architecture has no explicit local interpolation branch or exact sensor constraint.
 
-### 3.5 GeoFNO regressor
+### 3.6 GeoFNO regressor
 
 GeoFNO receives the regular-grid tensor
 

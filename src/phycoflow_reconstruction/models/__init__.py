@@ -174,6 +174,7 @@ def build_model(config: Mapping[str, Any], data_spec: DataSpec, physics_provider
             "branch_hidden_dim",
             "trunk_hidden_dim",
             "merge_type",
+            "sensor_order",
         },
         "diffusion_pde": {
             "backbone",

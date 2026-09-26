@@ -1,10 +1,10 @@
 """MIMONet branch--trunk operator adapted to the shared observation contract.
 
-The released model uses one FCN for measured values, one for their locations,
-a multiplicative merge of the two branch vectors, and a coordinate FCN whose
-output is contracted with that shared vector for every requested field.  This
-adapter keeps that computation and supplies fixed, field-specific sensor slots
-from :class:`ObservationBatch` without reading target fields.
+The released class accepts a list of FCN branches and a coordinate FCN whose
+output is contracted with their merged vector.  The combustion adaptation
+uses separate value and location branches with multiplicative fusion.  This
+adapter supplies fixed, field-specific sensor slots from
+:class:`ObservationBatch` without reading target fields.
 """
 
 from __future__ import annotations
@@ -42,10 +42,11 @@ class MIMONetOperator(BaseReconstructionModel):
 
     ``conditioning_fields`` declares exactly which measured fields may enter
     the branches. ``sensor_capacities`` defines a fixed segment for each field;
-    valid observations retain their within-field order and unused slots carry
-    a zero value, zero coordinate, and zero validity flag. The trunk sees only
-    the query coordinates. The five combustion outputs, for example, all share
-    the same 256-dimensional branch vector when ``basis_dim=256``.
+    valid observations retain their within-field input order by default, or
+    are sorted by point index when ``sensor_order="point_index"``. Unused slots
+    carry a zero value, zero coordinate, and zero validity flag. The trunk sees
+    only the query coordinates. The five combustion outputs, for example, all
+    share the same 256-dimensional branch vector when ``basis_dim=256``.
     """
 
     capabilities = ModelCapabilities(
@@ -63,6 +64,7 @@ class MIMONetOperator(BaseReconstructionModel):
         branch_hidden_dim: int = 512,
         trunk_hidden_dim: int = 256,
         merge_type: str = "mul",
+        sensor_order: str = "input",
     ) -> None:
         super().__init__()
         if coordinate_dim < 1 or num_fields < 1:
@@ -81,6 +83,8 @@ class MIMONetOperator(BaseReconstructionModel):
             raise ValueError("MIMONet network dimensions must be positive")
         if merge_type not in {"mul", "sum"}:
             raise ValueError("merge_type must be 'mul' or 'sum'")
+        if sensor_order not in {"input", "point_index"}:
+            raise ValueError("sensor_order must be 'input' or 'point_index'")
 
         self.num_fields = num_fields
         self.coordinate_dim = coordinate_dim
@@ -89,9 +93,10 @@ class MIMONetOperator(BaseReconstructionModel):
         self.max_sensors = sum(self.sensor_capacities)
         self.basis_dim = int(basis_dim)
         self.merge_type = merge_type
+        self.sensor_order = sensor_order
 
-        # Keep the released parameter/module structure for the two FCN branches,
-        # the FCN trunk, and one learned bias per output field.
+        # Use the released FCN/module structure with two combustion branches,
+        # a coordinate trunk, and one learned bias per output field.
         self.branch_nets = nn.ModuleList(
             (
                 _FCN(2 * self.max_sensors, branch_hidden_dim, basis_dim),
@@ -107,6 +112,8 @@ class MIMONetOperator(BaseReconstructionModel):
             raise ValueError("observation coordinates have the wrong dimension")
         if batch.query_coords.shape[-1] != self.coordinate_dim:
             raise ValueError("query coordinates have the wrong dimension")
+        if self.sensor_order == "point_index" and batch.obs_indices is None:
+            raise ValueError("sensor_order='point_index' requires obs_indices")
         allowed = torch.zeros_like(batch.obs_valid_mask)
         for field_id in self.conditioning_field_ids:
             allowed |= batch.obs_field_ids == field_id
@@ -125,9 +132,22 @@ class MIMONetOperator(BaseReconstructionModel):
             if bool((counts > capacity).any()):
                 raise ValueError(f"conditioning field {field_id} exceeds its sensor capacity")
             take = min(capacity, observed)
-            # Sort valid entries first while retaining their original order.
-            positions = torch.arange(observed, device=matches.device).expand(batch_size, -1)
-            order = torch.argsort((~matches).long() * observed + positions, dim=1)[:, :take]
+            if self.sensor_order == "input":
+                # Preserve the historical packing order for old configs/checkpoints.
+                positions = torch.arange(observed, device=matches.device).expand(batch_size, -1)
+                order = torch.argsort((~matches).long() * observed + positions, dim=1)[
+                    :, :take
+                ]
+            else:
+                # Stable lexicographic order: matching observations first, then
+                # ascending point index within each field. Duplicate indices
+                # retain their input order.
+                point_order = torch.argsort(batch.obs_indices, dim=1, stable=True)
+                point_matches = matches.gather(1, point_order)
+                valid_order = torch.argsort(
+                    (~point_matches).long(), dim=1, stable=True
+                )
+                order = point_order.gather(1, valid_order)[:, :take]
             valid = torch.arange(take, device=matches.device)[None, :] < counts[:, None]
             packed_valid[:, start : start + take] = valid
             packed_values[:, start : start + take] = batch.obs_values.gather(

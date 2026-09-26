@@ -1217,6 +1217,8 @@ def validate_config(config: Mapping[str, Any]) -> None:
                 raise ValueError(f"mimonet {key} must be positive")
         if model.get("merge_type", "mul") not in {"mul", "sum"}:
             raise ValueError("mimonet merge_type must be mul or sum")
+        if model.get("sensor_order", "input") not in {"input", "point_index"}:
+            raise ValueError("mimonet sensor_order must be input or point_index")
     elif model_name == "pointcloud_ffm":
         backbone = model.get("backbone", "gl_rbf_enh")
         if backbone not in {"gl_rbf_enh", "fno"}:

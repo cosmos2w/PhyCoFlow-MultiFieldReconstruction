@@ -11,6 +11,7 @@ stage: base_training
 case: turbulent_combustion
 
 # The two MIMONet branches receive exactly 256 T values and their locations.
+# Canonical point-index packing is supplied by configs/models/mimonet.yaml.
 # No other observed field or condition is passed to the model.
 model:
   conditioning_fields: [T]
@@ -65,4 +66,4 @@ benchmark_telemetry:
   sample_steps: 5
 
 output:
-  experiment_name: tc_mimonet_5000ep
+  experiment_name: tc_mimonet_point_index_256t_5000ep_gpu0

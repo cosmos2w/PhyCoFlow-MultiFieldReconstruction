@@ -16,19 +16,19 @@ The canonical loader verifies 403 unique x positions, 100 unique y positions, on
 
 ## MIMONet baseline
 
-`configs/base/mimonet_5000ep.yaml` adds the released MIMONet branch--trunk operator as a five-field deterministic baseline. It uses exactly 256 random temperature sensors: the value and location of each sensor enter the two branches, while the trunk receives query coordinates and predicts all five fields. The released 256-dimensional basis, multiplicative fusion, ReLU activations, 512-wide branch layers, and 256-wide trunk layers are retained. Its configured training and validation query count is 4,096. The repository trainer uses AdamW at a fixed $10^{-4}$ learning rate with $10^{-6}$ weight decay; it does not use the demo wrapper's Adam plus cosine schedule.
+`configs/base/mimonet_5000ep.yaml` adapts the released MIMONet branch--trunk class as a five-field deterministic baseline. It uses exactly 256 random temperature sensors and sorts their slots by canonical point index before the value and location branches; the trunk receives query coordinates and predicts all five fields. The 256-dimensional basis, multiplicative fusion, ReLU activations, 512-wide branch layers, and 256-wide trunk layers are retained from the local combustion demo. Its configured training and preview query count is 4,096. The repository trainer uses AdamW at a fixed $10^{-4}$ learning rate with $10^{-6}$ weight decay; it does not use the demo wrapper's Adam plus cosine schedule. The previous `tc_mimonet_5000ep/20260926T043014Z_0cda7ef7` run retained random input-slot order and is a historical run with a different input representation.
 
-The 256-sensor input is the specified information budget for this profile. Existing baseline configs should be checked individually before claiming a matched sensor budget, because some use a 192--384 sensor range. Dataset and normalization assets remain local and are configured through the existing case contract.
+The 256-sensor input is the specified information budget for this profile. Existing baseline configs should be checked individually before claiming a matched sensor budget, because some use a 192--384 sensor range. The local demo MIMONet also trained with 192--384 T sensors; it used exactly 256 only for fixed diagnostics and evaluated a different random train/validation split. Dataset and normalization assets remain local and are configured through the existing case contract.
 
 ```bash
 python cases/turbulent_combustion/run.py validate \
   --config configs/base/mimonet_5000ep.yaml
 python cases/turbulent_combustion/run.py train-base \
   --config configs/base/mimonet_5000ep.yaml \
-  --override runtime.device=cuda:1
+  --override runtime.device=cuda:0
 ```
 
-The architecture and source citation are documented in [docs/models.md](../../docs/models.md#34-mimonet-sparse-input-operator); its paper is Kobayashi et al., *Nature Communications* (2026), [10.1038/s41467-026-77463-7](https://doi.org/10.1038/s41467-026-77463-7), with code release [10.5281/zenodo.21986357](https://doi.org/10.5281/zenodo.21986357).
+The architecture and source citation are documented in [ModelExplain.md](../../ModelExplain.md#34-mimonet-operator); its paper is Kobayashi et al., *Nature Communications* (2026), [10.1038/s41467-026-77463-7](https://doi.org/10.1038/s41467-026-77463-7), with code release [10.5281/zenodo.21986357](https://doi.org/10.5281/zenodo.21986357).
 
 ## Sliced-persistence readiness profiles
 

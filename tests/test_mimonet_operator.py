@@ -11,7 +11,9 @@ from phycoflow_reconstruction.training.rollout import differentiable_reconstruct
 FIELD_NAMES = ("a", "b", "c")
 
 
-def _model(*, conditioning_fields=("b", "a"), sensor_capacities=(2, 2)):
+def _model(
+    *, conditioning_fields=("b", "a"), sensor_capacities=(2, 2), sensor_order=None
+):
     spec = DataSpec(
         field_names=FIELD_NAMES,
         field_units=("1", "1", "1"),
@@ -19,18 +21,18 @@ def _model(*, conditioning_fields=("b", "a"), sensor_capacities=(2, 2)):
         logical_shape=(2, 3),
         mesh_type="point",
     )
-    return build_model(
-        {
-            "name": "mimonet",
-            "conditioning_fields": list(conditioning_fields),
-            "sensor_capacities": list(sensor_capacities),
-            "basis_dim": 4,
-            "branch_hidden_dim": 8,
-            "trunk_hidden_dim": 7,
-            "merge_type": "mul",
-        },
-        spec,
-    )
+    config = {
+        "name": "mimonet",
+        "conditioning_fields": list(conditioning_fields),
+        "sensor_capacities": list(sensor_capacities),
+        "basis_dim": 4,
+        "branch_hidden_dim": 8,
+        "trunk_hidden_dim": 7,
+        "merge_type": "mul",
+    }
+    if sensor_order is not None:
+        config["sensor_order"] = sensor_order
+    return build_model(config, spec)
 
 
 def _batch(
@@ -39,6 +41,7 @@ def _batch(
     obs_values=None,
     obs_field_ids=None,
     obs_valid_mask=None,
+    obs_indices=None,
     query_coords=None,
     target_fields="default",
 ):
@@ -69,6 +72,7 @@ def _batch(
         obs_values=obs_values,
         obs_field_ids=obs_field_ids,
         obs_valid_mask=obs_valid_mask,
+        obs_indices=obs_indices,
         query_coords=query_coords,
         query_valid_mask=torch.ones(query_coords.shape[:2], dtype=torch.bool),
         target_fields=target_fields,
@@ -150,6 +154,69 @@ def test_sensor_slots_follow_field_order_pad_and_ignore_invalid_entries():
     torch.testing.assert_close(changed_location_input, expected_locations)
 
 
+def test_default_sensor_order_preserves_input_order():
+    # Omit sensor_order to exercise the backward-compatible constructor default.
+    model = _model()
+    batch = _batch(
+        obs_values=torch.tensor([[[10.0], [20.0], [30.0], [40.0]]]),
+        obs_indices=torch.tensor([[9, 8, 2, 1]]),
+    )
+
+    value_input, location_input = model._packed_branches(batch)
+    torch.testing.assert_close(
+        value_input,
+        torch.tensor([[20.0, 1.0, 40.0, 1.0, 10.0, 1.0, 30.0, 1.0]]),
+    )
+    torch.testing.assert_close(
+        location_input,
+        torch.tensor(
+            [[0.3, 0.4, 1.0, 0.7, 0.8, 1.0, 0.1, 0.2, 1.0, 0.5, 0.6, 1.0]]
+        ),
+    )
+
+
+def test_point_index_sensor_order_sorts_within_each_field_and_requires_indices():
+    model = _model(sensor_order="point_index")
+    batch = _batch(
+        obs_values=torch.tensor([[[10.0], [20.0], [30.0], [40.0]]]),
+        obs_indices=torch.tensor([[9, 8, 2, 1]]),
+    )
+
+    value_input, location_input = model._packed_branches(batch)
+    torch.testing.assert_close(
+        value_input,
+        torch.tensor([[40.0, 1.0, 20.0, 1.0, 30.0, 1.0, 10.0, 1.0]]),
+    )
+    torch.testing.assert_close(
+        location_input,
+        torch.tensor(
+            [[0.7, 0.8, 1.0, 0.3, 0.4, 1.0, 0.5, 0.6, 1.0, 0.1, 0.2, 1.0]]
+        ),
+    )
+
+    with pytest.raises(ValueError, match="sensor_order='point_index' requires obs_indices"):
+        model._packed_branches(_batch())
+
+
+def test_point_index_order_is_invariant_to_observation_permutation():
+    model = _model(sensor_order="point_index").eval()
+    original = _batch(
+        obs_indices=torch.tensor([[9, 8, 2, 1]]), target_fields=None
+    )
+    permutation = torch.tensor([3, 0, 2, 1])
+    shuffled = _batch(
+        obs_coords=original.obs_coords[:, permutation],
+        obs_values=original.obs_values[:, permutation],
+        obs_field_ids=original.obs_field_ids[:, permutation],
+        obs_valid_mask=original.obs_valid_mask[:, permutation],
+        obs_indices=original.obs_indices[:, permutation],
+        query_coords=original.query_coords,
+        target_fields=None,
+    )
+
+    torch.testing.assert_close(model.forward_batch(original), model.forward_batch(shuffled))
+
+
 def test_undeclared_valid_field_and_sensor_capacity_overflow_are_rejected():
     model = _model(conditioning_fields=("a",), sensor_capacities=(1,))
     undeclared = _batch(
@@ -174,6 +241,13 @@ def test_undeclared_valid_field_and_sensor_capacity_overflow_are_rejected():
 def test_config_requires_matching_condition_fields_and_sufficient_capacities():
     config = _training_config()
     validate_config(config)
+
+    config["model"]["sensor_order"] = "point_index"
+    validate_config(config)
+    config["model"]["sensor_order"] = "invalid"
+    with pytest.raises(ValueError, match="mimonet sensor_order must be input or point_index"):
+        validate_config(config)
+    del config["model"]["sensor_order"]
 
     config["observations"]["fields"]["c"] = {"count": 1}
     with pytest.raises(ValueError, match="observations must match conditioning_fields exactly"):
