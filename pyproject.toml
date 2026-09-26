@@ -41,6 +41,9 @@ phycoflow-reconstruct = "phycoflow_reconstruction.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"phycoflow_reconstruction.models.operators" = ["MIMONET_UPSTREAM_LICENSE.txt", "MIMONET_UPSTREAM.md"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"

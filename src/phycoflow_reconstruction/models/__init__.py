@@ -16,7 +16,7 @@ from .deterministic import (
 )
 from .flows import GLRbfCQ, PointCloudFFM
 from .generative import DiffusionPDEModel, LatentFlowModel
-from .operators import GeoFNORegressor
+from .operators import GeoFNORegressor, MIMONetOperator
 
 
 def _register_defaults() -> None:
@@ -82,6 +82,17 @@ def _register_defaults() -> None:
         },
     )
     MODEL_REGISTRY.register(
+        "mimonet",
+        MIMONetOperator,
+        metadata={
+            "family": "deterministic_operator",
+            "license": "MIT",
+            "upstream_reference": "https://zenodo.org/records/21986357",
+            "upstream_code": "https://github.com/kkazuma19/MIMONet",
+            "stages": ("base_training", "post_training"),
+        },
+    )
+    MODEL_REGISTRY.register(
         "diffusion_pde",
         DiffusionPDEModel,
         metadata={
@@ -135,8 +146,11 @@ def build_model(config: Mapping[str, Any], data_spec: DataSpec, physics_provider
         "pinn",
         "pointcloud_ffm",
         "gl_rbf_cq",
+        "mimonet",
     }:
         common["coordinate_dim"] = data_spec.coordinate_dim
+    if name == "mimonet":
+        common["field_names"] = data_spec.field_names
     if name in {
         "geofno",
         "diffusion_pde",
@@ -153,6 +167,14 @@ def build_model(config: Mapping[str, Any], data_spec: DataSpec, physics_provider
         "deeponet": {"width", "basis_dim"},
         "senseiver": {"width", "num_latents", "heads", "depth"},
         "geofno": {"hidden_channels", "modes", "layers"},
+        "mimonet": {
+            "conditioning_fields",
+            "sensor_capacities",
+            "basis_dim",
+            "branch_hidden_dim",
+            "trunk_hidden_dim",
+            "merge_type",
+        },
         "diffusion_pde": {
             "backbone",
             "hidden_channels",

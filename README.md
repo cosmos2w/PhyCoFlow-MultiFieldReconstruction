@@ -246,6 +246,7 @@ The public registry names and their intended entry points are:
 |---|---|---|
 | `coordinate_mlp`, `mlp_rbf` | A small deterministic point baseline is sufficient | Fastest place to test a new case contract |
 | `deeponet`, `senseiver` | Sparse sensor-token reconstruction is needed | Deterministic masked-MSE training |
+| `mimonet` | A sparse-input branch--trunk operator is appropriate | Multiplicative branch fusion; see the fixed 256-T turbulent-combustion profile |
 | `geofno` | A structured-grid operator is appropriate | Install the `operator` extra |
 | `diffusion_pde` | A grid-based generative reconstruction is needed | Complete 2-D targets; U-Net can require substantial GPU memory |
 | `latent_fm` | Latent generative flow is desired | Train Stage 1 first; Stage 2 is the reconstruction source |
@@ -253,7 +254,7 @@ The public registry names and their intended entry points are:
 | `gl_rbf_cq` | Coherence-ready point-cloud flow with cached K/V is needed | Preserve checkpoint/state compatibility contracts |
 | `pinn` | Direct equation-based training is required | Use `train-direct`, not `train-base` |
 
-Read [docs/models.md](docs/models.md) before changing a model or selecting one for a formal experiment. Point models consume sparse observation tokens; grid/operator models rasterize observations and their support mask. Diffusion and flow models retain their native noise/velocity objectives.
+Read [docs/models.md](docs/models.md) before changing a model or selecting one for a formal experiment. Point models consume sparse observation tokens. MIMONet consumes fixed-capacity sensor-value and sensor-location branches plus query coordinates; GeoFNO rasterizes observations and their support mask. Diffusion and flow models retain their native noise/velocity objectives.
 
 ### 5.3 Validate, smoke-test, train, and resume
 
@@ -288,6 +289,18 @@ python cases/<case>/run.py train-base \
 Each run stores the resolved config, checkpoints, metrics, provenance, histories, and previews under `cases/<case>/runs/<experiment>/<run-id>/`. Inspect `resolved_config.yaml` before comparing runs: it is the authoritative record of what was actually launched.
 
 ### 5.4 Model-specific examples
+
+The MIMONet turbulent-combustion profile uses the released 256-dimensional basis, multiplicative branch fusion, ReLU fully connected networks, and all five dataset outputs. Its input information budget is fixed at 256 temperature values and their 256 locations; no other observed field or operating condition enters the model. The profile uses 4,096 training queries and 5,000 epochs. The repository trainer uses AdamW with a fixed learning rate of $10^{-4}$ and weight decay $10^{-6}$; this follows the other repository base profiles and differs from the separate demo wrapper's Adam plus cosine schedule:
+
+```bash
+python cases/turbulent_combustion/run.py validate \
+  --config configs/base/mimonet_5000ep.yaml
+python cases/turbulent_combustion/run.py train-base \
+  --config configs/base/mimonet_5000ep.yaml \
+  --override runtime.device=cuda:1
+```
+
+The architecture keeps MIMONet's 256-dimensional internal basis. That dimension is model-specific; the matched comparison input budget is the same 256 temperature measurements and locations. Check the resolved sensor profile of every other run before treating its information budget as identical.
 
 The tracked Senseiver example below shows the total training objective and fixed-validation loss over a completed 5,000-epoch turbulent-combustion base run. Each run writes its current `loss_history.png` at the run root.
 

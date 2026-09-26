@@ -59,6 +59,7 @@ def test_shared_model_configs_are_the_single_architecture_source():
         "coordinate_mlp",
         "mlp_rbf",
         "deeponet",
+        "mimonet",
         "senseiver",
         "geofno",
         "diffusion_pde",

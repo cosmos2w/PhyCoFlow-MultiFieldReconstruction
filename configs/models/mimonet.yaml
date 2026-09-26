@@ -1,0 +1,8 @@
+# Reusable MIMONet architecture defaults, following the released combustion setup.
+
+model:
+  name: mimonet
+  basis_dim: 256
+  branch_hidden_dim: 512
+  trunk_hidden_dim: 256
+  merge_type: mul

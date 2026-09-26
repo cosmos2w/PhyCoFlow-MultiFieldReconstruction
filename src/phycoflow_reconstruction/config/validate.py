@@ -1192,7 +1192,32 @@ def validate_config(config: Mapping[str, Any]) -> None:
     if not isinstance(model, Mapping) or not model.get("name"):
         raise ValueError("model.name is required")
     model_name = str(model.get("name")).lower()
-    if model_name == "pointcloud_ffm":
+    if model_name == "mimonet":
+        conditioned = model.get("conditioning_fields")
+        capacities = model.get("sensor_capacities")
+        if (
+            not isinstance(conditioned, (list, tuple))
+            or not isinstance(capacities, (list, tuple))
+            or not conditioned
+            or len(conditioned) != len(capacities)
+            or len(set(conditioned)) != len(conditioned)
+        ):
+            raise ValueError("mimonet requires one capacity per unique conditioning field")
+        observed = config["observations"]["fields"]
+        if set(observed) != set(conditioned):
+            raise ValueError("mimonet observations must match conditioning_fields exactly")
+        if set(conditioned) - set(config["dataset"]["field_names"]):
+            raise ValueError("mimonet conditioning_fields must belong to the dataset")
+        for name, capacity in zip(conditioned, capacities):
+            maximum = observed[name].get("count", observed[name].get("count_max"))
+            if int(capacity) < int(maximum):
+                raise ValueError(f"mimonet sensor capacity for {name} is below observation count")
+        for key in ("basis_dim", "branch_hidden_dim", "trunk_hidden_dim"):
+            if key in model and int(model[key]) < 1:
+                raise ValueError(f"mimonet {key} must be positive")
+        if model.get("merge_type", "mul") not in {"mul", "sum"}:
+            raise ValueError("mimonet merge_type must be mul or sum")
+    elif model_name == "pointcloud_ffm":
         backbone = model.get("backbone", "gl_rbf_enh")
         if backbone not in {"gl_rbf_enh", "fno"}:
             raise ValueError("new PointCloudFFM supports only gl_rbf_enh or fno")
