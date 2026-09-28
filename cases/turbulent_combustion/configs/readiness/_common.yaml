@@ -1,10 +1,10 @@
 stage: post_training
 case: turbulent_combustion
 
-source_run: /home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/runs/tc_gl_rbf_cq_cached_kv_5000ep/20260826T212231Z_7b68c461
+source_run: null
 source_checkpoint: best.pt
 inherit_base_config: true
-source: {kind: native_run, allow_integration_source: true}
+source: {kind: native_run, allow_integration_source: false}
 
 objectives:
   data_retention: {enabled: true, weight: 0.1}

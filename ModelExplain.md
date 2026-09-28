@@ -69,7 +69,7 @@ The historical Demo50 adapter is deliberately isolated in [`models/compatibility
 
 ### 0.2 Canonical model settings
 
-The following is a compact snapshot of the maintained fragments in `configs/models/` as of 2026-09-26. Case files can override these values.
+The following table summarizes the maintained fragments in `configs/models/`. Case files can override these values.
 
 | Model fragment | Current architecture settings |
 |---|---|
@@ -100,7 +100,7 @@ These settings map through `_portable_config` in the adapter to the preserved po
 
 The source profile is [`gl_rbf_cq_cached_kv_5000ep.yaml`](cases/turbulent_combustion/configs/base/gl_rbf_cq_cached_kv_5000ep.yaml). It trains the canonical `gl_rbf_cq` model for 5000 epochs with AdamW batch size 128, learning rate $10^{-4}$, weight decay $10^{-6}$, and clip norm 1.0. The state has five output fields in order `CH4, CO, T, U_1, p` on a $100\times403$ grid with training mean/std normalization. Its only sparse input field is `T`, sampled uniformly at 192--384 locations per snapshot. Base training uses 4096 queries and an RFF rectified-flow source; configured evaluation uses four Euler generation steps and EMA weights.
 
-The older A/B/C readiness matrix is rooted at [`readiness/_common.yaml`](cases/turbulent_combustion/configs/readiness/_common.yaml). Its leaf files retain their own scientific definitions: in particular, [`C_topology.yaml`](cases/turbulent_combustion/configs/readiness/C_topology.yaml) and [`ABC_balanced.yaml`](cases/turbulent_combustion/configs/readiness/ABC_balanced.yaml) use the historical Betti-curve strategy. They must not be read as the settings of the sliced-persistence run. The current three-family sliced-persistence profile is [`ABC_sliced_persistence_formal_5000ep_gpu1.yaml`](cases/turbulent_combustion/configs/readiness/ABC_sliced_persistence_formal_5000ep_gpu1.yaml), which inherits its family definitions from [`ABC_sliced_persistence_50ep_gpu1.yaml`](cases/turbulent_combustion/configs/readiness/ABC_sliced_persistence_50ep_gpu1.yaml). The launched run's `resolved_config.yaml` remains authoritative.
+The [portable three-family profile](cases/turbulent_combustion/configs/posttrain/abc_sliced_persistence.yaml) uses the same A+B+C objective as the completed [formal run profile](cases/turbulent_combustion/configs/readiness/ABC_sliced_persistence_formal_5000ep_gpu1.yaml), but requires the caller to select a completed source run and defaults to its `best.pt` checkpoint. The formal profile inherits the family definitions from [`ABC_sliced_persistence_50ep_gpu1.yaml`](cases/turbulent_combustion/configs/readiness/ABC_sliced_persistence_50ep_gpu1.yaml). Its saved `resolved_config.yaml` records the exact launched values, including the source `last.pt` used for that experiment. The separate [`C_topology.yaml`](cases/turbulent_combustion/configs/readiness/C_topology.yaml) and [`ABC_balanced.yaml`](cases/turbulent_combustion/configs/readiness/ABC_balanced.yaml) profiles use Betti-curve topology and have different scientific settings.
 
 | Formal A+B+C setting | Resolved value |
 |---|---|
@@ -111,6 +111,8 @@ The older A/B/C readiness matrix is rooted at [`readiness/_common.yaml`](cases/t
 | B: cross spectrum | four pairs `(CO,T)`, `(T,CH4)`, `(T,U_1)`, `(CH4,U_1)`; 16-neighbor graph, 48 retained modes, low/mid/high bands; same- and cross-frequency terms enabled; `self_spectrum` and band-energy loss disabled |
 | C: topology | `cubical_persistence` with sliced-Wasserstein distance; CO/T on a nonperiodic $32\times128$ raster, H0/H1, sublevel/superlevel, no Gaussian smoothing; 32 diagram projections, self CO/T and three mutual CO--T lines |
 | Combination and selection | family weights 1/1/1 with two-batch `initial_grad_norm` calibration; `gradient_balance: config` for native-data versus aggregate-coherence gradients; `topology_with_fidelity` selects on fixed validation topology subject to 5% total and per-field relative-MSE limits |
+
+The [completed-run example](docs/examples/abc_co_posttraining/README.md) reports the selected checkpoint and matched validation/test results. It records improved distribution and topology agreement alongside a test cross-spectrum regression and mixed per-field reconstruction quality, which are outcomes of this profile rather than properties guaranteed by its objective.
 
 The older A/B/C and `ABC_balanced` files remain valid historical profiles. For example, the older C file has family weight 0.01, reference-quantile Betti curves, and smoothing sigma 0.8; the sliced-persistence C term above has family weight 1.0 and no threshold-sampled Betti loss. The standalone topology-only native-grid recipe instead uses `gradient_balance: topology_regularized`, as documented in [`TOPOLOGY_POSTTRAINING.md`](TOPOLOGY_POSTTRAINING.md). It is a different optimizer contract from three-family A+B+C training.
 

@@ -1,0 +1,9 @@
+# Portable three-family profile for a completed turbulent-combustion source run.
+defaults: [../readiness/ABC_sliced_persistence_formal_5000ep_gpu1.yaml]
+
+source_run: null
+source_checkpoint: best.pt
+source: {kind: native_run, allow_integration_source: false}
+
+runtime: {device: cuda:0, plot_every_steps: 25}
+output: {experiment_name: tc_abc_sliced_persistence}

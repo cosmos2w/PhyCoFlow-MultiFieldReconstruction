@@ -3,10 +3,7 @@
 These examples use a stable, SHA-256-verified copy of the formal run's
 `last.pt` at **epoch 1440, step 54720**. The checkpoint came from
 `runs/coherence_fix_ABC_sliced_persistence_formal_5000ep_gpu1/20260924T030724Z_4208231c`.
-The live 5000-epoch run was read only. See [snapshot provenance](snapshot_provenance.json)
-for its exact hash and capture time. This is a diagnostic snapshot, not a
-completed formal-run result. The source checkpoint is the base checkpoint
-recorded in the A+B+C run lineage.
+The formal run was read only when this snapshot was captured. See [snapshot provenance](snapshot_provenance.json) for its exact hash and capture time. This gallery demonstrates the figure workflow at epoch 1440; the [completed-run report](../../../../docs/examples/abc_co_posttraining/README.md) evaluates the selected checkpoint on matched validation and test sets. The source checkpoint is the base checkpoint recorded in the A+B+C run lineage.
 
 All set-level comparisons use the same 64 evenly spaced **validation**
 snapshots, sensor selections, generation settings, and sample IDs. Cross-spectrum
@@ -41,20 +38,15 @@ describes the frozen, compact JSONL snapshot.
 
 The `postprocessing/coherence/` directories are the repository's standard
 post-processing outputs. Each configured family has current and `-base` source
-figures, numerical metrics, and reports. The `explanatory/` views add direct
-interpretation from those saved outputs; they do not evaluate a new model.
-The general workflow now also generates the useful pair-score, band-error, and
-persistence-diagram views in each run's own evaluation directory. The pinned
-copies here remain an epoch-1440 demonstration.
+figures, numerical metrics, and reports. The `explanatory/` views interpret those saved outputs without evaluating another model. Standard run-local post-processing generates pair-score, band-error, and persistence-diagram views. The pinned copies here remain an epoch-1440 demonstration.
 
 | Family | Standard quantitative figures | Explanatory views |
 | --- | --- | --- |
 | Global distribution | [Marginal fields](postprocessing/coherence/global_distribution/marginal_field_distributions.png), [pairwise fields](postprocessing/coherence/global_distribution/pairwise_field_distributions.png), [joint/top-tail](postprocessing/coherence/global_distribution/joint_top_tail_distributions.png), and [all 10 matched joint PDFs](postprocessing/coherence/global_distribution/global_distribution_extra/) | [Weighted terms](explanatory/global_weighted_terms.png) and [three-way CO–T density](explanatory/global_CO_T_joint_density.png) show reference, source, and A+B+C on shared bins. |
-| Cross spectrum | [Same-frequency scores](postprocessing/coherence/cross_spectrum/same_frequency_coherence.png), [cross-frequency scores](postprocessing/coherence/cross_spectrum/cross_frequency_coherence.png), and [band profiles](postprocessing/coherence/cross_spectrum/spectral_band_profiles.png) | [Every configured field pair](explanatory/cross_pair_scores.png) and [percentage-point deviations](explanatory/cross_band_error.png) are now general run-local views; the [three-way energy profile](explanatory/cross_band_three_way.png) stays in this pinned gallery. Self spectrum and spectral-band-energy loss are disabled in this run. |
-| Topology | [Sliced-persistence component distances](postprocessing/coherence/topology/persistence_term_distributions.png), [exact H0/H1 Betti curves](postprocessing/coherence/topology/betti_curves.png), and [matched raster geometry](postprocessing/coherence/topology/configured_grid_topology.png) | [CO](explanatory/topology_diagrams_CO.png) and [T](explanatory/topology_diagrams_T.png) birth–death diagrams are now general run-local views. [Physical-domain maps](explanatory/topology_field_maps.png), [CO](explanatory/topology_filtration_CO.png) and [T](explanatory/topology_filtration_T.png) multi-threshold masks, and [mutual CO–T lines](explanatory/topology_mutual_CO_T.png) remain pinned examples. |
+| Cross spectrum | [Same-frequency scores](postprocessing/coherence/cross_spectrum/same_frequency_coherence.png), [cross-frequency scores](postprocessing/coherence/cross_spectrum/cross_frequency_coherence.png), and [band profiles](postprocessing/coherence/cross_spectrum/spectral_band_profiles.png) | [Every configured field pair](explanatory/cross_pair_scores.png) and [percentage-point deviations](explanatory/cross_band_error.png) are standard run-local views; the [three-way energy profile](explanatory/cross_band_three_way.png) stays in this pinned gallery. Self spectrum and spectral-band-energy loss are disabled in this run. |
+| Topology | [Sliced-persistence component distances](postprocessing/coherence/topology/persistence_term_distributions.png), [exact H0/H1 Betti curves](postprocessing/coherence/topology/betti_curves.png), and [matched raster geometry](postprocessing/coherence/topology/configured_grid_topology.png) | [CO](explanatory/topology_diagrams_CO.png) and [T](explanatory/topology_diagrams_T.png) birth–death diagrams are standard run-local views. [Physical-domain maps](explanatory/topology_field_maps.png), [CO](explanatory/topology_filtration_CO.png) and [T](explanatory/topology_filtration_T.png) multi-threshold masks, and [mutual CO–T lines](explanatory/topology_mutual_CO_T.png) remain pinned examples. |
 
-PNG and PDF forms are provided for explanatory views and reconstructions. The
-standard evaluator also writes SVG. The [explanation manifest](explanatory/manifest.json)
+The gallery versions the PNG figures and the numerical inputs needed to recreate them. The renderers also write local PDF files, and the standard evaluator writes local PDF/SVG files; these alternate formats stay outside Git. The [explanation manifest](explanatory/manifest.json)
 records the representative validation sample, physical raster extent, and a
 check that the recomputed self-diagram sliced distance agrees with the saved
 score. Diagram scatter plots show finite bars; text reports essential-class

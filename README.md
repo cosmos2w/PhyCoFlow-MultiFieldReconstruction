@@ -451,7 +451,7 @@ The implemented family names are `global_distribution`, `cross_spectrum`, and `t
 
 ### 6.3 Turbulent-combustion A+B+C sliced persistence
 
-The tracked [formal launch profile](cases/turbulent_combustion/configs/readiness/ABC_sliced_persistence_formal_5000ep_gpu1.yaml) inherits its [three-family definition](cases/turbulent_combustion/configs/readiness/ABC_sliced_persistence_50ep_gpu1.yaml) and [common settings](cases/turbulent_combustion/configs/readiness/_common.yaml). Its launched values are recorded in each child's `resolved_config.yaml`:
+For your own completed turbulent-combustion base model, start with the [portable A+B+C profile](cases/turbulent_combustion/configs/posttrain/abc_sliced_persistence.yaml). It composes the three families from the [formal experiment profile](cases/turbulent_combustion/configs/readiness/ABC_sliced_persistence_formal_5000ep_gpu1.yaml) but leaves `source_run` unset, defaults to the source's `best.pt`, and rejects incomplete integration sources. The formal experiment inherited its [family definitions](cases/turbulent_combustion/configs/readiness/ABC_sliced_persistence_50ep_gpu1.yaml) and [common execution settings](cases/turbulent_combustion/configs/readiness/_common.yaml); the completed run's `resolved_config.yaml` records the exact values used there:
 
 | Setting | Formal A+B+C value |
 |---|---|
@@ -461,23 +461,23 @@ The tracked [formal launch profile](cases/turbulent_combustion/configs/readiness
 | Loss balancing | Data/coherence objective weights 0.1/1; `optimization.gradient_balance: config` with additional gradient scales 1/1; `coherence.family_balance.mode: initial_grad_norm` with two calibration batches |
 | Selection and previews | `topology_with_fidelity`; 5% total and per-field relative-MSE eligibility limits; validation every 5 epochs, fixed preview loss every 10, reconstruction every 200 |
 
-This is a case-specific research profile, including `cuda:1`, `source_checkpoint: last.pt`, and a local source path inherited from `_common.yaml`. Override `source_run` for your own completed base run and choose a device available on your machine. Replace `BASE_EXPERIMENT/RUN_ID` below, then validate before launch:
+Use a base run trained for the same turbulent-combustion dataset and the five fields `CH4, CO, T, U_1, p`. Check its `status.json`, `resolved_config.yaml`, and chosen source checkpoint first. Set a device available on your machine; the portable profile defaults to `cuda:0`. Replace `BASE_EXPERIMENT/RUN_ID` with your completed run, validate the resolved configuration, and launch:
 
 ```bash
 BASE_RUN=runs/BASE_EXPERIMENT/RUN_ID
 
 python cases/turbulent_combustion/run.py validate \
-  --config configs/readiness/ABC_sliced_persistence_formal_5000ep_gpu1.yaml \
+  --config configs/posttrain/abc_sliced_persistence.yaml \
   --override source_run="$BASE_RUN" \
   --override runtime.device=cuda:0
 
 python cases/turbulent_combustion/run.py post-train \
-  --config configs/readiness/ABC_sliced_persistence_formal_5000ep_gpu1.yaml \
+  --config configs/posttrain/abc_sliced_persistence.yaml \
   --override source_run="$BASE_RUN" \
   --override runtime.device=cuda:0
 ```
 
-`source_checkpoint: last.pt` and `source.allow_integration_source: true` are inherited from this tracked readiness profile. Check that they match your source's provenance before reuse; the generic portable profile above defaults to `best.pt` and a native completed source. GUDHI pairing remains CPU work. Set `PHYCOFLOW_TOPOLOGY_WORKERS` to the CPUs allocated for pairing and optionally raise `PHYCOFLOW_TOPOLOGY_REFERENCE_CACHE` above its 4,096-entry default when repeated references and host RAM justify it. Neither setting changes the persistence objective.
+The launched formal run used source `last.pt`, 5,000 epochs, and GPU 1; the portable profile keeps the same objective and budgets but uses source `best.pt` and an experiment name without a device suffix. Override `source_checkpoint` deliberately if the source's final state is the intended starting point. For another case or field set, copy the portable profile and adapt the field lists and pairs, fixed-query geometry and raster, observation protocol, and validation limits before running `validate`; a field-name substitution alone does not transfer the topology contract. GUDHI pairing remains CPU work. Set `PHYCOFLOW_TOPOLOGY_WORKERS` to the CPUs allocated for pairing and optionally raise `PHYCOFLOW_TOPOLOGY_REFERENCE_CACHE` above its 4,096-entry default when repeated references and host RAM justify it. Neither setting changes the persistence objective.
 
 ### 6.4 Physics post-training and direct training
 
@@ -602,11 +602,11 @@ python cases/turbulent_combustion/run.py visualize-run \
 - Figure size, spacing, and text scale adapt to the physical-domain aspect ratio and field count.
 - A CUDA-memory warning appears before inference when the selected device may be tight; choose a different device with `--device`.
 
-Outputs are stored under `evaluation/reconstruction_<split>_<snapshot>_<checkpoint>/`: `reconstruction.png`, `report.json`, `sensor_manifest.json`, `query_indices.pt`, and the portable plotting payload `reconstruction.npz`. The former duplicate `reconstruction.pt` is no longer written.
+Outputs are stored under `evaluation/reconstruction_<split>_<snapshot>_<checkpoint>/`: `reconstruction.png`, `report.json`, `sensor_manifest.json`, `query_indices.pt`, and the portable plotting payload `reconstruction.npz`.
 
 ![A+B+C formal epoch-1440 full-grid reconstruction on a validation snapshot with physical coordinates](cases/turbulent_combustion/diagnostics/ExampleVisual/reconstruction/fullgrid_validation_frame8000.png)
 
-The [pinned plotting payload and provenance](cases/turbulent_combustion/diagnostics/ExampleVisual/README.md) make this epoch-1440 A+B+C example reproducible without model inference. The Senseiver command above remains a historical command example.
+The [pinned plotting payload and provenance](cases/turbulent_combustion/diagnostics/ExampleVisual/README.md) make this epoch-1440 workflow example reproducible without model inference; the [completed-run report](docs/examples/abc_co_posttraining/README.md) gives the selected checkpoint's quantitative results. The Senseiver command above illustrates explicit CLI options.
 
 ### 7.2 Multi-snapshot reconstruction statistics
 
@@ -638,7 +638,7 @@ When the target is a post-training run, statistical evaluation also evaluates th
 
 <img src="cases/turbulent_combustion/diagnostics/ExampleVisual/postprocessing/relative_l2_violin.png" alt="A+B+C formal epoch-1440 validation relative L2 distributions from 64 matched snapshots" width="65%">
 
-The [current diagnostic suite](cases/turbulent_combustion/diagnostics/ExampleVisual/README.md) includes matched 64-snapshot source/A+B+C metrics, a physical-coordinate full-grid reconstruction, and a fixed 4,096-point illustrative view from the same full-grid inference.
+The [epoch-1440 diagnostic gallery](cases/turbulent_combustion/diagnostics/ExampleVisual/README.md) includes matched 64-snapshot source/A+B+C metrics, a physical-coordinate full-grid reconstruction, and a fixed 4,096-point illustrative view from the same full-grid inference. Use the [completed-run report](docs/examples/abc_co_posttraining/README.md) for the selected checkpoint's validation and test comparison.
 
 ### 7.3 Multi-snapshot physical-coherence statistics
 
@@ -734,19 +734,19 @@ Cross-spectrum evaluation defaults to `--cross-spectrum-aggregation training_ali
 
 The horizontal-bar figures report the enabled self-spectrum, same-frequency, and cross-frequency agreement scores, bounded between 0 and 1, where 1 means exact spectral agreement. The renderer chooses a readable score range and shares its limits and canvas size between source and post-training counterparts; `--stat-scale` does not alter these charts. When enabled, self-spectrum bars are one per selected field, whereas the two distinct-field terms report one per configured pair. The additional `spectral_band_profiles.png` shows reference and reconstruction energy fractions by graph-frequency band, which gives the bounded scores a more direct interpretation. Per-ensemble values, averaged raw mean-squared discrepancies, normalized scores, spread statistics, ensemble membership, and dropped sample IDs are retained in `metrics.csv`, `metrics.npz`, and `report.json`. If spectral-band energy is enabled in the run's coherence configuration, its score figure is generated in the same family directory.
 
-The current paired example compares the source checkpoint with the A+B+C formal epoch-1440 checkpoint over two matched 32-snapshot validation ensembles. It shows every configured field pair and both enabled spectral terms on the same bounded score axis.
+The pinned paired example compares the source checkpoint with the A+B+C epoch-1440 checkpoint over two matched 32-snapshot validation ensembles. It shows every configured field pair and both enabled spectral terms on the same bounded score axis.
 
 ![Matched source and A+B+C cross-spectrum scores by configured field pair](cases/turbulent_combustion/diagnostics/ExampleVisual/explanatory/cross_pair_scores.png)
 
-The [full coherence gallery and pinned metrics](cases/turbulent_combustion/diagnostics/ExampleVisual/README.md) also show reference/source/A+B+C band-energy profiles. The paired percentage-point deviation heatmap is now part of standard run-local post-processing.
+The [coherence gallery and pinned metrics](cases/turbulent_combustion/diagnostics/ExampleVisual/README.md) show reference/source/A+B+C band-energy profiles. Standard run-local post-processing also produces the paired percentage-point deviation heatmap.
 
 #### 7.3.3 Topology coherence
 
-For a run configured with the cubical-persistence family, request `--eval-coherence topology` with `--eval-set`. The evaluator replays the run's deterministic `fixed_shared` point selection and configured topology raster, then compares each reconstructed snapshot with its paired dense target. It writes three complementary figures under `coherence/topology/`: `persistence_term_distributions.png` shows the configured sliced-Wasserstein H0/H1 objective components and their component-weighted total; `betti_curves.png` shows exact H0/H1 counts and panel count MAE at reference-defined filtration quantiles; and `configured_grid_topology.png` shows paired median-level geometry, mask disagreement, and the representative persistence distance on the configured raster. The added `diagrams/` category shows exact finite H0/H1 birth–death pairs and the configured distance for each enabled self-persistence field. The median-level image is an interpretation aid, not a persistence diagram or a native-grid topology claim. Each figure has PNG, PDF, and SVG forms, with CSV/NPZ/JSON numerical provenance.
+For a run configured with the cubical-persistence family, request `--eval-coherence topology` with `--eval-set`. The evaluator replays the run's deterministic `fixed_shared` point selection and configured topology raster, then compares each reconstructed snapshot with its paired dense target. It writes three complementary figures under `coherence/topology/`: `persistence_term_distributions.png` shows the configured sliced-Wasserstein H0/H1 objective components and their component-weighted total; `betti_curves.png` shows exact H0/H1 counts and panel count MAE at reference-defined filtration quantiles; and `configured_grid_topology.png` shows paired median-level geometry, mask disagreement, and the representative persistence distance on the configured raster. The `diagrams/` category shows exact finite H0/H1 birth–death pairs and the configured distance for each enabled self-persistence field. The median-level image is an interpretation aid, not a persistence diagram or a native-grid topology claim. Each figure has PNG, PDF, and SVG forms, with CSV/NPZ/JSON numerical provenance.
 
 The component-weighted topology total is shown before the outer family weight. Its magnitude cannot establish the term's share of the parameter update; use the run's gradient diagnostics for aggregate data/coherence update balance. The set plots evaluate paired references on the recorded reduced raster, so their conclusions are limited to that query and filtration contract. A post-training run gets `-base` source figures on the same set-level samples and plot scales; representative diagram panels can use different saved source and post-training snapshots, identified on each panel. Formal efficacy still requires case-specific, held-out fidelity and topology evidence.
 
-During training, the fixed validation objective and qualitative reconstruction use independent `evaluation.preview.loss_every_epochs` and `reconstruct_every_epochs` cadences. Validation loss is added to `loss_history.png`. Checkpoint selection follows `checkpointing.selection_metric`: the A+B+C profile selects `best.pt` by validation topology score subject to total and per-field fidelity eligibility, while a `reconstruction_mse` profile selects by validation reconstruction MSE. Periodic recovery writes `last.pt`, plus explicitly requested epoch checkpoints. Re-render a portable preview payload with:
+During training, the fixed validation objective and qualitative reconstruction use independent `evaluation.preview.loss_every_epochs` and `reconstruct_every_epochs` cadences. `loss_history.png` includes validation loss. Checkpoint selection follows `checkpointing.selection_metric`: the A+B+C profile selects `best.pt` by validation topology score subject to total and per-field fidelity eligibility, while a `reconstruction_mse` profile selects by validation reconstruction MSE. Periodic recovery writes `last.pt`, plus explicitly requested epoch checkpoints. Re-render a portable preview payload with:
 
 ```bash
 python scripts/visualization/training_reconstruction_preview.py \
