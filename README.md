@@ -539,6 +539,8 @@ python cases/<case>/run.py render-history \
 
 The [turbulent-combustion history renderer](cases/turbulent_combustion/diagnostics/ExampleVisual/README.md) also produces separate objective, gradient, and checkpoint-fidelity figures from a chosen cutoff of a run's saved metrics. It reads the active run without changing its training process.
 
+For a completed, quantitative example with matched validation and test reconstruction errors, all three coherence families, checkpoint selection, and standard figures, see the [A+B+C co-post-training report](docs/examples/abc_co_posttraining/README.md). The report records both improvements and regressions relative to its GL-RBF/CQ source checkpoint.
+
 ### Quick commands for a saved A+B+C run
 
 From the repository root, set `RUN` to the path **relative to `cases/turbulent_combustion/`**. The run below is a concrete example; use your own run ID and checkpoint when reproducing a different experiment. All generated post-processing files stay inside that run directory:

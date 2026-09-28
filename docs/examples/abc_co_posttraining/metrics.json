@@ -1,0 +1,529 @@
+{
+  "experiment": {
+    "base_run": "cases/turbulent_combustion/runs/tc_gl_rbf_cq_cached_kv_5000ep/20260826T212231Z_7b68c461",
+    "post_run": "cases/turbulent_combustion/runs/coherence_fix_ABC_sliced_persistence_formal_5000ep_gpu1/20260924T030724Z_4208231c",
+    "base_checkpoint_sha256": "03f2f45b966a00850cc45c011b4cf1cd644b9408de355324fec8dc434a84a810",
+    "post_best_checkpoint_sha256": "3aed57d2e86376e11d205d167eee86298d588aca5a4400a10f3cac9aa6e1dd48",
+    "post_final_checkpoint_sha256": "77d60498be7342424ef552b0288fc4aacdb8a3665ed050a17b1131a415c6f0ad",
+    "status": "completed"
+  },
+  "fixed_validation_panel": {
+    "before": {
+      "mse_normalized": 0.4897319972515106,
+      "per_field_mse_normalized": {
+        "CH4": 0.12773780524730682,
+        "CO": 0.3917801082134247,
+        "T": 0.11228188872337341,
+        "U_1": 1.0921852588653564,
+        "p": 0.7246747612953186
+      },
+      "per_field_relative_l2_physical": {
+        "CH4": 0.22938570380210876,
+        "CO": 0.49042078852653503,
+        "T": 0.20325671136379242,
+        "U_1": 0.912420392036438,
+        "p": 0.050527967512607574
+      },
+      "evaluation_weight_source": "configured_evaluation_weights",
+      "sensor_manifest_sha256": "ed5d4f5b482a855ef30be5793c2b33349f5667e803be385c72b618fb29a7d292"
+    },
+    "selected": {
+      "eligible": true,
+      "global_step": 114950,
+      "metric": 0.00438874214887619,
+      "mse": 0.44751524925231934,
+      "relative_mse_increase": {
+        "CH4": -0.06786152530832013,
+        "CO": 0.02817862127821935,
+        "T": -0.012904323891754776,
+        "U_1": -0.07281186005456941,
+        "p": -0.18281579450609786,
+        "total": -0.08620377724167805
+      },
+      "failed_fidelity_fields": []
+    },
+    "after": {
+      "mse_normalized": 0.5366780757904053,
+      "per_field_mse_normalized": {
+        "CH4": 0.12311685085296631,
+        "CO": 0.4283985495567322,
+        "T": 0.11398335546255112,
+        "U_1": 1.174352765083313,
+        "p": 0.8435388803482056
+      },
+      "per_field_relative_l2_physical": {
+        "CH4": 0.22498522698879242,
+        "CO": 0.5141846537590027,
+        "T": 0.20454278588294983,
+        "U_1": 0.9439405202865601,
+        "p": 0.05354206636548042
+      },
+      "evaluation_weight_source": "configured_evaluation_weights",
+      "sensor_manifest_sha256": "ed5d4f5b482a855ef30be5793c2b33349f5667e803be385c72b618fb29a7d292"
+    }
+  },
+  "sample_sets": {
+    "validation": {
+      "sample_count": 64,
+      "matched_inputs": {
+        "dataset_fingerprint": "8c49936567eced7ab94887c336b9b35aaf7ec70dea7479aee83434ff970455d5",
+        "evaluation_seed": 2027,
+        "generation_steps": 2,
+        "sensor_manifest_sha256": "230227b4ae94f1eb2aa9862f0eaaacff364aa3d5a4a5794c16b5768ff4b48346"
+      },
+      "sample_ids": [
+        "trajectory_000000:8000",
+        "trajectory_000000:8015",
+        "trajectory_000000:8031",
+        "trajectory_000000:8047",
+        "trajectory_000000:8063",
+        "trajectory_000000:8079",
+        "trajectory_000000:8095",
+        "trajectory_000000:8111",
+        "trajectory_000000:8126",
+        "trajectory_000000:8142",
+        "trajectory_000000:8158",
+        "trajectory_000000:8174",
+        "trajectory_000000:8190",
+        "trajectory_000000:8206",
+        "trajectory_000000:8222",
+        "trajectory_000000:8237",
+        "trajectory_000000:8253",
+        "trajectory_000000:8269",
+        "trajectory_000000:8285",
+        "trajectory_000000:8301",
+        "trajectory_000000:8317",
+        "trajectory_000000:8333",
+        "trajectory_000000:8348",
+        "trajectory_000000:8364",
+        "trajectory_000000:8380",
+        "trajectory_000000:8396",
+        "trajectory_000000:8412",
+        "trajectory_000000:8428",
+        "trajectory_000000:8444",
+        "trajectory_000000:8459",
+        "trajectory_000000:8475",
+        "trajectory_000000:8491",
+        "trajectory_000000:8507",
+        "trajectory_000000:8523",
+        "trajectory_000000:8539",
+        "trajectory_000000:8555",
+        "trajectory_000000:8570",
+        "trajectory_000000:8586",
+        "trajectory_000000:8602",
+        "trajectory_000000:8618",
+        "trajectory_000000:8634",
+        "trajectory_000000:8650",
+        "trajectory_000000:8666",
+        "trajectory_000000:8681",
+        "trajectory_000000:8697",
+        "trajectory_000000:8713",
+        "trajectory_000000:8729",
+        "trajectory_000000:8745",
+        "trajectory_000000:8761",
+        "trajectory_000000:8777",
+        "trajectory_000000:8792",
+        "trajectory_000000:8808",
+        "trajectory_000000:8824",
+        "trajectory_000000:8840",
+        "trajectory_000000:8856",
+        "trajectory_000000:8872",
+        "trajectory_000000:8888",
+        "trajectory_000000:8903",
+        "trajectory_000000:8919",
+        "trajectory_000000:8935",
+        "trajectory_000000:8951",
+        "trajectory_000000:8967",
+        "trajectory_000000:8983",
+        "trajectory_000000:8999"
+      ],
+      "relative_l2": {
+        "CH4": {
+          "base_mean": 0.21895176148973405,
+          "post_mean": 0.21787351951934397,
+          "delta_percent": -0.4924564036634327,
+          "improved_snapshots": 36,
+          "source_live_mean": 0.2195824144873768,
+          "post_vs_source_live_delta_percent": -0.7782476442944275
+        },
+        "CO": {
+          "base_mean": 0.48750221938826144,
+          "post_mean": 0.5024556177668273,
+          "delta_percent": 3.0673498055721726,
+          "improved_snapshots": 21,
+          "source_live_mean": 0.4845136092044413,
+          "post_vs_source_live_delta_percent": 3.7030969247378476
+        },
+        "T": {
+          "base_mean": 0.179738016333431,
+          "post_mean": 0.18138161825481802,
+          "delta_percent": 0.9144431183317314,
+          "improved_snapshots": 27,
+          "source_live_mean": 0.18066327611450106,
+          "post_vs_source_live_delta_percent": 0.3976138127051776
+        },
+        "U_1": {
+          "base_mean": 1.0228519877418876,
+          "post_mean": 1.030222435016185,
+          "delta_percent": 0.7205780858449362,
+          "improved_snapshots": 33,
+          "source_live_mean": 1.0232168715447187,
+          "post_vs_source_live_delta_percent": 0.6846606683576395
+        },
+        "p": {
+          "base_mean": 0.04003495223878417,
+          "post_mean": 0.03911918280937243,
+          "delta_percent": -2.287424808077032,
+          "improved_snapshots": 33,
+          "source_live_mean": 0.039826153733883984,
+          "post_vs_source_live_delta_percent": -1.775142358048154
+        }
+      },
+      "coherence": {
+        "global_distribution": {
+          "base": {
+            "family_total_mean": 0.42511621839366853,
+            "joint_top_tail_mean": 0.2636977498186752,
+            "marginal_per_field_means": {
+              "CH4": 0.0119186789233936,
+              "CO": 0.031061553811014164,
+              "T": 0.013931202913227025,
+              "U_1": 0.05913756802328862,
+              "p": 0.28169412445640774
+            },
+            "pairwise_per_field_pair_means": {
+              "CH4–CO": 0.018154049357690383,
+              "CH4–T": 0.014731554212630726,
+              "CH4–U_1": 0.02660070395359071,
+              "CH4–p": 0.21610256299027242,
+              "CO–T": 0.02244186693133088,
+              "CO–U_1": 0.03614056309743319,
+              "CO–p": 0.16847913594392594,
+              "T–U_1": 0.04061729253589874,
+              "T–p": 0.11184773635795864,
+              "U_1–p": 0.16358293033772497
+            }
+          },
+          "post": {
+            "family_total_mean": 0.36582607191667194,
+            "joint_top_tail_mean": 0.23396158945251955,
+            "marginal_per_field_means": {
+              "CH4": 0.007246125785059121,
+              "CO": 0.010006561536556546,
+              "T": 0.004420262076109793,
+              "U_1": 0.0395274230868381,
+              "p": 0.26245944508264074
+            },
+            "pairwise_per_field_pair_means": {
+              "CH4–CO": 0.00684930994611932,
+              "CH4–T": 0.005754406114192534,
+              "CH4–U_1": 0.017317219087999547,
+              "CH4–p": 0.2000331125673256,
+              "CO–T": 0.006876045721128321,
+              "CO–U_1": 0.016793949467682978,
+              "CO–p": 0.14907620333360683,
+              "T–U_1": 0.025865699484711513,
+              "T–p": 0.09931122347916244,
+              "U_1–p": 0.14344799032551236
+            }
+          }
+        },
+        "cross_spectrum": {
+          "base": {
+            "weighted_absolute_discrepancy": 0.017223648726940155,
+            "coherence_score": 0.6542708277702332,
+            "same_frequency_discrepancy": 0.008667781949043274,
+            "cross_frequency_discrepancy": 0.008555866777896881,
+            "cross_pair_scores": {
+              "CH4–U_1": 0.30809053778648376,
+              "CO–T": 0.6092875003814697,
+              "T–CH4": 0.46637651324272156,
+              "T–U_1": 0.3073514401912689
+            },
+            "ensemble_count": 2,
+            "ensemble_size": 32
+          },
+          "post": {
+            "weighted_absolute_discrepancy": 0.01590631902217865,
+            "coherence_score": 0.6981048583984375,
+            "same_frequency_discrepancy": 0.007190615404397249,
+            "cross_frequency_discrepancy": 0.008715704083442688,
+            "cross_pair_scores": {
+              "CH4–U_1": 0.34750625491142273,
+              "CO–T": 0.5874817371368408,
+              "T–CH4": 0.6089284420013428,
+              "T–U_1": 0.4507021903991699
+            },
+            "ensemble_count": 2,
+            "ensemble_size": 32
+          }
+        },
+        "topology": {
+          "base": {
+            "family_total_mean": 0.014205917541403323,
+            "component_means": {
+              "topology.mutual.persistence": 0.002572041194071062,
+              "topology.self.persistence": 0.011633876394625986
+            },
+            "raster_grid_shape": [
+              32,
+              128
+            ],
+            "source_grid_shape": [
+              100,
+              403
+            ],
+            "query_point_count": 4096
+          },
+          "post": {
+            "family_total_mean": 0.004506944131208002,
+            "component_means": {
+              "topology.mutual.persistence": 0.0012158911067672307,
+              "topology.self.persistence": 0.0032910530262597604
+            },
+            "raster_grid_shape": [
+              32,
+              128
+            ],
+            "source_grid_shape": [
+              100,
+              403
+            ],
+            "query_point_count": 4096
+          }
+        }
+      }
+    },
+    "test": {
+      "sample_count": 64,
+      "matched_inputs": {
+        "dataset_fingerprint": "8c49936567eced7ab94887c336b9b35aaf7ec70dea7479aee83434ff970455d5",
+        "evaluation_seed": 2027,
+        "generation_steps": 2,
+        "sensor_manifest_sha256": "9f956aacc3814ee2acd9088359357b76e00ee1a8c2289dfdeea321d294b7527a"
+      },
+      "sample_ids": [
+        "trajectory_000000:9000",
+        "trajectory_000000:9015",
+        "trajectory_000000:9031",
+        "trajectory_000000:9047",
+        "trajectory_000000:9063",
+        "trajectory_000000:9079",
+        "trajectory_000000:9095",
+        "trajectory_000000:9111",
+        "trajectory_000000:9126",
+        "trajectory_000000:9142",
+        "trajectory_000000:9158",
+        "trajectory_000000:9174",
+        "trajectory_000000:9190",
+        "trajectory_000000:9206",
+        "trajectory_000000:9222",
+        "trajectory_000000:9237",
+        "trajectory_000000:9253",
+        "trajectory_000000:9269",
+        "trajectory_000000:9285",
+        "trajectory_000000:9301",
+        "trajectory_000000:9317",
+        "trajectory_000000:9333",
+        "trajectory_000000:9348",
+        "trajectory_000000:9364",
+        "trajectory_000000:9380",
+        "trajectory_000000:9396",
+        "trajectory_000000:9412",
+        "trajectory_000000:9428",
+        "trajectory_000000:9444",
+        "trajectory_000000:9459",
+        "trajectory_000000:9475",
+        "trajectory_000000:9491",
+        "trajectory_000000:9507",
+        "trajectory_000000:9523",
+        "trajectory_000000:9539",
+        "trajectory_000000:9555",
+        "trajectory_000000:9570",
+        "trajectory_000000:9586",
+        "trajectory_000000:9602",
+        "trajectory_000000:9618",
+        "trajectory_000000:9634",
+        "trajectory_000000:9650",
+        "trajectory_000000:9666",
+        "trajectory_000000:9681",
+        "trajectory_000000:9697",
+        "trajectory_000000:9713",
+        "trajectory_000000:9729",
+        "trajectory_000000:9745",
+        "trajectory_000000:9761",
+        "trajectory_000000:9777",
+        "trajectory_000000:9792",
+        "trajectory_000000:9808",
+        "trajectory_000000:9824",
+        "trajectory_000000:9840",
+        "trajectory_000000:9856",
+        "trajectory_000000:9872",
+        "trajectory_000000:9888",
+        "trajectory_000000:9903",
+        "trajectory_000000:9919",
+        "trajectory_000000:9935",
+        "trajectory_000000:9951",
+        "trajectory_000000:9967",
+        "trajectory_000000:9983",
+        "trajectory_000000:9999"
+      ],
+      "relative_l2": {
+        "CH4": {
+          "base_mean": 0.2211839121300727,
+          "post_mean": 0.2201344994828105,
+          "delta_percent": -0.474452521051838,
+          "improved_snapshots": 32,
+          "source_live_mean": 0.22159946896135807,
+          "post_vs_source_live_delta_percent": -0.6610888940365767
+        },
+        "CO": {
+          "base_mean": 0.49430538434535265,
+          "post_mean": 0.5123297572135925,
+          "delta_percent": 3.6464043158483728,
+          "improved_snapshots": 18,
+          "source_live_mean": 0.4940591617487371,
+          "post_vs_source_live_delta_percent": 3.6980582244818816
+        },
+        "T": {
+          "base_mean": 0.1844866939354688,
+          "post_mean": 0.1867522478569299,
+          "delta_percent": 1.2280310699554153,
+          "improved_snapshots": 25,
+          "source_live_mean": 0.18528314866125584,
+          "post_vs_source_live_delta_percent": 0.7928941224762731
+        },
+        "U_1": {
+          "base_mean": 1.0369934746995568,
+          "post_mean": 1.041279036551714,
+          "delta_percent": 0.41326796712957137,
+          "improved_snapshots": 33,
+          "source_live_mean": 1.0469925832003355,
+          "post_vs_source_live_delta_percent": -0.5457103269210339
+        },
+        "p": {
+          "base_mean": 0.039261163503397256,
+          "post_mean": 0.03842651835293509,
+          "delta_percent": -2.1258798160424974,
+          "improved_snapshots": 34,
+          "source_live_mean": 0.03916980579379015,
+          "post_vs_source_live_delta_percent": -1.897603079188348
+        }
+      },
+      "coherence": {
+        "global_distribution": {
+          "base": {
+            "family_total_mean": 0.4123851675540209,
+            "joint_top_tail_mean": 0.2532103798876051,
+            "marginal_per_field_means": {
+              "CH4": 0.0143088953645929,
+              "CO": 0.03139183965686243,
+              "T": 0.012953454028320266,
+              "U_1": 0.05812434019026114,
+              "p": 0.2779582363582449
+            },
+            "pairwise_per_field_pair_means": {
+              "CH4–CO": 0.018273335608682828,
+              "CH4–T": 0.01458399076545902,
+              "CH4–U_1": 0.026593761656840798,
+              "CH4–p": 0.21267842274392024,
+              "CO–T": 0.02140649150533136,
+              "CO–U_1": 0.036747122765518725,
+              "CO–p": 0.16483970494300593,
+              "T–U_1": 0.03946685875416733,
+              "T–p": 0.10891416264348663,
+              "U_1–p": 0.15877047258254606
+            }
+          },
+          "post": {
+            "family_total_mean": 0.34724121395265684,
+            "joint_top_tail_mean": 0.22029599857341964,
+            "marginal_per_field_means": {
+              "CH4": 0.009262613856662938,
+              "CO": 0.010551516055784305,
+              "T": 0.004995710137336573,
+              "U_1": 0.046487680556310806,
+              "p": 0.24170854321710067
+            },
+            "pairwise_per_field_pair_means": {
+              "CH4–CO": 0.007663985204999335,
+              "CH4–T": 0.0070489487752638524,
+              "CH4–U_1": 0.020549984423269052,
+              "CH4–p": 0.18413680346566252,
+              "CO–T": 0.007371059520664858,
+              "CO–U_1": 0.021198530346737243,
+              "CO–p": 0.13735307243769057,
+              "T–U_1": 0.030431129613134544,
+              "T–p": 0.09133424916217336,
+              "U_1–p": 0.13635226024780422
+            }
+          }
+        },
+        "cross_spectrum": {
+          "base": {
+            "weighted_absolute_discrepancy": 0.022617487236857414,
+            "coherence_score": 0.6602045297622681,
+            "same_frequency_discrepancy": 0.009037305600941181,
+            "cross_frequency_discrepancy": 0.013580181635916233,
+            "cross_pair_scores": {
+              "CH4–U_1": 0.3629662096500397,
+              "CO–T": 0.5526187419891357,
+              "T–CH4": 0.5229398012161255,
+              "T–U_1": 0.3212141990661621
+            },
+            "ensemble_count": 2,
+            "ensemble_size": 32
+          },
+          "post": {
+            "weighted_absolute_discrepancy": 0.027320895344018936,
+            "coherence_score": 0.6436511874198914,
+            "same_frequency_discrepancy": 0.009612257592380047,
+            "cross_frequency_discrepancy": 0.017708638682961464,
+            "cross_pair_scores": {
+              "CH4–U_1": 0.33202776312828064,
+              "CO–T": 0.48621654510498047,
+              "T–CH4": 0.5279110670089722,
+              "T–U_1": 0.2800479233264923
+            },
+            "ensemble_count": 2,
+            "ensemble_size": 32
+          }
+        },
+        "topology": {
+          "base": {
+            "family_total_mean": 0.014386606882908382,
+            "component_means": {
+              "topology.mutual.persistence": 0.0024965140746644465,
+              "topology.self.persistence": 0.011890092842804734
+            },
+            "raster_grid_shape": [
+              32,
+              128
+            ],
+            "source_grid_shape": [
+              100,
+              403
+            ],
+            "query_point_count": 4096
+          },
+          "post": {
+            "family_total_mean": 0.004827693204788375,
+            "component_means": {
+              "topology.mutual.persistence": 0.0011797022871178342,
+              "topology.self.persistence": 0.003647990892204689
+            },
+            "raster_grid_shape": [
+              32,
+              128
+            ],
+            "source_grid_shape": [
+              100,
+              403
+            ],
+            "query_point_count": 4096
+          }
+        }
+      }
+    }
+  }
+}
