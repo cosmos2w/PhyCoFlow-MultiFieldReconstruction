@@ -116,6 +116,7 @@ class RunStore:
                 name: importlib.metadata.version(name)
                 for name in (
                     "conflictfree",
+                    "gudhi",
                     "h5py",
                     "neuraloperator",
                     "numpy",
@@ -199,6 +200,33 @@ class RunStore:
         path = self.run_dir / "metrics" / "history.jsonl"
         with path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(dict(row), sort_keys=True) + "\n")
+
+    def recover_metric_histories(self, completed_step: int) -> None:
+        """Trim writes beyond the checkpoint, including a torn trailing JSON row.
+
+        Training logs are written before the atomic checkpoint. Preemption may
+        therefore leave metrics for updates that recovery will replay. Repeated
+        validation of the same checkpoint is reduced to its last complete row.
+        """
+        for name in ("history", "validation_history", "topology_validation"):
+            path = self.run_dir / "metrics" / f"{name}.jsonl"
+            if not path.exists():
+                continue
+            rows = {}
+            lines = path.read_text(encoding="utf-8").splitlines()
+            for index, line in enumerate(lines):
+                if not line.strip():
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    if index == len(lines) - 1:
+                        break
+                    raise
+                step = int(row["step"])
+                if step <= completed_step:
+                    rows[step] = line
+            _atomic_text(path, "".join(rows[step] + "\n" for step in sorted(rows)))
 
 
 def _package_exists(name: str) -> bool:

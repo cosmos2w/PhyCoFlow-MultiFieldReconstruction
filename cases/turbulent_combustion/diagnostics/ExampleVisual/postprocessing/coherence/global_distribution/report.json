@@ -1,0 +1,332 @@
+{
+  "artifacts": {
+    "extra": {
+      "directory": "/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/diagnostics/ExampleVisual/.work/run_snapshot/evaluation/reconstruction_set_validation_last/coherence/global_distribution/global_distribution_extra",
+      "figures": {
+        "CH4\u2013CO": "/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/diagnostics/ExampleVisual/.work/run_snapshot/evaluation/reconstruction_set_validation_last/coherence/global_distribution/global_distribution_extra/joint_pdf_CH4-CO.png",
+        "CH4\u2013T": "/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/diagnostics/ExampleVisual/.work/run_snapshot/evaluation/reconstruction_set_validation_last/coherence/global_distribution/global_distribution_extra/joint_pdf_CH4-T.png",
+        "CH4\u2013U_1": "/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/diagnostics/ExampleVisual/.work/run_snapshot/evaluation/reconstruction_set_validation_last/coherence/global_distribution/global_distribution_extra/joint_pdf_CH4-U_1.png",
+        "CH4\u2013p": "/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/diagnostics/ExampleVisual/.work/run_snapshot/evaluation/reconstruction_set_validation_last/coherence/global_distribution/global_distribution_extra/joint_pdf_CH4-p.png",
+        "CO\u2013T": "/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/diagnostics/ExampleVisual/.work/run_snapshot/evaluation/reconstruction_set_validation_last/coherence/global_distribution/global_distribution_extra/joint_pdf_CO-T.png",
+        "CO\u2013U_1": "/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/diagnostics/ExampleVisual/.work/run_snapshot/evaluation/reconstruction_set_validation_last/coherence/global_distribution/global_distribution_extra/joint_pdf_CO-U_1.png",
+        "CO\u2013p": "/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/diagnostics/ExampleVisual/.work/run_snapshot/evaluation/reconstruction_set_validation_last/coherence/global_distribution/global_distribution_extra/joint_pdf_CO-p.png",
+        "T\u2013U_1": "/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/diagnostics/ExampleVisual/.work/run_snapshot/evaluation/reconstruction_set_validation_last/coherence/global_distribution/global_distribution_extra/joint_pdf_T-U_1.png",
+        "T\u2013p": "/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/diagnostics/ExampleVisual/.work/run_snapshot/evaluation/reconstruction_set_validation_last/coherence/global_distribution/global_distribution_extra/joint_pdf_T-p.png",
+        "U_1\u2013p": "/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/diagnostics/ExampleVisual/.work/run_snapshot/evaluation/reconstruction_set_validation_last/coherence/global_distribution/global_distribution_extra/joint_pdf_U_1-p.png"
+      },
+      "jensen_shannon_divergence_bits": {
+        "CH4\u2013CO": 0.17481183616327256,
+        "CH4\u2013T": 0.2174845699219747,
+        "CH4\u2013U_1": 0.16374538849685416,
+        "CH4\u2013p": 0.1813314322873639,
+        "CO\u2013T": 0.042245629325170814,
+        "CO\u2013U_1": 0.013206949859552564,
+        "CO\u2013p": 0.027216030152089083,
+        "T\u2013U_1": 0.028386015899746223,
+        "T\u2013p": 0.04620943297700741,
+        "U_1\u2013p": 0.025183127949399545
+      },
+      "metrics_csv": "/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/diagnostics/ExampleVisual/.work/run_snapshot/evaluation/reconstruction_set_validation_last/coherence/global_distribution/global_distribution_extra/joint_pdf_metrics.csv",
+      "metrics_payload": "/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/diagnostics/ExampleVisual/.work/run_snapshot/evaluation/reconstruction_set_validation_last/coherence/global_distribution/global_distribution_extra/joint_pdf_metrics.npz",
+      "report": "/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/diagnostics/ExampleVisual/.work/run_snapshot/evaluation/reconstruction_set_validation_last/coherence/global_distribution/global_distribution_extra/report.json"
+    },
+    "figures": {
+      "joint_top_tail": "joint_top_tail_distributions.png",
+      "marginal": "marginal_field_distributions.png",
+      "pairwise": "pairwise_field_distributions.png"
+    },
+    "metrics_csv": "metrics.csv",
+    "metrics_payload": "metrics.npz",
+    "vector_figures": {
+      "joint_top_tail": {
+        "pdf": "joint_top_tail_distributions.pdf",
+        "svg": "joint_top_tail_distributions.svg"
+      },
+      "marginal": {
+        "pdf": "marginal_field_distributions.pdf",
+        "svg": "marginal_field_distributions.svg"
+      },
+      "pairwise": {
+        "pdf": "pairwise_field_distributions.pdf",
+        "svg": "pairwise_field_distributions.svg"
+      }
+    }
+  },
+  "component_weights": {
+    "cross_joint_topk_swd": 1.0,
+    "mutual_pairwise_swd": 1.0,
+    "self_marginal_w2": 1.0
+  },
+  "family": "global_distribution",
+  "family_weight": 1.0,
+  "field_names": [
+    "CH4",
+    "CO",
+    "T",
+    "U_1",
+    "p"
+  ],
+  "field_pairs": [
+    "CH4\u2013CO",
+    "CH4\u2013T",
+    "CH4\u2013U_1",
+    "CH4\u2013p",
+    "CO\u2013T",
+    "CO\u2013U_1",
+    "CO\u2013p",
+    "T\u2013U_1",
+    "T\u2013p",
+    "U_1\u2013p"
+  ],
+  "metric": "paired_reconstruction_to_ground_truth_squared_distribution_discrepancy",
+  "sample_count": 64,
+  "settings": {
+    "components": {
+      "cross": {
+        "directions": 16,
+        "enabled": true,
+        "include_axes": true,
+        "qmc": true,
+        "seed": 1234,
+        "top_fraction": 0.1,
+        "weight": 1.0
+      },
+      "mutual": {
+        "directions": 8,
+        "enabled": true,
+        "seed": 1234,
+        "weight": 1.0
+      },
+      "self": {
+        "enabled": true,
+        "weight": 1.0
+      }
+    },
+    "enabled": true,
+    "fields": [
+      "CH4",
+      "CO",
+      "T",
+      "U_1",
+      "p"
+    ],
+    "reference_bank": {
+      "enabled": false
+    },
+    "target_use": "paired_supervised",
+    "units": "model_units",
+    "weight": 1.0
+  },
+  "split": "validation",
+  "statistic_scale": "log",
+  "statistics": {
+    "family_total": {
+      "count": 64,
+      "maximum": 1.5264301300048828,
+      "mean": 0.33918746301787905,
+      "median": 0.20788301527500153,
+      "minimum": 0.005960861220955849,
+      "quartile_25": 0.1155732050538063,
+      "quartile_75": 0.48513375222682953,
+      "standard_deviation": 0.32768501646726755
+    },
+    "joint_top_tail": {
+      "count": 64,
+      "maximum": 1.016304850578308,
+      "mean": 0.21512746448570397,
+      "median": 0.12542783841490746,
+      "minimum": 0.0032671866938471794,
+      "quartile_25": 0.06430201418697834,
+      "quartile_75": 0.31025736033916473,
+      "standard_deviation": 0.21990230822068468
+    },
+    "marginal_per_field": {
+      "CH4": {
+        "count": 64,
+        "maximum": 0.04286709427833557,
+        "mean": 0.008782428324593639,
+        "median": 0.005250894231721759,
+        "minimum": 0.0002876624057535082,
+        "quartile_25": 0.0014065825962461531,
+        "quartile_75": 0.01054919883608818,
+        "standard_deviation": 0.010248819730255335
+      },
+      "CO": {
+        "count": 64,
+        "maximum": 0.03832217678427696,
+        "mean": 0.009994826404181367,
+        "median": 0.007028746651485562,
+        "minimum": 0.00040425133192911744,
+        "quartile_25": 0.004566615447402,
+        "quartile_75": 0.012355299899354577,
+        "standard_deviation": 0.00849024607157542
+      },
+      "T": {
+        "count": 64,
+        "maximum": 0.024362899363040924,
+        "mean": 0.00568709638105247,
+        "median": 0.0035834929440170527,
+        "minimum": 0.000217836131923832,
+        "quartile_25": 0.0019949873676523566,
+        "quartile_75": 0.0072964063147082925,
+        "standard_deviation": 0.005860634624638062
+      },
+      "U_1": {
+        "count": 64,
+        "maximum": 0.1318696141242981,
+        "mean": 0.040505250872229226,
+        "median": 0.02886833716183901,
+        "minimum": 0.004132246132940054,
+        "quartile_25": 0.018341233488172293,
+        "quartile_75": 0.05125667154788971,
+        "standard_deviation": 0.031092069988566208
+      },
+      "p": {
+        "count": 64,
+        "maximum": 1.1947277784347534,
+        "mean": 0.23968498696922325,
+        "median": 0.13243740797042847,
+        "minimum": 0.0015623513609170914,
+        "quartile_25": 0.0665304260328412,
+        "quartile_75": 0.3561313673853874,
+        "standard_deviation": 0.25614214557278114
+      }
+    },
+    "pairwise_per_field_pair": {
+      "CH4\u2013CO": {
+        "count": 64,
+        "maximum": 0.023647397756576538,
+        "mean": 0.007366743580405455,
+        "median": 0.006305930437520146,
+        "minimum": 0.00026304167113266885,
+        "quartile_25": 0.0039000523975118995,
+        "quartile_75": 0.009131558472290635,
+        "standard_deviation": 0.00508783476329757
+      },
+      "CH4\u2013T": {
+        "count": 64,
+        "maximum": 0.034948643296957016,
+        "mean": 0.007455688297341112,
+        "median": 0.004257353721186519,
+        "minimum": 0.0003855095710605383,
+        "quartile_25": 0.0020139155676588416,
+        "quartile_75": 0.009496491402387619,
+        "standard_deviation": 0.008423357995873444
+      },
+      "CH4\u2013U_1": {
+        "count": 64,
+        "maximum": 0.04921756312251091,
+        "mean": 0.01831133002815477,
+        "median": 0.014651318546384573,
+        "minimum": 0.0015718931099399924,
+        "quartile_25": 0.010678702965378761,
+        "quartile_75": 0.022464643232524395,
+        "standard_deviation": 0.011661444966441338
+      },
+      "CH4\u2013p": {
+        "count": 64,
+        "maximum": 0.9150090217590332,
+        "mean": 0.18339858896615624,
+        "median": 0.10401620715856552,
+        "minimum": 0.0015211921418085694,
+        "quartile_25": 0.04438282176852226,
+        "quartile_75": 0.2654150053858757,
+        "standard_deviation": 0.19750808035436143
+      },
+      "CO\u2013T": {
+        "count": 64,
+        "maximum": 0.024843208491802216,
+        "mean": 0.007608723616613133,
+        "median": 0.006122350227087736,
+        "minimum": 0.0002633341937325895,
+        "quartile_25": 0.00399099919013679,
+        "quartile_75": 0.009265974396839738,
+        "standard_deviation": 0.005212391497425211
+      },
+      "CO\u2013U_1": {
+        "count": 64,
+        "maximum": 0.051725130528211594,
+        "mean": 0.017314593720584526,
+        "median": 0.01478443294763565,
+        "minimum": 0.001569609739817679,
+        "quartile_25": 0.010024329414591193,
+        "quartile_75": 0.02143362443894148,
+        "standard_deviation": 0.01030066572983687
+      },
+      "CO\u2013p": {
+        "count": 64,
+        "maximum": 0.6669169068336487,
+        "mean": 0.13655612733782618,
+        "median": 0.08023694902658463,
+        "minimum": 0.0012061900924891233,
+        "quartile_25": 0.04040587414056063,
+        "quartile_75": 0.19110313057899475,
+        "standard_deviation": 0.14305979490537507
+      },
+      "T\u2013U_1": {
+        "count": 64,
+        "maximum": 0.07748688757419586,
+        "mean": 0.02677454309014138,
+        "median": 0.019546071998775005,
+        "minimum": 0.0025086337700486183,
+        "quartile_25": 0.013778071850538254,
+        "quartile_75": 0.033497003838419914,
+        "standard_deviation": 0.018858618311585962
+      },
+      "T\u2013p": {
+        "count": 64,
+        "maximum": 0.4430431127548218,
+        "mean": 0.09206541520597966,
+        "median": 0.05745757184922695,
+        "minimum": 0.0009206323302350938,
+        "quartile_25": 0.02481994405388832,
+        "quartile_75": 0.13052326440811157,
+        "standard_deviation": 0.09602741848483685
+      },
+      "U_1\u2013p": {
+        "count": 64,
+        "maximum": 0.5938702821731567,
+        "mean": 0.13443906520478777,
+        "median": 0.09493190050125122,
+        "minimum": 0.0033131761010736227,
+        "quartile_25": 0.04795890673995018,
+        "quartile_75": 0.1932736113667488,
+        "standard_deviation": 0.1281608343864838
+      }
+    },
+    "weighted_component_totals": {
+      "joint_top_tail": {
+        "count": 64,
+        "maximum": 1.016304850578308,
+        "mean": 0.21512746448570397,
+        "median": 0.12542783841490746,
+        "minimum": 0.0032671866938471794,
+        "quartile_25": 0.06430201418697834,
+        "quartile_75": 0.31025736033916473,
+        "standard_deviation": 0.21990230822068468
+      },
+      "marginal": {
+        "count": 64,
+        "maximum": 0.24430158734321594,
+        "mean": 0.060930918509257026,
+        "median": 0.04697210341691971,
+        "minimum": 0.0013413531705737114,
+        "quartile_25": 0.025603601709008217,
+        "quartile_75": 0.08982227370142937,
+        "standard_deviation": 0.05163787447440409
+      },
+      "pairwise": {
+        "count": 64,
+        "maximum": 0.26582375168800354,
+        "mean": 0.06312908155086916,
+        "median": 0.04535514675080776,
+        "minimum": 0.0013523213565349579,
+        "quartile_25": 0.02472948655486107,
+        "quartile_75": 0.08841042220592499,
+        "standard_deviation": 0.05662820240490877
+      }
+    }
+  },
+  "target_use": "paired_supervised",
+  "units": "model_units"
+}

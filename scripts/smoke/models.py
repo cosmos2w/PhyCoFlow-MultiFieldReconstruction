@@ -55,6 +55,15 @@ MODEL_CONFIGS: dict[str, dict[str, Any]] = {
     "coordinate_mlp": {"name": "coordinate_mlp", "hidden_dim": 8, "fourier_bands": 2},
     "mlp_rbf": {"name": "mlp_rbf", "hidden_dim": 8, "fourier_bands": 2},
     "deeponet": {"name": "deeponet", "width": 8, "basis_dim": 4},
+    "mimonet": {
+        "name": "mimonet",
+        "conditioning_fields": ["u", "v"],
+        "sensor_capacities": [2, 2],
+        "basis_dim": 4,
+        "branch_hidden_dim": 8,
+        "trunk_hidden_dim": 8,
+        "merge_type": "mul",
+    },
     "senseiver": {
         "name": "senseiver",
         "width": 8,

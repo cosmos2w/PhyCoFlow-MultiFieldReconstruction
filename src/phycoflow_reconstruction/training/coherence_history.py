@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import statistics
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,10 +13,9 @@ from typing import Any
 
 from ..config import load_config
 from .history_plotting import (
-    HISTORY_FAMILY_COLORS,
-    HISTORY_FAMILY_LINESTYLES,
     HISTORY_MUTED_TEXT_COLOR,
     HISTORY_TEXT_COLOR,
+    history_family_style,
     style_history_axis,
 )
 
@@ -238,19 +238,46 @@ def _component_label(component: str) -> str:
     return " · ".join(_display_name(part) for part in component.split("."))
 
 
+def _rolling_median(values: tuple[float, ...]) -> tuple[float, ...]:
+    """Return a centered, two-percent-window median for visual trend context."""
+    if len(values) < 8:
+        return values
+    window = max(3, round(len(values) * 0.02))
+    if window % 2 == 0:
+        window += 1
+    radius = window // 2
+    return tuple(
+        statistics.median(values[max(0, index - radius) : index + radius + 1])
+        for index in range(len(values))
+    )
+
+
+def _stage_label(description: str) -> str:
+    stage = description.split(":", 1)[0].replace("_", " ").replace("-", " ").strip()
+    return stage.title() or "Training"
+
+
 def build_coherence_history_figure(data: CoherenceHistoryData, plt, *, description: str):
-    """Build an adaptive family-grouped small-multiples coherence figure."""
+    """Build a compact family-grouped figure of weighted and raw diagnostics."""
     by_family = {
         family: tuple(component for component in data.components if component.family == family)
         for family in data.family_order
     }
     by_family = {family: components for family, components in by_family.items() if components}
+    family_columns = {family: min(3, len(components)) for family, components in by_family.items()}
     family_rows = {
-        family: math.ceil(len(components) / 2) for family, components in by_family.items()
+        family: math.ceil(len(components) / family_columns[family])
+        for family, components in by_family.items()
     }
     total_component_rows = sum(family_rows.values())
+    all_epochs = [*data.total_epochs]
+    for epochs, _ in data.family_totals.values():
+        all_epochs.extend(epochs)
+    for component in data.components:
+        all_epochs.extend(component.epochs)
+    epoch_max = max(all_epochs, default=1.0)
     figure = plt.figure(
-        figsize=(12.4, 3.4 + 3.0 * total_component_rows),
+        figsize=(12.6, 2.5 + 1.9 * total_component_rows + 0.45 * len(by_family)),
         constrained_layout=True,
         facecolor="white",
     )
@@ -261,56 +288,69 @@ def build_coherence_history_figure(data: CoherenceHistoryData, plt, *, descripti
         squeeze=False,
     ).ravel()
     figure.suptitle(
-        f"{description.replace(':', ' · ').replace('_', ' ')} coherence component history",
+        f"{_stage_label(description)} coherence history",
         color=HISTORY_TEXT_COLOR,
-        fontsize=15,
+        fontsize=14,
         fontweight="medium",
     )
 
-    summary = subfigures[0].subplots()
-    summary_values = list(data.total_values)
+    total_axis, family_axis = subfigures[0].subplots(
+        1, 2, gridspec_kw={"width_ratios": [1.0, 1.55], "wspace": 0.22}
+    )
     if data.total_values:
-        summary.plot(
+        total_axis.plot(
             data.total_epochs,
             data.total_values,
             color=_SUMMARY_COLOR,
             linewidth=2.2,
             label="Total coherence",
         )
-    if len(data.family_totals) > 1:
+    total_axis.set_title(
+        "Total coherence", loc="left", color=HISTORY_TEXT_COLOR,
+        fontsize=11.5, fontweight="medium", pad=8,
+    )
+    total_axis.set_xlabel("Training epoch")
+    total_axis.set_ylabel("Weighted objective")
+    style_history_axis(total_axis, data.total_values, x_max=epoch_max)
+
+    family_values: list[float] = []
+    if data.family_totals:
         for index, family in enumerate(data.family_order):
             if family not in data.family_totals:
                 continue
             epochs, values = data.family_totals[family]
-            summary_values.extend(values)
-            summary.plot(
+            family_values.extend(values)
+            color, linestyle = history_family_style(family, index)
+            family_axis.plot(
                 epochs,
                 values,
-                color=HISTORY_FAMILY_COLORS[index % len(HISTORY_FAMILY_COLORS)],
-                linestyle=HISTORY_FAMILY_LINESTYLES[index % len(HISTORY_FAMILY_LINESTYLES)],
-                linewidth=1.65,
+                color=color,
+                linestyle=linestyle,
+                linewidth=1.8,
                 label=_display_name(family),
             )
-    summary.set_title(
-        "Weighted coherence objective",
+    family_axis.set_title(
+        "Weighted family contributions",
         loc="left",
         color=HISTORY_TEXT_COLOR,
-        fontsize=12.5,
+        fontsize=11.5,
         fontweight="medium",
-        pad=10,
+        pad=8,
     )
-    summary.set_xlabel("Training epoch")
-    summary.set_ylabel("Objective value")
-    style_history_axis(summary, summary_values)
-    if summary.lines:
-        summary.legend(
-            loc="best",
+    family_axis.set_xlabel("Training epoch")
+    family_axis.set_ylabel("Weighted objective")
+    style_history_axis(family_axis, family_values, x_max=epoch_max)
+    if family_axis.lines:
+        family_axis.legend(
+            loc="upper right",
             frameon=True,
             facecolor="white",
             edgecolor="#D4D9E2",
-            framealpha=0.94,
-            fontsize=8.6,
-            ncol=min(3, len(summary.lines)),
+            framealpha=0.96,
+            fontsize=8.2,
+            ncol=min(3, len(family_axis.lines)),
+            handlelength=2.4,
+            columnspacing=1.2,
         )
 
     for family_index, (family, components) in enumerate(by_family.items()):
@@ -319,33 +359,45 @@ def build_coherence_history_figure(data: CoherenceHistoryData, plt, *, descripti
             _display_name(family),
             x=0.01,
             ha="left",
-            color=HISTORY_TEXT_COLOR,
-            fontsize=13.0,
+            color=history_family_style(family, family_index)[0],
+            fontsize=11.5,
             fontweight="medium",
         )
-        grid = subfigure.add_gridspec(family_rows[family], 2)
+        columns = family_columns[family]
+        grid = subfigure.add_gridspec(family_rows[family], columns)
         axes = []
         for component_index in range(len(components)):
-            row = component_index // 2
-            column = component_index % 2
+            row = component_index // columns
+            column = component_index % columns
             cell = (
                 grid[row, :]
-                if component_index == len(components) - 1 and len(components) % 2
+                if component_index == len(components) - 1
+                and len(components) % columns == 1
                 else grid[row, column]
             )
             axes.append(subfigure.add_subplot(cell))
-        color_index = data.family_order.index(family)
-        color = HISTORY_FAMILY_COLORS[color_index % len(HISTORY_FAMILY_COLORS)]
+        color, _ = history_family_style(family, family_index)
         for axis, component in zip(axes, components):
             marker = "o" if len(component.epochs) <= 12 else None
             axis.plot(
                 component.epochs,
                 component.raw,
                 color=color,
-                linewidth=1.9,
+                linewidth=0.8,
+                alpha=0.42 if marker is None else 0.85,
                 marker=marker,
-                markersize=3.8 if marker else None,
+                markersize=3.2 if marker else None,
             )
+            trend = _rolling_median(component.raw)
+            if trend is not component.raw:
+                axis.plot(
+                    component.epochs,
+                    trend,
+                    color=color,
+                    linewidth=1.55,
+                    alpha=0.96,
+                    zorder=3,
+                )
             if component.partial_epochs:
                 lookup = dict(zip(component.epochs, component.raw))
                 visible = [epoch for epoch in component.partial_epochs if epoch in lookup]
@@ -358,33 +410,28 @@ def build_coherence_history_figure(data: CoherenceHistoryData, plt, *, descripti
                     s=28,
                     zorder=3,
                 )
-            ratios = [
-                weighted / raw
-                for raw, weighted in zip(component.raw, component.weighted)
-                if raw != 0.0
-            ]
-            multiplier = ratios[-1] if ratios else 1.0
             axis.set_title(
                 _component_label(component.component),
                 loc="left",
                 color=HISTORY_TEXT_COLOR,
-                fontsize=11.5,
+                fontsize=9.4,
                 fontweight="medium",
-                pad=9,
+                pad=6,
             )
             axis.text(
                 1.0,
-                1.015,
-                f"latest {component.raw[-1]:.3e} · effective ×{multiplier:.3g}",
+                0.97,
+                f"raw {component.raw[-1]:.2e} · weighted {component.weighted[-1]:.2e}",
                 transform=axis.transAxes,
                 ha="right",
-                va="bottom",
+                va="top",
                 color=HISTORY_MUTED_TEXT_COLOR,
-                fontsize=8.2,
+                fontsize=7.3,
+                bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.82, "pad": 1.2},
             )
-            axis.set_xlabel("Training epoch")
-            axis.set_ylabel("Raw component loss")
-            style_history_axis(axis, component.raw)
+            axis.set_xlabel("Epoch", labelpad=2)
+            axis.set_ylabel("Raw loss", labelpad=2)
+            style_history_axis(axis, component.raw, x_max=epoch_max)
     return figure
 
 

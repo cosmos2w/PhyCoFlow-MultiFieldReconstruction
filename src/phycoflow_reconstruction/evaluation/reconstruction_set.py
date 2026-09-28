@@ -29,9 +29,15 @@ from .coherence_set import (
     adaptive_coherence_score_limits,
     build_coherence_accumulators,
     render_coherence_distribution,
+    render_cross_spectrum_band_profiles,
     render_cross_spectrum_score_bars,
 )
 from .reconstruction_visualization import warn_if_cuda_memory_tight
+from .topology_set import (
+    render_configured_grid_topology,
+    render_topology_betti_curves,
+    render_topology_distance_distributions,
+)
 
 
 @dataclass(frozen=True)
@@ -121,6 +127,78 @@ def _distribution_limits(values: np.ndarray, scale: str) -> tuple[float, float]:
     return 0.0, max(upper, np.finfo(np.float64).eps)
 
 
+def _relative_l2_distribution_limits(values: np.ndarray, scale: str) -> tuple[float, float]:
+    """Limits for nonnegative relative errors, including an all-zero log case."""
+    finite = np.asarray(values, dtype=np.float64)
+    finite = finite[np.isfinite(finite)]
+    if np.any(finite < 0.0):
+        raise ValueError("relative L2 errors must be nonnegative")
+    if scale == "log" and finite.size and not np.any(finite > 0.0):
+        return 1.0e-4, 1.0
+    return _distribution_limits(finite, scale)
+
+
+def _merge_coherence_evaluation_override(
+    base_config: dict[str, Any],
+    current_coherence: dict[str, Any] | None,
+    requested_families: tuple[str, ...] | list[str],
+) -> dict[str, Any]:
+    """Apply only the current run's requested coherence evaluation contracts.
+
+    The source model keeps its own observations, runtime, and other resolved
+    configuration. Family settings and the small shared compute-budget subset
+    needed for identical graph/query construction are aligned for comparison.
+    """
+    if not isinstance(current_coherence, dict):
+        current_coherence = {}
+    existing = base_config.get("coherence")
+    merged = deepcopy(dict(existing)) if isinstance(existing, dict) else {}
+    current_families = current_coherence.get("families", {})
+    merged_families = deepcopy(merged.get("families", {}))
+    if not isinstance(merged_families, dict):
+        merged_families = {}
+    for name in requested_families:
+        family_settings = (
+            current_families.get(name) if isinstance(current_families, dict) else None
+        )
+        if isinstance(family_settings, dict):
+            merged_families[name] = deepcopy(family_settings)
+        else:
+            # Reproduce the current run's default family settings when it did
+            # not resolve an explicit block; retaining a source-only override
+            # would make the two figures describe different contracts.
+            merged_families.pop(name, None)
+    if merged_families:
+        merged["families"] = merged_families
+
+    compute_fields: set[str] = set()
+    if "topology" in requested_families:
+        compute_fields.update(("query_policy", "point_count", "query_seed"))
+    if "cross_spectrum" in requested_families:
+        compute_fields.update(("batch_size", "point_count", "query_seed"))
+    if compute_fields:
+        current_budget = current_coherence.get("compute_budget", {})
+        merged_budget = deepcopy(merged.get("compute_budget", {}))
+        if not isinstance(merged_budget, dict):
+            merged_budget = {}
+        defaults = {
+            "query_policy": "fixed_shared",
+            "point_count": 4096,
+            "query_seed": 100045,
+            "batch_size": 16,
+        }
+        for key in compute_fields:
+            merged_budget[key] = deepcopy(
+                current_budget.get(key, defaults[key])
+                if isinstance(current_budget, dict)
+                else defaults[key]
+            )
+        merged["compute_budget"] = merged_budget
+    result = deepcopy(base_config)
+    result["coherence"] = merged
+    return result
+
+
 def _publication_field_label(name: str) -> str:
     indexed = re.fullmatch(r"([A-Za-z]+)_([0-9]+)", name)
     if indexed:
@@ -170,57 +248,44 @@ def render_reconstruction_set_distribution(
     if scale not in {"log", "linear"}:
         raise ValueError("statistical plot scale must be 'log' or 'linear'")
 
-    figure_width = max(7.2, 1.15 * len(field_names) + 1.9)
-    figure, axis = plt.subplots(figsize=(figure_width, 4.7), layout="constrained")
+    if np.any(errors[np.isfinite(errors)] < 0.0):
+        raise ValueError("relative L2 errors must be nonnegative")
+
+    figure_width = max(7.2, 1.05 * len(field_names) + 2.1)
+    figure, axis = plt.subplots(figsize=(figure_width, 4.25), layout="constrained")
     figure.patch.set_facecolor("white")
     axis.set_facecolor("white")
     positions = np.arange(1, len(field_names) + 1, dtype=np.float64)
     rng = np.random.default_rng(2027)
-    okabe_ito = (
-        "#0072B2",
-        "#E69F00",
-        "#009E73",
-        "#CC79A7",
-        "#56B4E9",
-        "#D55E00",
-        "#F0E442",
-        "#000000",
-    )
-    colors = tuple(okabe_ito[index % len(okabe_ito)] for index in range(len(field_names)))
+    color = "#2878A5"
     finite_by_field = []
     finite_positions = []
+    zero_counts = []
     for field_index in range(len(field_names)):
-        finite = errors[:, field_index]
-        finite = finite[np.isfinite(finite)]
+        field_values = errors[:, field_index]
+        finite = field_values[np.isfinite(field_values)]
+        zero_count = int(np.count_nonzero(finite == 0.0))
+        zero_counts.append(zero_count)
         if scale == "log":
-            finite = finite[finite > 0.0]
-        if finite.size >= 2:
-            finite_by_field.append(finite)
+            plot_values = finite[finite > 0.0]
+        else:
+            plot_values = finite
+        if plot_values.size >= 2:
+            density_values = np.log10(plot_values) if scale == "log" else plot_values
+            finite_by_field.append(density_values)
             finite_positions.append(positions[field_index])
-        jitter = rng.uniform(-0.12, 0.12, size=finite.size)
+        jitter = rng.uniform(-0.105, 0.105, size=plot_values.size)
         axis.scatter(
-            np.full(finite.size, positions[field_index]) + jitter,
-            finite,
-            s=11,
-            alpha=0.48,
-            color=colors[field_index],
-            edgecolors="white",
-            linewidths=0.25,
+            np.full(plot_values.size, positions[field_index]) + jitter,
+            plot_values,
+            s=12,
+            alpha=0.42,
+            color=color,
+            edgecolors="none",
             zorder=3,
             rasterized=True,
         )
-        if finite.size:
-            axis.scatter(
-                positions[field_index],
-                np.median(finite),
-                marker="D",
-                s=31,
-                linewidths=0.9,
-                facecolors="white",
-                edgecolors="black",
-                zorder=4,
-            )
-        else:
+        if not finite.size:
             axis.text(
                 positions[field_index],
                 0.5,
@@ -234,45 +299,85 @@ def render_reconstruction_set_distribution(
         violin = axis.violinplot(
             finite_by_field,
             positions=finite_positions,
-            widths=0.68,
+            widths=0.64,
             showmeans=False,
             showmedians=False,
             showextrema=False,
         )
-        for body, position in zip(violin["bodies"], finite_positions):
-            field_index = int(position - 1)
-            body.set_facecolor(colors[field_index])
-            body.set_edgecolor(colors[field_index])
-            body.set_alpha(0.22)
-            body.set_linewidth(1.25)
+        for body in violin["bodies"]:
+            if scale == "log":
+                for path in body.get_paths():
+                    path.vertices[:, 1] = np.power(10.0, path.vertices[:, 1])
+            body.set_facecolor("#9CC7DA")
+            body.set_edgecolor(color)
+            body.set_alpha(0.48)
+            body.set_linewidth(0.9)
 
-    axis.set_xticks(
-        positions,
-        tuple(_publication_field_label(name) for name in field_names),
-        fontsize=10.5,
-    )
-    axis.set_xlim(0.35, len(field_names) + 0.65)
-    axis.set_yscale(scale)
-    limits = value_limits or _distribution_limits(errors, scale)
+    limits = value_limits or _relative_l2_distribution_limits(errors, scale)
     if scale == "log" and limits[0] <= 0.0:
         raise ValueError("log-scale reconstruction limits must be positive")
     if not np.isfinite(limits).all() or limits[0] >= limits[1]:
         raise ValueError("reconstruction plot limits must be finite and increasing")
     axis.set_ylim(*limits)
+
+    # Show robust summaries directly, without making the violin shape carry
+    # the only location/spread information.
+    for field_index, position in enumerate(positions):
+        finite = errors[:, field_index]
+        finite = finite[np.isfinite(finite)]
+        if scale == "log":
+            finite = finite[finite > 0.0]
+        if finite.size:
+            q25, median, q75 = np.quantile(finite, (0.25, 0.5, 0.75))
+            axis.vlines(position, q25, q75, color="#1D2933", linewidth=1.25, zorder=4)
+            axis.scatter(
+                position,
+                median,
+                marker="D",
+                s=28,
+                linewidths=0.8,
+                facecolors="white",
+                edgecolors="#1D2933",
+                zorder=5,
+            )
+        if scale == "log" and zero_counts[field_index]:
+            axis.scatter(
+                position + rng.uniform(-0.08, 0.08, size=zero_counts[field_index]),
+                np.full(zero_counts[field_index], limits[0] * 1.06),
+                marker="v",
+                s=23,
+                color="#1D2933",
+                edgecolors="white",
+                linewidths=0.35,
+                zorder=5,
+                clip_on=False,
+            )
+
+    axis.set_xticks(
+        positions,
+        tuple(
+            f"{_publication_field_label(name)}\n(n={count})"
+            for name, count in zip(field_names, np.isfinite(errors).sum(axis=0))
+        ),
+        fontsize=9.5,
+    )
+    axis.set_xlim(0.35, len(field_names) + 0.65)
+    axis.set_yscale(scale)
+    axis.set_ylim(*limits)
     axis.set_ylabel(
-        r"Relative $L_2$ error after physical-unit decoding",
-        fontsize=10.5,
+        r"Per-sample relative $L_2$ error" "\n(dimensionless; decoded physical fields)",
+        fontsize=10.0,
         labelpad=7.0,
     )
     axis.set_title(
-        title or f"Reconstruction quality distribution — {split} set",
-        fontsize=12.0,
+        title or f"Per-field reconstruction error — {split} set",
+        fontsize=10.8,
         fontweight="medium",
-        pad=9.0,
+        pad=8.0,
     )
     axis.tick_params(axis="y", labelsize=9.5, width=0.8, length=4)
     axis.tick_params(axis="x", width=0.8, length=4, pad=5)
-    axis.grid(axis="y", color="0.86", linewidth=0.65, linestyle="--", dashes=(3, 2))
+    axis.grid(axis="y", color="0.88", linewidth=0.6, linestyle="-", zorder=0)
     axis.set_axisbelow(True)
     axis.spines["top"].set_visible(False)
     axis.spines["right"].set_visible(False)
@@ -280,16 +385,20 @@ def render_reconstruction_set_distribution(
     axis.spines["bottom"].set_linewidth(0.8)
     axis.legend(
         handles=(
-            Patch(facecolor="0.55", edgecolor="0.35", alpha=0.22, label="Density"),
+            Patch(
+                facecolor="#9CC7DA",
+                edgecolor=color,
+                alpha=0.48,
+                label="Density in log space" if scale == "log" else "Density",
+            ),
             Line2D(
                 [],
                 [],
                 marker="o",
                 linestyle="none",
-                markersize=4.2,
-                markerfacecolor="0.45",
-                markeredgecolor="white",
-                markeredgewidth=0.3,
+                markersize=4.0,
+                markerfacecolor=color,
+                markeredgecolor=color,
                 label="Sample",
             ),
             Line2D(
@@ -299,21 +408,40 @@ def render_reconstruction_set_distribution(
                 linestyle="none",
                 markersize=4.5,
                 markerfacecolor="white",
-                markeredgecolor="black",
+                markeredgecolor="#1D2933",
                 markeredgewidth=0.8,
-                label="Median",
+                label="Median; line = IQR",
+            ),
+            *(
+                (
+                    Line2D(
+                        [],
+                        [],
+                        marker="v",
+                        linestyle="none",
+                        markersize=5,
+                        markerfacecolor="#1D2933",
+                        markeredgecolor="white",
+                        markeredgewidth=0.3,
+                        label="Zero at plot floor",
+                    ),
+                )
+                if any(zero_counts) and scale == "log"
+                else ()
             ),
         ),
         loc="upper left",
         ncol=3,
         frameon=False,
-        fontsize=8.5,
+        fontsize=8.0,
         handlelength=1.2,
         columnspacing=1.1,
         borderaxespad=0.5,
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(output_path, dpi=dpi, bbox_inches="tight")
+    for vector_suffix in (".pdf", ".svg"):
+        figure.savefig(output_path.with_suffix(vector_suffix), bbox_inches="tight")
     plt.close(figure)
     return output_path
 
@@ -365,7 +493,11 @@ def _evaluate_reconstruction_set_once(
         include_temporal_derivative=False,
     )
     if coherence_config_override is not None:
-        runtime.config["coherence"] = deepcopy(coherence_config_override)
+        runtime.config = _merge_coherence_evaluation_override(
+            runtime.config,
+            coherence_config_override,
+            tuple(coherence_families or ()),
+        )
     if evaluation_seed_override is not None:
         runtime.seed = int(evaluation_seed_override)
     dataset = runtime.dataset
@@ -760,7 +892,7 @@ def _cross_spectrum_comparison_subtitle(
         ensemble_summary = f"one pooled ensemble · n={used_count}"
         estimate_summary = "single pooled estimate"
     return (
-        f"{role} · {result.run_label.replace('_', ' ')} · {result.split} · "
+        f"{role} · {result.split} · "
         f"{result.checkpoint_label}.pt · {ensemble_summary} · {estimate_summary}"
     )
 
@@ -786,6 +918,170 @@ def _report_artifact_path(path: Path, output_dir: Path) -> str:
         return str(path)
 
 
+def _load_topology_comparison_data(payload_path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
+    report_path = payload_path.with_name("report.json")
+    if not payload_path.is_file() or not report_path.is_file():
+        raise FileNotFoundError("topology comparison payload or report is unavailable")
+    keys = (
+        "sample_ids",
+        "field_names",
+        "source_grid_shape",
+        "configured_grid_shape",
+        "query_indices",
+        "query_coordinates",
+        "query_seed",
+        "query_point_count",
+        "quantiles",
+        "objective_component_names",
+        "objective_component_distances",
+        "family_total_distance",
+        "filtration_metric",
+        "filtration_kind",
+        "filtration_direction",
+        "filtration_line_index",
+        "filtration_line_weight",
+        "reference_betti",
+        "reconstruction_betti",
+        "grid_coordinates",
+    )
+    with np.load(payload_path, allow_pickle=False) as payload:
+        missing = [key for key in keys if key not in payload]
+        if missing:
+            raise ValueError(f"topology comparison payload is missing {missing}")
+        data = {key: np.asarray(payload[key]).copy() for key in keys}
+    data["objective_component_names"] = tuple(str(value) for value in data["objective_component_names"])
+    data["field_names"] = tuple(str(value) for value in data["field_names"])
+    data["sample_ids"] = tuple(str(value) for value in data["sample_ids"])
+    data["filtration_metric"] = tuple(str(value) for value in data["filtration_metric"])
+    data["filtration_kind"] = tuple(str(value) for value in data["filtration_kind"])
+    data["filtration_direction"] = tuple(str(value) for value in data["filtration_direction"])
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    return data, report
+
+
+def _validate_topology_comparison(
+    base: dict[str, Any],
+    current: dict[str, Any],
+    base_report: dict[str, Any],
+    current_report: dict[str, Any],
+) -> None:
+    for key in (
+        "sample_ids",
+        "field_names",
+        "source_grid_shape",
+        "configured_grid_shape",
+        "query_indices",
+        "query_seed",
+        "query_point_count",
+        "quantiles",
+        "objective_component_names",
+        "filtration_metric",
+        "filtration_kind",
+        "filtration_direction",
+        "filtration_line_index",
+        "filtration_line_weight",
+    ):
+        if not np.array_equal(base[key], current[key]):
+            raise ValueError(f"base and post-training topology {key} do not match")
+    for key in ("query_coordinates", "grid_coordinates", "reference_betti"):
+        if not np.array_equal(base[key], current[key]):
+            raise ValueError(f"base and post-training topology {key} do not match")
+    if not np.array_equal(base["objective_component_names"], current["objective_component_names"]):
+        raise ValueError("base and post-training topology distance labels do not match")
+    if base_report.get("units") != current_report.get("units"):
+        raise ValueError("base and post-training topology units do not match")
+    base_query = base_report.get("query_contract", {})
+    current_query = current_report.get("query_contract", {})
+    base_raster = base_report.get("raster", {})
+    current_raster = current_report.get("raster", {})
+    base_objective = base_report.get("objective", {})
+    current_objective = current_report.get("objective", {})
+    if base_query != current_query:
+        raise ValueError("base and post-training topology fixed-query contracts do not match")
+    for key in ("grid_shape", "source_grid_shape", "periodic", "geometry_sha256"):
+        if base_raster.get(key) != current_raster.get(key):
+            raise ValueError(f"base and post-training topology raster {key} do not match")
+    if base_objective.get("settings") != current_objective.get("settings"):
+        raise ValueError("base and post-training topology family settings do not match")
+
+
+def _load_band_profile_comparison_data(
+    payload_path: Path,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    report_path = payload_path.with_name("report.json")
+    if not payload_path.is_file() or not report_path.is_file():
+        raise FileNotFoundError("cross-spectrum comparison payload or report is unavailable")
+    keys = (
+        "field_names",
+        "graph_band_names",
+        "band_field_labels",
+        "graph_band_energy_fraction_reference_mean",
+        "graph_band_energy_fraction_reference_std",
+        "graph_band_energy_fraction_reconstruction_mean",
+        "graph_band_energy_fraction_reconstruction_std",
+        "sample_ids",
+        "selected_sample_ids",
+        "ensemble_sample_ids",
+        "aggregation",
+        "ensemble_size",
+        "ensemble_count",
+    )
+    with np.load(payload_path, allow_pickle=False) as payload:
+        missing = [key for key in keys if key not in payload]
+        if missing:
+            raise ValueError(f"cross-spectrum comparison payload is missing {missing}")
+        data = {key: np.asarray(payload[key]).copy() for key in keys}
+    for key in ("field_names", "graph_band_names", "band_field_labels", "sample_ids", "selected_sample_ids"):
+        data[key] = tuple(str(value) for value in data[key].reshape(-1))
+    data["aggregation"] = str(data["aggregation"].item())
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    return data, report
+
+
+def _validate_band_profile_comparison(
+    base: dict[str, Any],
+    current: dict[str, Any],
+    base_report: dict[str, Any],
+    current_report: dict[str, Any],
+) -> None:
+    for key in (
+        "field_names",
+        "graph_band_names",
+        "band_field_labels",
+        "sample_ids",
+        "selected_sample_ids",
+        "aggregation",
+        "ensemble_size",
+        "ensemble_count",
+    ):
+        if not np.array_equal(base[key], current[key]):
+            raise ValueError(f"base and post-training graph-band profile {key} do not match")
+    if not np.array_equal(base["ensemble_sample_ids"], current["ensemble_sample_ids"]):
+        raise ValueError("base and post-training graph-band ensemble memberships do not match")
+    if base_report.get("units") != current_report.get("units"):
+        raise ValueError("base and post-training cross-spectrum field units do not match")
+    base_graph = base_report.get("graph", {})
+    current_graph = current_report.get("graph", {})
+    for key in (
+        "query_policy",
+        "query_seed",
+        "query_point_count",
+        "geometry_sha256",
+        "k_neighbors",
+        "resolved_sigma",
+        "num_modes",
+        "eigenvalues",
+        "band_mode_ids",
+    ):
+        if base_graph.get(key) != current_graph.get(key):
+            raise ValueError(f"base and post-training cross-spectrum graph contract {key} does not match")
+    for role in ("reference", "reconstruction"):
+        for statistic in ("mean", "std"):
+            key = f"graph_band_energy_fraction_{role}_{statistic}"
+            if base[key].shape != current[key].shape:
+                raise ValueError(f"base and post-training graph-band profile {key} shape differs")
+
+
 def _render_posttraining_comparison(
     current: _SetEvaluationResult,
     base: _SetEvaluationResult,
@@ -809,7 +1105,7 @@ def _render_posttraining_comparison(
     base_errors, base_fields, base_ids = _load_relative_l2_payload(base.payload_path)
     if (current_fields, current_ids) != (base_fields, base_ids):
         raise ValueError("base and post-training reconstruction payloads are not aligned")
-    reconstruction_limits = _distribution_limits(
+    reconstruction_limits = _relative_l2_distribution_limits(
         np.concatenate((base_errors.reshape(-1), current_errors.reshape(-1))),
         statistic_scale,
     )
@@ -846,6 +1142,7 @@ def _render_posttraining_comparison(
             "relative_l2": _report_artifact_path(post_reconstruction, current.output_dir)
         },
     }
+    matched_coherence_contracts: dict[str, Any] = {}
     if "global_distribution" in coherence_families:
         base_payload = base.output_dir / "coherence" / "global_distribution" / "metrics.npz"
         current_payload = current.output_dir / "coherence" / "global_distribution" / "metrics.npz"
@@ -890,6 +1187,27 @@ def _render_posttraining_comparison(
                 post_path.relative_to(current.output_dir)
             )
         shared_limits["global_distribution"] = family_limits
+
+        # Retain the matched source's numerical evidence alongside its figures.
+        # The source evaluation otherwise lives only in a TemporaryDirectory.
+        global_destination = current.output_dir / "coherence" / "global_distribution"
+        base_global_files = {
+            "metrics_payload": (base_payload, global_destination / "metrics-base.npz"),
+            "metrics_csv": (
+                base.output_dir / "coherence" / "global_distribution" / "metrics.csv",
+                global_destination / "metrics-base.csv",
+            ),
+            "report": (
+                base.output_dir / "coherence" / "global_distribution" / "report.json",
+                global_destination / "report-base.json",
+            ),
+        }
+        for source_path, destination_path in base_global_files.values():
+            shutil.copy2(source_path, destination_path)
+        artifacts["base"]["global_distribution_metrics"] = {
+            label: str(destination.relative_to(current.output_dir))
+            for label, (_, destination) in base_global_files.items()
+        }
 
         current_extra = current.coherence_accumulators.get("global_distribution")
         base_extra = base.coherence_accumulators.get("global_distribution")
@@ -940,6 +1258,282 @@ def _render_posttraining_comparison(
                 for label, limits in extra_ranges.items()
             }
 
+    if "topology" in coherence_families:
+        base_topology_payload = base.output_dir / "coherence" / "topology" / "metrics.npz"
+        current_topology_payload = current.output_dir / "coherence" / "topology" / "metrics.npz"
+        base_topology, base_topology_report = _load_topology_comparison_data(
+            base_topology_payload
+        )
+        current_topology, current_topology_report = _load_topology_comparison_data(
+            current_topology_payload
+        )
+        _validate_topology_comparison(
+            base_topology,
+            current_topology,
+            base_topology_report,
+            current_topology_report,
+        )
+
+        topology_dir = current_topology_payload.parent
+        base_topology_copy = topology_dir / "metrics-base.npz"
+        base_topology_csv_copy = topology_dir / "metrics-base.csv"
+        base_topology_report_copy = topology_dir / "report-base.json"
+        shutil.copy2(base_topology_payload, base_topology_copy)
+        shutil.copy2(base_topology_payload.with_name("metrics.csv"), base_topology_csv_copy)
+
+        distance_values = np.column_stack(
+            (
+                base_topology["objective_component_distances"],
+                base_topology["family_total_distance"].reshape(-1),
+            )
+        )
+        current_distance_values = np.column_stack(
+            (
+                current_topology["objective_component_distances"],
+                current_topology["family_total_distance"].reshape(-1),
+            )
+        )
+        objective_labels = base_topology["objective_component_names"]
+        distance_labels = tuple(name.removeprefix("topology.") for name in objective_labels) + (
+            "component-weighted total before outer family weight",
+        )
+        distance_roles = (*("component" for _ in objective_labels), "component_weighted_total")
+        if (
+            current_topology["objective_component_names"] != objective_labels
+            or distance_values.shape[1] != current_distance_values.shape[1]
+        ):
+            raise ValueError("base and post-training topology distance components do not match")
+        distance_upper = max(float(distance_values.max()), float(current_distance_values.max()))
+        distance_limits = (0.0, distance_upper * 1.13 if distance_upper > 0.0 else 1.0)
+        current_topology_accumulator = current.coherence_accumulators.get("topology")
+        base_topology_accumulator = base.coherence_accumulators.get("topology")
+        if current_topology_accumulator is None or base_topology_accumulator is None:
+            raise RuntimeError("topology accumulators are unavailable for paired visualization")
+        if (
+            tuple(current_topology_accumulator.sample_ids) != current_topology["sample_ids"]
+            or tuple(base_topology_accumulator.sample_ids) != base_topology["sample_ids"]
+        ):
+            raise ValueError("topology accumulator samples do not match their saved metrics")
+        base_cost = base_topology["family_total_distance"].reshape(-1)
+        current_cost = current_topology["family_total_distance"].reshape(-1)
+        base_ranks = np.empty(len(base_cost), dtype=np.int64)
+        current_ranks = np.empty(len(current_cost), dtype=np.int64)
+        base_ranks[np.argsort(base_cost, kind="stable")] = np.arange(len(base_cost))
+        current_ranks[np.argsort(current_cost, kind="stable")] = np.arange(len(current_cost))
+        representative_index = int(
+            np.argsort(base_ranks + current_ranks, kind="stable")[len(base_cost) // 2]
+        )
+        representative_id = current_topology["sample_ids"][representative_index]
+        reference_maps = np.asarray(
+            current_topology_accumulator.reference_maps[representative_index]
+        )
+        base_reference_maps = np.asarray(
+            base_topology_accumulator.reference_maps[representative_index]
+        )
+        if not np.array_equal(reference_maps, base_reference_maps):
+            raise ValueError("base and post-training topology references differ for paired sample")
+        fields = tuple(current_topology_accumulator.field_names)
+        if fields != current_topology["field_names"]:
+            raise ValueError("topology accumulator field order does not match saved metrics")
+        betti_payloads = (
+            base_topology["reference_betti"],
+            base_topology["reconstruction_betti"],
+            current_topology["reference_betti"],
+            current_topology["reconstruction_betti"],
+        )
+        betti_limits_by_dimension = tuple(
+            (
+                0.0,
+                max(
+                    1.0,
+                    float(
+                        np.ceil(
+                            max(float(values[:, :, dimension, :].max()) for values in betti_payloads)
+                            * 1.08
+                        )
+                    ),
+                ),
+            )
+            for dimension in range(2)
+        )
+        betti_limits_report = {
+            f"h{dimension}": list(limits)
+            for dimension, limits in enumerate(betti_limits_by_dimension)
+        }
+        filtration_metadata = [
+            {
+                "metric": metric,
+                "kind": kind,
+                "direction": direction,
+                "line_index": None if int(line_index) < 0 else int(line_index),
+                "line_weight": float(line_weight),
+            }
+            for metric, kind, direction, line_index, line_weight in zip(
+                current_topology["filtration_metric"],
+                current_topology["filtration_kind"],
+                current_topology["filtration_direction"],
+                current_topology["filtration_line_index"],
+                current_topology["filtration_line_weight"],
+            )
+        ]
+        metric_labels = tuple(dict.fromkeys(current_topology["filtration_metric"]))
+        directions = tuple(dict.fromkeys(current_topology["filtration_direction"]))
+        betti_path = topology_dir / "betti_curves.png"
+        betti_base_path = _base_figure_path(betti_path)
+        count_subtitle = (
+            f"{current.split} · n={len(current.sample_ids)} · mean ±1 SD across snapshots · "
+            f"fixed_shared query={int(current_topology['query_point_count']):,} · "
+            f"{int(current_topology['configured_grid_shape'][0])}×"
+            f"{int(current_topology['configured_grid_shape'][1])} configured raster"
+        )
+        for role, payload, destination in (
+            ("Base source", base_topology, betti_base_path),
+            ("Post-training", current_topology, betti_path),
+        ):
+            render_topology_betti_curves(
+                payload["reference_betti"],
+                payload["reconstruction_betti"],
+                filtration_metadata,
+                metric_labels,
+                directions,
+                payload["quantiles"],
+                destination,
+                title=f"{role} · exact Betti curves",
+                subtitle=count_subtitle,
+                dimension_y_limits=betti_limits_by_dimension,
+            )
+
+        topology_figure_path = topology_dir / "configured_grid_topology.png"
+        topology_base_figure_path = _base_figure_path(topology_figure_path)
+        paired_cost_summary = (
+            f"paired median objective rank · source={base_cost[representative_index]:.4g} · "
+            f"post={current_cost[representative_index]:.4g}"
+        )
+        for role, accumulator, destination, prediction_maps, cost in (
+            (
+                "Base source",
+                base_topology_accumulator,
+                topology_base_figure_path,
+                base_topology_accumulator.reconstruction_maps[representative_index],
+                base_cost[representative_index],
+            ),
+            (
+                "Post-training",
+                current_topology_accumulator,
+                topology_figure_path,
+                current_topology_accumulator.reconstruction_maps[representative_index],
+                current_cost[representative_index],
+            ),
+        ):
+            render_configured_grid_topology(
+                reference_maps,
+                prediction_maps,
+                accumulator.grid_coordinates,
+                fields,
+                representative_id,
+                units=str(current_topology_report["units"]),
+                sample_epoch=f"{role} · {paired_cost_summary} · cost={cost:.4g}",
+                output_path=destination,
+                objective_distance=float(cost),
+                role=role,
+            )
+
+        persistence_path = topology_dir / "persistence_term_distributions.png"
+        persistence_base_path = _base_figure_path(persistence_path)
+        for role, values, destination in (
+            ("Base source", distance_values, persistence_base_path),
+            ("Post-training", current_distance_values, persistence_path),
+        ):
+            render_topology_distance_distributions(
+                values,
+                distance_labels,
+                distance_roles,
+                destination,
+                title=f"{role} · configured persistence distances",
+                subtitle=(
+                    f"{current.split} · n={len(current.sample_ids)} · paired {statistic_scale} "
+                    "relative-$L_2$ sample selection"
+                ),
+                y_limits=distance_limits,
+            )
+
+        base_topology_report = deepcopy(base_topology_report)
+        base_topology_report.setdefault("artifacts", {})["metrics_csv"] = base_topology_csv_copy.name
+        base_topology_report["artifacts"]["metrics_payload"] = base_topology_copy.name
+        base_topology_report["artifacts"]["figures"] = {
+            key: _base_figure_path(topology_dir / filename).name
+            for key, filename in base_topology_report["artifacts"].get("figures", {}).items()
+        }
+        base_topology_report["artifacts"]["vector_figures"] = {
+            key: {
+                "pdf": _base_figure_path(topology_dir / filename["pdf"]).name,
+                "svg": _base_figure_path(topology_dir / filename["svg"]).name,
+            }
+            for key, filename in base_topology_report["artifacts"].get(
+                "vector_figures", {}
+            ).items()
+        }
+        base_topology_report["paired_source_comparison"] = {
+            "role": "base_source",
+            "representative_sample_id": representative_id,
+            "shared_limits": {
+                "betti_count_by_dimension": betti_limits_report,
+                "persistence_distance": list(distance_limits),
+            },
+        }
+        base_topology_report_copy.write_text(
+            json.dumps(base_topology_report, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        current_topology_report["paired_source_comparison"] = {
+            "role": "post_training",
+            "representative_sample_id": representative_id,
+            "shared_limits": {
+                "betti_count_by_dimension": betti_limits_report,
+                "persistence_distance": list(distance_limits),
+            },
+        }
+        (topology_dir / "report.json").write_text(
+            json.dumps(current_topology_report, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
+        artifacts["base"]["topology"] = {
+            "betti_curves": str(betti_base_path.relative_to(current.output_dir)),
+            "configured_grid_topology": str(
+                topology_base_figure_path.relative_to(current.output_dir)
+            ),
+            "persistence_term_distributions": str(
+                persistence_base_path.relative_to(current.output_dir)
+            ),
+            "metrics_csv": str(base_topology_csv_copy.relative_to(current.output_dir)),
+            "metrics_payload": str(base_topology_copy.relative_to(current.output_dir)),
+            "report": str(base_topology_report_copy.relative_to(current.output_dir)),
+        }
+        artifacts["post_training"]["topology"] = {
+            key: str((topology_dir / filename).relative_to(current.output_dir))
+            for key, filename in current_topology_report["artifacts"]["figures"].items()
+        }
+        artifacts["post_training"]["topology"].update(
+            {
+                "metrics_csv": str((topology_dir / "metrics.csv").relative_to(current.output_dir)),
+                "metrics_payload": str(current_topology_payload.relative_to(current.output_dir)),
+                "report": str((topology_dir / "report.json").relative_to(current.output_dir)),
+            }
+        )
+        shared_limits["topology"] = {
+            "betti_count_by_dimension": betti_limits_report,
+            "persistence_distance": list(distance_limits),
+            "representative_sample_id": representative_id,
+        }
+        matched_coherence_contracts["topology"] = {
+            "sample_ids": list(current_topology["sample_ids"]),
+            "field_names": list(current_topology["field_names"]),
+            "query_contract": current_topology_report["query_contract"],
+            "raster": current_topology_report["raster"],
+            "settings": current_topology_report["objective"]["settings"],
+        }
+
     if "cross_spectrum" in coherence_families:
         base_payload = base.output_dir / "coherence" / "cross_spectrum" / "metrics.npz"
         current_payload = current.output_dir / "coherence" / "cross_spectrum" / "metrics.npz"
@@ -957,6 +1551,15 @@ def _render_posttraining_comparison(
         base_report_payload["artifacts"]["figures"] = {
             key: _base_figure_path(current_cross_dir / filename).name
             for key, filename in base_report_payload["artifacts"]["figures"].items()
+        }
+        base_report_payload["artifacts"]["vector_figures"] = {
+            key: {
+                format_name: _base_figure_path(current_cross_dir / filename).name
+                for format_name, filename in formats.items()
+            }
+            for key, formats in base_report_payload["artifacts"].get(
+                "vector_figures", {}
+            ).items()
         }
         base_report_copy.write_text(
             json.dumps(base_report_payload, indent=2, sort_keys=True) + "\n",
@@ -1016,6 +1619,90 @@ def _render_posttraining_comparison(
             }
         )
 
+        base_profile, base_profile_report = _load_band_profile_comparison_data(base_payload)
+        current_profile, current_profile_report = _load_band_profile_comparison_data(
+            current_payload
+        )
+        _validate_band_profile_comparison(
+            base_profile,
+            current_profile,
+            base_profile_report,
+            current_profile_report,
+        )
+        base_profile_csv_copy = current_cross_dir / "band_energy_profile-base.csv"
+        shutil.copy2(base_payload.with_name("band_energy_profile.csv"), base_profile_csv_copy)
+        profile_path = current_cross_dir / "spectral_band_profiles.png"
+        profile_base_path = _base_figure_path(profile_path)
+        profile_subtitle = (
+            f"{current.split} · n={len(base_profile['sample_ids'])} paired used samples · "
+            f"{base_profile['aggregation']} ensembles · mean ±1 SD · shared fraction scale 0–1"
+        )
+        for role, profile, destination, report_payload in (
+            ("Base source", base_profile, profile_base_path, base_profile_report),
+            ("Post-training", current_profile, profile_path, current_profile_report),
+        ):
+            render_cross_spectrum_band_profiles(
+                profile["graph_band_energy_fraction_reference_mean"],
+                profile["graph_band_energy_fraction_reconstruction_mean"],
+                profile["graph_band_names"],
+                profile["field_names"],
+                destination,
+                reference_std=profile["graph_band_energy_fraction_reference_std"],
+                reconstruction_std=profile[
+                    "graph_band_energy_fraction_reconstruction_std"
+                ],
+                title=f"{role} · graph spectral energy by band",
+                subtitle=profile_subtitle,
+            )
+            if role == "Base source":
+                report_payload["paired_source_comparison"] = {
+                    "role": "base_source",
+                    "shared_fraction_limits": [0.0, 1.0],
+                }
+            else:
+                report_path = current_payload.with_name("report.json")
+                current_cross_report = json.loads(report_path.read_text(encoding="utf-8"))
+                current_cross_report["paired_source_comparison"] = {
+                    "role": "post_training",
+                    "shared_fraction_limits": [0.0, 1.0],
+                }
+                report_path.write_text(
+                    json.dumps(current_cross_report, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+        base_report_payload["paired_source_comparison"] = {
+            "role": "base_source",
+            "shared_fraction_limits": [0.0, 1.0],
+        }
+        base_report_payload.setdefault("artifacts", {})[
+            "band_energy_profile_csv"
+        ] = base_profile_csv_copy.name
+        base_report_copy.write_text(
+            json.dumps(base_report_payload, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        artifacts["base"]["cross_spectrum"].update(
+            {
+                "band_energy_profile": str(profile_base_path.relative_to(current.output_dir)),
+                "band_energy_profile_csv": str(
+                    base_profile_csv_copy.relative_to(current.output_dir)
+                ),
+            }
+        )
+        artifacts["post_training"]["cross_spectrum"]["band_energy_profile"] = str(
+            profile_path.relative_to(current.output_dir)
+        )
+        shared_limits["cross_spectrum"]["graph_band_energy_fraction"] = [0.0, 1.0]
+        matched_coherence_contracts["cross_spectrum"] = {
+            "field_names": list(current_profile["field_names"]),
+            "bands": list(current_profile["graph_band_names"]),
+            "band_field_labels": list(current_profile["band_field_labels"]),
+            "sample_ids": list(current_profile["sample_ids"]),
+            "selected_sample_ids": list(current_profile["selected_sample_ids"]),
+            "units": current_profile_report.get("units"),
+            "graph": current_profile_report.get("graph", {}),
+        }
+
     report = {
         "kind": "post_training_source_comparison",
         "split": current.split,
@@ -1039,6 +1726,7 @@ def _render_posttraining_comparison(
             },
         },
         "shared_axis_limits": shared_limits,
+        "matched_coherence_contracts": matched_coherence_contracts,
         "artifacts": artifacts,
     }
     report_path = current.output_dir / "comparison_report.json"
@@ -1126,6 +1814,10 @@ def evaluate_reconstruction_set(
         statistic_scale=statistic_scale,
     )
     if source is None:
+        if "topology" in families:
+            from .explanatory_coherence import render_saved_coherence_explanatory
+
+            render_saved_coherence_explanatory(current.output_dir, families=families)
         return current.figure_path
 
     source_run, source_checkpoint = source
@@ -1156,4 +1848,8 @@ def evaluate_reconstruction_set(
             coherence_families=families,
             statistic_scale=statistic_scale,
         )
+        if {"cross_spectrum", "topology"} & set(families):
+            from .explanatory_coherence import render_saved_coherence_explanatory
+
+            render_saved_coherence_explanatory(current.output_dir, families=families)
     return current.figure_path

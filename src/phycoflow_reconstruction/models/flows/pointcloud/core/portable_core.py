@@ -2387,6 +2387,35 @@ class ConditionalPointHybridLocalGlobalRBFCQ(ConditionalPointHybridLocalGlobalRB
         )
         return self.forward_query_chunk(t, x_t, coords, condition_context)
 
+    def prepare_rollout_query_context(self, coords, condition_context, *, cache_level):
+        """Differentiable reuse with the full forward's exact neighbor/readout shapes.
+
+        Inference chunk sizes can alter top-k choices at tied sensor distances
+        (notably torch.cdist's algorithm switch). Preserve the training path's
+        full-query measurement search and its existing readout chunking.
+        """
+        if self.training or cache_level not in {"geometry", "static_features"}:
+            raise ValueError("rollout query reuse requires eval mode and a supported cache level")
+        context = {"coord_feat": self.pos_enc(coords) if self.pos_enc is not None else coords}
+        if not self.cq_measurement_support_enabled:
+            # The general local path can depend on query features. Keep it live.
+            if cache_level == "static_features":
+                context["query_global"] = self._cq_readout_chunked(context["coord_feat"], condition_context)
+            return context
+        k = min(self.gather_topk, condition_context["obs_coords"].shape[1])
+        d2, indices, _, _, valid = self._get_topk_neighbors(
+            coords, condition_context["obs_coords"], condition_context["refined_sensor_feat"],
+            condition_context["obs_mask"], k, return_features=False)
+        if cache_level == "geometry":
+            context.update(topk_d2=d2, topk_idx=indices, topk_valid=valid)
+        else:
+            context["raw_measurement_support"] = self._cq_measurement_support_from_geometry(
+                d2, indices, valid, condition_context)
+            context["local_cond"] = self._aggregate_topk_from_geometry(
+                d2, indices, valid, condition_context)
+            context["query_global"] = self._cq_readout_chunked(context["coord_feat"], condition_context)
+        return context
+
     def model_summary(self) -> dict[str, Any]:
         query_prefixes = ("cq_", "query_to_cond", "gather_gate")
         query_parameters = sum(

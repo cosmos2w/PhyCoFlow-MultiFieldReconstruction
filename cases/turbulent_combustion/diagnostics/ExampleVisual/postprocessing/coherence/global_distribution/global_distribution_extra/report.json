@@ -1,0 +1,302 @@
+{
+  "artifacts": {
+    "figures": {
+      "CH4\u2013CO": "joint_pdf_CH4-CO.png",
+      "CH4\u2013T": "joint_pdf_CH4-T.png",
+      "CH4\u2013U_1": "joint_pdf_CH4-U_1.png",
+      "CH4\u2013p": "joint_pdf_CH4-p.png",
+      "CO\u2013T": "joint_pdf_CO-T.png",
+      "CO\u2013U_1": "joint_pdf_CO-U_1.png",
+      "CO\u2013p": "joint_pdf_CO-p.png",
+      "T\u2013U_1": "joint_pdf_T-U_1.png",
+      "T\u2013p": "joint_pdf_T-p.png",
+      "U_1\u2013p": "joint_pdf_U_1-p.png"
+    },
+    "metrics_csv": "joint_pdf_metrics.csv",
+    "metrics_payload": "joint_pdf_metrics.npz"
+  },
+  "checkpoint": "last.pt",
+  "family": "global_distribution",
+  "histogram": {
+    "bins_per_axis": 64,
+    "normalization": "probability_mass_then_density_by_bin_area",
+    "range_policy": "shared_ground_truth_and_reconstruction_finite_extrema_with_2pct_padding"
+  },
+  "jensen_shannon_divergence": {
+    "logarithm_base": 2,
+    "perfect_agreement": 0.0,
+    "range": [
+      0.0,
+      1.0
+    ],
+    "units": "bits"
+  },
+  "pairs": [
+    {
+      "density_range": [
+        0.0013063262981028645,
+        130.63262981028643
+      ],
+      "figure": "joint_pdf_CH4-CO.png",
+      "jensen_shannon_divergence_bits": 0.12773011691421515,
+      "left_field": "CH4",
+      "pair": "CH4\u2013CO",
+      "right_field": "CO",
+      "x_range": [
+        -1.2688559627532958,
+        1.0889839267730712
+      ],
+      "y_range": [
+        -1.059108054637909,
+        4.986844217777252
+      ]
+    },
+    {
+      "density_range": [
+        0.0025388673528404554,
+        253.8867352840455
+      ],
+      "figure": "joint_pdf_CH4-T.png",
+      "jensen_shannon_divergence_bits": 0.17045390466584542,
+      "left_field": "CH4",
+      "pair": "CH4\u2013T",
+      "right_field": "T",
+      "x_range": [
+        -1.2688559627532958,
+        1.0889839267730712
+      ],
+      "y_range": [
+        -1.1161043405532838,
+        1.563398814201355
+      ]
+    },
+    {
+      "density_range": [
+        0.00034356545658271087,
+        16.38120096986385
+      ],
+      "figure": "joint_pdf_CH4-U_1.png",
+      "jensen_shannon_divergence_bits": 0.11805958930445455,
+      "left_field": "CH4",
+      "pair": "CH4\u2013U_1",
+      "right_field": "U_1",
+      "x_range": [
+        -1.2688559627532958,
+        1.0889839267730712
+      ],
+      "y_range": [
+        -8.473569030761718,
+        10.81483184814453
+      ]
+    },
+    {
+      "density_range": [
+        0.0009806586260389003,
+        6.7233955401228105
+      ],
+      "figure": "joint_pdf_CH4-p.png",
+      "jensen_shannon_divergence_bits": 0.13129882443750807,
+      "left_field": "CH4",
+      "pair": "CH4\u2013p",
+      "right_field": "p",
+      "x_range": [
+        -1.2688559627532958,
+        1.0889839267730712
+      ],
+      "y_range": [
+        -3.8030007219314577,
+        2.9545274114608766
+      ]
+    },
+    {
+      "density_range": [
+        0.000994444992947519,
+        99.44449929475189
+      ],
+      "figure": "joint_pdf_CO-T.png",
+      "jensen_shannon_divergence_bits": 0.04231779961875348,
+      "left_field": "CO",
+      "pair": "CO\u2013T",
+      "right_field": "T",
+      "x_range": [
+        -1.059108054637909,
+        4.986844217777252
+      ],
+      "y_range": [
+        -1.1161043405532838,
+        1.563398814201355
+      ]
+    },
+    {
+      "density_range": [
+        0.00013398589695953037,
+        7.821694706806559
+      ],
+      "figure": "joint_pdf_CO-U_1.png",
+      "jensen_shannon_divergence_bits": 0.012816257455380512,
+      "left_field": "CO",
+      "pair": "CO\u2013U_1",
+      "right_field": "U_1",
+      "x_range": [
+        -1.059108054637909,
+        4.986844217777252
+      ],
+      "y_range": [
+        -8.473569030761718,
+        10.81483184814453
+      ]
+    },
+    {
+      "density_range": [
+        0.0003824436453182553,
+        2.7964279345671263
+      ],
+      "figure": "joint_pdf_CO-p.png",
+      "jensen_shannon_divergence_bits": 0.026959958807435673,
+      "left_field": "CO",
+      "pair": "CO\u2013p",
+      "right_field": "p",
+      "x_range": [
+        -1.059108054637909,
+        4.986844217777252
+      ],
+      "y_range": [
+        -3.8030007219314577,
+        2.9545274114608766
+      ]
+    },
+    {
+      "density_range": [
+        0.000302321845285618,
+        13.01646704877235
+      ],
+      "figure": "joint_pdf_T-U_1.png",
+      "jensen_shannon_divergence_bits": 0.02873335114975947,
+      "left_field": "T",
+      "pair": "T\u2013U_1",
+      "right_field": "U_1",
+      "x_range": [
+        -1.1161043405532838,
+        1.563398814201355
+      ],
+      "y_range": [
+        -8.473569030761718,
+        10.81483184814453
+      ]
+    },
+    {
+      "density_range": [
+        0.0008629346162103614,
+        5.633237174621292
+      ],
+      "figure": "joint_pdf_T-p.png",
+      "jensen_shannon_divergence_bits": 0.04806102705458321,
+      "left_field": "T",
+      "pair": "T\u2013p",
+      "right_field": "p",
+      "x_range": [
+        -1.1161043405532838,
+        1.563398814201355
+      ],
+      "y_range": [
+        -3.8030007219314577,
+        2.9545274114608766
+      ]
+    },
+    {
+      "density_range": [
+        0.00011987702044347886,
+        0.7299311774803489
+      ],
+      "figure": "joint_pdf_U_1-p.png",
+      "jensen_shannon_divergence_bits": 0.025236405793676597,
+      "left_field": "U_1",
+      "pair": "U_1\u2013p",
+      "right_field": "p",
+      "x_range": [
+        -8.473569030761718,
+        10.81483184814453
+      ],
+      "y_range": [
+        -3.8030007219314577,
+        2.9545274114608766
+      ]
+    }
+  ],
+  "point_selection": {
+    "configured_maximum_points_per_snapshot": 4096,
+    "policy": "fixed_shared_deterministic_subset",
+    "seed": 100045
+  },
+  "pooled_point_count": 262144,
+  "sample_count": 64,
+  "sample_ids": [
+    "trajectory_000000:8000",
+    "trajectory_000000:8015",
+    "trajectory_000000:8031",
+    "trajectory_000000:8047",
+    "trajectory_000000:8063",
+    "trajectory_000000:8079",
+    "trajectory_000000:8095",
+    "trajectory_000000:8111",
+    "trajectory_000000:8126",
+    "trajectory_000000:8142",
+    "trajectory_000000:8158",
+    "trajectory_000000:8174",
+    "trajectory_000000:8190",
+    "trajectory_000000:8206",
+    "trajectory_000000:8222",
+    "trajectory_000000:8237",
+    "trajectory_000000:8253",
+    "trajectory_000000:8269",
+    "trajectory_000000:8285",
+    "trajectory_000000:8301",
+    "trajectory_000000:8317",
+    "trajectory_000000:8333",
+    "trajectory_000000:8348",
+    "trajectory_000000:8364",
+    "trajectory_000000:8380",
+    "trajectory_000000:8396",
+    "trajectory_000000:8412",
+    "trajectory_000000:8428",
+    "trajectory_000000:8444",
+    "trajectory_000000:8459",
+    "trajectory_000000:8475",
+    "trajectory_000000:8491",
+    "trajectory_000000:8507",
+    "trajectory_000000:8523",
+    "trajectory_000000:8539",
+    "trajectory_000000:8555",
+    "trajectory_000000:8570",
+    "trajectory_000000:8586",
+    "trajectory_000000:8602",
+    "trajectory_000000:8618",
+    "trajectory_000000:8634",
+    "trajectory_000000:8650",
+    "trajectory_000000:8666",
+    "trajectory_000000:8681",
+    "trajectory_000000:8697",
+    "trajectory_000000:8713",
+    "trajectory_000000:8729",
+    "trajectory_000000:8745",
+    "trajectory_000000:8761",
+    "trajectory_000000:8777",
+    "trajectory_000000:8792",
+    "trajectory_000000:8808",
+    "trajectory_000000:8824",
+    "trajectory_000000:8840",
+    "trajectory_000000:8856",
+    "trajectory_000000:8872",
+    "trajectory_000000:8888",
+    "trajectory_000000:8903",
+    "trajectory_000000:8919",
+    "trajectory_000000:8935",
+    "trajectory_000000:8951",
+    "trajectory_000000:8967",
+    "trajectory_000000:8983",
+    "trajectory_000000:8999"
+  ],
+  "sampled_points_per_snapshot": 4096,
+  "split": "validation",
+  "view": "pairwise_joint_probability_density"
+}

@@ -1,0 +1,595 @@
+{
+  "artifacts": {
+    "band_energy_profile_csv": "band_energy_profile-base.csv",
+    "figures": {
+      "band_energy_profile": "spectral_band_profiles-base.png",
+      "cross_frequency": "cross_frequency_coherence-base.png",
+      "same_frequency": "same_frequency_coherence-base.png"
+    },
+    "metrics_csv": "metrics-base.csv",
+    "metrics_payload": "metrics-base.npz",
+    "vector_figures": {
+      "band_energy_profile": {
+        "pdf": "spectral_band_profiles-base.pdf",
+        "svg": "spectral_band_profiles-base.svg"
+      },
+      "cross_frequency": {
+        "pdf": "cross_frequency_coherence-base.pdf",
+        "svg": "cross_frequency_coherence-base.svg"
+      },
+      "same_frequency": {
+        "pdf": "same_frequency_coherence-base.pdf",
+        "svg": "same_frequency_coherence-base.svg"
+      }
+    }
+  },
+  "bands": [
+    "low",
+    "mid",
+    "high"
+  ],
+  "coherence_score": {
+    "absolute_discrepancy": "mean squared spectral difference",
+    "definition": "1 - ||S_reconstruction - S_ground_truth||_2 / max(||S_reconstruction||_2 + ||S_ground_truth||_2, epsilon)",
+    "perfect_agreement": 1.0,
+    "range": [
+      0.0,
+      1.0
+    ]
+  },
+  "component_weights": {
+    "cross_frequency": 1.0,
+    "same_frequency": 1.0
+  },
+  "components": {
+    "band_energy": {
+      "definition": "mean-band log-power matching"
+    },
+    "cross_frequency": {
+      "definition": "off-diagonal normalized band-energy coupling matching"
+    },
+    "same_frequency": {
+      "definition": "modewise pairwise cross-spectrum matching"
+    },
+    "self_spectrum": {
+      "definition": "modewise per-field auto-spectrum matching",
+      "sub_terms": "one auto-spectrum discrepancy and bounded agreement score per field"
+    }
+  },
+  "dropped_sample_count": 0,
+  "dropped_sample_ids": [],
+  "ensemble": {
+    "aggregation": "training_aligned",
+    "configured_training_batch_size": 32,
+    "ensemble_count": 2,
+    "ensemble_size": 32,
+    "grouping_policy": "deterministic_seeded_permutation_then_complete_chunks",
+    "grouping_seed": 2027,
+    "minimum_size": 3,
+    "policy": "training_aligned_fixed_size_nonoverlapping",
+    "sample_count": 64,
+    "sample_ids": [
+      "trajectory_000000:8000",
+      "trajectory_000000:8792",
+      "trajectory_000000:8333",
+      "trajectory_000000:8317",
+      "trajectory_000000:8602",
+      "trajectory_000000:8158",
+      "trajectory_000000:8713",
+      "trajectory_000000:8935",
+      "trajectory_000000:8459",
+      "trajectory_000000:8491",
+      "trajectory_000000:8555",
+      "trajectory_000000:8126",
+      "trajectory_000000:8919",
+      "trajectory_000000:8729",
+      "trajectory_000000:8206",
+      "trajectory_000000:8539",
+      "trajectory_000000:8475",
+      "trajectory_000000:8523",
+      "trajectory_000000:8967",
+      "trajectory_000000:8697",
+      "trajectory_000000:8174",
+      "trajectory_000000:8507",
+      "trajectory_000000:8111",
+      "trajectory_000000:8840",
+      "trajectory_000000:8412",
+      "trajectory_000000:8824",
+      "trajectory_000000:8666",
+      "trajectory_000000:8586",
+      "trajectory_000000:8095",
+      "trajectory_000000:8190",
+      "trajectory_000000:8570",
+      "trajectory_000000:8856",
+      "trajectory_000000:8031",
+      "trajectory_000000:8364",
+      "trajectory_000000:8285",
+      "trajectory_000000:8618",
+      "trajectory_000000:8237",
+      "trajectory_000000:8380",
+      "trajectory_000000:8015",
+      "trajectory_000000:8999",
+      "trajectory_000000:8063",
+      "trajectory_000000:8983",
+      "trajectory_000000:8903",
+      "trajectory_000000:8301",
+      "trajectory_000000:8888",
+      "trajectory_000000:8428",
+      "trajectory_000000:8872",
+      "trajectory_000000:8222",
+      "trajectory_000000:8951",
+      "trajectory_000000:8650",
+      "trajectory_000000:8079",
+      "trajectory_000000:8142",
+      "trajectory_000000:8761",
+      "trajectory_000000:8396",
+      "trajectory_000000:8681",
+      "trajectory_000000:8047",
+      "trajectory_000000:8808",
+      "trajectory_000000:8253",
+      "trajectory_000000:8777",
+      "trajectory_000000:8269",
+      "trajectory_000000:8634",
+      "trajectory_000000:8745",
+      "trajectory_000000:8348",
+      "trajectory_000000:8444"
+    ],
+    "sample_ids_by_ensemble": [
+      [
+        "trajectory_000000:8000",
+        "trajectory_000000:8792",
+        "trajectory_000000:8333",
+        "trajectory_000000:8317",
+        "trajectory_000000:8602",
+        "trajectory_000000:8158",
+        "trajectory_000000:8713",
+        "trajectory_000000:8935",
+        "trajectory_000000:8459",
+        "trajectory_000000:8491",
+        "trajectory_000000:8555",
+        "trajectory_000000:8126",
+        "trajectory_000000:8919",
+        "trajectory_000000:8729",
+        "trajectory_000000:8206",
+        "trajectory_000000:8539",
+        "trajectory_000000:8475",
+        "trajectory_000000:8523",
+        "trajectory_000000:8967",
+        "trajectory_000000:8697",
+        "trajectory_000000:8174",
+        "trajectory_000000:8507",
+        "trajectory_000000:8111",
+        "trajectory_000000:8840",
+        "trajectory_000000:8412",
+        "trajectory_000000:8824",
+        "trajectory_000000:8666",
+        "trajectory_000000:8586",
+        "trajectory_000000:8095",
+        "trajectory_000000:8190",
+        "trajectory_000000:8570",
+        "trajectory_000000:8856"
+      ],
+      [
+        "trajectory_000000:8031",
+        "trajectory_000000:8364",
+        "trajectory_000000:8285",
+        "trajectory_000000:8618",
+        "trajectory_000000:8237",
+        "trajectory_000000:8380",
+        "trajectory_000000:8015",
+        "trajectory_000000:8999",
+        "trajectory_000000:8063",
+        "trajectory_000000:8983",
+        "trajectory_000000:8903",
+        "trajectory_000000:8301",
+        "trajectory_000000:8888",
+        "trajectory_000000:8428",
+        "trajectory_000000:8872",
+        "trajectory_000000:8222",
+        "trajectory_000000:8951",
+        "trajectory_000000:8650",
+        "trajectory_000000:8079",
+        "trajectory_000000:8142",
+        "trajectory_000000:8761",
+        "trajectory_000000:8396",
+        "trajectory_000000:8681",
+        "trajectory_000000:8047",
+        "trajectory_000000:8808",
+        "trajectory_000000:8253",
+        "trajectory_000000:8777",
+        "trajectory_000000:8269",
+        "trajectory_000000:8634",
+        "trajectory_000000:8745",
+        "trajectory_000000:8348",
+        "trajectory_000000:8444"
+      ]
+    ],
+    "stored_representation": "graph_fourier_coefficients",
+    "summary_statistics": "mean and sample standard deviation across ensembles"
+  },
+  "family": "cross_spectrum",
+  "family_weight": 1.0,
+  "field_names": [
+    "CH4",
+    "CO",
+    "T",
+    "U_1",
+    "p"
+  ],
+  "field_pairs": [
+    "CO\u2013T",
+    "T\u2013CH4",
+    "T\u2013U_1",
+    "CH4\u2013U_1"
+  ],
+  "graph": {
+    "band_mode_ids": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2
+    ],
+    "eigenvalues": [
+      0.0009896151022985578,
+      0.001133556361310184,
+      0.002357128309085965,
+      0.002772111911326647,
+      0.004206076730042696,
+      0.004670400172472,
+      0.006289048586040735,
+      0.006871639750897884,
+      0.0075224824249744415,
+      0.009011142887175083,
+      0.010688337497413158,
+      0.011008678935468197,
+      0.011671544052660465,
+      0.013008221052587032,
+      0.015845617279410362,
+      0.016209077090024948,
+      0.01637871377170086,
+      0.01770034059882164,
+      0.018494190648198128,
+      0.020426608622074127,
+      0.021046888083219528,
+      0.022532474249601364,
+      0.023988880217075348,
+      0.024411553516983986,
+      0.02581232599914074,
+      0.026141971349716187,
+      0.02818000130355358,
+      0.028664376586675644,
+      0.030439745634794235,
+      0.0310065820813179,
+      0.0329676978290081,
+      0.0338025838136673,
+      0.03472698852419853,
+      0.035650745034217834,
+      0.03647807985544205,
+      0.03851258009672165,
+      0.03934073448181152,
+      0.0420583076775074,
+      0.04216212034225464,
+      0.04394958168268204,
+      0.04432288557291031,
+      0.046004585921764374,
+      0.04722466319799423,
+      0.04778536409139633,
+      0.049215756356716156,
+      0.049865663051605225,
+      0.05126943439245224,
+      0.0530107282102108
+    ],
+    "geometry_sha256": "25684a1ab7792b61d5cb0621e58d4f96fc02eacac66b9fb998053caee8a4af3f",
+    "k_neighbors": 16,
+    "num_modes": 48,
+    "query_point_count": 4096,
+    "query_policy": "fixed_shared",
+    "query_seed": 100045,
+    "resolved_sigma": 0.02174873473248331
+  },
+  "graph_band_energy_profile": {
+    "bands": [
+      "low",
+      "mid",
+      "high"
+    ],
+    "definition": "per-snapshot graph Fourier energy summed within each configured eigenvalue band, normalized to a fraction per field, then averaged within the selected ensemble",
+    "uncertainty": "mean and sample standard deviation across ensembles; zero spread for one pooled ensemble"
+  },
+  "metric": "paired_reconstruction_to_ground_truth_graph_cross_spectrum_coherence",
+  "paired_source_comparison": {
+    "role": "base_source",
+    "shared_fraction_limits": [
+      0.0,
+      1.0
+    ]
+  },
+  "selected_sample_count": 64,
+  "settings": {
+    "components": {
+      "band_energy": {
+        "enabled": false,
+        "weight": 0.0
+      },
+      "cross_frequency": {
+        "enabled": true,
+        "weight": 1.0
+      },
+      "same_frequency": {
+        "enabled": true,
+        "weight": 1.0
+      },
+      "self_spectrum": {
+        "enabled": false,
+        "weight": 1.0
+      }
+    },
+    "enabled": true,
+    "eps": 1e-08,
+    "fields": [
+      "CH4",
+      "CO",
+      "T",
+      "U_1",
+      "p"
+    ],
+    "graph": {
+      "bands": [
+        "low",
+        "mid",
+        "high"
+      ],
+      "exclude_zero": true,
+      "k_neighbors": 16,
+      "num_modes": 48,
+      "sigma": null
+    },
+    "pairs": [
+      [
+        "CO",
+        "T"
+      ],
+      [
+        "T",
+        "CH4"
+      ],
+      [
+        "T",
+        "U_1"
+      ],
+      [
+        "CH4",
+        "U_1"
+      ]
+    ],
+    "reference_bank": {
+      "enabled": false
+    },
+    "target_use": "paired_supervised",
+    "units": "model_units",
+    "weight": 1.0
+  },
+  "split": "validation",
+  "statistic_scale": "bounded_linear_0_to_1",
+  "statistics": {
+    "cross_frequency": {
+      "coherence_score": 0.4189543128013611,
+      "coherence_score_std": 0.1992315798997879,
+      "sub_terms": {
+        "CH4\u2013U_1": {
+          "absolute_discrepancy": 0.021491747349500656,
+          "absolute_discrepancy_std": 0.0004770772939082235,
+          "coherence_score": 0.20503389835357666,
+          "coherence_score_std": 0.03702356293797493
+        },
+        "CO\u2013T": {
+          "absolute_discrepancy": 0.007868883199989796,
+          "absolute_discrepancy_std": 0.007916015572845936,
+          "coherence_score": 0.5528982877731323,
+          "coherence_score_std": 0.16439209878444672
+        },
+        "T\u2013CH4": {
+          "absolute_discrepancy": 0.0034746332094073296,
+          "absolute_discrepancy_std": 9.18541190912947e-05,
+          "coherence_score": 0.5255957245826721,
+          "coherence_score_std": 0.34325364232063293
+        },
+        "T\u2013U_1": {
+          "absolute_discrepancy": 0.016069674864411354,
+          "absolute_discrepancy_std": 0.016954677179455757,
+          "coherence_score": 0.392289400100708,
+          "coherence_score_std": 0.2522570788860321
+        }
+      },
+      "weighted_absolute_discrepancy": 0.012226234190165997,
+      "weighted_absolute_discrepancy_std": 0.00631397869437933
+    },
+    "family_total": {
+      "coherence_score": 0.6511507034301758,
+      "coherence_score_std": 0.0923415943980217,
+      "weighted_absolute_discrepancy": 0.021268188953399658,
+      "weighted_absolute_discrepancy_std": 0.0041161770932376385
+    },
+    "graph_band_energy_profile": {
+      "CH4": {
+        "high": {
+          "reconstruction_fraction_ensemble_sd": 0.005171665921807289,
+          "reconstruction_fraction_mean": 0.024282950907945633,
+          "reference_fraction_ensemble_sd": 0.0014521090779453516,
+          "reference_fraction_mean": 0.026171619072556496
+        },
+        "low": {
+          "reconstruction_fraction_ensemble_sd": 0.010040896944701672,
+          "reconstruction_fraction_mean": 0.9278676509857178,
+          "reference_fraction_ensemble_sd": 0.0010372339747846127,
+          "reference_fraction_mean": 0.9242993593215942
+        },
+        "mid": {
+          "reconstruction_fraction_ensemble_sd": 0.004869236145168543,
+          "reconstruction_fraction_mean": 0.04784943163394928,
+          "reference_fraction_ensemble_sd": 0.0024892613291740417,
+          "reference_fraction_mean": 0.0495290569961071
+        }
+      },
+      "CO": {
+        "high": {
+          "reconstruction_fraction_ensemble_sd": 0.009201623499393463,
+          "reconstruction_fraction_mean": 0.04623871296644211,
+          "reference_fraction_ensemble_sd": 0.011536305770277977,
+          "reference_fraction_mean": 0.04982132464647293
+        },
+        "low": {
+          "reconstruction_fraction_ensemble_sd": 0.014390872791409492,
+          "reconstruction_fraction_mean": 0.8678401708602905,
+          "reference_fraction_ensemble_sd": 0.013407797552645206,
+          "reference_fraction_mean": 0.8605238199234009
+        },
+        "mid": {
+          "reconstruction_fraction_ensemble_sd": 0.0051893200725317,
+          "reconstruction_fraction_mean": 0.08592112362384796,
+          "reference_fraction_ensemble_sd": 0.001871483400464058,
+          "reference_fraction_mean": 0.0896548181772232
+        }
+      },
+      "T": {
+        "high": {
+          "reconstruction_fraction_ensemble_sd": 0.004168673884123564,
+          "reconstruction_fraction_mean": 0.025368070229887962,
+          "reference_fraction_ensemble_sd": 0.0009591463604010642,
+          "reference_fraction_mean": 0.03493542596697807
+        },
+        "low": {
+          "reconstruction_fraction_ensemble_sd": 0.007377215661108494,
+          "reconstruction_fraction_mean": 0.9171382784843445,
+          "reference_fraction_ensemble_sd": 0.0011472372571006417,
+          "reference_fraction_mean": 0.8985103368759155
+        },
+        "mid": {
+          "reconstruction_fraction_ensemble_sd": 0.0032085105776786804,
+          "reconstruction_fraction_mean": 0.057493701577186584,
+          "reference_fraction_ensemble_sd": 0.0021063624881207943,
+          "reference_fraction_mean": 0.0665542259812355
+        }
+      },
+      "U_1": {
+        "high": {
+          "reconstruction_fraction_ensemble_sd": 0.021109512075781822,
+          "reconstruction_fraction_mean": 0.19905775785446167,
+          "reference_fraction_ensemble_sd": 0.008310810662806034,
+          "reference_fraction_mean": 0.2424335777759552
+        },
+        "low": {
+          "reconstruction_fraction_ensemble_sd": 0.009277237579226494,
+          "reconstruction_fraction_mean": 0.4973181188106537,
+          "reference_fraction_ensemble_sd": 0.014915706589818,
+          "reference_fraction_mean": 0.4278891086578369
+        },
+        "mid": {
+          "reconstruction_fraction_ensemble_sd": 0.01183228474110365,
+          "reconstruction_fraction_mean": 0.30362415313720703,
+          "reference_fraction_ensemble_sd": 0.006604895927011967,
+          "reference_fraction_mean": 0.3296772837638855
+        }
+      },
+      "p": {
+        "high": {
+          "reconstruction_fraction_ensemble_sd": 0.0068915970623493195,
+          "reconstruction_fraction_mean": 0.050029464066028595,
+          "reference_fraction_ensemble_sd": 0.001625293167307973,
+          "reference_fraction_mean": 0.04840977117419243
+        },
+        "low": {
+          "reconstruction_fraction_ensemble_sd": 0.013368727639317513,
+          "reconstruction_fraction_mean": 0.8173126578330994,
+          "reference_fraction_ensemble_sd": 0.005650459323078394,
+          "reference_fraction_mean": 0.8053663969039917
+        },
+        "mid": {
+          "reconstruction_fraction_ensemble_sd": 0.006477148737758398,
+          "reconstruction_fraction_mean": 0.13265785574913025,
+          "reference_fraction_ensemble_sd": 0.007275747135281563,
+          "reference_fraction_mean": 0.14622384309768677
+        }
+      }
+    },
+    "same_frequency": {
+      "coherence_score": 0.8833469748497009,
+      "coherence_score_std": 0.01454841811209917,
+      "sub_terms": {
+        "CH4\u2013U_1": {
+          "absolute_discrepancy": 0.010655788704752922,
+          "absolute_discrepancy_std": 0.0035873730666935444,
+          "coherence_score": 0.8230835795402527,
+          "coherence_score_std": 0.033148832619190216
+        },
+        "CO\u2013T": {
+          "absolute_discrepancy": 0.013736434280872345,
+          "absolute_discrepancy_std": 0.0043101743794977665,
+          "coherence_score": 0.8990429639816284,
+          "coherence_score_std": 0.019339123740792274
+        },
+        "T\u2013CH4": {
+          "absolute_discrepancy": 0.0025801872834563255,
+          "absolute_discrepancy_std": 0.0012260228395462036,
+          "coherence_score": 0.9726372361183167,
+          "coherence_score_std": 0.006955494172871113
+        },
+        "T\u2013U_1": {
+          "absolute_discrepancy": 0.009195412509143353,
+          "absolute_discrepancy_std": 0.0003323647833894938,
+          "coherence_score": 0.8386242389678955,
+          "coherence_score_std": 0.001249780529178679
+        }
+      },
+      "weighted_absolute_discrepancy": 0.009041955694556236,
+      "weighted_absolute_discrepancy_std": 0.0021978013683110476
+    }
+  },
+  "target_use": "paired_supervised",
+  "units": "model_units",
+  "used_sample_count": 64
+}

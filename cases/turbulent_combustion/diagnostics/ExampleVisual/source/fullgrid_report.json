@@ -1,0 +1,130 @@
+{
+  "case_diagnostics": {
+    "per_field_physical": {
+      "CH4": {
+        "maximum": 0.05630582943558693,
+        "mean": 0.03294810280203819,
+        "minimum": -0.001260858029127121,
+        "observed_input_field": false,
+        "std": 0.02595471404492855
+      },
+      "CO": {
+        "maximum": 0.047056540846824646,
+        "mean": 0.006506599951535463,
+        "minimum": -7.809419184923172e-05,
+        "observed_input_field": false,
+        "std": 0.009677977301180363
+      },
+      "T": {
+        "maximum": 2228.9697265625,
+        "mean": 995.01318359375,
+        "minimum": 362.98907470703125,
+        "observed_input_field": true,
+        "std": 721.6099853515625
+      },
+      "U_1": {
+        "maximum": 219.0424346923828,
+        "mean": 0.6405149698257446,
+        "minimum": -125.7395248413086,
+        "observed_input_field": false,
+        "std": 34.89362716674805
+      },
+      "p": {
+        "maximum": 120314.890625,
+        "mean": 109883.0,
+        "minimum": 88125.3671875,
+        "observed_input_field": false,
+        "std": 5366.6923828125
+      }
+    },
+    "topology": {
+      "coordinate_reorder": "lexicographic_yx",
+      "logical_shape": [
+        100,
+        403
+      ],
+      "verified": true
+    }
+  },
+  "compute": {
+    "peak_cuda_memory_bytes": 0,
+    "query_points_per_sample": 40300,
+    "seconds": 0.7065201317891479,
+    "seconds_per_sample": 0.7065201317891479
+  },
+  "mean_relative_l2": 0.24949942529201508,
+  "mse_normalized": 0.05993834510445595,
+  "mse_physical": 275615.4375,
+  "observed_entry_mse_normalized": 0.0,
+  "per_field_mse_normalized": {
+    "CH4": 0.023612327873706818,
+    "CO": 0.11871955543756485,
+    "T": 0.022769924253225327,
+    "U_1": 0.10785994678735733,
+    "p": 0.026729974895715714
+  },
+  "per_field_mse_physical": {
+    "CH4": 1.683235495875124e-05,
+    "CO": 1.0666559319361113e-05,
+    "T": 13691.298828125,
+    "U_1": 149.4349822998047,
+    "p": 1364236.375
+  },
+  "per_field_relative_l2": {
+    "CH4": 0.1567889004945755,
+    "CO": 0.3339320421218872,
+    "T": 0.1592104732990265,
+    "U_1": 0.3334195017814636,
+    "p": 0.17039549350738525
+  },
+  "trace": {
+    "checkpoint": "checkpoints/last.pt",
+    "checkpoint_sha256": "7e39fa0322b4bc21db4ec612cef7c221fe490eba78545b9a1783b53bd37c9038",
+    "dataset_catalog_name": "Merged_CH4COTU1P.h5",
+    "dataset_fingerprint": "8c49936567eced7ab94887c336b9b35aaf7ec70dea7479aee83434ff970455d5",
+    "portable_plot_payload": "evaluation/reconstruction_validation_0000_last/reconstruction.npz",
+    "portable_plot_payload_sha256": "8c00238b1b2ed9aa6580ca6fa91c9f29e594d5e435159d78938bee83fd4e7183",
+    "query_indices": "evaluation/reconstruction_validation_0000_last/query_indices.pt",
+    "query_indices_sha256": "aff65e948fdcba510b038232d3eec67096872549f428a5bd3d1cb48803d6ffa1",
+    "resolved_config_sha256": "3fd77525df2a43a1d65721b03517dc1a265dc01953e449865e5a3d1d65d3999b",
+    "run": "diagnostics/ExampleVisual/.work/run_snapshot",
+    "sample_ids": [
+      "trajectory_000000:8000"
+    ],
+    "sample_index": 0,
+    "sensor_manifest": "evaluation/reconstruction_validation_0000_last/sensor_manifest.json",
+    "sensor_manifest_sha256": "cbd2eb233220da3e37224bec236fd8d0745ba9475af8e379f49549fc32e52eab",
+    "split": "validation",
+    "weight_selection": "configured"
+  },
+  "uncertainty": {
+    "available": false,
+    "reason": "model returned no ensemble samples"
+  },
+  "unobserved_entry_mse_normalized": 0.06002682074904442,
+  "visualization": {
+    "colorbar_ticks": 4,
+    "coordinate_space": "physical",
+    "dpi": 300,
+    "error_annotation": "per_field_relative_l2_physical",
+    "field_units": [
+      "unknown",
+      "unknown",
+      "unknown",
+      "unknown",
+      "unknown"
+    ],
+    "filled_contour_levels": 20,
+    "panels": [
+      "ground_truth",
+      "reconstruction",
+      "absolute_error"
+    ],
+    "png": "/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/diagnostics/ExampleVisual/.work/smoke_preview.png",
+    "vector_figures": {
+      "pdf": "/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/diagnostics/ExampleVisual/.work/smoke_preview.pdf",
+      "svg": "/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/diagnostics/ExampleVisual/.work/smoke_preview.svg"
+    }
+  },
+  "worst_field_relative_l2": 0.3339320421218872
+}

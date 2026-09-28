@@ -1,0 +1,18 @@
+# A+B+C continuation of the completed deterministic Senseiver checkpoint.
+defaults: [ABC_sliced_persistence_formal_5000ep_gpu1.yaml]
+
+source_run: runs/tc_senseiver_5000ep/20260828T190145Z_fea0fc25
+source_checkpoint: best.pt
+source: {kind: native_run, allow_integration_source: false}
+
+# The inherited flow profile sets model_ema_eval=false; null lets the loader
+# restore the Senseiver model section exactly from the source run.
+model: {model_ema_eval: null}
+
+# Senseiver's native inference does not apply the flow endpoint smoother.
+observation_consistency: {mode: none, final_clamp: false}
+
+runtime:
+  device: cuda:0
+
+output: {experiment_name: coherence_fix_ABC_sliced_persistence_senseiver_formal_5000ep_gpu0}

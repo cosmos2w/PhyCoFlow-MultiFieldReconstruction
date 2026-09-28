@@ -56,8 +56,11 @@ def open_field_dataset(
             grid_shape=config.get("grid_shape"),
             coordinate_reorder=config.get("coordinate_reorder", "stored"),
             include_temporal_derivative=bool(config.get("include_temporal_derivative", False)),
+            augmentation=config.get("augmentation"),
         )
     if suffix.endswith((".pt", ".pth")):
+        if config.get("augmentation"):
+            raise ValueError("augmentation currently requires HDF5 snapshot loading")
         if config.get("coordinate_reorder", "stored") != "stored":
             raise ValueError("PT datasets do not support coordinate_reorder")
         if bool(config.get("include_temporal_derivative", False)):

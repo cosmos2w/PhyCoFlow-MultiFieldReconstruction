@@ -1,0 +1,44 @@
+# Case geometry and reporting schedule for efficient sliced persistence.
+defaults:
+- ../../../../configs/defaults/topology_post_training.yaml
+- ../dataset.yaml
+- ../sensors/block_means.yaml
+- ../coherence/topology.yaml
+case: active_emulsion
+model:
+  name: gl_rbf_cq
+optimization:
+  epochs: 3000
+  training_subset:
+    fraction: 0.3
+    seed: 42
+    min_frames_per_trajectory: 4
+    strata_keys:
+    - regime
+    - m
+    trajectory_key: file
+  steps_per_epoch: 9
+  rollout_execution:
+    context_cache: static_features
+    checkpointing: false
+runtime:
+  data_strategy: async_cpu
+  plot_every_steps: 50
+evaluation:
+  query_points: 16384
+checkpointing:
+  enabled: true
+  every_epochs: 10
+  save_epoch_one: true
+  selection_metric: topology_with_fidelity
+  validation_every_epochs: 25
+  every_steps: 24
+  epochs:
+  - 100
+  - 250
+  - 500
+  - 1000
+  - 2000
+  - 3000
+output:
+  experiment_name: topology_efficient_sliced

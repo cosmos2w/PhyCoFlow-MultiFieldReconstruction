@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
+from math import isqrt
 
 import torch
 
@@ -26,8 +27,12 @@ class SensorProtocol:
     shared_locations: bool = False
 
     def validate(self) -> None:
-        if self.name not in {"random_uniform", "structured_stride", "uniform_spacetime_stride"}:
+        if self.name not in {"random_uniform", "structured_stride", "uniform_spacetime_stride", "structured_block_mean"}:
             raise ValueError(f"unsupported sensor protocol {self.name!r}")
+        if self.name == "structured_block_mean" and (
+            not self.field_counts or self.field_count_ranges or self.phase != 0
+        ):
+            raise ValueError("structured_block_mean requires fixed field_counts and phase=0")
         if self.spatial_downsample_ratio < 1 or self.temporal_downsample_ratio < 1:
             raise ValueError("spatial and temporal downsample ratios must be positive")
         if self.field_counts and any(int(value) < 1 for value in self.field_counts.values()):
@@ -53,6 +58,9 @@ def _sample_observation_indices(
 ) -> list[tuple[int, int]]:
     field_lookup = {name: index for index, name in enumerate(sample.field_names)}
     pairs: list[tuple[int, int]] = []
+
+    if protocol.name == "structured_block_mean":
+        return list(_block_mean_observations(sample, protocol))
 
     if protocol.name == "uniform_spacetime_stride":
         if sample.reconstruction_unit != "space_time_trajectory" or len(sample.logical_shape) != 2:
@@ -114,6 +122,42 @@ def _resolved_field_counts(
     return counts or {sample.field_names[0]: int(default_count)}
 
 
+def _block_mean_observations(sample: FieldSample, protocol: SensorProtocol):
+    """Nonoverlapping square blocks on an ordered complete 2D snapshot.
+
+    Values and locations are block means. The central lower grid index is only
+    a stable manifest identifier, never a pointwise measurement or clamp.
+    Pool before applying any nonlinear model transform.
+    """
+    if sample.reconstruction_unit != "snapshot" or len(sample.logical_shape) != 2:
+        raise ValueError("structured_block_mean requires a complete 2D snapshot")
+    height, width = sample.logical_shape
+    if height * width != sample.values.shape[0]:
+        raise ValueError("structured_block_mean requires a complete grid")
+    if sample.valid_points is not None and not sample.valid_points.all():
+        raise ValueError("structured_block_mean requires every grid point to be valid")
+    coords = sample.coordinates.reshape(height, width, -1)
+    # Require the stored grid order to describe Cartesian rows and columns.
+    if not torch.allclose(coords[..., 0], coords[:1, :, 0].expand(height, width)) or not torch.allclose(
+        coords[..., 1], coords[:, :1, 1].expand(height, width)
+    ):
+        raise ValueError("structured_block_mean requires stored Cartesian y/x order")
+    result = {}
+    for name, count in protocol.field_counts.items():
+        field_id = sample.field_names.index(name)
+        stride = isqrt(height * width // int(count))
+        if stride < 1 or height % stride or width % stride or (height // stride) * (width // stride) != int(count):
+            raise ValueError(f"{name}: field count does not define complete square blocks")
+        values = sample.values[:, field_id].reshape(height, width)
+        pooled_values = values.double().reshape(height // stride, stride, width // stride, stride).mean((1, 3))
+        pooled_coords = coords.double().reshape(height // stride, stride, width // stride, stride, -1).mean((1, 3))
+        for row in range(height // stride):
+            for column in range(width // stride):
+                point_id = (row * stride + (stride - 1) // 2) * width + column * stride + (stride - 1) // 2
+                result[(point_id, field_id)] = (pooled_coords[row, column].float(), pooled_values[row, column].float().reshape(1))
+    return result
+
+
 def build_observation_batch(
     samples: Sequence[FieldSample],
     protocol: SensorProtocol,
@@ -141,8 +185,11 @@ def build_observation_batch(
     for sample_index, sample in enumerate(samples):
         sample.validate()
         sample_id = f"{sample.trajectory_id}:{sample.time_index if sample.time_index is not None else 'all'}"
+        pooled = _block_mean_observations(sample, protocol) if protocol.name == "structured_block_mean" else None
         if manifest_indices and sample_id in manifest_indices:
             pairs = [(int(item[0]), int(item[1])) for item in manifest_indices[sample_id]]
+        elif pooled is not None:
+            pairs = list(pooled)
         else:
             pairs = _sample_observation_indices(sample, protocol, generator)
         if not pairs:
@@ -160,10 +207,12 @@ def build_observation_batch(
                 )
         point_ids = torch.tensor([item[0] for item in pairs], dtype=torch.long)
         field_ids = torch.tensor([item[1] for item in pairs], dtype=torch.long)
+        if pooled is not None and any(pair not in pooled for pair in pairs):
+            raise ValueError("block-mean manifest contains an invalid block identifier")
         obs_payloads.append(
             (
-                sample.coordinates[point_ids],
-                sample.values[point_ids, field_ids].unsqueeze(-1),
+                torch.stack([pooled[pair][0] for pair in pairs]) if pooled is not None else sample.coordinates[point_ids],
+                torch.stack([pooled[pair][1] for pair in pairs]) if pooled is not None else sample.values[point_ids, field_ids].unsqueeze(-1),
                 field_ids,
                 point_ids,
             )

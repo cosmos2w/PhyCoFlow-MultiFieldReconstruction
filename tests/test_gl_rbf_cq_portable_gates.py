@@ -16,49 +16,7 @@ import torch
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
-def _small_core_config(coord_dim: int, execution: str = "cached_kv") -> dict:
-    return {
-        "model_name": "GL_rbf_CQ",
-        "backbone": "GL_rbf_ENH_CQ",
-        "coord_dim": coord_dim,
-        "prior": "iid",
-        "hidden_dim": 16,
-        "cond_dim": 8,
-        "field_embed_dim": 4,
-        "latent_dim": 16,
-        "num_latents": 8,
-        "num_heads": 4,
-        "num_latent_blocks": 4,
-        "ff_mult": 2,
-        "attn_dropout": 0.0,
-        "mlp_dropout": 0.0,
-        "summary_type": "mean",
-        "gather_mode": "topk_rbf_glres",
-        "gather_topk": 3,
-        "gather_query_chunk_size": 5,
-        "learnable_rbf_sigma": True,
-        "neighbor_backend": "torch",
-        "USE_FOURIER_PE": True,
-        "fourier_pe_num_bands": 2,
-        "fourier_pe_max_freq": 4.0,
-        "sensor_coord_encoding": "fourier",
-        "latent_sensor_reinject": True,
-        "latent_reinject_every": 1,
-        "condition_attention_execution": execution,
-        "sensor_attention_padding_mode": "full",
-        "glres_scale_init": 1.0e-2,
-        "cq_query_dim": 8,
-        "cq_readout_mode": "lowrank",
-        "cq_readout_rank": 4,
-        "cq_readout_heads": 2,
-        "cq_fusion_mode": "additive",
-        "cq_time_conditioning": "sinusoidal_film",
-        "cq_time_embed_dim": 8,
-        "cq_time_max_period": 10000.0,
-        "cq_time_film_zero_init": True,
-        "cq_measurement_support_mode": "rbf_value_support",
-        "cq_measurement_support_normalize": True,
-    }
+from helpers.pointcloud import _small_core_config
 
 
 def _core_inputs(coord_dim: int, n_fields: int, *, query_count: int = 17) -> dict:

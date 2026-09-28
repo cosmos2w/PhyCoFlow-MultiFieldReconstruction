@@ -11,10 +11,12 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import random
 import statistics
 import warnings
 from collections.abc import Mapping
+from copy import deepcopy
 from dataclasses import asdict
 from pathlib import Path
 from time import perf_counter
@@ -24,7 +26,7 @@ import numpy as np
 import torch
 
 from ..coherence import ReferenceBank, build_enabled_families, fit_reference_bank
-from ..contracts import FamilyResult, ObservationBatch
+from ..contracts import DataSpec, FamilyResult, ObservationBatch
 from ..data.factory import FieldDataset, open_field_dataset
 from ..data.manifest import dataset_fingerprint, manifest_from_batch
 from ..data.sensor_protocols import SensorProtocol, build_observation_batch
@@ -55,7 +57,9 @@ from .model_lifecycle import (
 )
 from .monitoring import TrainingMonitor
 from .preview import TrainingReconstructionPreview
+from .retention import endpoint_retention, post_training_mode
 from .rollout import differentiable_reconstruction, subset_query_batch
+from .rollout_contract import verify_rollout_contract
 from .run_store import (
     RunStore,
     checkpoint_model_state,
@@ -68,6 +72,35 @@ from .source import (
     source_checkpoint_path,
     source_hashes,
 )
+from .topology_constraints import (
+    ComponentConstrainedAdam,
+    RegularizedTopologyAdam,
+    calibrated_score,
+    constraint_settings,
+    fidelity_components,
+    leaf_components,
+    make_calibration,
+    optimizer_source_digest,
+    optimizer_source_snapshot,
+    regularized_fidelity_loss,
+    restore_constraint_audit,
+    scalar_values,
+    topology_constraint_components,
+)
+from .topology_selection import fidelity_eligibility, topology_selection_report
+from .update_budget import post_training_steps_per_epoch, sample_exposure
+
+
+def _configure_persistence_workers(config: Mapping[str, Any]) -> None:
+    """Parallelize independent GUDHI pairings without changing their results.
+
+    Keep this execution setting outside the versioned persistence definition so
+    an existing run can resume after changing only the worker count. An explicit
+    environment setting remains authoritative.
+    """
+    topology = config.get("coherence", {}).get("families", {}).get("topology", {})
+    if topology.get("enabled") and topology.get("strategy") == "cubical_persistence":
+        os.environ.setdefault("PHYCOFLOW_TOPOLOGY_WORKERS", str(min(4, os.cpu_count() or 1)))
 
 
 def _slice_batch(batch: ObservationBatch, count: int) -> ObservationBatch:
@@ -192,6 +225,9 @@ def _coherence_objective(
     step: int,
     generator: torch.Generator,
     family_scales: Mapping[str, float] | None = None,
+    retention_losses: dict[str, torch.Tensor] | None = None,
+    source_anchor_model=None,
+    step_context: dict | None = None,
 ) -> tuple[FamilyResult, tuple[str, ...]]:
     compute = config["coherence"]["compute_budget"]
     selected = _slice_batch(batch, int(compute["batch_size"]))
@@ -203,6 +239,7 @@ def _coherence_objective(
     # rollout, including explicitly paired-supervised structural losses.
     model_batch = complete if model.capabilities.structured_grid_required else selected
     model_batch = _without_target(model_batch)
+    initial_generator_state = generator.get_state()
     prediction = differentiable_reconstruction(
         model,
         model_batch,
@@ -213,10 +250,68 @@ def _coherence_objective(
     )
     if model.capabilities.structured_grid_required:
         prediction = _gather_prediction(prediction, complete, selected)
+    if step_context is not None:
+
+        def reconstruct(candidate):
+            candidate_generator = torch.Generator(device=prediction.device)
+            candidate_generator.set_state(initial_generator_state)
+            value = differentiable_reconstruction(
+                candidate,
+                model_batch,
+                steps=int(config["rollout"]["steps"]),
+                solver=config["rollout"]["solver"],
+                generator=candidate_generator,
+                observation_config=dict(config["observation_consistency"]),
+            )
+            return (
+                _gather_prediction(value, complete, selected)
+                if model.capabilities.structured_grid_required
+                else value
+            )
+
+        with torch.no_grad():
+            source_prediction = reconstruct(source_anchor_model)
+        step_context.update(
+            prediction=prediction,
+            reference=selected.target_fields,
+            coordinates=selected.query_coords,
+            reconstruct=reconstruct,
+            source_prediction=source_prediction,
+            persistence_cache={},
+        )
+    if retention_losses is not None:
+        settings = config.get("objectives", {})
+        for name in ("endpoint", "source_anchor"):
+            term = settings.get(name, {})
+            if not term.get("enabled", False):
+                continue
+            if selected.target_fields is None:
+                raise ValueError("endpoint retention requires dense training targets")
+            target = selected.target_fields
+            if name == "source_anchor":
+                if source_anchor_model is None:
+                    raise ValueError("source_anchor requires the frozen source model")
+                anchor_generator = torch.Generator(device=prediction.device)
+                anchor_generator.set_state(initial_generator_state)
+                with torch.no_grad():
+                    target = differentiable_reconstruction(
+                        source_anchor_model,
+                        model_batch,
+                        steps=int(config["rollout"]["steps"]),
+                        solver=config["rollout"]["solver"],
+                        generator=anchor_generator,
+                        observation_config=dict(config["observation_consistency"]),
+                    )
+                if model.capabilities.structured_grid_required:
+                    target = _gather_prediction(target, complete, selected)
+            retention_losses[name] = endpoint_retention(
+                prediction,
+                target,
+                scale_reference=selected.target_fields,
+                variance_floor=float(term.get("variance_floor", 1e-8)),
+            )
     families = dict(family) if isinstance(family, Mapping) else {family.family_name: family}
-    banks = dict(bank) if isinstance(bank, Mapping) else {
-        name: bank for name in families
-    }
+    banks = dict(bank) if isinstance(bank, Mapping) else {name: bank for name in families}
     component_results = {}
     family_results: dict[str, FamilyResult] = {}
     reference_ids_all: list[str] = []
@@ -234,12 +329,18 @@ def _coherence_objective(
                     f"training_reference coherence family {family_name} requires a reference bank"
                 )
             bank_rows = family_bank.selection_indices(
-                prediction.shape[0], step=step, current_sample_ids=selected.sample_ids,
+                prediction.shape[0],
+                step=step,
+                current_sample_ids=selected.sample_ids,
                 strict_distinct=True,
             )
             reference, reference_ids = family_bank.select(
-                prediction.shape[0], step=step, device=prediction.device, dtype=prediction.dtype,
-                current_sample_ids=selected.sample_ids, strict_distinct=True,
+                prediction.shape[0],
+                step=step,
+                device=prediction.device,
+                dtype=prediction.dtype,
+                current_sample_ids=selected.sample_ids,
+                strict_distinct=True,
             )
             if reference.shape[1] != prediction.shape[1]:
                 raise ValueError("reference-bank and coherence point counts differ")
@@ -255,7 +356,15 @@ def _coherence_objective(
             prediction,
             reference,
             coordinates=selected.query_coords,
-            context={"sample_ids": selected.sample_ids, "reference_ids": reference_ids},
+            context={
+                "sample_ids": selected.sample_ids,
+                "reference_ids": reference_ids,
+                **(
+                    {"persistence_cache": step_context["persistence_cache"]}
+                    if step_context is not None
+                    else {}
+                ),
+            },
         )
         family_results[family_name] = result
         component_results.update(result.component_results)
@@ -266,9 +375,7 @@ def _coherence_objective(
             per_sample_parts.append(weight * calibration_scale * result.per_sample_cost)
         reference_ids_all.extend(reference_ids)
     per_sample = (
-        torch.stack(per_sample_parts).sum(dim=0)
-        if len(per_sample_parts) == len(families)
-        else None
+        torch.stack(per_sample_parts).sum(dim=0) if len(per_sample_parts) == len(families) else None
     )
     combined = FamilyResult(
         component_results=component_results,
@@ -295,6 +402,177 @@ def _coherence_objective(
     return combined, tuple(dict.fromkeys(reference_ids_all))
 
 
+def _calibrate_topology_components(
+    model, train_dataset, families, banks, config, device, source_hash
+):
+    settings = constraint_settings(config)
+    calibration_seed = int(config["runtime"].get("seed", 42)) + 700_019
+    torch_rng, python_rng, numpy_rng = (
+        torch.get_rng_state(),
+        random.getstate(),
+        np.random.get_state(),
+    )
+    cuda_rng = torch.cuda.get_rng_state_all() if device.type == "cuda" else []
+    source = None
+    records = []
+    try:
+        indices = iter_unique_batch_indices(
+            len(train_dataset),
+            settings["calibration_batches"],
+            int(config["optimization"]["batch_size"]),
+            generator=torch.Generator().manual_seed(calibration_seed),
+        )
+        source = build_training_batch_source(
+            train_dataset,
+            indices,
+            config,
+            query_points=None
+            if model.capabilities.structured_grid_required
+            else int(config["coherence"]["compute_budget"]["point_count"]),
+            device=device,
+            start_step=0,
+        )
+        model.eval()
+        with torch.no_grad():
+            for i, batch in enumerate(source):
+                result, ids = _coherence_objective(
+                    model,
+                    batch,
+                    families,
+                    banks,
+                    config,
+                    step=i,
+                    generator=torch.Generator(device=device).manual_seed(calibration_seed + i),
+                )
+                records.append(
+                    {
+                        "sample_ids": list(ids),
+                        "raw_total": float(result.scalar_loss),
+                        "components": {k: float(v) for k, v in leaf_components(result).items()},
+                    }
+                )
+        return make_calibration(
+            records,
+            floor=settings["scale_floor"],
+            weights=families["topology"].spatial_objective.weights,
+            source_hash=source_hash,
+            objective_weight=float(config["objectives"]["coherence"]["weight"]),
+        )
+    finally:
+        if source is not None:
+            source.close()
+        torch.set_rng_state(torch_rng)
+        if cuda_rng:
+            torch.cuda.set_rng_state_all(cuda_rng)
+        random.setstate(python_rng)
+        np.random.set_state(numpy_rng)
+
+
+def _constrained_topology_update(controller, result, context, family, config, field_names):
+    calibration = family.component_calibration
+    settings = constraint_settings(config)
+    components = leaf_components(result)
+    score = calibrated_score(components, calibration)
+    constraints = topology_constraint_components(result, settings["topology_reduction"])
+    topology_constraint_count = len(constraints)
+    bounds = scalar_values(constraints)
+    tolerances = {
+        name: settings["numerical_tolerance"] * calibration["scales"][name.rsplit("#", 1)[0]]
+        for name in constraints
+    }
+    fidelity_settings = {
+        **settings,
+        "max_relative_field_mse_increase": config["posttrain_fidelity"][
+            "max_relative_field_mse_increase"
+        ],
+    }
+    fidelity, fidelity_bounds = fidelity_components(
+        context["prediction"],
+        context["reference"],
+        context["source_prediction"],
+        field_names,
+        fidelity_settings,
+    )
+    constraints.update(fidelity)
+    bounds.update(fidelity_bounds)
+    tolerances.update({name: settings["fidelity_numerical_tolerance"] for name in fidelity})
+
+    def evaluate(candidate):
+        # Match the baseline's attention/rollout kernels. No-grad inference can
+        # select different fused kernels; a tiny bias matters to tight guards.
+        # Detach immediately: only the live baseline needs backward passes.
+        with torch.enable_grad():
+            prediction = context["reconstruct"](candidate).detach()
+        candidate_result = family(
+            prediction,
+            context["reference"],
+            coordinates=context["coordinates"],
+            context={"persistence_cache": context["persistence_cache"]},
+        )
+        candidate_components = leaf_components(candidate_result)
+        candidate_fidelity, _ = fidelity_components(
+            prediction,
+            context["reference"],
+            context["source_prediction"],
+            field_names,
+            fidelity_settings,
+        )
+        candidate_topology = topology_constraint_components(
+            candidate_result, settings["topology_reduction"]
+        )
+        return {**candidate_topology, **candidate_fidelity}, calibrated_score(
+            candidate_components, calibration
+        )
+
+    endpoint_loss = torch.stack(
+        [v for k, v in fidelity.items() if k.startswith("fidelity.endpoint.")]
+    ).mean()
+    regularized = config["optimization"].get("gradient_balance") == "topology_regularized"
+    proposal_loss = endpoint_loss if settings["proposal_objective"] == "endpoint" else None
+    penalty = None
+    if regularized:
+        # Fixed calibration defines units; no batch-dependent loss rescaling.
+        source_scale = sum(
+            calibration["scales"][name] * calibration["coefficients"][name]
+            for name in calibration["scales"]
+        )
+        penalty = (
+            source_scale
+            * settings["fidelity_penalty_weight"]
+            * regularized_fidelity_loss(fidelity, fidelity_bounds, settings)
+        )
+        proposal_loss = score + penalty
+    report = controller.step(
+        score,
+        constraints,
+        bounds,
+        tolerances,
+        evaluate,
+        grad_clip=config["optimization"].get("grad_clip"),
+        proposal_loss=proposal_loss,
+    )
+    report["proposal_objective"] = (
+        "topology_with_fidelity_regularization" if regularized else settings["proposal_objective"]
+    )
+    if penalty is not None:
+        report["fidelity_penalty_before"] = float(penalty.detach())
+    report["topology_reduction"] = settings["topology_reduction"]
+    report["topology_constraint_count"] = topology_constraint_count
+    report["fidelity_constraint_count"] = len(fidelity)
+    report["constraint_batch_size"] = int(context["prediction"].shape[0])
+    report["endpoint_nmse_before"] = float(
+        torch.stack(
+            [v.detach() for k, v in fidelity.items() if k.startswith("fidelity.endpoint.")]
+        ).mean()
+    )
+    report["source_anchor_nmse_before"] = float(
+        torch.stack(
+            [v.detach() for k, v in fidelity.items() if k.startswith("fidelity.anchor.")]
+        ).mean()
+    )
+    return report
+
+
 def _component_scalars(result: FamilyResult) -> dict[str, float]:
     return {
         path: float(component.scalar_loss.detach().cpu())
@@ -317,7 +595,9 @@ def _component_reports(family, result: FamilyResult) -> dict[str, dict[str, Any]
     reported = result.diagnostics.get("components", {})
     output = {}
     for path, component in result.component_results.items():
-        if path in reported:
+        if component.diagnostics.get("evaluation_only", False):
+            inner_weight = 0.0
+        elif path in reported:
             inner_weight = float(reported[path]["weight"])
         else:
             matches = [
@@ -373,7 +653,10 @@ def _component_history_report(
             raw_value = float(result.component_results[path].scalar_loss.detach().cpu())
         if raw_value is None:
             continue
-        if "weight" in diagnostics:
+        term = result.component_results.get(path)
+        if term is not None and term.diagnostics.get("evaluation_only", False):
+            inner = 0.0
+        elif "weight" in diagnostics:
             inner = float(diagnostics["weight"])
         else:
             family = (families or {}).get(family_name)
@@ -399,9 +682,7 @@ def _query_digest(query_ids: torch.Tensor) -> str:
     return hashlib.sha256(payload.tobytes()).hexdigest()
 
 
-def _median_nested_cosines(
-    records: list[Mapping[str, Any]], key: str
-) -> dict[str, Any]:
+def _median_nested_cosines(records: list[Mapping[str, Any]], key: str) -> dict[str, Any]:
     first = records[0][key]
     if key == "data_family_cosines":
         return {
@@ -410,9 +691,7 @@ def _median_nested_cosines(
         }
     return {
         left: {
-            right: float(
-                statistics.median(record[key][left][right] for record in records)
-            )
+            right: float(statistics.median(record[key][left][right] for record in records))
             for right in first[left]
         }
         for left in first
@@ -481,7 +760,7 @@ def _calibrate_family_balance(
     python_rng = random.getstate()
     numpy_rng = np.random.get_state()
     try:
-        model.train()
+        post_training_mode(model, config)
         for batch_index, batch in enumerate(batch_source):
             data_loss = model.training_loss(batch).total
             data_gradients = loss_gradients(data_loss, parameters)
@@ -502,9 +781,7 @@ def _calibrate_family_balance(
                 raw_loss = result.scalar_loss / outer_weight
                 family_losses[name] = float(raw_loss.detach())
                 family_gradients[name] = loss_gradients(raw_loss, parameters)
-            diagnostics = gradient_diagnostics(
-                data_gradients, family_gradients, epsilon=epsilon
-            )
+            diagnostics = gradient_diagnostics(data_gradients, family_gradients, epsilon=epsilon)
             selected = subset_query_batch(
                 _slice_batch(batch, int(config["coherence"]["compute_budget"]["batch_size"])),
                 int(config["coherence"]["compute_budget"]["point_count"]),
@@ -534,14 +811,11 @@ def _calibrate_family_balance(
         [record["family_gradient_norms"] for record in batch_records], settings
     )
     aggregate_losses = {
-        name: float(
-            statistics.median(record["family_losses"][name] for record in batch_records)
-        )
+        name: float(statistics.median(record["family_losses"][name] for record in batch_records))
         for name in families
     }
     outer_weights = {
-        name: float(getattr(family, "family_weight", 1.0))
-        for name, family in families.items()
+        name: float(getattr(family, "family_weight", 1.0)) for name, family in families.items()
     }
     peak_after = torch.cuda.max_memory_allocated(device) if device.type == "cuda" else 0
     reference_norm = float(statistics.median(aggregate_norms.values()))
@@ -561,7 +835,8 @@ def _calibrate_family_balance(
         "source_checkpoint_sha256": source_hashes_before["checkpoint"],
         "weight_identity": "live_training_weights",
         "configured_evaluation_weight_identity": (
-            "ema" if getattr(model, "_ema", None) is not None and getattr(model, "_ema_eval", False)
+            "ema"
+            if getattr(model, "_ema", None) is not None and getattr(model, "_ema_eval", False)
             else "live"
         ),
         "sample_ids": [record["sample_ids"] for record in batch_records],
@@ -573,20 +848,13 @@ def _calibrate_family_balance(
         "clipped_families": clipped_families,
         "outer_weights": outer_weights,
         "effective_weighted_gradient_norms": {
-            name: outer_weights[name] * scales[name] * aggregate_norms[name]
-            for name in families
+            name: outer_weights[name] * scales[name] * aggregate_norms[name] for name in families
         },
         "native_data_gradient_norm": float(
-            statistics.median(
-                record["native_data_gradient_norm"] for record in batch_records
-            )
+            statistics.median(record["native_data_gradient_norm"] for record in batch_records)
         ),
-        "family_family_cosines": _median_nested_cosines(
-            batch_records, "family_family_cosines"
-        ),
-        "data_family_cosines": _median_nested_cosines(
-            batch_records, "data_family_cosines"
-        ),
+        "family_family_cosines": _median_nested_cosines(batch_records, "family_family_cosines"),
+        "data_family_cosines": _median_nested_cosines(batch_records, "data_family_cosines"),
         "calibration_seconds": perf_counter() - started,
         "peak_cuda_memory_delta_bytes": max(0, peak_after - peak_before),
         "seeds": {
@@ -612,9 +880,7 @@ def _sparse_family_gradient_diagnostics(
     device: torch.device,
 ) -> dict[str, Any]:
     parameters = tuple(parameter for parameter in model.parameters() if parameter.requires_grad)
-    epsilon = float(
-        config["coherence"].get("family_balance", {}).get("epsilon", 1.0e-12)
-    )
+    epsilon = float(config["coherence"].get("family_balance", {}).get("epsilon", 1.0e-12))
     data_gradients = loss_gradients(data_loss, parameters, retain_graph=True)
     combined_gradients = loss_gradients(combined_loss, parameters, retain_graph=True)
     family_gradients = {}
@@ -673,7 +939,13 @@ def _build_evaluation_batch(
     count = min(int(config.get("evaluation", {}).get("max_samples", 1)), len(dataset))
     if count < 1:
         raise ValueError(f"evaluation split {dataset.split_name!r} contains no samples")
-    samples = [dataset[index] for index in range(count)]
+    selection = config.get("evaluation", {}).get("sample_selection", "first")
+    indices = (
+        np.linspace(0, len(dataset) - 1, count).round().astype(int).tolist()
+        if selection == "uniform"
+        else list(range(count))
+    )
+    samples = [dataset[index] for index in indices]
     return build_observation_batch(samples, protocol, query_points=None).to(device)
 
 
@@ -696,8 +968,7 @@ def _build_comparison_batch(
             seed=int(
                 compute.get(
                     "query_seed",
-                    config["observations"].get("seed", config["runtime"].get("seed", 42))
-                    + 100_003,
+                    config["observations"].get("seed", config["runtime"].get("seed", 42)) + 100_003,
                 )
             ),
         )
@@ -802,7 +1073,8 @@ def _evaluate(
                     family_bank,
                     query_ids if isinstance(query_ids, torch.Tensor) else None,
                     bank_rows=family_bank.selection_indices(
-                        prediction.shape[0], step=0,
+                        prediction.shape[0],
+                        step=0,
                         current_sample_ids=comparison_batch.sample_ids,
                         strict_distinct=True,
                     ),
@@ -818,9 +1090,7 @@ def _evaluate(
             )
             weight = float(getattr(family_module, "family_weight", 1.0))
             calibration_scale = float((family_scales or {}).get(family_name, 1.0))
-            combined_total = (
-                combined_total + weight * calibration_scale * family_result.scalar_loss
-            )
+            combined_total = combined_total + weight * calibration_scale * family_result.scalar_loss
             combined_components.update(_component_scalars(family_result))
             all_reference_ids.extend(reference_ids)
             family_payloads[family_name] = {
@@ -837,6 +1107,24 @@ def _evaluate(
                 "reference_ids": list(reference_ids),
                 "diagnostics": _json_safe(family_result.diagnostics),
             }
+            component_calibration = getattr(family_module, "component_calibration", None)
+            if component_calibration is not None:
+                family_payloads[family_name]["selection_score"] = float(
+                    calibrated_score(leaf_components(family_result), component_calibration)
+                )
+                family_payloads[family_name]["selection_score_definition"] = (
+                    "fixed_train_source_component_scales"
+                )
+                family_payloads[family_name]["selection_components"] = {
+                    name: {
+                        "raw": float(value),
+                        "source_scale": component_calibration["scales"][name],
+                        "coefficient": component_calibration["coefficients"][name],
+                        "weighted_contribution": float(value)
+                        * component_calibration["coefficients"][name],
+                    }
+                    for name, value in leaf_components(family_result).items()
+                }
         target_uses = {module.target_use for module in families.values()}
         units = {module.units for module in families.values()}
         coherence_payload = {
@@ -848,8 +1136,45 @@ def _evaluate(
             "reference_ids": list(dict.fromkeys(all_reference_ids)),
             "families": family_payloads,
         }
+        native_topology = None
+        if evaluation.get("native_topology", False):
+            topology = families["topology"]
+            native_config = deepcopy(topology.config)
+            native_config["geometry"]["grid_shape"] = list(config["dataset"]["grid_shape"])
+            # At equal resolution the area map is an exact permutation. Avoid
+            # small IDW interpolation errors at floating-point grid coordinates.
+            native_config["geometry"]["antialias_downsample"] = True
+            native_config["filtration"]["smoothing_sigma"] = 0.0
+            native_family = type(topology)(
+                native_config,
+                DataSpec(
+                    field_names,
+                    tuple(config["dataset"]["field_units"]),
+                    comparison_batch.query_coords.shape[-1],
+                    tuple(config["dataset"]["grid_shape"]),
+                ),
+                normalizer,
+            ).to(prediction.device)
+            reuse_native = (
+                set(families) == {"topology"}
+                and getattr(topology, "component_calibration", None) is not None
+                and tuple(topology.grid_shape) == tuple(config["dataset"]["grid_shape"])
+                and topology.smoothing_sigma == 0.0
+                and topology.config["geometry"].get("antialias_downsample", False)
+            )
+            native = (
+                family_result
+                if reuse_native
+                else native_family(prediction, target, coordinates=comparison_batch.query_coords)
+            )
+            native_topology = {
+                "total": float(native.scalar_loss.cpu()),
+                "components": _component_scalars(native),
+                "grid_shape": list(config["dataset"]["grid_shape"]),
+            }
     return {
         **metrics,
+        "native_topology": native_topology,
         "inference": {
             "seconds": inference_seconds,
             "samples": prediction.shape[0],
@@ -897,9 +1222,7 @@ def _reference_bank(
                 seed=int(
                     compute.get(
                         "query_seed",
-                        config["observations"].get(
-                            "seed", config["runtime"].get("seed", 42)
-                        )
+                        config["observations"].get("seed", config["runtime"].get("seed", 42))
                         + 100_003,
                     )
                 ),
@@ -926,15 +1249,18 @@ def _reference_bank(
     return bank
 
 
-def _add_source_relative_coherence(
-    before: Mapping[str, Any], after: dict[str, Any]
-) -> None:
+def _add_source_relative_coherence(before: Mapping[str, Any], after: dict[str, Any]) -> None:
     source_families = before.get("coherence", {}).get("families", {})
     for name, payload in after.get("coherence", {}).get("families", {}).items():
         source = source_families.get(name, {}).get("total")
         current = payload.get("total")
         payload["source_total"] = source
-        if source is None or current is None or not math.isfinite(float(source)) or float(source) == 0:
+        if (
+            source is None
+            or current is None
+            or not math.isfinite(float(source))
+            or float(source) == 0
+        ):
             payload["source_normalized_ratio"] = None
             payload["relative_reduction"] = None
         else:
@@ -951,9 +1277,17 @@ def _fidelity_guard_report(
     before_mse = float(before["mse_normalized"])
     after_mse = float(after["mse_normalized"])
     relative_increase = (
-        math.inf if before_mse == 0 and after_mse > 0 else 0.0 if before_mse == 0 else (after_mse - before_mse) / before_mse
+        math.inf
+        if before_mse == 0 and after_mse > 0
+        else 0.0
+        if before_mse == 0
+        else (after_mse - before_mse) / before_mse
     )
     exceeded = threshold is not None and relative_increase > float(threshold)
+    per_field = None
+    if threshold is not None and settings.get("max_relative_field_mse_increase") is not None:
+        per_field = fidelity_eligibility(before, after, settings)
+        exceeded = not per_field["eligible"]
     return {
         "source_mse_normalized": before_mse,
         "posttrain_mse_normalized": after_mse,
@@ -962,6 +1296,7 @@ def _fidelity_guard_report(
         "behavior": settings.get("behavior", "report"),
         "status": "exceeded" if exceeded else "passed" if threshold is not None else "reported",
         "exceeded": exceeded,
+        "per_field_guard": per_field,
     }
 
 
@@ -973,8 +1308,19 @@ def run_post_training(
     resume: str | Path | None = None,
 ) -> Path:
     """Create or resume one immutable child post-training run."""
+    if config["optimization"].get("gradient_balance") in {
+        "component_constrained",
+        "topology_regularized",
+    }:
+        # Direct Python callers must not bypass the every-update/geometry guards.
+        from ..config.validate import validate_config
+
+        validate_config(config)
     if config["stage"] != "post_training":
         raise ValueError("run_post_training accepts only stage=post_training")
+    if max_steps is not None and max_steps < 0:
+        raise ValueError("max_steps must be non-negative")
+    _configure_persistence_workers(config)
     seed = int(config["runtime"].get("seed", 42))
     seed_everything(seed, bool(config["runtime"].get("deterministic", True)))
     device = torch.device(config["runtime"].get("device", "cpu"))
@@ -982,6 +1328,30 @@ def run_post_training(
         raise RuntimeError("CUDA was requested but is unavailable")
     source_hashes_before = source_hashes(config)
     model, train_dataset, source_metadata = load_source_model(config, device)
+    execution = config["optimization"].get("rollout_execution", {})
+    for key, attribute in (
+        ("context_cache", "rollout_context_cache"),
+        ("checkpointing", "rollout_checkpointing"),
+    ):
+        if key in execution:
+            if not hasattr(model, attribute):
+                raise ValueError("rollout_execution requires a compatible physical CQ model")
+            setattr(model, attribute, execution[key])
+    subset_manifest = None
+    if "training_subset" in config["optimization"]:
+        from ..data.topology_subset import apply_training_subset
+
+        subset_manifest = apply_training_subset(
+            train_dataset, config["optimization"]["training_subset"]
+        )
+    constrained = config["optimization"].get("gradient_balance") in {
+        "component_constrained",
+        "topology_regularized",
+    }
+    source_anchor_model = None
+    if constrained or config.get("objectives", {}).get("source_anchor", {}).get("enabled", False):
+        # Snapshot before loading a resumed child: the anchor is always the source.
+        source_anchor_model = deepcopy(model).eval().requires_grad_(False)
     if not len(train_dataset):
         raise ValueError(f"training split is empty for {config['dataset']['path']}")
     if not model.capabilities.differentiable_rollout:
@@ -1013,10 +1383,24 @@ def run_post_training(
         load_training_aux_state(model, checkpoint)
         optimizer.load_state_dict(checkpoint["optimizer"])
         start_step = int(checkpoint["global_step"])
+        store.recover_metric_histories(start_step)
         torch.set_rng_state(checkpoint["rng_state"]["torch_cpu"])
         if device.type == "cuda" and checkpoint["rng_state"].get("torch_cuda"):
             torch.cuda.set_rng_state_all(checkpoint["rng_state"]["torch_cuda"])
 
+    if subset_manifest is not None:
+        subset_path = store.run_dir / "artifacts/training_subset.json"
+        if resume is not None:
+            if not subset_path.is_file() or json.loads(subset_path.read_text()) != subset_manifest:
+                raise ValueError("resume training subset differs from the saved selection")
+            if checkpoint.get("training_subset_sha256") != subset_manifest["sha256"]:
+                raise ValueError("recovery checkpoint does not bind the training subset")
+        else:
+            store.write_json("artifacts/training_subset.json", subset_manifest)
+        store.update_manifest(
+            training_subset_sha256=subset_manifest["sha256"],
+            training_subset_count=len(train_dataset),
+        )
     families = build_enabled_families(
         config["coherence"], train_dataset.data_spec, train_dataset.normalizer
     )
@@ -1037,9 +1421,7 @@ def run_post_training(
         )
         if banks[family_name] is not None and not bank_path.exists():
             banks[family_name].save(bank_path)
-    family_paths = {
-        name: store.run_dir / "artifacts" / f"{name}_family.pt" for name in families
-    }
+    family_paths = {name: store.run_dir / "artifacts" / f"{name}_family.pt" for name in families}
     if resume is not None:
         manifest = json.loads((store.run_dir / "run_manifest.json").read_text())
         expected_hashes = manifest.get("coherence_family_state_sha256s", {})
@@ -1069,6 +1451,20 @@ def run_post_training(
             device=device,
             source_hashes_before=source_hashes_before,
         )
+        if constrained:
+            calibration["topology_components"] = _calibrate_topology_components(
+                model,
+                train_dataset,
+                families,
+                banks,
+                config,
+                device,
+                source_hashes_before["checkpoint"],
+            )
+        if constrained:
+            store.write_json(
+                "artifacts/topology_optimizer_source.json", optimizer_source_snapshot()
+            )
         store.write_json("artifacts/coherence_calibration.json", calibration)
     else:
         if not calibration_path.is_file():
@@ -1088,9 +1484,36 @@ def run_post_training(
             raise ValueError("resume coherence family-balance mode mismatch")
         if checkpoint.get("family_scales") != calibration.get("resolved_scales"):
             raise ValueError("resume checkpoint family scales differ from calibration artifact")
-    family_scales = {
-        name: float(calibration["resolved_scales"][name]) for name in families
-    }
+    family_scales = {name: float(calibration["resolved_scales"][name]) for name in families}
+    controller = None
+    if constrained:
+        if "topology_components" not in calibration:
+            raise ValueError("constrained resume is missing component calibration")
+        if (
+            calibration["topology_components"]["optimizer_source_sha256"]
+            != optimizer_source_digest()
+        ):
+            raise ValueError("constrained optimizer implementation changed; start a new experiment")
+        families["topology"].component_calibration = calibration["topology_components"]
+        if resume is not None and "component_controller" not in checkpoint:
+            raise ValueError("constrained resume is missing optimizer controller state")
+        controller_type = (
+            RegularizedTopologyAdam
+            if config["optimization"].get("gradient_balance") == "topology_regularized"
+            else ComponentConstrainedAdam
+        )
+        controller = controller_type(
+            model,
+            optimizer,
+            constraint_settings(config),
+            state=checkpoint["component_controller"] if resume is not None else None,
+        )
+        if controller.counts["attempted"] != start_step:
+            raise ValueError("constrained optimizer attempt count differs from recovery step")
+        if resume is not None:
+            restore_constraint_audit(
+                store.run_dir / "metrics" / "constraint_updates.jsonl", start_step
+            )
     calibration_hash = file_sha256(calibration_path)
     store.save_artifact("normalization.pt", train_dataset.normalizer.state_dict())
     store.write_json("artifacts/trainable_parameters.json", {"names": list(trainable_names)})
@@ -1150,6 +1573,16 @@ def run_post_training(
     protocol = sensor_protocol_from_config(config)
     evaluation_batch = _build_evaluation_batch(evaluation_dataset, config, protocol, device)
     comparison_batch = _build_comparison_batch(evaluation_batch, config)
+    if any(
+        getattr(family, "strategy", None) == "cubical_persistence" for family in families.values()
+    ):
+        contract_batch = (
+            evaluation_batch if model.capabilities.structured_grid_required else comparison_batch
+        )
+        report = verify_rollout_contract(
+            model, _without_target(_slice_batch(contract_batch, 1)), config
+        )
+        store.write_json("evaluation/rollout_contract.json", report)
     # Bind sensors and the exact fixed comparison queries into one replayable
     # evaluation contract. The complete batch remains available only for
     # structured-model reconstruction before gathering these comparison IDs.
@@ -1180,9 +1613,7 @@ def run_post_training(
     source_metrics = (
         before_metrics
         if before_metrics is not None
-        else json.loads(
-            (store.run_dir / "evaluation" / "before.json").read_text(encoding="utf-8")
-        )
+        else json.loads((store.run_dir / "evaluation" / "before.json").read_text(encoding="utf-8"))
     )
     # Evaluation initializes geometry-dependent fixed artifacts. Persist those
     # exact tensors rather than the empty lazy-construction placeholders.
@@ -1201,12 +1632,16 @@ def run_post_training(
     fraction = float(config["optimization"].get("train_fraction", 1.0))
     if not 0.0 < fraction <= 1.0:
         raise ValueError("optimization.train_fraction must lie in (0,1]")
-    steps_per_epoch = max(1, math.ceil(len(train_dataset) * fraction / batch_size))
+    steps_per_epoch = post_training_steps_per_epoch(config, len(train_dataset))
     configured_steps = epochs * steps_per_epoch
     final_step = (
         min(configured_steps, start_step + max_steps) if max_steps is not None else configured_steps
     )
-    if start_step >= final_step:
+    # A preemption can leave the terminal checkpoint intact but interrupt
+    # reporting. Resuming that checkpoint must finish evaluation without
+    # replaying an optimizer update or changing the configured training budget.
+    reporting_only = resume is not None and start_step == configured_steps
+    if start_step > configured_steps or (start_step >= final_step and not reporting_only):
         raise ValueError("post-training would perform no optimizer steps")
     index_generator = torch.Generator(device="cpu").manual_seed(seed + 17)
     if checkpoint is not None:
@@ -1215,8 +1650,21 @@ def run_post_training(
         len(train_dataset),
         final_step - start_step,
         batch_size,
-        generator=index_generator,
+        # Prefetch may request future batches. Keep its cursor separate from the
+        # completed-update cursor serialized in recovery checkpoints.
+        generator=torch.Generator(device="cpu").set_state(index_generator.get_state()),
     )
+    full_pass = config["optimization"].get("sampling") == "full_pass"
+    if full_pass:
+        from ..data.topology_subset import iter_full_pass_indices
+
+        sampled_indices = iter_full_pass_indices(
+            len(train_dataset),
+            final_step - start_step,
+            batch_size,
+            seed=seed + 17,
+            start_step=start_step,
+        )
     query_points = (
         None
         if model.capabilities.structured_grid_required
@@ -1233,13 +1681,22 @@ def run_post_training(
     store.update_manifest(
         training_data_strategy=batch_source.strategy,
         training_dataset_logical_bytes=dataset_field_bytes(train_dataset),
+        epoch_definition=(
+            "fixed_updates_continuous_subset_passes"
+            if "steps_per_epoch" in config["optimization"]
+            else "full_subset_pass"
+            if full_pass
+            else "fractional_random_batches"
+        ),
+        steps_per_epoch=steps_per_epoch,
+        batches_per_dataset_pass=math.ceil(len(train_dataset) / batch_size),
     )
     store.set_status("running", start_step=start_step, final_step=final_step)
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
         torch.cuda.synchronize(device)
     training_started = perf_counter()
-    model.train()
+    post_training_mode(model, config)
     monitor = TrainingMonitor(
         store.run_dir,
         start_step=start_step,
@@ -1261,25 +1718,93 @@ def run_post_training(
         store=store,
         steps_per_epoch=steps_per_epoch,
     )
-    last_result = None
+    panel_metrics_cache = {}
+    if checkpoint_manager.selection_metric == "topology_with_fidelity":
+
+        def evaluate_panel(step):
+            metrics = (
+                source_metrics
+                if step == 0
+                else _evaluate(
+                    model,
+                    evaluation_batch,
+                    comparison_batch,
+                    families,
+                    banks,
+                    train_dataset.field_names,
+                    config,
+                    normalizer=train_dataset.normalizer,
+                    family_scales=family_scales,
+                )
+            )
+            metrics["sensor_manifest_sha256"] = evaluation_manifest.digest()
+            panel_metrics_cache.clear()
+            panel_metrics_cache[step] = metrics
+            return topology_selection_report(source_metrics, metrics, config["posttrain_fidelity"])
+
+        checkpoint_manager.panel_evaluator = evaluate_panel
+        if resume is None:
+            # The unchanged source is a valid candidate. Never fall back to an
+            # ineligible child if every post-training checkpoint degrades fidelity.
+            checkpoint_manager.save(
+                _post_checkpoint_payload(
+                    model,
+                    optimizer,
+                    global_step=0,
+                    config=config,
+                    train_dataset=train_dataset,
+                    families=families,
+                    source_hashes_before=source_hashes_before,
+                    index_generator=index_generator,
+                    device=device,
+                    config_sha256=store.config_hash,
+                    coherence_calibration_sha256=calibration_hash,
+                    family_scales=family_scales,
+                    controller=controller,
+                ),
+                model=model,
+                preview=preview,
+                global_step=0,
+                fallback_metric=0.0,
+                force=True,
+            )
+    last_coherence_loss = None
     for offset, batch in enumerate(batch_source):
         global_step = start_step + offset
+        if not full_pass:
+            torch.randperm(len(train_dataset), generator=index_generator)
         epoch = global_step // steps_per_epoch + 1
-        model.train()
-        data_loss = model.training_loss(batch).total
+        post_training_mode(model, config)
+        step_started = perf_counter()
+        data_loss = (
+            torch.zeros((), device=device) if constrained else model.training_loss(batch).total
+        )
         every = int(config["coherence"]["schedule"].get("every_n_steps", 1))
         coherence_weight = _coherence_weight(config, epoch)
         coherence_active = coherence_weight > 0 and global_step % every == 0
+        retention_active = (
+            any(
+                config["objectives"].get(name, {}).get("enabled", False)
+                for name in ("endpoint", "source_anchor")
+            )
+            and global_step % every == 0
+        )
         row: dict[str, Any] = {
             "step": global_step + 1,
             "epoch": epoch,
             "data_loss": float(data_loss.detach().cpu()),
             "native_data_loss": float(data_loss.detach().cpu()),
-            "data_retention_objective": "model_native_training_loss",
+            "data_retention_objective": (
+                "native_plus_endpoint_retention"
+                if retention_active
+                else "model_native_training_loss"
+            ),
             "coherence_applied": coherence_active,
             "coherence_weight": coherence_weight,
         }
-        if coherence_active:
+        if coherence_active or retention_active:
+            step_context = {} if constrained else None
+            retention_losses: dict[str, torch.Tensor] = {}
             rollout_generator = torch.Generator(device=device).manual_seed(
                 seed + 1_000_003 + global_step
             )
@@ -1292,7 +1817,20 @@ def run_post_training(
                 step=global_step,
                 generator=rollout_generator,
                 family_scales=family_scales,
+                retention_losses=retention_losses,
+                source_anchor_model=source_anchor_model,
+                step_context=step_context,
             )
+            for name, loss in retention_losses.items():
+                # Retention has the same sparse cadence as the shared rollout.
+                factor = (
+                    every if config["coherence"]["schedule"].get("interval_rescale", False) else 1
+                )
+                data_loss = data_loss + factor * float(config["objectives"][name]["weight"]) * loss
+                row[f"{name}_retention_loss"] = float(loss.detach().cpu())
+            if retention_losses:
+                del loss
+            row["data_loss"] = float(data_loss.detach().cpu())
             coherence_loss = result.scalar_loss
             if bool(config["coherence"]["schedule"].get("interval_rescale", False)):
                 coherence_loss = coherence_loss * every
@@ -1321,19 +1859,51 @@ def run_post_training(
             data_update_weight, coherence_update_weight = _balanced_weights(
                 config, coherence_weight
             )
-            gradient = two_objective_update(
-                model,
-                optimizer,
-                data_loss,
-                coherence_loss,
-                mode=config["optimization"].get("gradient_balance", "weighted_sum"),
-                data_weight=data_update_weight,
-                coherence_weight=coherence_update_weight,
-                grad_clip=config["optimization"].get("grad_clip"),
-                config_missing_behavior=config["optimization"].get(
-                    "config_missing_behavior", "error"
-                ),
-            )
+            row["data_update_weight"] = data_update_weight
+            row["coherence_update_weight"] = coherence_update_weight
+            if constrained:
+                gradient = _constrained_topology_update(
+                    controller,
+                    result,
+                    step_context,
+                    families["topology"],
+                    config,
+                    train_dataset.field_names,
+                )
+                row["data_retention_objective"] = (
+                    "source_relative_fidelity_regularization"
+                    if config["optimization"].get("gradient_balance") == "topology_regularized"
+                    else "source_bounded_endpoint_and_anchor"
+                )
+                row["data_loss"] = gradient["endpoint_nmse_before"]
+                row["native_data_loss"] = None
+                with (store.run_dir / "metrics" / "constraint_updates.jsonl").open("a") as handle:
+                    handle.write(
+                        json.dumps(
+                            {
+                                "step": global_step + 1,
+                                "sample_ids": list(reference_ids),
+                                **gradient,
+                                "update_seconds_before_reporting": perf_counter() - step_started,
+                            },
+                            allow_nan=False,
+                        )
+                        + "\n"
+                    )
+            else:
+                gradient = two_objective_update(
+                    model,
+                    optimizer,
+                    data_loss,
+                    coherence_loss,
+                    mode=config["optimization"].get("gradient_balance", "weighted_sum"),
+                    data_weight=data_update_weight,
+                    coherence_weight=coherence_update_weight,
+                    grad_clip=config["optimization"].get("grad_clip"),
+                    config_missing_behavior=config["optimization"].get(
+                        "config_missing_behavior", "error"
+                    ),
+                )
             row.update(
                 coherence_loss=float(result.scalar_loss.detach().cpu()),
                 coherence_reference_ids=list(reference_ids),
@@ -1342,8 +1912,13 @@ def run_post_training(
                 **_family_scalar_report(result),
                 **gradient,
             )
-            last_result = result
+            last_coherence_loss = row["coherence_loss"]
+            # The final report needs a scalar, not a retained rollout graph.
+            # Release it before the next rollout or large validation panel.
+            del result, coherence_loss, retention_losses, step_context
         else:
+            row["data_update_weight"] = _data_weight(config)
+            row["coherence_update_weight"] = 0.0
             row.update(
                 data_only_update(
                     model,
@@ -1353,7 +1928,17 @@ def run_post_training(
                     grad_clip=config["optimization"].get("grad_clip"),
                 )
             )
-        after_optimizer_step(model)
+        if row.get("update_accepted", True):
+            after_optimizer_step(model)
+        row["update_seconds"] = perf_counter() - step_started
+        del data_loss
+        row["total"] = row["data_update_weight"] * row["data_loss"] + row[
+            "coherence_update_weight"
+        ] * row.get("coherence_loss", 0.0) * (
+            every if config["coherence"]["schedule"].get("interval_rescale", False) else 1
+        )
+        if constrained:
+            row["total"] = row.get("regularized_loss_before", row["balanced_topology_before"])
         monitor.record(row, lr=optimizer.param_groups[0]["lr"])
         checkpoint_result = None
         if checkpoint_manager.due_for_preview_or_checkpoint(global_step + 1, preview):
@@ -1377,6 +1962,7 @@ def run_post_training(
                     config_sha256=store.config_hash,
                     coherence_calibration_sha256=calibration_hash,
                     family_scales=family_scales,
+                    controller=controller,
                 ),
                 model=model,
                 preview=preview,
@@ -1385,6 +1971,16 @@ def run_post_training(
             )
         if checkpoint_result is not None:
             monitor.record_validation(checkpoint_manager.last_validation_report)
+            store.write_json(
+                "progress.json",
+                {
+                    "completed_updates": global_step + 1,
+                    "reporting_epoch": (global_step + 1) / steps_per_epoch,
+                    **sample_exposure(global_step + 1, len(train_dataset), batch_size),
+                    "last_update_seconds": row["update_seconds"],
+                    "update_mode": row.get("update_mode"),
+                },
+            )
         monitor.finish_step(
             checkpoint_checked=(
                 checkpoint_result is not None and checkpoint_manager.last_best_checked
@@ -1399,17 +1995,19 @@ def run_post_training(
     if device.type == "cuda":
         torch.cuda.synchronize(device)
     post_training_seconds = perf_counter() - training_started
-    after_metrics = _evaluate(
-        model,
-        evaluation_batch,
-        comparison_batch,
-        families,
-        banks,
-        train_dataset.field_names,
-        config,
-        normalizer=train_dataset.normalizer,
-        family_scales=family_scales,
-    )
+    after_metrics = panel_metrics_cache.get(final_step)
+    if after_metrics is None:
+        after_metrics = _evaluate(
+            model,
+            evaluation_batch,
+            comparison_batch,
+            families,
+            banks,
+            train_dataset.field_names,
+            config,
+            normalizer=train_dataset.normalizer,
+            family_scales=family_scales,
+        )
     after_metrics["sensor_manifest_sha256"] = evaluation_manifest.digest()
     _add_source_relative_coherence(source_metrics, after_metrics)
     store.write_json("evaluation/after.json", after_metrics)
@@ -1421,10 +2019,7 @@ def run_post_training(
             RuntimeWarning,
             stacklevel=2,
         )
-    if fidelity_guard["exceeded"] and fidelity_guard["behavior"] == "error":
-        raise RuntimeError(
-            "post-training reconstruction MSE exceeded the configured fidelity guard"
-        )
+    guard_failed = fidelity_guard["exceeded"] and fidelity_guard["behavior"] == "error"
     family_paths = {
         name: store.save_artifact(f"{name}_family.pt", family.state_artifact())
         for name, family in families.items()
@@ -1442,13 +2037,20 @@ def run_post_training(
         config_sha256=store.config_hash,
         coherence_calibration_sha256=calibration_hash,
         family_scales=family_scales,
+        controller=controller,
     )
+    if checkpoint_manager.selection_metric == "topology_with_fidelity":
+        checkpoint_manager.panel_evaluator = lambda step: topology_selection_report(
+            source_metrics, after_metrics, config["posttrain_fidelity"]
+        )
     saved = checkpoint_manager.save(
         checkpoint_payload,
         model=model,
         preview=preview,
         global_step=final_step,
-        fallback_metric=float(row["data_loss"]),
+        fallback_metric=(
+            float(after_metrics["mse_normalized"]) if reporting_only else float(row["data_loss"])
+        ),
         force=True,
     )
     if saved is None:
@@ -1471,7 +2073,12 @@ def run_post_training(
     if source_hashes_after != source_hashes_before:
         raise RuntimeError("source run changed during child post-training")
     status = "completed" if final_step >= configured_steps else "integration_truncated"
+    if guard_failed:
+        status = "fidelity_guard_failed"
     final_checkpoint_hashes = {
+        **json.loads((store.run_dir / "run_manifest.json").read_text()).get(
+            "checkpoint_hashes", {}
+        ),
         "last": file_sha256(last_path),
         "best": file_sha256(best_path),
     }
@@ -1494,6 +2101,10 @@ def run_post_training(
         status,
         global_step=final_step,
         configured_steps=configured_steps,
+        segment_start_step=start_step,
+        segment_steps=final_step - start_step,
+        steps_per_epoch=steps_per_epoch,
+        **sample_exposure(final_step, len(train_dataset), batch_size),
         source_immutable_verified=True,
         coherence_target_use=(
             next(iter({family.target_use for family in families.values()}))
@@ -1501,9 +2112,7 @@ def run_post_training(
             else "mixed"
         ),
         coherence_target_uses={name: family.target_use for name, family in families.items()},
-        final_coherence_loss=(
-            None if last_result is None else float(last_result.scalar_loss.detach().cpu())
-        ),
+        final_coherence_loss=last_coherence_loss,
         post_training_seconds=post_training_seconds,
         seconds_per_step=post_training_seconds / max(final_step - start_step, 1),
         peak_cuda_memory_bytes=(
@@ -1512,6 +2121,10 @@ def run_post_training(
     )
     train_dataset.close()
     evaluation_dataset.close()
+    if guard_failed:
+        raise RuntimeError(
+            "post-training reconstruction MSE exceeded the fidelity guard; recovery checkpoint saved"
+        )
     return store.run_dir
 
 
@@ -1529,12 +2142,16 @@ def _post_checkpoint_payload(
     config_sha256: str,
     coherence_calibration_sha256: str,
     family_scales: Mapping[str, float],
+    controller=None,
 ) -> dict[str, Any]:
     """Build an internally consistent post-training recovery checkpoint."""
     payload = {
         "model": checkpoint_model_state(model),
         "optimizer": optimizer.state_dict(),
         "global_step": int(global_step),
+        **sample_exposure(
+            global_step, len(train_dataset), int(config["optimization"]["batch_size"])
+        ),
         "source_run": str(config["source_run"]),
         "source_checkpoint": str(source_checkpoint_path(config)),
         "source_hashes": dict(source_hashes_before),
@@ -1551,4 +2168,8 @@ def _post_checkpoint_payload(
             "index_generator": index_generator.get_state(),
         },
     }
+    if controller is not None:
+        payload["component_controller"] = controller.state_dict()
+    if hasattr(train_dataset, "training_subset_manifest"):
+        payload["training_subset_sha256"] = train_dataset.training_subset_manifest["sha256"]
     return add_training_aux_state(payload, model)

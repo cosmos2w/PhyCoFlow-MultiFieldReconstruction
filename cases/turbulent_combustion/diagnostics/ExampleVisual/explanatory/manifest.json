@@ -1,0 +1,34 @@
+{
+  "source": "standard post-processing metrics from the frozen epoch-1440 checkpoint",
+  "global_distribution": {
+    "matched_samples": 64,
+    "CO_T_jsd_source_bits": 0.21039110290037466,
+    "CO_T_jsd_ABC_bits": 0.04231779961875348
+  },
+  "cross_spectrum": {
+    "ensemble_count": 2,
+    "ensemble_size": 32,
+    "pair_labels": [
+      "CO\u2013T",
+      "T\u2013CH4",
+      "T\u2013U_1",
+      "CH4\u2013U_1"
+    ]
+  },
+  "topology": {
+    "representative_sample_id": "trajectory_000000:8317",
+    "representative_index": 20,
+    "self_diagram_distance_recomputed": 0.003202943858013896,
+    "self_diagram_distance_scored": 0.003202949184924364,
+    "raster": [
+      32,
+      128
+    ],
+    "physical_extent": [
+      0.0003868074854835868,
+      0.9971275062998757,
+      -0.09947119653224945,
+      0.14916598796844482
+    ]
+  }
+}

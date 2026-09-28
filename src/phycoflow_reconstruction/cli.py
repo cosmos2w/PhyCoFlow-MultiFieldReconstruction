@@ -66,10 +66,13 @@ def _load_case_config(
                     source_config = load_config(source_config_path)
                     if source_config.get("case") != case_name:
                         raise ValueError("source run belongs to a different case")
+                    model_ema_eval = config.get("model", {}).get("model_ema_eval")
                     for key in ("dataset", "model", "observations"):
                         if key not in source_config:
                             raise ValueError(f"source run is missing inheritable section {key!r}")
                         config[key] = source_config[key]
+                    if model_ema_eval is not None:
+                        config["model"]["model_ema_eval"] = model_ema_eval
                     source = config.setdefault("source", {})
                     source["inherited_base_keys"] = ["dataset", "model", "observations"]
                     source["config_origins"] = {
@@ -78,6 +81,8 @@ def _load_case_config(
                         "observations": "source_run.resolved_config.yaml",
                         "post_training": "child_config",
                     }
+                    if model_ema_eval is not None:
+                        source["config_origins"]["model.model_ema_eval"] = "child_config"
                 elif config.get("source", {}).get("kind") == "legacy_demo50":
                     source = config.setdefault("source", {})
                     source["inherited_base_keys"] = [
@@ -174,6 +179,11 @@ def run_case_cli(case_name: str, case_dir: str | Path) -> int:
     history_renderer.add_argument("--run", type=Path, required=True)
     history_renderer.add_argument("--output", type=Path)
 
+    explanatory_renderer = subparsers.add_parser("render-coherence-explanatory")
+    explanatory_renderer.add_argument("--run", type=Path, required=True)
+    explanatory_renderer.add_argument("--split", choices=("train", "validation", "test"), default="validation")
+    explanatory_renderer.add_argument("--checkpoint", default="best")
+
     visualizer = subparsers.add_parser("visualize-run")
     visualizer.add_argument("--run", type=Path, required=True)
     visualizer.add_argument("--checkpoint", default="best")
@@ -187,16 +197,17 @@ def run_case_cli(case_name: str, case_dir: str | Path) -> int:
         default="log",
         help=(
             "vertical scale for reconstruction and discrepancy-distribution plots; "
-            "cross-spectrum coherence bars always use a bounded 0-1 scale (default: log)"
+            "cross-spectrum scores and topology diagnostics keep their own "
+            "labeled scales (default: log)"
         ),
     )
     visualizer.add_argument(
         "--eval-coherence",
         nargs="+",
-        choices=("global_distribution", "cross_spectrum"),
+        choices=("global_distribution", "cross_spectrum", "topology"),
         help=(
             "also evaluate selected coherence families over --eval-set; "
-            "currently supports global_distribution and cross_spectrum"
+            "supports global_distribution, cross_spectrum, and topology"
         ),
     )
     visualizer.add_argument(
@@ -214,7 +225,8 @@ def run_case_cli(case_name: str, case_dir: str | Path) -> int:
         action="store_true",
         help=(
             "add dedicated coherence-family views to --eval-coherence output; "
-            "currently renders global-distribution pairwise joint PDFs"
+            "currently enables global-distribution pairwise joint PDFs; "
+            "topology and spectral quality views render with their families"
         ),
     )
     visualizer.add_argument(
@@ -235,6 +247,15 @@ def run_case_cli(case_name: str, case_dir: str | Path) -> int:
     )
 
     args = parser.parse_args()
+    if args.command == "render-coherence-explanatory":
+        from .evaluation.explanatory_coherence import render_saved_coherence_explanatory
+
+        run_dir = args.run.resolve() if args.run.is_absolute() else (case_dir / args.run).resolve()
+        checkpoint_label = Path(args.checkpoint).stem
+        output_dir = run_dir / "evaluation" / f"reconstruction_set_{args.split}_{checkpoint_label}"
+        print(render_saved_coherence_explanatory(output_dir))
+        return 0
+
     if args.command == "render-history":
         from .training.coherence_history import render_coherence_history
 

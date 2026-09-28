@@ -76,6 +76,7 @@ class H5FieldDataset(Dataset[FieldSample]):
         grid_shape: Sequence[int] | None = None,
         coordinate_reorder: str = "stored",
         include_temporal_derivative: bool = False,
+        augmentation: dict | None = None,
     ) -> None:
         self.path = Path(path).resolve()
         self.split_name = split
@@ -83,6 +84,7 @@ class H5FieldDataset(Dataset[FieldSample]):
         self.time_stride = int(time_stride)
         self.include_temporal_derivative = bool(include_temporal_derivative)
         self.coordinate_reorder = str(coordinate_reorder)
+        self.augmentation = dict(augmentation or {}) if split == "train" else {}
         self._h5: h5py.File | None = None
 
         with h5py.File(self.path, "r") as handle:
@@ -177,6 +179,14 @@ class H5FieldDataset(Dataset[FieldSample]):
             else "point",
         )
         self.data_spec.validate()
+        if self.augmentation:
+            if (self.augmentation.get("kind") != "periodic_translate_rot90"
+                    or self.reconstruction_unit != "snapshot" or len(self.grid_shape) != 2
+                    or self.grid_shape[0] != self.grid_shape[1] or self.include_temporal_derivative):
+                raise ValueError("augmentation requires periodic square snapshots without temporal derivatives")
+            names = self.augmentation.get("vector_fields", [])
+            if len(names) != 2 or len(set(names)) != 2 or not set(names) <= set(self.field_names):
+                raise ValueError("augmentation.vector_fields requires two ordered velocity fields")
 
     def _coordinate_permutation(self, coordinates: np.ndarray) -> torch.Tensor:
         if self.coordinate_reorder == "stored":
@@ -275,6 +285,13 @@ class H5FieldDataset(Dataset[FieldSample]):
             "trajectory_index": trajectory_index,
             **self._sample_context(trajectory_index, time_index),
         }
+        if self.augmentation:
+            from .augmentation import periodic_translate_rot90
+
+            if any(metadata.get(key) for key in ("physics", "auxiliary")):
+                raise ValueError("augmentation of point-aligned auxiliary/physics fields is unsupported")
+            values = periodic_translate_rot90(values, self.grid_shape, tuple(
+                self.field_names.index(name) for name in self.augmentation["vector_fields"]))
         if self.include_temporal_derivative:
             if self.selection.strategy == "chronological_frames_80_10_10":
                 first_allowed = self.selection.frame_indices[0]

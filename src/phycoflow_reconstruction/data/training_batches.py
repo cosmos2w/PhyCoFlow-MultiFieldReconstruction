@@ -514,6 +514,7 @@ class AsyncCompactH5BatchSource:
         start_step: int,
         num_workers: int,
         fixed_query_indices: torch.Tensor | None = None,
+        isolate_model_rng: bool = False,
     ) -> None:
         self.device = device
         workers = max(1, int(num_workers))
@@ -526,6 +527,10 @@ class AsyncCompactH5BatchSource:
             prefetch_factor=2,
             pin_memory=device.type == "cuda",
             pin_memory_device=str(device) if device.type == "cuda" else "",
+            # Worker creation must not consume the model's RF/noise RNG stream
+            # on each resume or evaluation boundary.
+            generator=(torch.Generator().manual_seed(protocol.seed + start_step)
+                       if isolate_model_rng else None),
         )
 
     def __iter__(self) -> Iterator[ObservationBatch]:
@@ -552,6 +557,7 @@ class LegacyBatchSource:
         start_step,
         num_workers,
         fixed_query_indices=None,
+        isolate_model_rng=False,
     ) -> None:
         self.dataset = dataset
         self.protocol = protocol
@@ -565,6 +571,8 @@ class LegacyBatchSource:
             num_workers=num_workers,
             collate_fn=_identity_samples,
             persistent_workers=bool(num_workers),
+            generator=(torch.Generator().manual_seed(protocol.seed + start_step)
+                       if isolate_model_rng else None),
         )
 
     def __iter__(self):
@@ -683,6 +691,7 @@ def build_training_batch_source(
             start_step=start_step,
             num_workers=workers,
             fixed_query_indices=shared_queries,
+            isolate_model_rng=config.get("stage") == "post_training",
         )
     print("data pipeline: using compatibility loader for this protocol or dataset format")
     return LegacyBatchSource(
@@ -694,4 +703,5 @@ def build_training_batch_source(
         start_step=start_step,
         num_workers=int(runtime.get("num_workers", 0)),
         fixed_query_indices=shared_queries,
+        isolate_model_rng=config.get("stage") == "post_training",
     )

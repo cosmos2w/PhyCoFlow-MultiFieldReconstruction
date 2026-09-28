@@ -9,6 +9,7 @@ This document describes the mathematical contract implemented by `phycoflow_reco
 | `coordinate_mlp` | deterministic point | masked field MSE | direct query prediction |
 | `mlp_rbf` | deterministic point | masked field MSE | local RBF value/support features |
 | `deeponet` | deterministic point | masked field MSE | sparse branch + coordinate trunk |
+| `mimonet` | deterministic operator | masked field MSE | two sparse sensor branches, multiplicative fusion, coordinate trunk |
 | `senseiver` | deterministic point | masked field MSE | latent sparse attention |
 | `geofno` | grid operator | masked field MSE | optional `neuraloperator` dependency |
 | `diffusion_pde` | grid generative | noise-prediction MSE | deterministic DDIM-style sampling |
@@ -225,7 +226,37 @@ Current drawbacks:
 - The fixed basis dimension $P$ imposes a low-rank bottleneck that may underrepresent sharp or multiscale fields.
 - All output fields share the same pooled observation set, and the model does not enforce observations exactly.
 
-### 3.4 Senseiver regressor
+### 3.4 MIMONet sparse-input operator
+
+The MIMONet adapter preserves the released branch--trunk computation while adapting its branch list to combustion. The published lid-driven-cavity example uses one branch and three outputs; the local combustion demo and this adapter use separate temperature-value and sensor-location branches and five outputs. For the turbulent-combustion profile, each sample contains $M=256$ observed temperature values $y_m$ at normalized coordinates $\mathbf r_m\in\mathbb R^2$. A validity bit $v_m$ travels with each padded sensor slot. The maintained template sorts valid sensors by canonical point index within each declared field before flattening them; historical configs without `model.sensor_order` keep their input order. The value and geometry branches receive
+
+$$
+\mathbf u_b=\operatorname{flatten}\left([v_my_m,v_m]_{m=1}^{M}\right),
+\qquad
+\mathbf g_b=\operatorname{flatten}\left([v_m\mathbf r_m,v_m]_{m=1}^{M}\right).
+$$
+
+Their fully connected networks produce $P=256$ features each. The branch outputs combine elementwise using the released multiplicative merge,
+
+$$
+\mathbf c_b=\operatorname{Branch}_{\mathrm{value}}(\mathbf u_b)
+\odot
+\operatorname{Branch}_{\mathrm{geometry}}(\mathbf g_b).
+$$
+
+For each query coordinate, the trunk predicts a $P\times C$ basis tensor. Its contraction with $\mathbf c_b$, followed by a learned field bias, gives all $C=5$ field values:
+
+$$
+\widehat X_{bqc}=\sum_{p=1}^{P}c_{bp}T_{bqpc}+a_c.
+$$
+
+The combustion profile retains the released ReLU FCN blocks, branch hidden width 512, trunk hidden width 256, multiplicative merge, and 256-dimensional basis. Its branch input widths are 512 and 768; the trunk input width is 2 and its output width is 1280, giving 2,430,981 trainable parameters. Training minimizes the shared masked field MSE at 4,096 queried points. The fixed input information budget is exactly 256 temperature values and their locations; the other four fields are prediction targets, and no operating-condition features enter the model. Parameter count follows the branch input and network widths and is not constrained to match another architecture. The repository's base trainer uses AdamW with fixed learning rate $10^{-4}$ and weight decay $10^{-6}$; it does not use the separate demo wrapper's Adam plus cosine schedule. The demo trained with 192--384 T sensors and used exactly 256 only in its fixed diagnostics, so the two training loss curves do not share an identical sensor protocol.
+
+MIMONet uses the common normalized `ObservationBatch` and supports arbitrary query-coordinate batches. The configured sensor capacities define its fixed branch input shape, so sensor counts and field identities must agree with the case profile. The architecture is deterministic and has no sampling or uncertainty head.
+
+The model follows Kobayashi et al., “Virtual sensing to enable real-time monitoring of inaccessible locations & unmeasurable parameters,” *Nature Communications* (2026), [doi:10.1038/s41467-026-77463-7](https://doi.org/10.1038/s41467-026-77463-7). The released implementation is recorded at [Zenodo v2](https://doi.org/10.5281/zenodo.21986357). Its metadata also names the [project GitHub page](https://github.com/kkazuma19/MIMONet), which returned 404 during this integration; the local archived source came from Zenodo.
+
+### 3.5 Senseiver regressor
 
 Sensor tokens are embedded as
 
@@ -261,7 +292,7 @@ Current drawbacks:
 - Output attention costs $\mathcal O(BQL)$ for $L$ latents, and the current Senseiver implementation does not chunk large query sets.
 - The compact architecture has no explicit local interpolation branch or exact sensor constraint.
 
-### 3.5 GeoFNO regressor
+### 3.6 GeoFNO regressor
 
 GeoFNO receives the regular-grid tensor
 

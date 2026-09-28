@@ -1,0 +1,15 @@
+{
+  "repository": "PhyCoFlow_dev",
+  "base_revision": "0ae5ef73bf3d76c0d07f53695f35a525a51cdf31",
+  "working_tree_changes_included": true,
+  "files_sha256": {
+    "src/topo_coherence_training/topo_loss.py": "05d66e6190f31922b3f28a53907d9f8d319a895077801aee6f4a084f27b8047f",
+    "src/topo_coherence_training/mph_fibered.py": "665b6cfce3c497c09e63694bc4b2f86b33c72aa090c4a9eba3e1483b59155111",
+    "src/topo_coherence_training/marginal_betti.py": "5061f7cc4c81b279ac35b66fbb81495ea07373032c2b0063506f84f2f4602377",
+    "src/ram_topo_coherence.py": "d02dbda69a01a063641a776c98b8e99373eebbc44f5e2b480cd7785c5b933f44",
+    "src/coherence_eval.py": "f1a2eb799ed8662eba0594d7d7d445b19e871e13665ae48cbf255ec07b865cec",
+    "Save_config/active_emulsion/config_pointcloud_ffm_cq_topo_posttrain_N195.yaml": "5e34a18cec7c0990beb51ba03775b2630f20c1395ccaf0312138725e764e61d1",
+    "Save_config/active_emulsion/config_pointcloud_ffm_cq_topo_posttrain_N197.yaml": "7a9a422b3efa2f219b0eff76fc21f36c7842a885c5d1f679efb4e8c0e45e317b"
+  },
+  "snapshot_sha256": "e6ec9580afeb9090a8073f082fdfc5262d418dcb310299c0ef552dcb49bd62d7"
+}

@@ -1,0 +1,18 @@
+dataset:
+  path: ../../datasets/active_emulsion/generated/fields.h5
+  split: train
+  reconstruction_unit: snapshot
+  field_names: [phi, vx, vy]
+  field_units: [dimensionless, dimensionless, dimensionless]
+  # The checkpoint's nonlinear transform is inside its physical-field adapter.
+  normalization: none
+  time_stride: 1
+  coordinate_dim: 3
+  grid_shape: [128, 128]
+  coordinate_reorder: stored
+  grid_mapping_verified: true
+  benchmark_eligible: true
+  allow_nonbenchmark: false
+  augmentation:
+    kind: periodic_translate_rot90
+    vector_fields: [vx, vy]
