@@ -1,4 +1,4 @@
-# Portable three-family profile for a completed turbulent-combustion source run.
+# Portable three-family profile for a completed turbulent-combustion GL-RBF/CQ source run.
 defaults: [../readiness/ABC_sliced_persistence_formal_5000ep_gpu1.yaml]
 
 source_run: null
