@@ -17,6 +17,7 @@ from phycoflow_reconstruction.coherence.families.cross_spectrum.basis import (
 from phycoflow_reconstruction.coherence.families.cross_spectrum.covariance_blocks import (
     LinearCoefficientCovarianceAccumulator,
     covariance_band_block,
+    covariance_band_energies,
     linear_coefficient_covariance,
     second_order_covariance_block_losses,
 )
@@ -239,6 +240,90 @@ def test_reference_mask_is_fixed_and_generated_collapse_does_not_disable_blocks(
         min(record["reference_energy_fractions"]) >= 0.2
         for record in collapse_result.diagnostics["cross_frequency_blocks"]
     )
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_calibrated_energy_floor_policy_preserves_low_energy_identity(device: str) -> None:
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is not available")
+    generator = torch.Generator().manual_seed(1002)
+    calibration_coefficients = torch.randn(
+        64, 4, 2, generator=generator, dtype=torch.float64
+    ).to(device)
+    band_ids = torch.tensor([0, 0, 1, 1], device=device)
+    calibration = covariance_band_energies(
+        linear_coefficient_covariance(calibration_coefficients), band_ids
+    )
+
+    for scale in (1.0, 1.0e-4, 1.0e-6):
+        reference = (scale * calibration_coefficients).detach()
+        generated = reference.clone().requires_grad_(True)
+        symmetric = second_order_covariance_block_losses(
+            generated,
+            reference,
+            band_ids,
+            ((0, 1),),
+            include_block_values=True,
+            energy_floor_policy="symmetric_calibrated",
+            calibration_reference_energies=calibration,
+            calibration_ensemble_size=64,
+        )
+        symmetric_total = symmetric.same_frequency + symmetric.cross_frequency
+        torch.testing.assert_close(
+            symmetric_total, torch.zeros_like(symmetric_total), atol=1.0e-28, rtol=0.0
+        )
+        symmetric_gradient = torch.autograd.grad(symmetric_total, generated)[0]
+        assert torch.isfinite(symmetric_gradient).all()
+        torch.testing.assert_close(
+            symmetric_gradient, torch.zeros_like(symmetric_gradient), atol=1.0e-24, rtol=0.0
+        )
+        assert symmetric.diagnostics["energy_floor_policy"] == "symmetric_calibrated"
+
+    low_reference = (1.0e-4 * calibration_coefficients).detach()
+    low_generated = low_reference.clone().requires_grad_(True)
+    legacy = second_order_covariance_block_losses(
+        low_generated,
+        low_reference,
+        band_ids,
+        ((0, 1),),
+        include_block_values=True,
+        energy_floor_policy="generated_only_legacy",
+        calibration_reference_energies=calibration,
+        calibration_ensemble_size=64,
+    )
+    legacy_total = legacy.same_frequency + legacy.cross_frequency
+    assert float(legacy_total) > 0.0
+    assert legacy.diagnostics["energy_floor_policy"] == "generated_only_legacy"
+    record = legacy.diagnostics["same_frequency_blocks"][0]
+    generated_block = torch.tensor(record["generated_normalized_block"], dtype=torch.float64)
+    reference_block = torch.tensor(record["reference_normalized_block"], dtype=torch.float64)
+    ratio = torch.linalg.vector_norm(generated_block) / torch.linalg.vector_norm(reference_block)
+    assert float(ratio) == pytest.approx(0.505, abs=0.01)
+
+
+def test_v4_energy_floor_policy_is_versioned_and_artifact_bound() -> None:
+    coordinates = _irregular_coordinates()
+    legacy = _family(coordinates)
+    assert legacy.version == "4"
+    assert legacy.energy_floor_policy == "generated_only_legacy"
+    legacy._basis(coordinates.unsqueeze(0), torch.float32)
+    old_artifact = legacy.state_artifact()
+    assert old_artifact["energy_floor_policy"] == "generated_only_legacy"
+    old_artifact.pop("energy_floor_policy")  # saved before policy provenance was added
+    _family(coordinates).load_state_artifact(old_artifact)
+
+    symmetric_config = _config(coordinates)
+    symmetric_config["stabilization"]["energy_floor_policy"] = "symmetric_calibrated"
+    symmetric = _family(coordinates, symmetric_config)
+    assert symmetric.version == "4.1"
+    assert symmetric.energy_floor_policy == "symmetric_calibrated"
+    symmetric._basis(coordinates.unsqueeze(0), torch.float32)
+    symmetric_artifact = symmetric.state_artifact()
+    assert symmetric_artifact["version"] == "4.1"
+    assert symmetric_artifact["energy_floor_policy"] == "symmetric_calibrated"
+    with pytest.raises(ValueError, match="identity mismatch"):
+        symmetric.load_state_artifact(old_artifact)
+    _family(coordinates, symmetric_config).load_state_artifact(symmetric_artifact)
 
 
 def test_exact_generated_collapse_and_all_low_energy_masks_have_finite_gradients() -> None:

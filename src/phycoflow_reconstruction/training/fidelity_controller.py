@@ -170,8 +170,11 @@ def coherence_selection_report(source: Mapping, candidate: Mapping, settings: Ma
     report = fidelity_eligibility(source, candidate, settings)
     source_families = source["coherence"]["families"]
     candidate_families = candidate["coherence"]["families"]
-    if list(source_families) != list(candidate_families):
-        raise ValueError("coherence selection family membership/order changed")
+    # RunStore writes sorted JSON keys. A resumed source report therefore has
+    # a different insertion order from an in-memory family result. Membership
+    # is a contract; incidental mapping order is not part of this mean score.
+    if set(source_families) != set(candidate_families):
+        raise ValueError("coherence selection family membership changed")
     ratios = {name: float(candidate_families[name]["total"]) /
               max(float(value["total"]), 1e-12) for name, value in source_families.items()}
     score = sum(ratios.values()) / len(ratios)

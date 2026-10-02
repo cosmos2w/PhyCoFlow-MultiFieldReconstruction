@@ -103,7 +103,11 @@ def _validate_covariance_block_settings(family, compute, evaluation):
     if min(int(compute["batch_size"]), int(evaluation.get("max_samples", 1))) < minimum:
         raise ValueError("second_order_blocks_v4 has insufficient covariance ensemble")
     stabilization = family.get("stabilization", {})
-    _reject_unknown(stabilization, {"relative_floor", "absolute_floor", "minimum_reference_band_fraction"}, "cross_spectrum.stabilization")
+    _reject_unknown(stabilization, {"relative_floor", "absolute_floor", "minimum_reference_band_fraction", "energy_floor_policy"}, "cross_spectrum.stabilization")
+    if stabilization.get("energy_floor_policy", "generated_only_legacy") not in {
+        "symmetric_calibrated", "generated_only_legacy"
+    }:
+        raise ValueError("cross_spectrum.stabilization.energy_floor_policy is unsupported")
     for key, default in (("relative_floor", 1e-6), ("absolute_floor", 1e-12), ("minimum_reference_band_fraction", 1e-8)):
         _positive_number(stabilization.get(key, default), f"stabilization.{key}")
     if float(stabilization.get("minimum_reference_band_fraction", 1e-8)) >= 1:

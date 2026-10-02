@@ -55,6 +55,7 @@ class CrossSpectrumFamily(nn.Module):
     family_name = "cross_spectrum"
     version = "3"
     second_order_version = "4"
+    symmetric_second_order_version = "4.1"
 
     def __init__(
         self,
@@ -182,11 +183,35 @@ class CrossSpectrumFamily(nn.Module):
             "relative_floor",
             "absolute_floor",
             "minimum_reference_band_fraction",
+            "energy_floor_policy",
         }
         if unknown_stabilization:
             raise ValueError(
                 f"unknown cross_spectrum.stabilization keys: {sorted(unknown_stabilization)}"
             )
+        if self.definition == "second_order_blocks_v4":
+            self.energy_floor_policy = stabilization.get(
+                "energy_floor_policy", "generated_only_legacy"
+            )
+            if not isinstance(self.energy_floor_policy, str) or self.energy_floor_policy not in {
+                "symmetric_calibrated",
+                "generated_only_legacy",
+            }:
+                raise ValueError(
+                    "cross_spectrum.stabilization.energy_floor_policy must be "
+                    "symmetric_calibrated or generated_only_legacy"
+                )
+            self.version = (
+                self.symmetric_second_order_version
+                if self.energy_floor_policy == "symmetric_calibrated"
+                else self.second_order_version
+            )
+        else:
+            if "energy_floor_policy" in stabilization:
+                raise ValueError(
+                    "energy_floor_policy is only valid for second_order_blocks_v4"
+                )
+            self.energy_floor_policy = None
         self.relative_floor = float(stabilization.get("relative_floor", 1.0e-6))
         self.absolute_floor = float(stabilization.get("absolute_floor", 1.0e-12))
         self.minimum_reference_band_fraction = float(
@@ -466,6 +491,7 @@ class CrossSpectrumFamily(nn.Module):
                 absolute_floor=self.absolute_floor,
                 minimum_reference_band_fraction=self.minimum_reference_band_fraction,
                 include_block_values=block_values_requested,
+                energy_floor_policy=self.energy_floor_policy,
                 calibration_reference_energies=(
                     self.calibrated_band_energies
                     if self.calibrated_band_energies.numel()
@@ -702,6 +728,7 @@ class CrossSpectrumFamily(nn.Module):
                     "relative_floor": self.relative_floor,
                     "absolute_floor": self.absolute_floor,
                     "minimum_reference_band_fraction": self.minimum_reference_band_fraction,
+                    "energy_floor_policy": self.energy_floor_policy,
                 },
                 "covariance": block_diagnostics,
                 "component_weights": dict(self.component_weights),
@@ -714,6 +741,7 @@ class CrossSpectrumFamily(nn.Module):
             "family": self.family_name,
             "version": self.version,
             "definition": self.definition,
+            "energy_floor_policy": self.energy_floor_policy,
             "upstream": {
                 "repository": "https://github.com/ctrl-is/PhyCoFlowModel-Cross-Spectral-Coherence",
                 "revision": "add1b1a6422c",
@@ -756,6 +784,13 @@ class CrossSpectrumFamily(nn.Module):
         artifact_definition = artifact.get("definition", "legacy_v3")
         if artifact_definition != self.definition:
             raise ValueError("cross-spectrum family artifact definition mismatch")
+        stored_energy_floor_policy = artifact.get("energy_floor_policy")
+        if stored_energy_floor_policy is None and artifact_definition == "second_order_blocks_v4":
+            # v4 artifacts created before policy provenance used generated-only
+            # clamping; preserve that exact transient interpretation on restore.
+            stored_energy_floor_policy = "generated_only_legacy"
+        if stored_energy_floor_policy != self.energy_floor_policy:
+            raise ValueError("cross-spectrum family artifact energy-floor policy mismatch")
         if dict(artifact.get("config", {})) != self.config:
             raise ValueError("cross-spectrum family artifact config mismatch")
         state = artifact.get("state_dict")

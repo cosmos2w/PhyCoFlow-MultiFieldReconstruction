@@ -106,6 +106,7 @@ def second_order_covariance_block_losses(
     absolute_floor: float = 1.0e-12,
     minimum_reference_band_fraction: float = 1.0e-8,
     include_block_values: bool = False,
+    energy_floor_policy: str = "symmetric_calibrated",
     calibration_reference_energies: torch.Tensor | None = None,
     calibration_ensemble_size: int | None = None,
     ddof: int = 1,
@@ -120,10 +121,13 @@ def second_order_covariance_block_losses(
     collapsing its own spectrum.  If a frozen calibration panel is supplied,
     its energies set both the eligibility mask and the additive floor; the
     current reference batch still defines the target covariance and its
-    normalization scale.  Generated energies are clamped below by a positive
-    calibration-derived value before the square root, preventing a singular
-    derivative at exact collapse.  Frobenius norms are squared sums, with no
-    division by block size, then averaged over eligible blocks.
+    normalization scale.  ``symmetric_calibrated`` clamps both generated and
+    reference energies by the same positive calibration-derived values before
+    the square root; ``generated_only_legacy`` retains the original v4
+    generated-only clamp.  Both policies keep the denominator positive and
+    the generated derivative finite at exact collapse.  Frobenius norms are
+    squared sums, with no division by block size, then averaged over eligible
+    blocks.
     """
     _check_coefficients(generated_coefficients)
     _check_coefficients(reference_coefficients)
@@ -138,6 +142,11 @@ def second_order_covariance_block_losses(
         raise ValueError("covariance stabilization floors must be finite and non-negative")
     if relative_floor == 0 and absolute_floor == 0:
         raise ValueError("at least one covariance stabilization floor must be positive")
+    if not isinstance(energy_floor_policy, str) or energy_floor_policy not in {
+        "symmetric_calibrated",
+        "generated_only_legacy",
+    }:
+        raise ValueError("energy_floor_policy must be symmetric_calibrated or generated_only_legacy")
     if not 0.0 <= minimum_reference_band_fraction < 1.0:
         raise ValueError("minimum_reference_band_fraction must be in [0,1)")
     if ddof < 0 or generated_coefficients.shape[0] <= ddof:
@@ -251,9 +260,24 @@ def second_order_covariance_block_losses(
                         right_generated_floor,
                     )
                 )
+                if energy_floor_policy == "symmetric_calibrated":
+                    left_reference_energy = torch.maximum(
+                        energy_reference[left_band, left_field].clamp_min(0),
+                        left_generated_floor,
+                    )
+                    right_reference_energy = torch.maximum(
+                        energy_reference[right_band, right_field].clamp_min(0),
+                        right_generated_floor,
+                    )
+                else:
+                    left_reference_energy = energy_reference[
+                        left_band, left_field
+                    ].clamp_min(tiny)
+                    right_reference_energy = energy_reference[
+                        right_band, right_field
+                    ].clamp_min(tiny)
                 ref_denominator = torch.sqrt(
-                    energy_reference[left_band, left_field].clamp_min(tiny)
-                    * energy_reference[right_band, right_field].clamp_min(tiny)
+                    left_reference_energy * right_reference_energy
                 ) + floor
                 gen_denominator = gen_scale + floor
                 if bool(ref_denominator <= 0) or bool(gen_denominator <= 0):
@@ -319,6 +343,7 @@ def second_order_covariance_block_losses(
             "relative_floor": relative_floor,
             "absolute_floor": absolute_floor,
             "minimum_reference_band_fraction": minimum_reference_band_fraction,
+            "energy_floor_policy": energy_floor_policy,
             "calibration_source": calibration_source,
             "calibration_ensemble_size": effective_calibration_ensemble_size,
             "covariance_estimator": covariance_estimator,

@@ -279,6 +279,7 @@ def test_failed_resume_attempt_updates_global_stage_and_lineage_totals(tmp_path)
         "run_dir": str(run_dir),
         "lineage_key": str(run_dir),
         "config_sha256": "fixture-config-hash",
+        "implementation_commit": "repair-commit",
         "experiment_name": "Test_1002/T20_A",
         "configured_epochs": 50,
         "steps_per_epoch": 38,
@@ -295,6 +296,8 @@ def test_failed_resume_attempt_updates_global_stage_and_lineage_totals(tmp_path)
     assert ledger["stages"]["T20"]["attempted_updates"] == 2
     assert ledger["lineages"][str(run_dir.resolve())]["attempted_updates"] == 2
     assert ledger["runs"][-1]["status"] == "failed"
+    assert ledger["runs"][-1]["implementation_commit"] == "repair-commit"
+    assert ledger["lineages"][str(run_dir.resolve())]["last_implementation_commit"] == "repair-commit"
 
 
 def test_dry_run_prints_full_contract_without_model_launch_or_ledger_mutation(
@@ -338,5 +341,6 @@ def test_dry_run_prints_full_contract_without_model_launch_or_ledger_mutation(
     assert payload["effective_max_steps"] == 1
     assert payload["source"]["source_checkpoint_sha256"] == PINNED_SOURCE_SHA256
     assert payload["formal_launch_authorized"] is False
+    assert payload["implementation_commit"] == "fixture"
     assert "Test_1002/T20_A_copula" in output
     assert not ledger_path.exists()

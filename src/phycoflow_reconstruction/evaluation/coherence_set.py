@@ -2237,6 +2237,7 @@ class CrossSpectrumAccumulator:
                 absolute_floor=self.family.absolute_floor,
                 minimum_reference_band_fraction=self.family.minimum_reference_band_fraction,
                 include_block_values=True,
+                energy_floor_policy=self.family.energy_floor_policy,
                 calibration_reference_energies=calibration,
                 calibration_ensemble_size=self.family.calibration_ensemble_size,
                 generated_covariance=generated_covariance,
@@ -2622,11 +2623,21 @@ class CrossSpectrumAccumulator:
                 "band_field_energy": "E[l,i] = sum over modes k in band l of Re(C[k,k,i,i])",
                 "eligibility": "frozen_training_fraction[l,i] and frozen_training_fraction[m,j] are each >= minimum_reference_band_fraction",
                 "shared_floor": "absolute_floor + relative_floor * sqrt(E_cal[l,i] * E_cal[m,j])",
-                "reference_denominator": "sqrt(max(E_ref[l,i], tiny) * max(E_ref[m,j], tiny)) + shared_floor",
+                "energy_floor_policy": self.family.energy_floor_policy,
+                "reference_denominator": (
+                    "sqrt(max(E_ref[l,i], relative_floor*E_cal[l,i], tiny) * "
+                    "max(E_ref[m,j], relative_floor*E_cal[m,j], tiny)) + shared_floor"
+                    if self.family.energy_floor_policy == "symmetric_calibrated"
+                    else "sqrt(max(E_ref[l,i], tiny) * max(E_ref[m,j], tiny)) + shared_floor"
+                ),
                 "generated_denominator": "sqrt(max(E_gen[l,i], relative_floor*E_cal[l,i], tiny) * max(E_gen[m,j], relative_floor*E_cal[m,j], tiny)) + shared_floor",
                 "block_loss": "sum(abs(generated_normalized_block-reference_normalized_block)^2)",
                 "block_reduction": "mean over reference-eligible band/pair blocks",
-                "normalization": "frozen-reference eligibility and floors, current paired reference covariance target, positive calibration-derived generated-energy clamp",
+                "normalization": (
+                    "same frozen-calibration positive energy clamp and additive floor for generated and reference"
+                    if self.family.energy_floor_policy == "symmetric_calibrated"
+                    else "frozen-reference eligibility and floors, current paired reference covariance target, positive calibration-derived generated-energy clamp"
+                ),
                 "mask_source": "frozen_training_reference_band_energy_fractions",
             },
             "split": split,

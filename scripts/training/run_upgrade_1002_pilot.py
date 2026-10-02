@@ -557,11 +557,13 @@ def _apply_attempt(
         delta.get("end_step", lineage.get("last_committed_global_step", 0))
     )
     lineage["last_status"] = status
+    lineage["last_implementation_commit"] = active.get("implementation_commit")
     run = {
         "stage": stage,
         "run_dir": str(run_dir.resolve()) if run_dir is not None else None,
         "lineage_key": lineage_key,
         "config_sha256": str(active["config_sha256"]),
+        "implementation_commit": active.get("implementation_commit"),
         "revision_type": str(active.get("revision_type", "initial")),
         "kind": str(active.get("kind", "initial")),
         "status": status,
@@ -803,6 +805,7 @@ def _make_active_attempt(
         ),
         "experiment_name": str(contract["experiment_name"]),
         "config_sha256": config_sha,
+        "implementation_commit": contract.get("implementation_commit"),
         "revision_type": revision_type,
         "configured_epochs": int(contract["configured_epochs"]),
         "steps_per_epoch": int(contract["steps_per_epoch"]),
@@ -844,6 +847,7 @@ def run_pilot(
         branch=branch_identity["branch"],
         visible_devices=environment.get("CUDA_VISIBLE_DEVICES"),
     )
+    contract["implementation_commit"] = branch_identity["commit"]
     resume = _resolve_resume_path(resume_arg)
     config_sha = str(contract["config_sha256"])
     stage = str(contract["stage"])

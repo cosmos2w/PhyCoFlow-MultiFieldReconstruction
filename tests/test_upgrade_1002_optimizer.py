@@ -1,5 +1,6 @@
 """Independent numerical/controller and lifecycle gates for the opt-in upgrade."""
 
+import json
 from copy import deepcopy
 
 import pytest
@@ -150,6 +151,32 @@ def test_selector_refuses_hidden_field_regression_and_ranks_balanced_ratios():
     candidate["per_field_mse_normalized"]["v"] = 1.06
     rejected = coherence_selection_report(source, candidate, settings)
     assert not rejected["eligible"] and rejected["failed_fidelity_fields"] == ["v"]
+
+
+def test_selector_replays_sorted_json_without_weakening_membership():
+    source = {
+        "mse_normalized": 1.,
+        "per_field_mse_normalized": {"u": 1., "v": 1.},
+        "coherence": {"families": {
+            "global_distribution": {"total": 2.},
+            "cross_spectrum": {"total": 4.},
+            "topology": {"total": 8.},
+        }},
+    }
+    candidate = deepcopy(source)
+    candidate["coherence"]["families"]["topology"]["total"] = 4.
+    settings = {"max_relative_mse_increase": .05, "max_relative_field_mse_increase": .05}
+    replayed = json.loads(json.dumps(source, sort_keys=True))
+    original = coherence_selection_report(source, candidate, settings)
+    resumed = coherence_selection_report(replayed, candidate, settings)
+    assert resumed["eligible"] and resumed["metric"] == original["metric"]
+    assert resumed["family_source_normalized_scores"] == original["family_source_normalized_scores"]
+    del candidate["coherence"]["families"]["cross_spectrum"]
+    with pytest.raises(ValueError, match="membership changed"):
+        coherence_selection_report(replayed, candidate, settings)
+    candidate["coherence"]["families"]["unexpected"] = {"total": 4.}
+    with pytest.raises(ValueError, match="membership changed"):
+        coherence_selection_report(replayed, candidate, settings)
 
 
 def test_endpoint_risk_masks_and_aggregate_not_sample_ratios():

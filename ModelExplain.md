@@ -1273,7 +1273,7 @@ where $V_{\rho,\tau}(0)=-\tau\log\rho-\tau(1-\rho)\log(1-\rho)/\rho$. For $\rho=
 
 ### 13.2 Linear graph covariance blocks v4
 
-Select `definition: second_order_blocks_v4` in `cross_spectrum`. In a fixed orthonormal retained graph basis $U$, linear coefficients $a_{bki}=U_k^*X_{bi}$ have centered sample covariance
+Select `definition: second_order_blocks_v4` and `stabilization.energy_floor_policy: symmetric_calibrated` in `cross_spectrum` (artifact version 4.1). In a fixed orthonormal retained graph basis $U$, linear coefficients $a_{bki}=U_k^*X_{bi}$ have centered sample covariance
 
 $$
 \widehat C_{ij}[k,q]=\frac1{B-1}\sum_b(a_{bki}-\bar a_{ki})
@@ -1287,7 +1287,9 @@ $$
 \sqrt{E_{\ell i}^{\rm cal}E_{mj}^{\rm cal}}.
 $$
 
-Reference normalization uses the current reference energies with a positive machine floor. Generated normalization clamps energies below the frozen calibration-relative floor before its square root, keeping the derivative finite at exact collapse. Eligibility depends only on frozen TRAIN reference-energy fractions. The two terms are weighted separately; auto-spectrum energy profiles are diagnostics, without an optimized self-spectrum term. See [`covariance_blocks.py`](src/phycoflow_reconstruction/coherence/families/cross_spectrum/covariance_blocks.py) and [`family.py`](src/phycoflow_reconstruction/coherence/families/cross_spectrum/family.py).
+Both generated and reference normalization use $\widetilde E_{\ell i}=\max(E_{\ell i},\delta_{\rm rel}E_{\ell i}^{\rm cal},\mathrm{tiny})$ before the square root, so $D_{ij}^{\ell m}=\sqrt{\widetilde E_{\ell i}\widetilde E_{mj}}+\delta_{ij}^{\ell m}$. This keeps the generated derivative finite at exact collapse and gives zero discrepancy for identical low-energy inputs. Eligibility depends only on frozen TRAIN reference-energy fractions. The two terms are weighted separately; auto-spectrum energy profiles are diagnostics, without an optimized self-spectrum term. See [`covariance_blocks.py`](src/phycoflow_reconstruction/coherence/families/cross_spectrum/covariance_blocks.py) and [`family.py`](src/phycoflow_reconstruction/coherence/families/cross_spectrum/family.py).
+
+Original upgrade-smoke artifacts with version 4 and no energy-floor policy retain `generated_only_legacy`, whose asymmetric stabilization fails low-energy identity. Their configurations and metrics remain reproducible for diagnosing that failed gate; release profiles use the explicit symmetric policy. The historical `legacy_v3` spectrum definition remains unchanged.
 
 This changes the legacy cross-band covariance of squared energies, which is fourth-order in the fields. V4 measures second-order spatial covariance in a truncated basis; it deliberately does not target that fourth-order information. Off-frequency covariance describes inhomogeneous or nonstationary structure, without establishing nonlinear energy transfer. Global evaluation pools coefficient sufficient statistics before normalization and separately reports aligned training-size groups. Family artifacts preserve basis, bands, masks, floors, field order, and calibration identity so source/current comparisons cannot silently fit different descriptors.
 
