@@ -10,6 +10,7 @@ from torch import nn
 
 from .....contracts import CoherenceComponentSpec, TermResult
 from ....base import empirical_w2_columns, projection_bank
+from .point_masks import point_mask_for_batch, select_valid_points
 
 
 class CrossJointTopKSWD(nn.Module):
@@ -41,7 +42,13 @@ class CrossJointTopKSWD(nn.Module):
             raise ValueError("cross top_fraction must lie in (0,1]")
         self.top_fraction = float(top_fraction)
 
-    def forward(self, generated: torch.Tensor, reference: torch.Tensor) -> TermResult:
+    def forward(
+        self,
+        generated: torch.Tensor,
+        reference: torch.Tensor,
+        *,
+        point_mask: torch.Tensor | None = None,
+    ) -> TermResult:
         if len(self.field_ids) < 2:
             zero = generated.sum(dim=(1, 2)) * 0.0
             return TermResult(zero, zero.mean(), reason="fewer than two configured fields")
@@ -49,7 +56,18 @@ class CrossJointTopKSWD(nn.Module):
         per_batch = []
         per_direction = []
         top_indices = []
-        for generated_item, reference_item in zip(generated, reference):
+        for batch_index, (generated_item, reference_item) in enumerate(
+            zip(generated, reference)
+        ):
+            mask = point_mask_for_batch(
+                point_mask,
+                batch_index,
+                batch_size=generated.shape[0],
+                point_count=generated.shape[1],
+                device=generated.device,
+            )
+            generated_item = select_valid_points(generated_item, mask)
+            reference_item = select_valid_points(reference_item, mask)
             generated_projection = generated_item[:, self.field_ids] @ directions.T
             reference_projection = reference_item[:, self.field_ids] @ directions.T
             costs = empirical_w2_columns(generated_projection, reference_projection)

@@ -41,6 +41,9 @@ class PeriodicCheckpointManager:
         self.selection_metric = str(
             settings.get("selection_metric", "native_validation_loss")
         )
+        self.panel_selection = self.selection_metric in {
+            "topology_with_fidelity", "coherence_with_fidelity"
+        }
         self.best_name, self.best_value = self._existing_best_metric()
         self.last_validation_report: dict[str, Any] | None = None
         self.last_best_checked = False
@@ -48,6 +51,45 @@ class PeriodicCheckpointManager:
         manifest_path = self.store.run_dir / "run_manifest.json"
         manifest = json.loads(manifest_path.read_text()) if manifest_path.is_file() else {}
         self.best_fidelity_value = float(manifest.get("best_panel_mse", math.inf))
+        self.feasible_archive = list(manifest.get("coherence_feasible_archive", []))
+
+    def restore_coherence_selector(self, checkpoint: Mapping[str, Any]) -> None:
+        """Recover selection from the committed checkpoint, not a newer manifest."""
+        if self.selection_metric != "coherence_with_fidelity":
+            return
+        state = checkpoint.get("coherence_selector_state")
+        if not isinstance(state, Mapping):
+            raise TypeError("coherence recovery checkpoint is missing selector state")
+        archive = list(state["feasible_archive"])
+        step = int(checkpoint["global_step"])
+        if len(archive) > 3 or any(int(item["step"]) > step for item in archive):
+            raise ValueError("invalid recovered coherence feasible archive")
+        for item in archive:
+            path = (self.store.run_dir / item["checkpoint"]).resolve()
+            if path.parent != (self.store.run_dir / "checkpoints").resolve() or not path.is_file():
+                raise ValueError("recovered coherence archive checkpoint is unavailable")
+        self.feasible_archive = archive
+        self.best_value = float(state["best_value"])
+        self.best_fidelity_value = float(state["best_fidelity_value"])
+        self.best_name = str(checkpoint["best_metric_name"])
+        if archive:
+            selected = min(archive, key=lambda item: (item["metric"], item["step"]))
+            selected_checkpoint = self.store.load_checkpoint(Path(selected["checkpoint"]).stem)
+            best_path = self.store.save_checkpoint("best", selected_checkpoint)
+            selected_report = selected_checkpoint["coherence_selection_report"]
+            self.store.write_json("evaluation/selected.json", {
+                "global_step": int(selected["step"]),
+                "is_source_baseline": int(selected["step"]) == 0,
+                **selected_report,
+            })
+            manifest_path = self.store.run_dir / "run_manifest.json"
+            hashes = json.loads(manifest_path.read_text()).get("checkpoint_hashes", {})
+            self.store.update_manifest(checkpoint_hashes={**hashes, "best": file_sha256(best_path)})
+        self.store.update_manifest(
+            best_metric={"name": self.best_name, "value": self.best_value},
+            best_panel_mse=self.best_fidelity_value,
+            coherence_feasible_archive=archive,
+        )
 
     def _existing_best_metric(self) -> tuple[str, float]:
         manifest_path = self.store.run_dir / "run_manifest.json"
@@ -142,13 +184,13 @@ class PeriodicCheckpointManager:
         epoch = self._epoch(global_step)
         panel_due = (force or self.validation_every_epochs is None or
                      (epoch is not None and epoch % int(self.validation_every_epochs) == 0))
-        if self.selection_metric == "topology_with_fidelity" and not panel_due:
+        if self.panel_selection and not panel_due:
             eligible_for_best = False
-        elif self.selection_metric == "topology_with_fidelity":
+        elif self.panel_selection:
             if self.panel_evaluator is None:
                 raise ValueError("topology checkpoint selection requires a fixed-panel evaluator")
             panel_report = self.panel_evaluator(global_step)
-            metric_name = "fixed_panel_topology_with_fidelity"
+            metric_name = f"fixed_panel_{self.selection_metric}"
             metric_value = float(panel_report["metric"])
             eligible_for_best = bool(panel_report["eligible"])
             mse = float(panel_report["mse"])
@@ -158,7 +200,9 @@ class PeriodicCheckpointManager:
             self.last_validation_report = {"global_step": global_step, "loss": metric_value,
                 "training_epoch": global_step / self.steps_per_epoch,
                 "topology_selection_eligible": eligible_for_best}
-            with (self.store.run_dir / "metrics" / "topology_validation.jsonl").open("a") as handle:
+            history_name = ("coherence_validation" if self.selection_metric == "coherence_with_fidelity"
+                            else "topology_validation")
+            with (self.store.run_dir / "metrics" / f"{history_name}.jsonl").open("a") as handle:
                 handle.write(json.dumps({"step": global_step, **panel_report}) + "\n")
         elif self.selection_metric == "reconstruction_mse":
             if reconstruction_report is not None:
@@ -191,7 +235,32 @@ class PeriodicCheckpointManager:
         if panel_report is not None:
             checkpoint["topology_selection"] = {key: value for key, value in panel_report.items()
                                                 if key != "metrics"}
+            if self.selection_metric == "coherence_with_fidelity":
+                checkpoint["coherence_selection"] = checkpoint["topology_selection"]
+                # The archived payload can restore the complete selected
+                # report after a crash leaves a newer selected.json behind.
+                checkpoint["coherence_selection_report"] = panel_report
+                if bool(panel_report["eligible"]) and math.isfinite(metric_value):
+                    entry = {"step": global_step, "metric": metric_value,
+                             "mse": float(panel_report["mse"]),
+                             "family_scores": panel_report["family_source_normalized_scores"],
+                             "checkpoint": f"checkpoints/feasible_{global_step:07d}.pt"}
+                    previous = list(self.feasible_archive)
+                    candidates = [item for item in previous if item["step"] != global_step] + [entry]
+                    self.feasible_archive = sorted(candidates, key=lambda item: (item["metric"], item["step"]))[:3]
+                checkpoint["coherence_selector_state"] = {"feasible_archive": self.feasible_archive,
+                                                          "best_value": self.best_value,
+                                                          "best_fidelity_value": self.best_fidelity_value}
+                if (bool(panel_report["eligible"]) and math.isfinite(metric_value)
+                        and entry in self.feasible_archive):
+                    self.store.save_checkpoint(f"feasible_{global_step:07d}", checkpoint)
         last_path = self.store.save_checkpoint("last", checkpoint) if last_due else None
+        if last_path is not None and self.selection_metric == "coherence_with_fidelity":
+            # Retain the previous committed archive until last.pt is atomic.
+            keep = {item["checkpoint"] for item in self.feasible_archive}
+            for path in (self.store.run_dir / "checkpoints").glob("feasible_*.pt"):
+                if str(path.relative_to(self.store.run_dir)) not in keep:
+                    path.unlink()
         milestone_path = None
         if milestone_due:
             epoch = global_step // self.steps_per_epoch
@@ -233,6 +302,8 @@ class PeriodicCheckpointManager:
         }
         if panel_report is not None:
             manifest_details["best_panel_mse"] = self.best_fidelity_value
+            if self.selection_metric == "coherence_with_fidelity":
+                manifest_details["coherence_feasible_archive"] = self.feasible_archive
         if last_path is not None:
             manifest_details.update(
                 last_checkpoint_step=int(global_step),

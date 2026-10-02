@@ -77,6 +77,18 @@ class TopologyFamily(nn.Module):
         self.grid_shape = (int(shape[0]), int(shape[1]))
         axes = geometry.get("axes", (0, 1))
         self.axes = (int(axes[0]), int(axes[1]))
+        logical_shape = tuple(int(value) for value in data_spec.logical_shape)
+        self.native_grid_shape = (
+            logical_shape
+            if data_spec.mesh_type == "structured"
+            and len(logical_shape) == 2
+            and self.axes == (0, 1)
+            else logical_shape[::-1]
+            if data_spec.mesh_type == "structured"
+            and len(logical_shape) == 2
+            and self.axes == (1, 0)
+            else None
+        )
         self.raster_neighbors = int(geometry.get("neighbors", 4))
         self.raster_power = float(geometry.get("power", 2.0))
         self.periodic = bool(geometry.get("periodic", False))
@@ -150,6 +162,7 @@ class TopologyFamily(nn.Module):
         self.spatial_objective = None
         if self.strategy == "cubical_persistence":
             self.spatial_objective = PersistenceTopologyObjective(config, data_spec.field_names)
+            self.version = self.spatial_objective.version
             self.component_weights = dict(self.spatial_objective.weights)
             self.spec = self.spatial_objective.spec
             return
@@ -242,6 +255,7 @@ class TopologyFamily(nn.Module):
             mapping = build_raster_map(
                 coordinates[0],
                 grid_shape=self.grid_shape,
+                native_shape=self.native_grid_shape,
                 axes=self.axes,
                 neighbors=self.raster_neighbors,
                 power=self.raster_power,
@@ -386,6 +400,21 @@ class TopologyFamily(nn.Module):
         context: Any | None = None,
     ) -> FamilyResult:
         reference_cache = (context or {}).get("persistence_cache")
+        phase = (context or {}).get(
+            "phase", "train" if self.training else "evaluation"
+        )
+        global_step = (context or {}).get("global_step")
+        source_reference_identity = (
+            id(reference),
+            reference._version,
+            id(coordinates),
+            coordinates._version if coordinates is not None else None,
+        )
+        selected_lines = (
+            self.spatial_objective.selected_line_indices(global_step, phase)
+            if self.strategy == "cubical_persistence"
+            else ()
+        )
         if reference_cache is not None:
             if self.strategy != "cubical_persistence":
                 raise ValueError("reference caching requires cubical_persistence")
@@ -395,10 +424,17 @@ class TopologyFamily(nn.Module):
                 reference._version,
                 id(coordinates),
                 coordinates._version if coordinates is not None else None,
+                self.native_grid_shape,
+                phase,
+                global_step,
+                selected_lines,
             )
             reference_cache.setdefault("reference_identity", (reference, coordinates))
-            if reference_cache.setdefault("signature", signature) != signature:
+            existing_signature = reference_cache.setdefault("signature", signature)
+            if existing_signature[:6] != signature[:6]:
                 raise ValueError("persistence reference cache target/coordinates changed")
+            if existing_signature[6:] != signature[6:]:
+                raise ValueError("persistence reference cache line selection changed")
         require_field_tensor("generated", generated)
         require_field_tensor("reference", reference)
         if generated.shape != reference.shape:
@@ -442,7 +478,20 @@ class TopologyFamily(nn.Module):
         if self.spatial_objective is not None:
             with torch.autocast(device_type=generated.device.type, enabled=False):
                 kwargs = (
-                    {"reference_cache": reference_cache}
+                    {
+                        "reference_cache": reference_cache,
+                        "global_step": global_step,
+                        "phase": phase,
+                        "reference_identity": (
+                            *source_reference_identity,
+                            self.geometry_sha256,
+                            self.grid_shape,
+                            self.native_grid_shape,
+                            self.periods,
+                            self.smoothing_sigma,
+                            self.units,
+                        ),
+                    }
                     if self.strategy == "cubical_persistence"
                     else {}
                 )
@@ -458,6 +507,7 @@ class TopologyFamily(nn.Module):
                     "units": self.units,
                     "fields": self.field_names,
                     "grid_shape": self.grid_shape,
+                    "native_grid_shape": self.native_grid_shape,
                     "periodic": self.periodic,
                     "periods": self.periods,
                     "geometry_sha256": self.geometry_sha256,
@@ -531,7 +581,7 @@ class TopologyFamily(nn.Module):
             "family": self.family_name,
             "version": self.version,
             "scientific_source": persistence_source()
-            if self.version == "3"
+            if self.strategy == "cubical_persistence"
             else dict(SOURCE_SNAPSHOT)
             if self.version == "2"
             else {
@@ -544,8 +594,12 @@ class TopologyFamily(nn.Module):
             "target_use": self.target_use,
             "units": self.units,
             "geometry_sha256": self.geometry_sha256,
+            "native_grid_shape": self.native_grid_shape,
             "periods": self.periods,
             "geometry_diagnostics": dict(self.geometry_diagnostics),
+            "sampling_state": self.spatial_objective.sampling_artifact()
+            if self.strategy == "cubical_persistence"
+            else None,
             "state_dict": self.state_dict(),
         }
 
@@ -554,12 +608,34 @@ class TopologyFamily(nn.Module):
             raise ValueError("topology family artifact identity mismatch")
         if dict(artifact.get("config", {})) != self.config:
             raise ValueError("topology family artifact config mismatch")
+        if (
+            "native_grid_shape" in artifact
+            and artifact.get("native_grid_shape") != self.native_grid_shape
+        ):
+            raise ValueError("topology family artifact native-grid identity mismatch")
         if self.version == "2" and artifact.get("scientific_source") != SOURCE_SNAPSHOT:
             raise ValueError(
                 "topology family artifact scientific source mismatch; rebuild the artifact"
             )
-        if self.version == "3" and artifact.get("scientific_source") != persistence_source():
+        if self.strategy == "cubical_persistence" and artifact.get(
+            "scientific_source"
+        ) != persistence_source():
             raise ValueError("persistence family source/backend mismatch; start a new experiment")
+        if self.strategy == "cubical_persistence":
+            expected_sampling = self.spatial_objective.sampling_artifact()
+            saved_sampling = artifact.get("sampling_state")
+            if not isinstance(saved_sampling, Mapping) or any(
+                saved_sampling.get(key) != expected_sampling.get(key)
+                for key in (
+                    "mode",
+                    "seed",
+                    "line_bank_size",
+                    "training_subset_size",
+                    "update_index",
+                    "resume_rule",
+                )
+            ):
+                raise ValueError("persistence family line-bank sampling state mismatch")
         state = artifact["state_dict"]
         device = self.normalization_offset.device
         self.neighbor_indices = state["neighbor_indices"].to(device)
@@ -569,3 +645,7 @@ class TopologyFamily(nn.Module):
         self.periods = artifact.get("periods", self.periods)
         self.geometry_diagnostics = dict(artifact.get("geometry_diagnostics", {}))
         self.load_state_dict(state, strict=True)
+        if self.strategy == "cubical_persistence" and (
+            artifact.get("sampling_state") != self.spatial_objective.sampling_artifact()
+        ):
+            raise ValueError("persistence family serialized line-bank identity mismatch")

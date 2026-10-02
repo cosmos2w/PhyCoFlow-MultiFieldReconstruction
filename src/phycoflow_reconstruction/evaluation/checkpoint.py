@@ -43,6 +43,8 @@ class EvaluationRuntime:
     checkpoint_path: Path
     generation_steps: int
     seed: int
+    run_dir: Path | None = None
+    coherence_artifact_run_dir: Path | None = None
 
 
 def _checkpoint_path(run_dir: Path, checkpoint: str) -> Path:
@@ -141,6 +143,8 @@ def load_evaluation_runtime(
         checkpoint_path=checkpoint_path,
         generation_steps=steps,
         seed=int(config.get("evaluation", {}).get("seed", 2027)),
+        run_dir=run_dir,
+        coherence_artifact_run_dir=run_dir,
     )
 
 

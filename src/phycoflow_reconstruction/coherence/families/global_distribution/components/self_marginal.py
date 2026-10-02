@@ -9,6 +9,7 @@ from torch import nn
 
 from .....contracts import CoherenceComponentSpec, TermResult
 from ....base import empirical_w2_columns
+from .point_masks import point_mask_for_batch, select_valid_points
 
 
 class SelfMarginalW2(nn.Module):
@@ -41,13 +42,29 @@ class SelfMarginalW2(nn.Module):
             )
         self.register_buffer("channel_weights", weights.float() / weights.float().sum())
 
-    def forward(self, generated: torch.Tensor, reference: torch.Tensor) -> TermResult:
+    def forward(
+        self,
+        generated: torch.Tensor,
+        reference: torch.Tensor,
+        *,
+        point_mask: torch.Tensor | None = None,
+    ) -> TermResult:
         per_batch = []
         per_field = []
         weights = self.channel_weights.to(device=generated.device, dtype=generated.dtype)
-        for generated_item, reference_item in zip(generated, reference):
+        for batch_index, (generated_item, reference_item) in enumerate(
+            zip(generated, reference)
+        ):
+            mask = point_mask_for_batch(
+                point_mask,
+                batch_index,
+                batch_size=generated.shape[0],
+                point_count=generated.shape[1],
+                device=generated.device,
+            )
             costs = empirical_w2_columns(
-                generated_item[:, self.field_ids], reference_item[:, self.field_ids]
+                select_valid_points(generated_item[:, self.field_ids], mask),
+                select_valid_points(reference_item[:, self.field_ids], mask),
             )
             per_field.append(costs)
             per_batch.append((costs * weights).sum())

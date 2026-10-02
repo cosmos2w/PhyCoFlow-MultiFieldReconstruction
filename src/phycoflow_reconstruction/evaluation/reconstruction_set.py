@@ -465,6 +465,7 @@ def _evaluate_reconstruction_set_once(
     statistic_scale: str = "log",
     output_dir_override: str | Path | None = None,
     coherence_config_override: dict[str, Any] | None = None,
+    coherence_artifact_run_dir: str | Path | None = None,
     evaluation_seed_override: int | None = None,
 ) -> _SetEvaluationResult:
     """Stream a complete split through one loaded model and plot field-wise error statistics."""
@@ -498,6 +499,8 @@ def _evaluate_reconstruction_set_once(
             coherence_config_override,
             tuple(coherence_families or ()),
         )
+    if coherence_artifact_run_dir is not None:
+        runtime.coherence_artifact_run_dir = Path(coherence_artifact_run_dir).resolve()
     if evaluation_seed_override is not None:
         runtime.seed = int(evaluation_seed_override)
     dataset = runtime.dataset
@@ -758,6 +761,109 @@ def _global_distribution_specs(
     path: Path,
 ) -> dict[str, tuple[np.ndarray, tuple[str, ...], tuple[str, ...], str, str]]:
     with np.load(path, allow_pickle=False) as payload:
+        if "marginal_per_field_w2" in payload.files:
+            marginal = np.asarray(payload["marginal_per_field_w2"], dtype=np.float64)
+            joint = np.asarray(payload["joint_copula_smooth_cvar"], dtype=np.float64)
+            direction_mean = np.asarray(payload["mean_directional_w2"], dtype=np.float64)
+            smooth_tail = np.asarray(
+                payload["identity_calibrated_smooth_cvar"], dtype=np.float64
+            )
+            hard_tail = np.asarray(
+                payload["hard_empirical_cvar_diagnostic"], dtype=np.float64
+            )
+            exact_rank = np.asarray(
+                payload["exact_midranks_projected_w2_diagnostic"], dtype=np.float64
+            )
+            direction_costs = np.asarray(payload["per_direction_w2"], dtype=np.float64)
+            component_totals = np.asarray(
+                payload["weighted_component_totals"], dtype=np.float64
+            )
+            family_total = np.asarray(payload["family_total"], dtype=np.float64)
+            field_names = tuple(str(value) for value in payload["field_names"])
+        else:
+            marginal = joint = direction_mean = smooth_tail = hard_tail = exact_rank = None
+            direction_costs = component_totals = family_total = None
+            field_names = ()
+
+        if marginal is not None:
+            if marginal.ndim != 2 or component_totals.shape != (len(marginal), 2):
+                raise ValueError("global-distribution v2 marginal metrics are misaligned")
+            if family_total.shape != (len(marginal), 1) or joint.shape != (len(marginal), 1):
+                raise ValueError("global-distribution v2 family metrics are misaligned")
+            if direction_costs.ndim != 2 or direction_costs.shape[0] != len(marginal):
+                raise ValueError("global-distribution v2 direction spectrum is misaligned")
+            if not all(
+                value.shape == (len(marginal), 1)
+                for value in (direction_mean, smooth_tail, hard_tail, exact_rank)
+            ):
+                raise ValueError("global-distribution v2 tail diagnostics are misaligned")
+            directions = tuple(
+                f"Projection {index + 1:02d}"
+                for index in range(direction_costs.shape[1])
+            )
+            marginal_plot = np.column_stack(
+                (marginal, component_totals[:, 0], family_total[:, 0])
+            )
+            direction_plot = np.column_stack(
+                (
+                    direction_costs,
+                    direction_mean[:, 0],
+                    smooth_tail[:, 0],
+                    joint[:, 0],
+                    family_total[:, 0],
+                )
+            )
+            tail_plot = np.column_stack(
+                (
+                    hard_tail[:, 0],
+                    smooth_tail[:, 0],
+                    exact_rank[:, 0],
+                    joint[:, 0],
+                    family_total[:, 0],
+                )
+            )
+            return {
+                "marginal": (
+                    marginal_plot,
+                    (*field_names, "Marginal total", "Family total"),
+                    (*("detail" for _ in field_names), "component_total", "family_total"),
+                    "marginal_copula_v2_marginal_distributions.png",
+                    "Marginal field-distribution coherence · marginal-copula v2",
+                ),
+                "direction_spectrum": (
+                    direction_plot,
+                    (
+                        *directions,
+                        "Direction mean",
+                        "Identity-calibrated smooth CVaR",
+                        "Joint objective total",
+                        "Family total",
+                    ),
+                    (
+                        *("detail" for _ in directions),
+                        "detail",
+                        "detail",
+                        "component_total",
+                        "family_total",
+                    ),
+                    "marginal_copula_v2_direction_spectrum.png",
+                    "Frozen projection direction spectrum · marginal-copula v2",
+                ),
+                "tail_diagnostics": (
+                    tail_plot,
+                    (
+                        "Hard empirical CVaR",
+                        "Identity-calibrated smooth CVaR",
+                        "Exact midrank diagnostic",
+                        "Joint objective total",
+                        "Family total",
+                    ),
+                    ("detail", "detail", "detail", "component_total", "family_total"),
+                    "marginal_copula_v2_tail_diagnostics.png",
+                    "Tail and exact-rank diagnostics · marginal-copula v2",
+                ),
+            }
+
         marginal = np.asarray(payload["marginal_per_field"], dtype=np.float64)
         pairwise = np.asarray(payload["pairwise_per_field_pair"], dtype=np.float64)
         joint = np.asarray(payload["joint_top_tail"], dtype=np.float64)
@@ -787,6 +893,183 @@ def _global_distribution_specs(
             "joint_top_tail_distributions.png",
             "Joint/top-tail distribution coherence",
         ),
+    }
+
+
+def _global_distribution_pair_contract(
+    base_payload: Path,
+    current_payload: Path,
+    base_report: dict[str, Any],
+    current_report: dict[str, Any],
+    *,
+    base_sample_ids: tuple[str, ...],
+    current_sample_ids: tuple[str, ...],
+    base_field_names: tuple[str, ...],
+    current_field_names: tuple[str, ...],
+    base_weight_selection: str | None,
+    current_weight_selection: str | None,
+) -> dict[str, Any]:
+    """Validate the saved contracts underlying a paired global-family report."""
+    base_definition = str(base_report.get("definition", "legacy_v1"))
+    current_definition = str(current_report.get("definition", "legacy_v1"))
+    if base_definition != current_definition:
+        raise ValueError("base and post-training global-distribution definitions differ")
+    if base_sample_ids != current_sample_ids:
+        raise ValueError("base and post-training global-distribution sample identities differ")
+    if base_field_names != current_field_names:
+        raise ValueError("base and post-training global-distribution field orders differ")
+
+    def read_identity(path: Path) -> dict[str, Any]:
+        with np.load(path, allow_pickle=False) as payload:
+            sample_ids = tuple(str(value) for value in payload["sample_ids"])
+            fields = tuple(str(value) for value in payload["field_names"])
+            units = str(payload["units"].item())
+            version_two = "marginal_per_field_w2" in payload.files
+            identity: dict[str, Any] = {
+                "sample_ids": sample_ids,
+                "field_names": fields,
+                "units": units,
+                "definition": "marginal_copula_v2" if version_two else "legacy_v1",
+            }
+            if version_two:
+                identity.update(
+                    projection_directions=np.asarray(payload["projection_directions"]),
+                    projection_direction_sha256=str(
+                        payload["projection_direction_sha256"].item()
+                    ),
+                    pairwise_projection_directions=np.asarray(
+                        payload["pairwise_projection_directions"]
+                    ),
+                    pairwise_projection_direction_sha256=str(
+                        payload["pairwise_projection_direction_sha256"].item()
+                    ),
+                )
+            return identity
+
+    base_identity = read_identity(base_payload)
+    current_identity = read_identity(current_payload)
+    for name, identity, expected_ids, expected_fields, report in (
+        ("base", base_identity, base_sample_ids, base_field_names, base_report),
+        (
+            "post-training",
+            current_identity,
+            current_sample_ids,
+            current_field_names,
+            current_report,
+        ),
+    ):
+        if identity["sample_ids"] != expected_ids or identity["field_names"] != expected_fields:
+            raise ValueError(f"{name} global-distribution metrics do not match evaluated samples")
+        if identity["definition"] != base_definition:
+            raise ValueError(f"{name} global-distribution metrics do not match its report definition")
+        if report.get("units") != identity["units"]:
+            raise ValueError(f"{name} global-distribution report and metric units differ")
+    if base_identity["units"] != current_identity["units"]:
+        raise ValueError("base and post-training global-distribution units differ")
+
+    if base_definition != "marginal_copula_v2":
+        return {
+            "definition": base_definition,
+            "sample_ids": list(current_sample_ids),
+            "field_names": list(current_field_names),
+            "units": current_identity["units"],
+        }
+
+    import hashlib
+
+    for bank_name in ("projection_directions", "pairwise_projection_directions"):
+        base_bank = base_identity[bank_name]
+        current_bank = current_identity[bank_name]
+        if not np.array_equal(base_bank, current_bank):
+            raise ValueError(f"base and post-training global-distribution {bank_name} differ")
+        digest_key = (
+            "projection_direction_sha256"
+            if bank_name == "projection_directions"
+            else "pairwise_projection_direction_sha256"
+        )
+        for identity, report in (
+            (base_identity, base_report),
+            (current_identity, current_report),
+        ):
+            actual_digest = hashlib.sha256(
+                np.ascontiguousarray(identity[bank_name]).tobytes()
+            ).hexdigest()
+            if identity[digest_key] != actual_digest:
+                raise ValueError(f"{bank_name} checksum does not match saved direction bank")
+            report_digest = (
+                report.get("projection_bank", {}).get("sha256")
+                if bank_name == "projection_directions"
+                else report.get("pairwise_diagnostics", {}).get(
+                    "projection_direction_sha256"
+                )
+            )
+            if report_digest != actual_digest:
+                raise ValueError(f"{bank_name} checksum does not match its saved report")
+
+    for name, report in (("base", base_report), ("post-training", current_report)):
+        if report.get("projection_bank", {}).get("artifact_restored") is not True:
+            raise ValueError(f"{name} global-distribution projection bank was not restored")
+        artifact = report.get("family_artifact", {})
+        if not artifact.get("artifact_path") or not artifact.get("artifact_sha256"):
+            raise ValueError(f"{name} global-distribution family artifact provenance is missing")
+        if not artifact.get("artifact_run_dir"):
+            raise ValueError(f"{name} global-distribution artifact run directory is missing")
+    base_artifact = base_report["family_artifact"]
+    current_artifact = current_report["family_artifact"]
+    for key in (
+        "artifact_path",
+        "artifact_sha256",
+        "artifact_run_dir",
+        "source_run_id",
+        "source_checkpoint_sha256",
+    ):
+        if base_artifact.get(key) != current_artifact.get(key):
+            raise ValueError("base and post-training runs did not restore the same frozen family artifact")
+
+    if base_report.get("settings") != current_report.get("settings"):
+        raise ValueError("base and post-training global-distribution settings differ")
+    if base_report.get("family_weight") != current_report.get("family_weight"):
+        raise ValueError("base and post-training global-distribution family weights differ")
+    if base_report.get("component_weights") != current_report.get("component_weights"):
+        raise ValueError("base and post-training global-distribution component weights differ")
+    base_tail = base_report.get("objective", {}).get("mean_tail_mixture", {})
+    current_tail = current_report.get("objective", {}).get("mean_tail_mixture", {})
+    tail_parameters = {name: base_tail.get(name) for name in ("alpha", "rho", "temperature")}
+    if tail_parameters != {
+        name: current_tail.get(name) for name in ("alpha", "rho", "temperature")
+    }:
+        raise ValueError("base and post-training global-distribution tail parameters differ")
+
+    if base_weight_selection is None or current_weight_selection is None:
+        raise ValueError("paired global-distribution model weight-selection policy is unavailable")
+    if base_weight_selection != current_weight_selection:
+        raise ValueError("base and post-training model weight-selection policies differ")
+
+    projection = current_report["projection_bank"]
+    artifact_contract = {
+        key: current_artifact.get(key)
+        for key in (
+            "artifact_run_dir",
+            "artifact_sha256",
+            "source_run_id",
+            "source_checkpoint_sha256",
+        )
+    }
+    return {
+        "definition": base_definition,
+        "sample_ids": list(current_sample_ids),
+        "field_names": list(current_field_names),
+        "units": current_identity["units"],
+        "weight_selection": current_weight_selection,
+        "family_weight": current_report["family_weight"],
+        "component_weights": current_report["component_weights"],
+        "family_artifact": artifact_contract,
+        "projection_bank": {
+            key: projection.get(key)
+            for key in ("kind", "directions", "dimension", "include_axes", "qmc", "seed", "sha256")
+        },
+        "tail_parameters": tail_parameters,
+        "canonicalizer": current_report.get("objective", {}).get("canonicalizer", {}),
     }
 
 
@@ -1082,6 +1365,584 @@ def _validate_band_profile_comparison(
                 raise ValueError(f"base and post-training graph-band profile {key} shape differs")
 
 
+def _load_second_order_spectrum_artifacts(
+    output_dir: Path,
+) -> tuple[dict[str, Any], dict[str, Any], Path, Path, Path]:
+    cross_dir = output_dir / "coherence" / "cross_spectrum"
+    report_path = cross_dir / "report.json"
+    if not report_path.is_file():
+        raise FileNotFoundError(f"second-order cross-spectrum report is missing: {report_path}")
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    if report.get("definition") != "second_order_blocks_v4":
+        raise ValueError("paired v4 cross-spectrum comparison requires second_order_blocks_v4 reports")
+    artifact_paths = report.get("artifacts", {})
+    blocks_path = cross_dir / str(artifact_paths.get("signed_covariance_blocks_json", ""))
+    metrics_path = cross_dir / str(artifact_paths.get("covariance_metrics_csv", ""))
+    profile_path = cross_dir / str(artifact_paths.get("covariance_band_energy_profile_csv", ""))
+    if not blocks_path.is_file() or not metrics_path.is_file() or not profile_path.is_file():
+        raise FileNotFoundError("second-order cross-spectrum raw artifacts are incomplete")
+    blocks = json.loads(blocks_path.read_text(encoding="utf-8"))
+    if blocks.get("definition") != "second_order_blocks_v4":
+        raise ValueError("signed covariance artifact definition does not match the report")
+    return report, blocks, blocks_path, metrics_path, profile_path
+
+
+def _validate_second_order_spectrum_pair(
+    base_report: dict[str, Any],
+    current_report: dict[str, Any],
+    base_blocks: dict[str, Any],
+    current_blocks: dict[str, Any],
+) -> None:
+    """Require one graph, mask, normalization and ensemble contract on both sides."""
+    for key in (
+        "version",
+        "definition",
+        "target_use",
+        "units",
+        "field_names",
+        "field_pairs",
+        "bands",
+        "family_weight",
+        "component_weights",
+        "settings",
+        "aggregation",
+        "selected_sample_ids",
+    ):
+        if base_report.get(key) != current_report.get(key):
+            raise ValueError(f"base and post-training v4 cross-spectrum {key} do not match")
+    base_graph = base_report.get("graph", {})
+    current_graph = current_report.get("graph", {})
+    for key in (
+        "query_policy",
+        "query_seed",
+        "query_point_count",
+        "query_indices",
+        "geometry_sha256",
+        "k_neighbors",
+        "resolved_sigma",
+        "num_modes",
+        "eigenvalues",
+        "band_intervals",
+        "band_mode_ids",
+    ):
+        if base_graph.get(key) != current_graph.get(key):
+            raise ValueError(f"base and post-training v4 cross-spectrum graph {key} does not match")
+    for key in (
+        "basis_sha256",
+        "family_artifact_sha256",
+        "source_checkpoint_sha256",
+        "geometry_sha256",
+    ):
+        if base_report.get("training_artifact", {}).get(key) != current_report.get(
+            "training_artifact", {}
+        ).get(key):
+            raise ValueError(f"base and post-training v4 cross-spectrum training artifact {key} differs")
+    base_calibration = base_report.get("calibration", {})
+    current_calibration = current_report.get("calibration", {})
+    for key in (
+        "source",
+        "sha256",
+        "ensemble_size",
+        "band_energies",
+        "relative_floor",
+        "absolute_floor",
+        "minimum_reference_band_fraction",
+    ):
+        if base_calibration.get(key) != current_calibration.get(key):
+            raise ValueError(f"base and post-training v4 cross-spectrum calibration {key} differs")
+    if base_report.get("covariance_estimator") != current_report.get("covariance_estimator"):
+        raise ValueError("base and post-training v4 covariance normalization definitions differ")
+    if base_blocks.get("basis_sha256") != current_blocks.get("basis_sha256"):
+        raise ValueError("base and post-training signed covariance basis hashes differ")
+    if base_blocks.get("calibration_sha256") != current_blocks.get("calibration_sha256"):
+        raise ValueError("base and post-training signed covariance calibration hashes differ")
+    if base_blocks.get("primary_aggregation") != current_blocks.get("primary_aggregation"):
+        raise ValueError("base and post-training covariance aggregation differs")
+    for report_payload, block_payload in (
+        (base_report, base_blocks),
+        (current_report, current_blocks),
+    ):
+        if block_payload.get("field_names") != report_payload.get("field_names"):
+            raise ValueError("signed covariance field names do not match the v4 report")
+        if block_payload.get("band_names") != report_payload.get("bands"):
+            raise ValueError("signed covariance band names do not match the v4 report")
+        if block_payload.get("basis_sha256") != report_payload.get("training_artifact", {}).get(
+            "basis_sha256"
+        ):
+            raise ValueError("signed covariance basis hash does not match the v4 report")
+        if block_payload.get("calibration_sha256") != report_payload.get("calibration", {}).get(
+            "sha256"
+        ):
+            raise ValueError("signed covariance calibration hash does not match the v4 report")
+        if block_payload.get("primary_aggregation") != report_payload.get("aggregation"):
+            raise ValueError("signed covariance aggregation does not match the v4 report")
+
+    for aggregation in ("pooled", "training_aligned"):
+        base_summary = base_report.get("covariance_reports", {}).get(aggregation, {})
+        current_summary = current_report.get("covariance_reports", {}).get(aggregation, {})
+        base_records = base_blocks.get("reports", {}).get(aggregation, {}).get("ensembles", [])
+        current_records = current_blocks.get("reports", {}).get(aggregation, {}).get("ensembles", [])
+        if base_summary.get("sample_ids_by_ensemble") != current_summary.get("sample_ids_by_ensemble"):
+            raise ValueError(f"base and post-training {aggregation} covariance memberships differ")
+        if len(base_records) != len(current_records):
+            raise ValueError(f"base and post-training {aggregation} covariance ensemble counts differ")
+        if base_summary.get("sample_ids_by_ensemble") != [
+            record.get("sample_ids") for record in base_records
+        ]:
+            raise ValueError(f"base {aggregation} report and signed-block memberships disagree")
+        if current_summary.get("sample_ids_by_ensemble") != [
+            record.get("sample_ids") for record in current_records
+        ]:
+            raise ValueError(f"post-training {aggregation} report and signed-block memberships disagree")
+        for base_record, current_record in zip(base_records, current_records):
+            if base_record.get("sample_ids") != current_record.get("sample_ids"):
+                raise ValueError(f"base and post-training {aggregation} ensemble membership differs")
+            for component, block_key in (
+                ("same_frequency", "same_frequency_blocks"),
+                ("cross_frequency", "cross_frequency_blocks"),
+            ):
+                base_diagnostics = base_record.get("diagnostics", {})
+                current_diagnostics = current_record.get("diagnostics", {})
+                for count_key in (
+                    f"{component}_eligible_blocks",
+                    f"{component}_skipped_blocks",
+                ):
+                    if base_diagnostics.get(count_key) != current_diagnostics.get(count_key):
+                        raise ValueError(
+                            f"base and post-training {aggregation} {component} reference masks differ"
+                        )
+                base_blocks_for_term = base_diagnostics.get(block_key, [])
+                current_blocks_for_term = current_diagnostics.get(block_key, [])
+                if [
+                    (block.get("fields"), block.get("bands"))
+                    for block in base_blocks_for_term
+                ] != [
+                    (block.get("fields"), block.get("bands"))
+                    for block in current_blocks_for_term
+                ]:
+                    raise ValueError(
+                        f"base and post-training {aggregation} {component} eligible blocks differ"
+                    )
+                for base_block, current_block in zip(
+                    base_blocks_for_term, current_blocks_for_term
+                ):
+                    base_fractions = np.asarray(
+                        base_block.get("reference_energy_fractions"), dtype=np.float64
+                    )
+                    current_fractions = np.asarray(
+                        current_block.get("reference_energy_fractions"), dtype=np.float64
+                    )
+                    if base_fractions.shape != current_fractions.shape or not np.allclose(
+                        base_fractions, current_fractions, rtol=1.0e-7, atol=1.0e-9
+                    ):
+                        raise ValueError(
+                            f"base and post-training {aggregation} {component} reference masks differ"
+                        )
+                    if not np.isclose(
+                        float(base_block.get("shared_floor")),
+                        float(current_block.get("shared_floor")),
+                        rtol=1.0e-10,
+                        atol=0.0,
+                    ):
+                        raise ValueError(
+                            f"base and post-training {aggregation} {component} stabilization floors differ"
+                        )
+                    base_reference = base_block.get("reference_normalized_block")
+                    current_reference = current_block.get("reference_normalized_block")
+                    if isinstance(base_reference, dict) and isinstance(current_reference, dict):
+                        base_matrix = np.asarray(base_reference.get("real"), dtype=np.float64) + 1j * np.asarray(
+                            base_reference.get("imag", 0.0), dtype=np.float64
+                        )
+                        current_matrix = np.asarray(current_reference.get("real"), dtype=np.float64) + 1j * np.asarray(
+                            current_reference.get("imag", 0.0), dtype=np.float64
+                        )
+                    else:
+                        base_matrix = np.asarray(base_reference, dtype=np.float64)
+                        current_matrix = np.asarray(current_reference, dtype=np.float64)
+                    if base_matrix.shape != current_matrix.shape or not np.allclose(
+                        base_matrix, current_matrix, rtol=1.0e-7, atol=1.0e-9
+                    ):
+                        raise ValueError(
+                            f"base and post-training {aggregation} {component} reference covariance differs"
+                        )
+
+
+def _v4_component_pair_values(
+    report: dict[str, Any], aggregation: str, component: str
+) -> tuple[tuple[str, ...], np.ndarray, np.ndarray]:
+    values = report["covariance_reports"][aggregation]["components"][component]["per_field_pair"]
+    labels = tuple(values)
+    means = np.asarray(
+        [np.nan if values[label]["raw_block_loss_mean"] is None else values[label]["raw_block_loss_mean"] for label in labels],
+        dtype=np.float64,
+    )
+    spreads = np.asarray(
+        [np.nan if values[label]["raw_block_loss_sample_sd"] is None else values[label]["raw_block_loss_sample_sd"] for label in labels],
+        dtype=np.float64,
+    )
+    return labels, means, spreads
+
+
+def _render_v4_covariance_loss(
+    report: dict[str, Any],
+    component: str,
+    output_path: Path,
+    *,
+    role: str,
+    upper_limit: float,
+) -> Path:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from .coherence_set import _save_publication_figure
+
+    labels, means, spreads = _v4_component_pair_values(
+        report, report["aggregation"], component
+    )
+    if not labels or not np.isfinite(means[np.isfinite(means)]).all():
+        raise ValueError(f"{component} covariance report has no finite pair losses")
+    positions = np.arange(len(labels), dtype=np.float64)
+    valid = np.isfinite(means)
+    figure, axis = plt.subplots(figsize=(7.6, max(3.8, 0.42 * len(labels) + 1.8)))
+    axis.set_facecolor("white")
+    figure.patch.set_facecolor("white")
+    axis.barh(
+        positions[valid],
+        means[valid],
+        xerr=np.nan_to_num(spreads[valid], nan=0.0),
+        color="#687786" if role == "Base source" else "#16647F",
+        capsize=3,
+        zorder=3,
+    )
+    for position in positions[~valid]:
+        axis.text(0.015 * upper_limit, position, "no eligible blocks", va="center", fontsize=8.5)
+    axis.set_yticks(positions, labels)
+    axis.invert_yaxis()
+    axis.set_xlim(0.0, upper_limit)
+    axis.set_xlabel("Mean squared Frobenius covariance-block difference")
+    axis.set_title(
+        f"{role} · {component.replace('_', ' ')} covariance blocks",
+        loc="left",
+        fontsize=11.0,
+    )
+    axis.grid(axis="x", color="#DCE3E8", linewidth=0.65)
+    axis.set_axisbelow(True)
+    axis.spines["top"].set_visible(False)
+    axis.spines["right"].set_visible(False)
+    axis.spines["left"].set_visible(False)
+    figure.tight_layout()
+    result = _save_publication_figure(figure, output_path, dpi=300)
+    plt.close(figure)
+    return result
+
+
+def _v4_energy_profile(
+    blocks: dict[str, Any], aggregation: str
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    ensembles = blocks["reports"][aggregation]["ensembles"]
+    if not ensembles:
+        raise ValueError(f"{aggregation} covariance report has no energy profile ensembles")
+    references = np.asarray(
+        [record["reference_energy_fractions"] for record in ensembles], dtype=np.float64
+    )
+    generated = np.asarray(
+        [record["generated_energy_fractions"] for record in ensembles], dtype=np.float64
+    )
+    return (
+        references.mean(axis=0),
+        references.std(axis=0, ddof=1) if len(ensembles) > 1 else np.zeros_like(references[0]),
+        generated.mean(axis=0),
+        generated.std(axis=0, ddof=1) if len(ensembles) > 1 else np.zeros_like(generated[0]),
+    )
+
+
+def _render_v4_energy_profile(
+    report: dict[str, Any],
+    profile: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
+    output_path: Path,
+    *,
+    role: str,
+) -> Path:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from .coherence_set import _save_publication_figure
+
+    reference, reference_sd, generated, generated_sd = profile
+    band_names = tuple(report["bands"])
+    field_names = tuple(report["field_names"])
+    expected_shape = (len(band_names), len(field_names))
+    if reference.shape != expected_shape or generated.shape != expected_shape:
+        raise ValueError("v4 covariance-energy profile does not align with bands and fields")
+    columns = min(3, len(field_names))
+    rows = int(np.ceil(len(field_names) / columns))
+    figure, axes = plt.subplots(
+        rows,
+        columns,
+        figsize=(3.0 * columns, 2.8 * rows),
+        squeeze=False,
+        sharex=True,
+        sharey=True,
+    )
+    figure.patch.set_facecolor("white")
+    x = np.arange(len(band_names), dtype=np.float64)
+    for index, field_name in enumerate(field_names):
+        row, column = divmod(index, columns)
+        axis = axes[row, column]
+        axis.errorbar(
+            x,
+            reference[:, index],
+            yerr=reference_sd[:, index],
+            color="#4B5B6B",
+            marker="o",
+            markersize=4,
+            linewidth=1.5,
+            capsize=2,
+            label="Reference",
+        )
+        axis.errorbar(
+            x,
+            generated[:, index],
+            yerr=generated_sd[:, index],
+            color="#28769B",
+            marker="s",
+            markersize=3.8,
+            linewidth=1.5,
+            linestyle="--",
+            capsize=2,
+            label="Reconstruction",
+        )
+        axis.set_title(str(field_name), loc="left", fontsize=9.2, fontweight="semibold")
+        axis.set_xticks(x, band_names)
+        axis.set_ylim(0.0, 1.0)
+        axis.grid(axis="y", color="#E2E6E9", linewidth=0.6, linestyle="--")
+        axis.set_axisbelow(True)
+        axis.spines["top"].set_visible(False)
+        axis.spines["right"].set_visible(False)
+    for index in range(len(field_names), rows * columns):
+        figure.delaxes(axes.flat[index])
+    axes[0, 0].set_ylabel("Centered covariance-energy fraction")
+    axes[0, 0].legend(frameon=False, fontsize=7.7)
+    figure.suptitle(f"{role} · centered covariance energy by graph band", fontsize=11)
+    figure.tight_layout()
+    result = _save_publication_figure(figure, output_path, dpi=300)
+    plt.close(figure)
+    return result
+
+
+def _render_second_order_spectrum_comparison(
+    current: _SetEvaluationResult,
+    base: _SetEvaluationResult,
+    *,
+    shared_limits: dict[str, Any],
+    artifacts: dict[str, Any],
+    matched_coherence_contracts: dict[str, Any],
+) -> None:
+    current_report, current_blocks, current_blocks_path, current_csv_path, current_profile_csv = (
+        _load_second_order_spectrum_artifacts(current.output_dir)
+    )
+    base_report, base_blocks, base_blocks_path, base_csv_path, base_profile_csv = (
+        _load_second_order_spectrum_artifacts(base.output_dir)
+    )
+    _validate_second_order_spectrum_pair(
+        base_report, current_report, base_blocks, current_blocks
+    )
+    cross_dir = current_blocks_path.parent
+    base_blocks_copy = cross_dir / "covariance_blocks_v4-base.json"
+    base_csv_copy = cross_dir / "covariance_metrics_v4-base.csv"
+    base_profile_copy = cross_dir / "covariance_band_energy_profile_v4-base.csv"
+    base_report_copy = cross_dir / "report-base.json"
+    shutil.copy2(base_blocks_path, base_blocks_copy)
+    shutil.copy2(base_csv_path, base_csv_copy)
+    shutil.copy2(base_profile_csv, base_profile_copy)
+
+    aggregation = current_report["aggregation"]
+    upper_limits: dict[str, float] = {}
+    for component in ("same_frequency", "cross_frequency"):
+        values = []
+        for report_payload in (base_report, current_report):
+            _, means, spreads = _v4_component_pair_values(
+                report_payload, aggregation, component
+            )
+            finite = np.isfinite(means)
+            if finite.any():
+                values.extend((means[finite] + np.nan_to_num(spreads[finite], nan=0.0)).tolist())
+        upper = max(values) if values else 0.0
+        upper_limits[component] = upper * 1.12 if upper > 0.0 else 1.0
+
+    paired_figures: dict[str, dict[str, Path]] = {"base": {}, "post_training": {}}
+    for component in ("same_frequency", "cross_frequency"):
+        current_path = cross_dir / f"{component}_covariance_block_loss_v4.png"
+        base_path = _base_figure_path(current_path)
+        paired_figures["base"][component] = _render_v4_covariance_loss(
+            base_report,
+            component,
+            base_path,
+            role="Base source",
+            upper_limit=upper_limits[component],
+        )
+        paired_figures["post_training"][component] = _render_v4_covariance_loss(
+            current_report,
+            component,
+            current_path,
+            role="Post-training",
+            upper_limit=upper_limits[component],
+        )
+
+    base_profile = _v4_energy_profile(base_blocks, aggregation)
+    current_profile = _v4_energy_profile(current_blocks, aggregation)
+    if not np.allclose(base_profile[0], current_profile[0], rtol=0.0, atol=1.0e-6):
+        raise ValueError("base and post-training v4 covariance reference energy profiles differ")
+    current_profile_path = cross_dir / "covariance_band_energy_profile_v4.png"
+    base_profile_path = _base_figure_path(current_profile_path)
+    paired_figures["base"]["covariance_band_energy_profile"] = _render_v4_energy_profile(
+        base_report,
+        base_profile,
+        base_profile_path,
+        role="Base source",
+    )
+    paired_figures["post_training"]["covariance_band_energy_profile"] = _render_v4_energy_profile(
+        current_report,
+        current_profile,
+        current_profile_path,
+        role="Post-training",
+    )
+
+    def update_run_report(
+        report_payload: dict[str, Any], *, role: str, base_role: bool
+    ) -> dict[str, Any]:
+        report_payload["paired_source_comparison"] = {
+            "role": "base_source" if base_role else "post_training",
+            "aggregation": aggregation,
+            "selected_sample_ids": current_report["selected_sample_ids"],
+            "training_aligned_sample_ids_by_ensemble": current_report[
+                "covariance_reports"
+            ]["training_aligned"]["sample_ids_by_ensemble"],
+            "raw_block_loss_by_component": {
+                component: report_payload["covariance_reports"][aggregation][
+                    "components"
+                ][component]
+                for component in ("same_frequency", "cross_frequency")
+            },
+            "shared_raw_loss_limits": {
+                name: [0.0, upper] for name, upper in upper_limits.items()
+            },
+            "shared_covariance_energy_fraction_limits": [0.0, 1.0],
+        }
+        figure_names = {
+            component: path.name
+            for component, path in paired_figures[role].items()
+        }
+        report_payload.setdefault("artifacts", {})["figures"] = figure_names
+        report_payload["artifacts"]["vector_figures"] = {
+            name: {"pdf": Path(filename).with_suffix(".pdf").name,
+                   "svg": Path(filename).with_suffix(".svg").name}
+            for name, filename in figure_names.items()
+        }
+        report_payload["artifacts"]["covariance_metrics_csv"] = (
+            base_csv_copy.name if base_role else current_csv_path.name
+        )
+        report_payload["artifacts"]["signed_covariance_blocks_json"] = (
+            base_blocks_copy.name if base_role else current_blocks_path.name
+        )
+        report_payload["artifacts"]["covariance_band_energy_profile_csv"] = (
+            base_profile_copy.name if base_role else current_profile_csv.name
+        )
+        return report_payload
+
+    base_report_copy.write_text(
+        json.dumps(update_run_report(base_report, role="base", base_role=True), indent=2, sort_keys=True)
+        + "\n",
+        encoding="utf-8",
+    )
+    current_report_path = cross_dir / "report.json"
+    current_report_path.write_text(
+        json.dumps(
+            update_run_report(current_report, role="post_training", base_role=False),
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    shared_limits["cross_spectrum"] = {
+        "definition": "second_order_blocks_v4",
+        "aggregation": aggregation,
+        "raw_covariance_block_loss_by_component": {
+            name: [0.0, upper] for name, upper in upper_limits.items()
+        },
+        "covariance_energy_fraction": [0.0, 1.0],
+    }
+    artifacts["base"]["cross_spectrum"] = {
+        **{
+            name: _report_artifact_path(path, current.output_dir)
+            for name, path in paired_figures["base"].items()
+        },
+        "covariance_metrics_csv": _report_artifact_path(base_csv_copy, current.output_dir),
+        "signed_covariance_blocks_json": _report_artifact_path(base_blocks_copy, current.output_dir),
+        "covariance_band_energy_profile_csv": _report_artifact_path(base_profile_copy, current.output_dir),
+        "report": _report_artifact_path(base_report_copy, current.output_dir),
+    }
+    artifacts["post_training"]["cross_spectrum"] = {
+        **{
+            name: _report_artifact_path(path, current.output_dir)
+            for name, path in paired_figures["post_training"].items()
+        },
+        "covariance_metrics_csv": _report_artifact_path(current_csv_path, current.output_dir),
+        "signed_covariance_blocks_json": _report_artifact_path(current_blocks_path, current.output_dir),
+        "covariance_band_energy_profile_csv": _report_artifact_path(current_profile_csv, current.output_dir),
+        "report": _report_artifact_path(current_report_path, current.output_dir),
+    }
+    def raw_losses_by_aggregation(report_payload: dict[str, Any]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for aggregation_name in ("pooled", "training_aligned"):
+            aggregation_payload = report_payload["covariance_reports"][aggregation_name]
+            result[aggregation_name] = {
+                component: aggregation_payload.get("components", {}).get(component)
+                for component in ("same_frequency", "cross_frequency")
+            }
+        return result
+
+    matched_coherence_contracts["cross_spectrum"] = {
+        "definition": "second_order_blocks_v4",
+        "field_names": current_report["field_names"],
+        "field_pairs": current_report["field_pairs"],
+        "bands": current_report["bands"],
+        "selected_sample_ids": current_report["selected_sample_ids"],
+        "pooled_sample_ids_by_ensemble": current_report["covariance_reports"]["pooled"][
+            "sample_ids_by_ensemble"
+        ],
+        "training_aligned_sample_ids_by_ensemble": current_report["covariance_reports"][
+            "training_aligned"
+        ]["sample_ids_by_ensemble"],
+        "units": current_report["units"],
+        "graph": current_report["graph"],
+        "basis_sha256": current_report["training_artifact"]["basis_sha256"],
+        "calibration_sha256": current_report["calibration"]["sha256"],
+        "calibration": current_report["calibration"],
+        "normalization": current_report["covariance_estimator"],
+        "reference_mask": {
+            "source": current_report["covariance_estimator"]["mask_source"],
+            "minimum_reference_band_fraction": current_report["calibration"][
+                "minimum_reference_band_fraction"
+            ],
+            "stabilization_floors": {
+                "relative": current_report["calibration"]["relative_floor"],
+                "absolute": current_report["calibration"]["absolute_floor"],
+            },
+        },
+        "raw_block_loss_by_role_and_aggregation": {
+            "base": raw_losses_by_aggregation(base_report),
+            "post_training": raw_losses_by_aggregation(current_report),
+        },
+    }
+
+
 def _render_posttraining_comparison(
     current: _SetEvaluationResult,
     base: _SetEvaluationResult,
@@ -1146,18 +2007,66 @@ def _render_posttraining_comparison(
     if "global_distribution" in coherence_families:
         base_payload = base.output_dir / "coherence" / "global_distribution" / "metrics.npz"
         current_payload = current.output_dir / "coherence" / "global_distribution" / "metrics.npz"
+        base_family_report_path = base_payload.with_name("report.json")
+        current_family_report_path = current_payload.with_name("report.json")
+        base_global_report = json.loads(
+            base_family_report_path.read_text(encoding="utf-8")
+        )
+        current_global_report = json.loads(
+            current_family_report_path.read_text(encoding="utf-8")
+        )
+        base_set_report = json.loads(base.report_path.read_text(encoding="utf-8"))
+        current_set_report = json.loads(current.report_path.read_text(encoding="utf-8"))
+        global_contract = _global_distribution_pair_contract(
+            base_payload,
+            current_payload,
+            base_global_report,
+            current_global_report,
+            base_sample_ids=base.sample_ids,
+            current_sample_ids=current.sample_ids,
+            base_field_names=base.field_names,
+            current_field_names=current.field_names,
+            base_weight_selection=base_set_report.get("trace", {}).get("weight_selection"),
+            current_weight_selection=current_set_report.get("trace", {}).get("weight_selection"),
+        )
+        if (
+            current.generation_steps != base.generation_steps
+            or current.evaluation_seed != base.evaluation_seed
+        ):
+            raise ValueError("base and post-training global-distribution geometry seeds differ")
+        global_contract.update(
+            dataset_fingerprint=current.dataset_fingerprint,
+            generation_steps=current.generation_steps,
+            evaluation_seed=current.evaluation_seed,
+            sensor_manifest_sha256=current_manifest_sha,
+        )
         base_specs = _global_distribution_specs(base_payload)
         current_specs = _global_distribution_specs(current_payload)
+        if base_specs.keys() != current_specs.keys():
+            raise ValueError("base and post-training global-distribution metrics differ")
         family_limits = {}
+        family_scales = {}
+        base_figure_paths = {}
         for name, base_spec in base_specs.items():
             current_spec = current_specs[name]
             if base_spec[1:3] != current_spec[1:3]:
                 raise ValueError(f"global-distribution {name} comparison labels do not match")
+            combined = np.concatenate(
+                (base_spec[0].reshape(-1), current_spec[0].reshape(-1))
+            )
+            plot_scale = statistic_scale
+            if (
+                global_contract["definition"] == "marginal_copula_v2"
+                and statistic_scale == "log"
+                and not np.any(np.isfinite(combined) & (combined > 0.0))
+            ):
+                plot_scale = "linear"
             limits = _distribution_limits(
-                np.concatenate((base_spec[0].reshape(-1), current_spec[0].reshape(-1))),
-                statistic_scale,
+                combined,
+                plot_scale,
             )
             family_limits[name] = list(limits)
+            family_scales[name] = plot_scale
             post_path = current.output_dir / "coherence" / "global_distribution" / current_spec[3]
             base_path = _base_figure_path(post_path)
             render_coherence_distribution(
@@ -1166,8 +2075,8 @@ def _render_posttraining_comparison(
                 base_spec[2],
                 base_path,
                 title=f"Base source — {base_spec[4]}",
-                subtitle=_comparison_subtitle("Base source", base, scale=statistic_scale),
-                scale=statistic_scale,
+                subtitle=_comparison_subtitle("Base source", base, scale=plot_scale),
+                scale=plot_scale,
                 value_limits=limits,
             )
             render_coherence_distribution(
@@ -1176,10 +2085,11 @@ def _render_posttraining_comparison(
                 current_spec[2],
                 post_path,
                 title=f"Post-training — {current_spec[4]}",
-                subtitle=_comparison_subtitle("Post-training", current, scale=statistic_scale),
-                scale=statistic_scale,
+                subtitle=_comparison_subtitle("Post-training", current, scale=plot_scale),
+                scale=plot_scale,
                 value_limits=limits,
             )
+            base_figure_paths[name] = base_path
             artifacts["base"].setdefault("global_distribution", {})[name] = str(
                 base_path.relative_to(current.output_dir)
             )
@@ -1187,6 +2097,8 @@ def _render_posttraining_comparison(
                 post_path.relative_to(current.output_dir)
             )
         shared_limits["global_distribution"] = family_limits
+        shared_limits["global_distribution_scales"] = family_scales
+        matched_coherence_contracts["global_distribution"] = global_contract
 
         # Retain the matched source's numerical evidence alongside its figures.
         # The source evaluation otherwise lives only in a TemporaryDirectory.
@@ -1257,6 +2169,64 @@ def _render_posttraining_comparison(
                 }
                 for label, limits in extra_ranges.items()
             }
+
+        if global_contract["definition"] == "marginal_copula_v2":
+            base_global_report_payload = deepcopy(base_global_report)
+            base_artifacts = base_global_report_payload.setdefault("artifacts", {})
+            base_artifacts["metrics_payload"] = "metrics-base.npz"
+            base_artifacts["metrics_csv"] = "metrics-base.csv"
+            base_artifacts["figures"] = {
+                name: path.name for name, path in base_figure_paths.items()
+            }
+            base_artifacts["vector_figures"] = {
+                name: {
+                    fmt: path.with_suffix(f".{fmt}").name
+                    for fmt in ("pdf", "svg")
+                }
+                for name, path in base_figure_paths.items()
+            }
+            if base_extra is not None and getattr(base_extra, "extra_view", False):
+                base_artifacts["extra"] = {
+                    "directory": _report_artifact_path(
+                        Path(base_extra_output["directory"]), current.output_dir
+                    ),
+                    "report": _report_artifact_path(
+                        Path(base_extra_output["report"]), current.output_dir
+                    ),
+                    "metrics_csv": _report_artifact_path(
+                        Path(base_extra_output["metrics_csv"]), current.output_dir
+                    ),
+                    "metrics_payload": _report_artifact_path(
+                        Path(base_extra_output["metrics_payload"]), current.output_dir
+                    ),
+                    "figures": {
+                        label: _report_artifact_path(Path(path), current.output_dir)
+                        for label, path in base_extra_output["figures"].items()
+                    },
+                    "jensen_shannon_divergence_bits": base_extra_output[
+                        "jensen_shannon_divergence_bits"
+                    ],
+                }
+            base_global_report_payload["paired_source_comparison"] = {
+                "role": "base_source",
+                "matched_contract": global_contract,
+                "shared_limits": family_limits,
+                "shared_scales": family_scales,
+            }
+            (global_destination / "report-base.json").write_text(
+                json.dumps(base_global_report_payload, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            current_global_report["paired_source_comparison"] = {
+                "role": "post_training",
+                "matched_contract": global_contract,
+                "shared_limits": family_limits,
+                "shared_scales": family_scales,
+            }
+            current_family_report_path.write_text(
+                json.dumps(current_global_report, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
 
     if "topology" in coherence_families:
         base_topology_payload = base.output_dir / "coherence" / "topology" / "metrics.npz"
@@ -1534,7 +2504,31 @@ def _render_posttraining_comparison(
             "settings": current_topology_report["objective"]["settings"],
         }
 
+    cross_spectrum_v4 = False
     if "cross_spectrum" in coherence_families:
+        base_cross_report_path = base.output_dir / "coherence" / "cross_spectrum" / "report.json"
+        current_cross_report_path = (
+            current.output_dir / "coherence" / "cross_spectrum" / "report.json"
+        )
+        base_cross_report = json.loads(base_cross_report_path.read_text(encoding="utf-8"))
+        current_cross_report = json.loads(
+            current_cross_report_path.read_text(encoding="utf-8")
+        )
+        base_definition = base_cross_report.get("definition", "legacy_v3")
+        current_definition = current_cross_report.get("definition", "legacy_v3")
+        if base_definition != current_definition:
+            raise ValueError("base and post-training cross-spectrum definitions do not match")
+        cross_spectrum_v4 = current_definition == "second_order_blocks_v4"
+        if cross_spectrum_v4:
+            _render_second_order_spectrum_comparison(
+                current,
+                base,
+                shared_limits=shared_limits,
+                artifacts=artifacts,
+                matched_coherence_contracts=matched_coherence_contracts,
+            )
+
+    if "cross_spectrum" in coherence_families and not cross_spectrum_v4:
         base_payload = base.output_dir / "coherence" / "cross_spectrum" / "metrics.npz"
         current_payload = current.output_dir / "coherence" / "cross_spectrum" / "metrics.npz"
         current_cross_dir = current_payload.parent
@@ -1792,6 +2786,12 @@ def evaluate_reconstruction_set(
     run_dir = Path(run_dir).resolve()
     case_dir = Path(case_dir).resolve()
     run_config = load_config(run_dir / "resolved_config.yaml")
+    if (
+        run_config.get("optimization", {}).get("update_policy") == "coherence_primal_dual"
+        and weight_selection == "configured"
+    ):
+        # The parent may have an EMA evaluation default; this recipe is live/live.
+        weight_selection = "live"
     families = tuple(
         dict.fromkeys(str(name).strip().lower() for name in (coherence_families or ()))
     )
@@ -1821,7 +2821,9 @@ def evaluate_reconstruction_set(
         return current.figure_path
 
     source_run, source_checkpoint = source
-    with TemporaryDirectory(prefix="phycoflow-base-comparison-") as temporary_dir:
+    with TemporaryDirectory(
+        prefix="phycoflow-base-comparison-", dir=current.output_dir
+    ) as temporary_dir:
         base = _evaluate_reconstruction_set_once(
             source_run,
             case_dir=case_dir,
@@ -1840,6 +2842,7 @@ def evaluate_reconstruction_set(
             statistic_scale=statistic_scale,
             output_dir_override=Path(temporary_dir),
             coherence_config_override=run_config.get("coherence"),
+            coherence_artifact_run_dir=run_dir,
             evaluation_seed_override=current.evaluation_seed,
         )
         _render_posttraining_comparison(

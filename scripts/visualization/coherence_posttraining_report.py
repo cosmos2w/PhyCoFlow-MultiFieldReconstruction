@@ -265,8 +265,13 @@ def _family_figure(family: str, data: Mapping[str, Any], output: Path) -> bool:
     return True
 
 
-def generate_report(run_dir: str | Path, output_dir: str | Path | None = None) -> dict[str, Any]:
-    """Generate summary/family figures and a machine-readable inventory."""
+def generate_report(
+    run_dir: str | Path,
+    output_dir: str | Path | None = None,
+    *,
+    include_adaptive_history: bool = False,
+) -> dict[str, Any]:
+    """Generate summary/family figures and an optional adaptive-history audit."""
     root = Path(run_dir)
     destination = Path(output_dir) if output_dir is not None else root / "visualization"
     destination.mkdir(parents=True, exist_ok=True)
@@ -277,6 +282,19 @@ def generate_report(run_dir: str | Path, output_dir: str | Path | None = None) -
         filename = f"{family}_diagnostics.png"
         if _family_figure(family, data, destination / filename):
             generated.append(filename)
+    adaptive_history = None
+    if include_adaptive_history:
+        from phycoflow_reconstruction.training.coherence_history import (
+            render_adaptive_coherence_history,
+        )
+
+        adaptive_history = render_adaptive_coherence_history(
+            root, output_dir=destination, pyplot=plt
+        )
+        if adaptive_history is not None:
+            generated.append(Path(adaptive_history["summary"]).name)
+            for formats in adaptive_history["figures"].values():
+                generated.extend(Path(path).name for path in formats.values())
     missing = [name for name, data in parsed["families"].items() if not data["present"]]
     report = {
         **parsed,
@@ -288,6 +306,8 @@ def generate_report(run_dir: str | Path, output_dir: str | Path | None = None) -
             "Sequence diagnostics are summarized by mean/min/max in the JSON inventory.",
         ],
     }
+    if adaptive_history is not None:
+        report["adaptive_history"] = adaptive_history
     (destination / "coherence_report.json").write_text(
         json.dumps(report, indent=2, sort_keys=True), encoding="utf-8"
     )
@@ -298,8 +318,17 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("run_dir", type=Path)
     parser.add_argument("--output-dir", type=Path)
+    parser.add_argument(
+        "--adaptive-history",
+        action="store_true",
+        help="also render source-relative fidelity, primal-dual, feasible-selector, and gradient geometry diagnostics",
+    )
     args = parser.parse_args()
-    report = generate_report(args.run_dir, args.output_dir)
+    report = generate_report(
+        args.run_dir,
+        args.output_dir,
+        include_adaptive_history=args.adaptive_history,
+    )
     print(Path(report["output_dir"]) / "coherence_report.json")
 
 

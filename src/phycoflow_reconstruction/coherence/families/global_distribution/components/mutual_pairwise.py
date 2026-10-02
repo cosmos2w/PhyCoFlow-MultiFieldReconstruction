@@ -9,6 +9,7 @@ from torch import nn
 
 from .....contracts import CoherenceComponentSpec, TermResult
 from ....base import empirical_w2_columns, projection_bank
+from .point_masks import point_mask_for_batch, select_valid_points
 
 
 class MutualPairwiseSWD(nn.Module):
@@ -37,14 +38,31 @@ class MutualPairwiseSWD(nn.Module):
             "directions", torch.stack(banks) if banks else torch.empty(0, directions, 2)
         )
 
-    def forward(self, generated: torch.Tensor, reference: torch.Tensor) -> TermResult:
+    def forward(
+        self,
+        generated: torch.Tensor,
+        reference: torch.Tensor,
+        *,
+        point_mask: torch.Tensor | None = None,
+    ) -> TermResult:
         if not self.pairs:
             zero = generated.sum(dim=(1, 2)) * 0.0
             return TermResult(zero, zero.mean(), reason="fewer than two configured fields")
         per_batch = []
         per_pair = []
         banks = self.directions.to(device=generated.device, dtype=generated.dtype)
-        for generated_item, reference_item in zip(generated, reference):
+        for batch_index, (generated_item, reference_item) in enumerate(
+            zip(generated, reference)
+        ):
+            mask = point_mask_for_batch(
+                point_mask,
+                batch_index,
+                batch_size=generated.shape[0],
+                point_count=generated.shape[1],
+                device=generated.device,
+            )
+            generated_item = select_valid_points(generated_item, mask)
+            reference_item = select_valid_points(reference_item, mask)
             costs = []
             for pair_index, pair in enumerate(self.pairs):
                 generated_projection = generated_item[:, pair] @ banks[pair_index].T

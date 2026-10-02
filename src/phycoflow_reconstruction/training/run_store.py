@@ -93,6 +93,9 @@ class RunStore:
         *,
         parent_run: str | None = None,
     ) -> RunStore:
+        experiment = Path(experiment_name)
+        if experiment.is_absolute() or ".." in experiment.parts:
+            raise ValueError("output.experiment_name must be a relative path without '..'")
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         digest = config_digest(config)
         run_dir = Path(case_dir) / "runs" / experiment_name / f"{timestamp}_{digest[:8]}"
@@ -208,7 +211,7 @@ class RunStore:
         therefore leave metrics for updates that recovery will replay. Repeated
         validation of the same checkpoint is reduced to its last complete row.
         """
-        for name in ("history", "validation_history", "topology_validation"):
+        for name in ("history", "validation_history", "topology_validation", "coherence_validation"):
             path = self.run_dir / "metrics" / f"{name}.jsonl"
             if not path.exists():
                 continue

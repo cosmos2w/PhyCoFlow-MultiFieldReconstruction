@@ -62,7 +62,8 @@ def stable_clip_grad_norm_(
             # Apply potentially large unscale factors in float64, then copy the
             # final clipped value back. This keeps very small power-of-two loss
             # scales safe even when the unclipped norm later falls below one.
-            clipped = values.to(dtype=torch.float64) * coefficient.to(values.device)
+            work_dtype = torch.complex128 if values.is_complex() else torch.float64
+            clipped = values.to(dtype=work_dtype) * coefficient.to(values.device)
             values.copy_(clipped.to(dtype=values.dtype))
     return total_norm
 

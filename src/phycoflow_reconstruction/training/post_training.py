@@ -48,7 +48,14 @@ from .common import (
     iter_unique_batch_indices,
     sensor_protocol_from_config,
 )
-from .gradient_balance import data_only_update, two_objective_update
+from .fidelity_controller import (
+    FidelityController,
+    coherence_selection_report,
+    endpoint_risks,
+    fidelity_settings,
+    unobserved_endpoint_risks,
+)
+from .gradient_balance import coherence_primal_dual_update, data_only_update, two_objective_update
 from .model_lifecycle import (
     add_training_aux_state,
     after_optimizer_step,
@@ -228,6 +235,8 @@ def _coherence_objective(
     retention_losses: dict[str, torch.Tensor] | None = None,
     source_anchor_model=None,
     step_context: dict | None = None,
+    phase: str = "train",
+    committed_step: int | None = None,
 ) -> tuple[FamilyResult, tuple[str, ...]]:
     compute = config["coherence"]["compute_budget"]
     selected = _slice_batch(batch, int(compute["batch_size"]))
@@ -240,6 +249,7 @@ def _coherence_objective(
     model_batch = complete if model.capabilities.structured_grid_required else selected
     model_batch = _without_target(model_batch)
     initial_generator_state = generator.get_state()
+    rollout_started = perf_counter()
     prediction = differentiable_reconstruction(
         model,
         model_batch,
@@ -251,6 +261,9 @@ def _coherence_objective(
     if model.capabilities.structured_grid_required:
         prediction = _gather_prediction(prediction, complete, selected)
     if step_context is not None:
+        if prediction.device.type == "cuda":
+            torch.cuda.synchronize(prediction.device)
+        rollout_seconds = perf_counter() - rollout_started
 
         def reconstruct(candidate):
             candidate_generator = torch.Generator(device=prediction.device)
@@ -269,8 +282,11 @@ def _coherence_objective(
                 else value
             )
 
+        source_started = perf_counter()
         with torch.no_grad():
             source_prediction = reconstruct(source_anchor_model)
+        if prediction.device.type == "cuda":
+            torch.cuda.synchronize(prediction.device)
         step_context.update(
             prediction=prediction,
             reference=selected.target_fields,
@@ -278,6 +294,9 @@ def _coherence_objective(
             reconstruct=reconstruct,
             source_prediction=source_prediction,
             persistence_cache={},
+            batch=selected,
+            rollout_seconds=rollout_seconds,
+            source_forward_seconds=perf_counter() - source_started,
         )
     if retention_losses is not None:
         settings = config.get("objectives", {})
@@ -352,20 +371,27 @@ def _coherence_objective(
                 query_ids if isinstance(query_ids, torch.Tensor) else None,
                 bank_rows=bank_rows,
             )
+        family_started = perf_counter()
+        family_context = {
+            "sample_ids": selected.sample_ids,
+            "reference_ids": reference_ids,
+            "global_step": step if committed_step is None else committed_step,
+            "phase": phase,
+            **({"persistence_cache": step_context["persistence_cache"]}
+               if step_context is not None else {}),
+        }
+        if step_context is not None:
+            step_context.setdefault("family_contexts", {})[family_name] = family_context
         result = family_module(
             prediction,
             reference,
             coordinates=selected.query_coords,
-            context={
-                "sample_ids": selected.sample_ids,
-                "reference_ids": reference_ids,
-                **(
-                    {"persistence_cache": step_context["persistence_cache"]}
-                    if step_context is not None
-                    else {}
-                ),
-            },
+            context=family_context,
         )
+        if step_context is not None:
+            if prediction.device.type == "cuda":
+                torch.cuda.synchronize(prediction.device)
+            step_context.setdefault("family_seconds", {})[family_name] = perf_counter() - family_started
         family_results[family_name] = result
         component_results.update(result.component_results)
         weight = float(getattr(family_module, "family_weight", 1.0))
@@ -399,7 +425,64 @@ def _coherence_objective(
             },
         },
     )
+    if step_context is not None:
+        step_context["family_results"] = family_results
     return combined, tuple(dict.fromkeys(reference_ids_all))
+
+
+def _calibrate_endpoint_fidelity(model, train_dataset, config, device, source_hash):
+    """Fit source risk scales on fixed TRAIN batches and preserve caller RNG."""
+    settings = fidelity_settings(config)
+    count = int(settings["calibration_batches"])
+    calibration_seed = int(config["runtime"].get("seed", 42)) + 700_061
+    rng = (torch.get_rng_state(), random.getstate(), np.random.get_state())
+    cuda_rng = torch.cuda.get_rng_state_all() if device.type == "cuda" else []
+    batches = None
+    risks, records = [], []
+    try:
+        indices = iter_unique_batch_indices(
+            len(train_dataset), count, int(config["optimization"]["batch_size"]),
+            generator=torch.Generator().manual_seed(calibration_seed),
+        )
+        batches = build_training_batch_source(
+            train_dataset, indices, config,
+            query_points=None if model.capabilities.structured_grid_required
+            else int(config["coherence"]["compute_budget"]["point_count"]),
+            device=device, start_step=0,
+        )
+        with torch.no_grad():
+            for index, batch in enumerate(batches):
+                generator = torch.Generator(device=device).manual_seed(calibration_seed + 1_000_003 + index)
+                complete = _slice_batch(batch, int(config["coherence"]["compute_budget"]["batch_size"]))
+                selected = subset_query_batch(complete, int(config["coherence"]["compute_budget"]["point_count"]), generator=generator)
+                prediction = differentiable_reconstruction(
+                    model, _without_target(complete if model.capabilities.structured_grid_required else selected),
+                    steps=int(config["rollout"]["steps"]), solver=config["rollout"]["solver"],
+                    generator=generator, observation_config=dict(config["observation_consistency"]),
+                )
+                if model.capabilities.structured_grid_required:
+                    prediction = _gather_prediction(prediction, complete, selected)
+                risk = endpoint_risks(prediction, selected.target_fields, selected.query_valid_mask)
+                risks.append(risk.double().cpu())
+                records.append({"sample_ids": list(selected.sample_ids),
+                                "query_sha256": _query_digest(selected.metadata["query_indices"]),
+                                "noise_seed": calibration_seed + 1_000_003 + index,
+                                "source_field_risks": risk.cpu().tolist()})
+    finally:
+        if batches is not None:
+            batches.close()
+        torch.set_rng_state(rng[0])
+        random.setstate(rng[1])
+        np.random.set_state(rng[2])
+        if device.type == "cuda":
+            torch.cuda.set_rng_state_all(cuda_rng)
+    fields = torch.stack(risks).mean(dim=0)
+    risk_vector = torch.cat((fields.mean()[None], fields)).clamp_min(float(settings["absolute_floor"]))
+    return {"version": "endpoint_model_mse_source_calibration_v1", "split": "train",
+            "source_checkpoint_sha256": source_hash, "source_weight_selection": "live",
+            "field_names": list(train_dataset.field_names), "source_risks": risk_vector.tolist(),
+            "unfloored_source_field_risks": fields.tolist(), "settings": settings,
+            "calibration_seed": calibration_seed, "batches": records}
 
 
 def _calibrate_topology_components(
@@ -507,7 +590,9 @@ def _constrained_topology_update(controller, result, context, family, config, fi
             prediction,
             context["reference"],
             coordinates=context["coordinates"],
-            context={"persistence_cache": context["persistence_cache"]},
+            context=context.get("family_contexts", {}).get(
+                "topology", {"persistence_cache": context["persistence_cache"]}
+            ),
         )
         candidate_components = leaf_components(candidate_result)
         candidate_fidelity, _ = fidelity_components(
@@ -762,6 +847,18 @@ def _calibrate_family_balance(
     try:
         post_training_mode(model, config)
         for batch_index, batch in enumerate(batch_source):
+            spectrum = families.get("cross_spectrum")
+            if batch_index == 0 and getattr(spectrum, "definition", None) == "second_order_blocks_v4":
+                # Only training targets establish the frozen spectral masks
+                # and scales, before source gradient calibration or selection.
+                selected_reference = subset_query_batch(
+                    _slice_batch(batch, int(config["coherence"]["compute_budget"]["batch_size"])),
+                    int(config["coherence"]["compute_budget"]["point_count"]),
+                    generator=torch.Generator(device=device).manual_seed(calibration_seed + 1_000_003),
+                )
+                spectrum.freeze_reference_calibration(
+                    selected_reference.target_fields, selected_reference.query_coords
+                )
             data_loss = model.training_loss(batch).total
             data_gradients = loss_gradients(data_loss, parameters)
             family_gradients = {}
@@ -776,6 +873,7 @@ def _calibrate_family_balance(
                     config,
                     step=batch_index,
                     generator=torch.Generator(device=device).manual_seed(rollout_seed),
+                    phase="calibration",
                 )
                 outer_weight = float(getattr(family, "family_weight", 1.0))
                 raw_loss = result.scalar_loss / outer_weight
@@ -1086,6 +1184,8 @@ def _evaluate(
                 context={
                     "sample_ids": comparison_batch.sample_ids,
                     "reference_ids": reference_ids,
+                    "phase": "evaluation",
+                    "global_step": 0,
                 },
             )
             weight = float(getattr(family_module, "family_weight", 1.0))
@@ -1308,7 +1408,8 @@ def run_post_training(
     resume: str | Path | None = None,
 ) -> Path:
     """Create or resume one immutable child post-training run."""
-    if config["optimization"].get("gradient_balance") in {
+    adaptive = config["optimization"].get("update_policy", "legacy") == "coherence_primal_dual"
+    if adaptive or config["optimization"].get("gradient_balance") in {
         "component_constrained",
         "topology_regularized",
     }:
@@ -1349,7 +1450,7 @@ def run_post_training(
         "topology_regularized",
     }
     source_anchor_model = None
-    if constrained or config.get("objectives", {}).get("source_anchor", {}).get("enabled", False):
+    if adaptive or constrained or config.get("objectives", {}).get("source_anchor", {}).get("enabled", False):
         # Snapshot before loading a resumed child: the anchor is always the source.
         source_anchor_model = deepcopy(model).eval().requires_grad_(False)
     if not len(train_dataset):
@@ -1451,6 +1552,10 @@ def run_post_training(
             device=device,
             source_hashes_before=source_hashes_before,
         )
+        if adaptive:
+            calibration["endpoint_fidelity"] = _calibrate_endpoint_fidelity(
+                source_anchor_model, train_dataset, config, device, source_hashes_before["checkpoint"]
+            )
         if constrained:
             calibration["topology_components"] = _calibrate_topology_components(
                 model,
@@ -1486,6 +1591,17 @@ def run_post_training(
             raise ValueError("resume checkpoint family scales differ from calibration artifact")
     family_scales = {name: float(calibration["resolved_scales"][name]) for name in families}
     controller = None
+    if adaptive:
+        if "endpoint_fidelity" not in calibration:
+            raise ValueError("adaptive run is missing frozen training fidelity calibration")
+        if resume is not None and "fidelity_controller" not in checkpoint:
+            raise ValueError("adaptive resume is missing fidelity controller state")
+        controller = FidelityController(
+            train_dataset.field_names, fidelity_settings(config), calibration["endpoint_fidelity"],
+            state=checkpoint["fidelity_controller"] if resume is not None else None,
+        )
+        if controller.updates != start_step:
+            raise ValueError("fidelity controller accepted-update count differs from recovery step")
     if constrained:
         if "topology_components" not in calibration:
             raise ValueError("constrained resume is missing component calibration")
@@ -1718,8 +1834,13 @@ def run_post_training(
         store=store,
         steps_per_epoch=steps_per_epoch,
     )
+    if resume is not None and adaptive:
+        checkpoint_manager.restore_coherence_selector(checkpoint)
     panel_metrics_cache = {}
-    if checkpoint_manager.selection_metric == "topology_with_fidelity":
+    if checkpoint_manager.selection_metric in {"topology_with_fidelity", "coherence_with_fidelity"}:
+        selection_report = (coherence_selection_report
+                            if checkpoint_manager.selection_metric == "coherence_with_fidelity"
+                            else topology_selection_report)
 
         def evaluate_panel(step):
             metrics = (
@@ -1740,7 +1861,7 @@ def run_post_training(
             metrics["sensor_manifest_sha256"] = evaluation_manifest.digest()
             panel_metrics_cache.clear()
             panel_metrics_cache[step] = metrics
-            return topology_selection_report(source_metrics, metrics, config["posttrain_fidelity"])
+            return selection_report(source_metrics, metrics, config["posttrain_fidelity"])
 
         checkpoint_manager.panel_evaluator = evaluate_panel
         if resume is None:
@@ -1776,9 +1897,13 @@ def run_post_training(
         epoch = global_step // steps_per_epoch + 1
         post_training_mode(model, config)
         step_started = perf_counter()
-        data_loss = (
-            torch.zeros((), device=device) if constrained else model.training_loss(batch).total
-        )
+        if adaptive:
+            # Native flow/noise loss is monitored; it supplies no hidden
+            # manually weighted gradient in the adaptive update.
+            with torch.no_grad():
+                data_loss = model.training_loss(batch).total.detach()
+        else:
+            data_loss = torch.zeros((), device=device) if constrained else model.training_loss(batch).total
         every = int(config["coherence"]["schedule"].get("every_n_steps", 1))
         coherence_weight = _coherence_weight(config, epoch)
         coherence_active = coherence_weight > 0 and global_step % every == 0
@@ -1803,7 +1928,7 @@ def run_post_training(
             "coherence_weight": coherence_weight,
         }
         if coherence_active or retention_active:
-            step_context = {} if constrained else None
+            step_context = {} if (adaptive or constrained) else None
             retention_losses: dict[str, torch.Tensor] = {}
             rollout_generator = torch.Generator(device=device).manual_seed(
                 seed + 1_000_003 + global_step
@@ -1820,6 +1945,7 @@ def run_post_training(
                 retention_losses=retention_losses,
                 source_anchor_model=source_anchor_model,
                 step_context=step_context,
+                committed_step=controller.counts["accepted"] if constrained else global_step,
             )
             for name, loss in retention_losses.items():
                 # Retention has the same sparse cadence as the shared rollout.
@@ -1840,7 +1966,7 @@ def run_post_training(
                 .get("gradient_diagnostics_every_epochs", 0)
             )
             if (
-                diagnostic_every > 0
+                not adaptive and diagnostic_every > 0
                 and global_step % steps_per_epoch == 0
                 and epoch % diagnostic_every == 0
             ):
@@ -1861,7 +1987,57 @@ def run_post_training(
             )
             row["data_update_weight"] = data_update_weight
             row["coherence_update_weight"] = coherence_update_weight
-            if constrained:
+            if adaptive:
+                violations, live_risks, source_risks = controller.violations(
+                    step_context["prediction"], step_context["source_prediction"],
+                    step_context["reference"], step_context["batch"].query_valid_mask,
+                )
+                fidelity_loss, fidelity_terms, pressure = controller.primal(violations)
+                family_losses = {
+                    name: coherence_weight * family_scales[name] * float(families[name].family_weight)
+                    * family_result.scalar_loss
+                    for name, family_result in step_context["family_results"].items()
+                }
+                diagnose = global_step % int(controller.settings["diagnostics_every_steps"]) == 0
+                backward_started = perf_counter()
+                gradient = coherence_primal_dual_update(
+                    model, optimizer, family_losses, fidelity_loss,
+                    method=config["optimization"].get("coherence_gradient_method", "config"),
+                    grad_clip=config["optimization"].get("grad_clip"), diagnostics=diagnose,
+                    constraint_losses=fidelity_terms if diagnose else None,
+                    cagrad_alpha=float(config["optimization"].get("cagrad_alpha", 0.5)),
+                    cagrad_rescale=int(config["optimization"].get("cagrad_rescale", 1)),
+                )
+                if device.type == "cuda":
+                    torch.cuda.synchronize(device)
+                controller.advance(violations)
+                row.update(controller.telemetry(violations, live_risks, source_risks, pressure))
+                row.update({"data_update_weight": 0.0, "coherence_update_weight": coherence_weight,
+                            "data_retention_objective": "endpoint_primal_dual_native_monitor",
+                            "loss/native": float(data_loss), "loss/endpoint_total": float(live_risks[0].detach()),
+                            "loss/fidelity_augmented": float(fidelity_loss.detach()),
+                            "runtime/rollout_seconds": step_context["rollout_seconds"],
+                            "runtime/source_forward_seconds": step_context["source_forward_seconds"],
+                            "runtime/backward_and_optimizer_seconds": perf_counter() - backward_started,
+                            "runtime/peak_cuda_bytes": torch.cuda.max_memory_allocated(device) if device.type == "cuda" else 0})
+                for name, value in zip(train_dataset.field_names, live_risks[1:]):
+                    row[f"loss/endpoint/{name}"] = float(value.detach())
+                if diagnose:
+                    unobserved = unobserved_endpoint_risks(
+                        step_context["prediction"], step_context["reference"], step_context["batch"]
+                    )
+                    if unobserved is not None:
+                        for i, name in enumerate(train_dataset.field_names):
+                            row[f"loss/endpoint_unobserved/{name}"] = (
+                                float(unobserved["risks"][i]) if unobserved["counts"][i] else None
+                            )
+                            row[f"loss/endpoint_unobserved/{name}/point_count"] = int(unobserved["counts"][i])
+                for name, family_result in step_context["family_results"].items():
+                    row[f"loss/coherence/{name}/raw"] = float(family_result.scalar_loss.detach())
+                    row[f"loss/coherence/{name}/calibrated"] = float(family_losses[name].detach())
+                    row[f"runtime/{name}_seconds"] = step_context["family_seconds"][name]
+                del fidelity_loss, fidelity_terms, family_losses, violations, live_risks, source_risks, pressure
+            elif constrained:
                 gradient = _constrained_topology_update(
                     controller,
                     result,
@@ -1931,6 +2107,8 @@ def run_post_training(
         if row.get("update_accepted", True):
             after_optimizer_step(model)
         row["update_seconds"] = perf_counter() - step_started
+        if adaptive:
+            row["runtime/step_seconds"] = row["update_seconds"]
         del data_loss
         row["total"] = row["data_update_weight"] * row["data_loss"] + row[
             "coherence_update_weight"
@@ -2039,8 +2217,8 @@ def run_post_training(
         family_scales=family_scales,
         controller=controller,
     )
-    if checkpoint_manager.selection_metric == "topology_with_fidelity":
-        checkpoint_manager.panel_evaluator = lambda step: topology_selection_report(
+    if checkpoint_manager.selection_metric in {"topology_with_fidelity", "coherence_with_fidelity"}:
+        checkpoint_manager.panel_evaluator = lambda step: selection_report(
             source_metrics, after_metrics, config["posttrain_fidelity"]
         )
     saved = checkpoint_manager.save(
@@ -2169,7 +2347,8 @@ def _post_checkpoint_payload(
         },
     }
     if controller is not None:
-        payload["component_controller"] = controller.state_dict()
+        key = "fidelity_controller" if isinstance(controller, FidelityController) else "component_controller"
+        payload[key] = controller.state_dict()
     if hasattr(train_dataset, "training_subset_manifest"):
         payload["training_subset_sha256"] = train_dataset.training_subset_manifest["sha256"]
     return add_training_aux_state(payload, model)

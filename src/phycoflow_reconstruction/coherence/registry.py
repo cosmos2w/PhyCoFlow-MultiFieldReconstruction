@@ -26,7 +26,10 @@ def _register_defaults() -> None:
                     "self.marginal_w2",
                     "mutual.pairwise_swd",
                     "cross.joint_topk_swd",
+                    "cross.joint_copula_cvar",
                 ),
+                "definitions": {"legacy_v1": "1", "marginal_copula_v2": "2"},
+                "default_definition": "legacy_v1",
                 "license": "repository-local scientific implementation",
             },
         )
@@ -34,14 +37,18 @@ def _register_defaults() -> None:
         COHERENCE_FAMILY_REGISTRY.register(
             "cross_spectrum",
             CrossSpectrumFamily,
-            version="2",
+            version="3",
             metadata={
                 "components": (
                     "self_spectrum.auto_spectrum",
                     "same_frequency.magnitude_squared",
                     "cross_frequency.band_energy_coupling",
                     "band_energy.log_power",
+                    "same_frequency.second_order_blocks",
+                    "cross_frequency.second_order_blocks",
                 ),
+                "definitions": {"legacy_v3": "3", "second_order_blocks_v4": "4"},
+                "default_definition": "legacy_v3",
                 "aggregation": "ensemble",
             },
         )

@@ -48,6 +48,7 @@ def build_raster_map(
     coordinates: torch.Tensor,
     *,
     grid_shape: tuple[int, int],
+    native_shape: tuple[int, int] | None = None,
     axes: tuple[int, int] = (0, 1),
     neighbors: int = 4,
     power: float = 2.0,
@@ -64,6 +65,10 @@ def build_raster_map(
     height, width = (int(value) for value in grid_shape)
     if height < 2 or width < 2:
         raise ValueError("topology grid_shape must contain dimensions >=2")
+    if native_shape is not None and (
+        len(native_shape) != 2 or any(int(value) < 2 for value in native_shape)
+    ):
+        raise ValueError("topology native_shape must contain two dimensions >=2")
     coords = coordinates.detach().to(device="cpu", dtype=torch.float64)[:, axes].numpy()
     if not np.isfinite(coords).all():
         raise ValueError("topology coordinates must be finite")
@@ -117,15 +122,24 @@ def build_raster_map(
     grid_y, grid_x = np.meshgrid(y, x, indexing="ij")
     grid = np.stack((grid_x, grid_y), axis=-1).reshape(-1, 2)
 
-    # Use every native lattice value when reducing a complete Cartesian grid.
-    # Express block averaging in the existing fixed linear-map contract so
-    # shuffled point order, checkpointing and autograd need no special path.
+    # A complete native Cartesian grid has an exact gather/reshape path. It
+    # bypasses IDW and remains a fixed linear map, including for shuffled input.
     xs, ys = np.unique(coords[:, 0]), np.unique(coords[:, 1])
     native_h, native_w = len(ys), len(xs)
     area_indices = None
-    if (
+    complete_cartesian = unique_count == len(coords) == native_h * native_w
+    if native_shape is not None and (native_h, native_w) != tuple(map(int, native_shape)):
+        # A Cartesian subset of a larger structured domain is still sparse.
+        complete_cartesian = False
+    native_gather = False
+    native_area_average = False
+    if complete_cartesian and native_h == height and native_w == width:
+        order = np.lexsort((coords[:, 0], coords[:, 1])).reshape(native_h, native_w)
+        area_indices = order.reshape(height * width, 1)
+        native_gather = True
+    elif (
         antialias_downsample
-        and unique_count == len(coords) == native_h * native_w
+        and complete_cartesian
         and native_h >= height
         and native_w >= width
         and native_h % height == 0
@@ -138,6 +152,7 @@ def build_raster_map(
             .transpose(0, 2, 1, 3)
             .reshape(height * width, factor_h * factor_w)
         )
+        native_area_average = area_indices.shape[1] > 1
 
     source = coords
     source_ids = np.arange(coords.shape[0])
@@ -182,7 +197,10 @@ def build_raster_map(
             "nearest_spacing_min": float(finite_nearest.min()),
             "nearest_spacing_median": float(np.median(finite_nearest)),
             "nearest_spacing_max": float(finite_nearest.max()),
-            "antialias_applied": int(area_indices is not None),
+            "antialias_applied": int(native_area_average),
+            "native_gather_applied": int(native_gather),
+            "native_area_average_applied": int(native_area_average),
+            "complete_native_cartesian_grid": int(complete_cartesian),
         },
     )
 

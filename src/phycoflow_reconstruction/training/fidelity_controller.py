@@ -1,0 +1,183 @@
+"""Opt-in source-matched, dimensionless endpoint primal-dual constraints.
+
+Frozen training calibration is distinct from family gradient calibration and
+validation checkpoint selection. No controller statistic is fitted on test or
+validation data. The controller makes no pointwise or convergence guarantee.
+"""
+
+from __future__ import annotations
+
+import math
+from collections.abc import Mapping
+from typing import Any
+
+import torch
+
+FIDELITY_DEFAULTS = {
+    "enabled": True,
+    "risk": "endpoint_model_mse",
+    "relative_budget_total": 0.05,
+    "relative_budget_per_field": 0.05,
+    "absolute_floor": 1e-8,
+    "absolute_allowance": 0.0,
+    "source_weight_selection": "live",
+    "same_noise_source": True,
+    "calibration_batches": 8,
+    "dual_lr": 0.05,
+    "ema_decay": 0.9,
+    "augmented_rho": 1.0,
+    "multiplier_max": 100.0,
+    "native_loss_role": "monitor",
+    "anchor": {"enabled": False},
+    "diagnostics_every_steps": 20,
+}
+
+
+def fidelity_settings(config: Mapping[str, Any]) -> dict[str, Any]:
+    return {**FIDELITY_DEFAULTS, **dict(config.get("fidelity_controller", {}))}
+
+
+def endpoint_risks(
+    prediction: torch.Tensor, reference: torch.Tensor, mask: torch.Tensor | None = None
+) -> torch.Tensor:
+    """Return aggregate model-unit MSE per field, never per-sample ratios."""
+    if prediction.ndim != 3 or prediction.shape != reference.shape:
+        raise ValueError("endpoint risks require aligned [B,N,C] tensors")
+    if mask is None:
+        mask = torch.ones(prediction.shape[:2], device=prediction.device, dtype=torch.bool)
+    if mask.shape != prediction.shape[:2] or not bool(mask.any(dim=1).all()):
+        raise ValueError("each endpoint risk snapshot needs valid query points")
+    errors = (prediction - reference.detach()).square()
+    per_sample = (errors * mask[..., None]).sum(dim=1) / mask.sum(dim=1)[:, None]
+    return per_sample.mean(dim=0)
+
+
+def unobserved_endpoint_risks(prediction, reference, batch):
+    """Exclude clamped sensor entries separately for each physical channel."""
+    query_ids = batch.metadata.get("query_indices")
+    if query_ids is None or batch.obs_indices is None:
+        return None
+    valid = batch.query_valid_mask[..., None].expand_as(prediction).clone()
+    for b in range(prediction.shape[0]):
+        observed = batch.obs_valid_mask[b]
+        for channel in range(prediction.shape[-1]):
+            indices = batch.obs_indices[b][observed & (batch.obs_field_ids[b] == channel)]
+            if indices.numel():
+                valid[b, :, channel] &= ~torch.isin(query_ids[b], indices.to(query_ids.device))
+    errors = (prediction.detach() - reference.detach()).square()
+    counts = valid.sum(dim=(0, 1))
+    risks = (errors * valid).sum(dim=(0, 1)) / counts.clamp_min(1)
+    return {"risks": risks, "counts": counts}
+
+
+class FidelityController:
+    """One augmented primal pressure; detached EMA/dual advance after a step.
+
+    EMA starts at zero and is bias-corrected by 1-beta**updates. Multipliers
+    start at zero. Only accepted updates advance either accumulator.
+    """
+
+    def __init__(self, field_names, settings: Mapping, calibration: Mapping, *, state=None):
+        self.field_names = tuple(field_names)
+        self.names = ("total", *self.field_names)
+        self.settings = {**FIDELITY_DEFAULTS, **dict(settings)}
+        self.calibration = dict(calibration)
+        if tuple(calibration["field_names"]) != self.field_names:
+            raise ValueError("fidelity calibration field order mismatch")
+        self.normalizers = torch.as_tensor(calibration["source_risks"], dtype=torch.float64)
+        if self.normalizers.shape != (len(self.names),) or not bool(
+            torch.isfinite(self.normalizers).all() and (self.normalizers > 0).all()
+        ):
+            raise ValueError("fidelity calibration needs finite positive frozen risk scales")
+        self.multipliers = torch.zeros_like(self.normalizers)
+        self.ema = torch.zeros_like(self.normalizers)
+        self.updates = 0
+        if state is not None:
+            if state.get("version") != "endpoint_primal_dual_v1":
+                raise ValueError("fidelity resume controller version mismatch")
+            if state["calibration"] != self.calibration or state["settings"] != self.settings:
+                raise ValueError("fidelity resume calibration/settings differ from the frozen state")
+            if tuple(state["names"]) != self.names:
+                raise ValueError("fidelity resume constraint order mismatch")
+            self.multipliers.copy_(state["multipliers"].cpu())
+            self.ema.copy_(state["ema"].cpu())
+            self.updates = int(state["updates"])
+            if self.updates < 0 or not torch.isfinite(self.ema).all() or not bool(
+                (self.multipliers >= 0).all()
+                and (self.multipliers <= float(self.settings["multiplier_max"])).all()
+                and torch.isfinite(self.multipliers).all()
+            ):
+                raise ValueError("invalid recovered fidelity controller state")
+
+    def violations(self, prediction, source_prediction, reference, mask=None):
+        live_fields = endpoint_risks(prediction, reference, mask)
+        source_fields = endpoint_risks(source_prediction.detach(), reference, mask)
+        live = torch.cat((live_fields.mean()[None], live_fields))
+        source = torch.cat((source_fields.mean()[None], source_fields))
+        budgets = live.new_tensor([self.settings["relative_budget_total"]] +
+                                 [self.settings["relative_budget_per_field"]] * len(self.field_names))
+        scales = self.normalizers.to(device=live.device, dtype=live.dtype)
+        violations = (live - (1 + budgets) * source -
+                      float(self.settings["absolute_allowance"])) / scales
+        if not torch.isfinite(violations).all():
+            raise FloatingPointError("non-finite endpoint fidelity risks")
+        return violations, live, source
+
+    def primal(self, violations: torch.Tensor):
+        rho = float(self.settings["augmented_rho"])
+        multipliers = self.multipliers.to(device=violations.device, dtype=violations.dtype)
+        pressure = (multipliers + rho * violations).clamp_min(0)
+        terms = (pressure.square() - multipliers.square()) / (2 * rho)
+        return terms.sum(), {name: term for name, term in zip(self.names, terms)}, pressure
+
+    def advance(self, violations: torch.Tensor) -> None:
+        values = violations.detach().to(device="cpu", dtype=torch.float64)
+        if values.shape != self.ema.shape or not torch.isfinite(values).all():
+            raise FloatingPointError("invalid detached fidelity controller update")
+        beta = float(self.settings["ema_decay"])
+        self.ema.mul_(beta).add_(values, alpha=1 - beta)
+        self.updates += 1
+        corrected = self.ema / (1 - beta**self.updates)
+        self.multipliers.add_(corrected, alpha=float(self.settings["dual_lr"]))
+        self.multipliers.clamp_(0, float(self.settings["multiplier_max"]))
+
+    def telemetry(self, violations, live, source, pressure):
+        corrected = self.ema / (1 - float(self.settings["ema_decay"])**self.updates) if self.updates else self.ema
+        row = {}
+        # Risks/pressure are pre-step; EMA and multipliers below are post-step.
+        for i, name in enumerate(self.names):
+            prefix = f"fidelity/{name}"
+            row.update({f"{prefix}/source_risk": float(source[i].detach()),
+                        f"{prefix}/live_risk": float(live[i].detach()),
+                        f"{prefix}/violation": float(violations[i].detach()),
+                        f"{prefix}/ema_violation": float(corrected[i]),
+                        f"{prefix}/multiplier": float(self.multipliers[i]),
+                        f"{prefix}/effective_primal_coefficient": float(pressure[i].detach()),
+                        f"{prefix}/cap_saturated": bool(self.multipliers[i] >= float(self.settings["multiplier_max"]))})
+        return row
+
+    def state_dict(self):
+        return {"version": "endpoint_primal_dual_v1", "names": list(self.names),
+                "settings": self.settings, "calibration": self.calibration,
+                "multipliers": self.multipliers.clone(), "ema": self.ema.clone(),
+                "updates": self.updates}
+
+
+def coherence_selection_report(source: Mapping, candidate: Mapping, settings: Mapping):
+    """Frozen equal-family source ratios within total AND per-field gates."""
+    from .topology_selection import fidelity_eligibility
+
+    report = fidelity_eligibility(source, candidate, settings)
+    source_families = source["coherence"]["families"]
+    candidate_families = candidate["coherence"]["families"]
+    if list(source_families) != list(candidate_families):
+        raise ValueError("coherence selection family membership/order changed")
+    ratios = {name: float(candidate_families[name]["total"]) /
+              max(float(value["total"]), 1e-12) for name, value in source_families.items()}
+    score = sum(ratios.values()) / len(ratios)
+    report.update(metric=score, mse=float(candidate["mse_normalized"]),
+                  metrics=dict(candidate), family_source_normalized_scores=ratios,
+                  definition="equal_active_family_mean_source_ratio_v1",
+                  family_scale_floor=1e-12)
+    report["eligible"] &= math.isfinite(score) and all(math.isfinite(v) for v in ratios.values())
+    return report

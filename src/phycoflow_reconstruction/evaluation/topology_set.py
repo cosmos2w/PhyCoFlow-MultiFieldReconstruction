@@ -600,6 +600,7 @@ class TopologySetAccumulator:
     matches_training_fixed_shared_selector: bool = True
     query_indices: torch.Tensor | None = None
     fixed_coordinates: torch.Tensor | None = None
+    family_artifact_provenance: dict[str, Any] = field(default_factory=dict)
     sample_ids: list[str] = field(default_factory=list)
     family_total: list[float] = field(default_factory=list)
     objective_component_names: list[str] = field(default_factory=list)
@@ -622,12 +623,22 @@ class TopologySetAccumulator:
         if not isinstance(configured, Mapping):
             raise TypeError("topology set family configuration must be a mapping")
         settings = dict(configured)
-        settings["enabled"] = True
-        settings["target_use"] = "paired_supervised"
-        settings["reference_bank"] = {"enabled": False}
+        master_bank = settings.get("components", {}).get("mutual", {}).get("line_bank_size")
+        if master_bank is None:
+            settings["enabled"] = True
+            settings["target_use"] = "paired_supervised"
+            settings["reference_bank"] = {"enabled": False}
         family = build_coherence_family(
             "topology", settings, runtime.dataset.data_spec, runtime.dataset.normalizer
         ).to(runtime.device)
+        family_artifact_provenance = {}
+        if master_bank is not None:
+            # Import locally because coherence_set also exposes this class.
+            # New master banks replay the saved tensors and raster identity;
+            # legacy evaluation retains its original reconstruction path.
+            from .coherence_set import _restore_evaluation_family
+
+            family_artifact_provenance = _restore_evaluation_family(runtime, family, "topology")
         family.eval()
         if getattr(family, "strategy", None) != "cubical_persistence":
             raise ValueError(
@@ -667,6 +678,7 @@ class TopologySetAccumulator:
             source_grid_shape=tuple(int(value) for value in runtime.dataset.data_spec.logical_shape),
             query_point_count=query_point_count,
             query_seed=int(compute.get("query_seed", 100045)),
+            family_artifact_provenance=family_artifact_provenance,
             objective_component_names=objective_components,
             diagnostic_names=diagnostic_names,
             filtration_metadata=filtration_metadata,
@@ -1160,6 +1172,9 @@ class TopologySetAccumulator:
                 },
             },
         }
+        if self.family_artifact_provenance:
+            report["family_state_artifact"] = dict(self.family_artifact_provenance)
+            report["line_sampling"] = self.family.spatial_objective.sampling_artifact()
         report_path = destination / "report.json"
         report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         return {

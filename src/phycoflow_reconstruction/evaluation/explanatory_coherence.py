@@ -165,6 +165,196 @@ def render_cross_band_error(
     return {"mean_absolute_error_percentage_points": {"base": source_mae, "post_training": trained_mae}}
 
 
+def _decode_covariance_block(value: Any) -> np.ndarray:
+    if isinstance(value, dict) and "real" in value:
+        real = np.asarray(value["real"], dtype=np.float64)
+        imaginary = np.asarray(value.get("imag", np.zeros_like(real)), dtype=np.float64)
+        if real.shape != imaginary.shape:
+            raise ValueError("signed covariance block real and imaginary parts are misaligned")
+        return real + 1j * imaginary
+    return np.asarray(value, dtype=np.float64)
+
+
+def render_v4_signed_covariance_blocks(
+    post: dict[str, Any],
+    output_path: str | Path,
+    *,
+    base: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Plot representative signed normalized covariance blocks from saved v4 diagnostics."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    if post.get("definition") != "second_order_blocks_v4":
+        raise ValueError("signed block explanation requires a second_order_blocks_v4 payload")
+    if base is not None:
+        if base.get("definition") != "second_order_blocks_v4":
+            raise ValueError("base signed block explanation has a different definition")
+        for key in ("basis_sha256", "calibration_sha256", "primary_aggregation"):
+            if base.get(key) != post.get(key):
+                raise ValueError(f"base and post-training signed blocks have different {key}")
+
+    aggregation = str(post["primary_aggregation"])
+    post_records = post["reports"][aggregation]["ensembles"]
+    base_records = [] if base is None else base["reports"][aggregation]["ensembles"]
+    if base is not None and [record["sample_ids"] for record in base_records] != [
+        record["sample_ids"] for record in post_records
+    ]:
+        raise ValueError("base and post-training signed block ensemble memberships differ")
+    field_names = tuple(str(name) for name in post["field_names"])
+    band_names = tuple(str(name) for name in post["band_names"])
+
+    selected: dict[str, dict[str, Any]] = {}
+    view_rows: list[tuple[str, str, np.ndarray, np.ndarray, np.ndarray]] = []
+    for component, block_key in (
+        ("same_frequency", "same_frequency_blocks"),
+        ("cross_frequency", "cross_frequency_blocks"),
+    ):
+        candidates: list[dict[str, Any]] = []
+        for ensemble_index, post_record in enumerate(post_records):
+            post_blocks = post_record["diagnostics"].get(block_key, [])
+            source_blocks = (
+                []
+                if base is None
+                else base_records[ensemble_index]["diagnostics"].get(block_key, [])
+            )
+            if base is not None and [
+                (block["fields"], block["bands"]) for block in source_blocks
+            ] != [(block["fields"], block["bands"]) for block in post_blocks]:
+                raise ValueError(f"paired {component} signed block identities do not match")
+            for block_index, post_block in enumerate(post_blocks):
+                post_generated = _decode_covariance_block(
+                    post_block["generated_normalized_block"]
+                )
+                post_reference = _decode_covariance_block(
+                    post_block["reference_normalized_block"]
+                )
+                if base is None:
+                    source_generated = post_reference
+                    reference_difference = post_generated - post_reference
+                    selection_norm = float(np.linalg.norm(reference_difference))
+                else:
+                    source_block = source_blocks[block_index]
+                    source_generated = _decode_covariance_block(
+                        source_block["generated_normalized_block"]
+                    )
+                    source_reference = _decode_covariance_block(
+                        source_block["reference_normalized_block"]
+                    )
+                    if not np.allclose(source_reference, post_reference, rtol=0.0, atol=1.0e-6):
+                        raise ValueError(
+                            f"paired {component} blocks have different ground-truth covariances"
+                        )
+                    reference_difference = post_generated - source_generated
+                    selection_norm = float(np.linalg.norm(reference_difference))
+                candidates.append(
+                    {
+                        "ensemble_index": ensemble_index,
+                        "block_index": block_index,
+                        "post_generated": post_generated,
+                        "source_generated": source_generated,
+                        "reference": post_reference,
+                        "selection_norm": selection_norm,
+                        "post_record": post_record,
+                        "post_block": post_block,
+                        "source_block": None if base is None else source_blocks[block_index],
+                    }
+                )
+        if not candidates:
+            continue
+        choice = max(candidates, key=lambda item: item["selection_norm"])
+        block = choice["post_block"]
+        left_field, right_field = (int(value) for value in block["fields"])
+        left_band, right_band = (int(value) for value in block["bands"])
+        source_matrix = choice["source_generated"]
+        post_matrix = choice["post_generated"]
+        difference = post_matrix - source_matrix if base is not None else post_matrix - choice["reference"]
+        matrices = (source_matrix, post_matrix, difference)
+        component_selected = {
+            "ensemble_index": int(choice["ensemble_index"]),
+            "sample_ids": list(choice["post_record"]["sample_ids"]),
+            "fields": [field_names[left_field], field_names[right_field]],
+            "bands": [band_names[left_band], band_names[right_band]],
+            "selection_norm": choice["selection_norm"],
+            "post_training_raw_block_loss": float(block["frobenius_squared"]),
+            "base_raw_block_loss": (
+                None
+                if choice["source_block"] is None
+                else float(choice["source_block"]["frobenius_squared"])
+            ),
+        }
+        selected[component] = component_selected
+        complex_values = any(np.iscomplexobj(matrix) for matrix in matrices)
+        parts = ("real", "imaginary") if complex_values else ("real",)
+        titles = (
+            ("Reference", "Generated", "Generated − reference")
+            if base is None
+            else ("Base generated", "Post-training generated", "Post-training − base")
+        )
+        for part in parts:
+            if part == "real":
+                displayed = tuple(np.asarray(matrix).real for matrix in matrices)
+            else:
+                displayed = tuple(np.asarray(matrix).imag for matrix in matrices)
+            view_rows.append((component, part, *displayed))
+
+    if not view_rows:
+        raise ValueError("v4 signed covariance payload contains no eligible blocks to explain")
+    figure, axes = plt.subplots(
+        len(view_rows),
+        3,
+        figsize=(9.8, max(3.2, 2.6 * len(view_rows))),
+        squeeze=False,
+    )
+    image = None
+    for row_index, (component, part, first, second, difference) in enumerate(view_rows):
+        limit = max(
+            float(np.max(np.abs(first))),
+            float(np.max(np.abs(second))),
+            float(np.max(np.abs(difference))),
+            1.0e-12,
+        )
+        for column_index, (axis, matrix, title) in enumerate(
+            zip(axes[row_index], (first, second, difference), titles)
+        ):
+            image = axis.imshow(matrix, cmap="RdBu_r", vmin=-limit, vmax=limit, aspect="auto")
+            axis.set_title(
+                f"{component.replace('_', ' ')}\n{title} · {part}",
+                loc="left",
+                fontsize=8.5,
+            )
+            axis.set_xlabel("right-band mode")
+            axis.set_ylabel("left-band mode" if column_index == 0 else "")
+            axis.tick_params(labelsize=7.3)
+    if image is not None:
+        figure.colorbar(image, ax=axes.ravel().tolist(), label="Signed normalized covariance", fraction=0.025, pad=0.02)
+    title = (
+        "Signed normalized covariance blocks · source to post-training"
+        if base is not None
+        else "Signed normalized covariance blocks · reference and reconstruction"
+    )
+    figure.suptitle(f"{title} · {aggregation.replace('_', ' ')}", fontsize=11.0)
+    figure.subplots_adjust(
+        left=0.12,
+        right=0.90,
+        bottom=0.05,
+        top=0.91,
+        hspace=0.55,
+        wspace=0.30,
+    )
+    save_spectral_figure(figure, output_path)
+    plt.close(figure)
+    return {
+        "definition": "second_order_blocks_v4",
+        "aggregation": aggregation,
+        "comparison": "base_to_post_training" if base is not None else "reference_to_reconstruction",
+        "displayed_quantity": "signed real and imaginary parts of normalized covariance blocks",
+        "selected_blocks": selected,
+    }
+
+
 def render_topology_diagrams(
     payload: dict[str, np.ndarray], report: dict[str, Any], output_dir: str | Path,
     *, role: str, suffix: str = "",
@@ -307,7 +497,72 @@ def render_saved_coherence_explanatory(
     comparison = json.loads(comparison_path.read_text()) if comparison_path.is_file() else None
 
     cross_dir = coherence_dir / "cross_spectrum"
-    if "cross_spectrum" in selected and (cross_dir / "metrics-base.npz").is_file():
+    cross_report_path = cross_dir / "report.json"
+    cross_report = (
+        json.loads(cross_report_path.read_text(encoding="utf-8"))
+        if cross_report_path.is_file()
+        else {}
+    )
+    if (
+        "cross_spectrum" in selected
+        and cross_report.get("definition") == "second_order_blocks_v4"
+    ):
+        artifact_name = cross_report.get("artifacts", {}).get(
+            "signed_covariance_blocks_json", "covariance_blocks_v4.json"
+        )
+        post_path = cross_dir / artifact_name
+        if not post_path.is_file():
+            raise FileNotFoundError(f"v4 signed covariance artifact is missing: {post_path}")
+        post_blocks = json.loads(post_path.read_text(encoding="utf-8"))
+        base_path = cross_dir / "covariance_blocks_v4-base.json"
+        base_blocks = (
+            json.loads(base_path.read_text(encoding="utf-8"))
+            if base_path.is_file()
+            else None
+        )
+        explanatory_path = cross_dir / "signed_covariance_blocks_explanatory_v4.png"
+        explanatory = render_v4_signed_covariance_blocks(
+            post_blocks,
+            explanatory_path,
+            base=base_blocks,
+        )
+        summary["cross_spectrum_signed_covariance_v4"] = explanatory
+        summary["artifacts"]["cross_spectrum"] = {
+            "signed_covariance_blocks_v4": explanatory_path.name,
+            "raw_metrics_csv": cross_report.get("artifacts", {}).get(
+                "covariance_metrics_csv"
+            ),
+            "full_signed_blocks_json": artifact_name,
+        }
+        cross_report.setdefault("artifacts", {}).setdefault("explanatory_figures", {})[
+            "signed_covariance_blocks_v4"
+        ] = explanatory_path.name
+        cross_report_path.write_text(
+            json.dumps(cross_report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        base_report_path = cross_dir / "report-base.json"
+        if base_blocks is not None and base_report_path.is_file():
+            base_report = json.loads(base_report_path.read_text(encoding="utf-8"))
+            base_report.setdefault("artifacts", {}).setdefault("explanatory_figures", {})[
+                "signed_covariance_blocks_v4"
+            ] = explanatory_path.name
+            base_report_path.write_text(
+                json.dumps(base_report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+            )
+        if comparison is not None:
+            comparison.setdefault("artifacts", {})[
+                "paired_explanatory_cross_spectrum"
+            ] = {
+                "signed_covariance_blocks_v4": str(
+                    explanatory_path.relative_to(evaluation_dir)
+                )
+            }
+
+    if (
+        "cross_spectrum" in selected
+        and cross_report.get("definition") != "second_order_blocks_v4"
+        and (cross_dir / "metrics-base.npz").is_file()
+    ):
         base = _load_payload(cross_dir / "metrics-base.npz")
         post = _load_payload(cross_dir / "metrics.npz")
         pair_path = cross_dir / "cross_pair_scores.png"

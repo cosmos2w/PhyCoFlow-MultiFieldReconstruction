@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
+from pathlib import PurePath
 from typing import Any
 
 from .schema import STAGE_SCHEMAS
@@ -32,6 +33,7 @@ COMMON_KEYS = {
     "benchmark_telemetry",
     "trainable",
     "posttrain_fidelity",
+    "fidelity_controller",
 }
 
 
@@ -54,6 +56,137 @@ def _coherence_component_enabled(
     """Resolve component activation without implicitly enabling unstable terms."""
     default_enabled = not (family_name == "cross_spectrum" and component_name == "self_spectrum")
     return bool(settings.get("enabled", default_enabled))
+
+
+def _positive_number(value, path, *, allow_zero=False):
+    if isinstance(value, bool) or not math.isfinite(float(value)) or float(value) < 0 or (
+        float(value) == 0 and not allow_zero
+    ):
+        raise ValueError(f"{path} must be finite and {'nonnegative' if allow_zero else 'positive'}")
+
+
+def _positive_integer(value, path, *, minimum=1):
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        raise ValueError(f"{path} must be an integer >= {minimum}")
+
+
+def _validate_copula_settings(cross):
+    copula = cross.get("copula", {})
+    tail = cross.get("tail", {})
+    _reject_unknown(copula, {"canonicalizer", "landmarks", "bandwidth", "scale_floor", "chunk_size"}, "cross.copula")
+    _reject_unknown(tail, {"alpha", "rho", "temperature", "eta_tolerance", "eta_max_iterations"}, "cross.tail")
+    if copula.get("canonicalizer", "quantile_landmark_smooth_cdf") != "quantile_landmark_smooth_cdf":
+        raise ValueError("unsupported differentiable copula canonicalizer")
+    for key, default in (("landmarks", 64), ("chunk_size", 512)):
+        _positive_integer(copula.get(key, default), f"cross.copula.{key}")
+    for key, default in (("bandwidth", .1), ("scale_floor", 1e-6)):
+        _positive_number(copula.get(key, default), f"cross.copula.{key}")
+    alpha, rho = float(tail.get("alpha", .25)), float(tail.get("rho", .1))
+    if not math.isfinite(alpha) or not 0 <= alpha <= 1 or not math.isfinite(rho) or not 0 < rho <= 1:
+        raise ValueError("smooth tail requires alpha in [0,1], rho in (0,1]")
+    for key, default in (("temperature", .001), ("eta_tolerance", 1e-6)):
+        _positive_number(tail.get(key, default), f"cross.tail.{key}")
+    _positive_integer(tail.get("eta_max_iterations", 80), "cross.tail.eta_max_iterations")
+    if "pairwise_diagnostics" in cross and not isinstance(cross["pairwise_diagnostics"], bool):
+        raise ValueError("pairwise_diagnostics must be boolean")
+    if "top_fraction" in cross:
+        raise ValueError("marginal_copula_v2 uses tail.rho, not legacy hard top_fraction")
+
+
+def _validate_covariance_block_settings(family, compute, evaluation):
+    components = family.get("components", {})
+    for component in ("self_spectrum", "band_energy"):
+        if _coherence_component_enabled("cross_spectrum", component, components.get(component, {})):
+            raise ValueError("second_order_blocks_v4 prohibits optimized self_spectrum/band_energy")
+    minimum = family.get("minimum_ensemble_size", 32)
+    _positive_integer(minimum, "minimum_ensemble_size", minimum=2)
+    if min(int(compute["batch_size"]), int(evaluation.get("max_samples", 1))) < minimum:
+        raise ValueError("second_order_blocks_v4 has insufficient covariance ensemble")
+    stabilization = family.get("stabilization", {})
+    _reject_unknown(stabilization, {"relative_floor", "absolute_floor", "minimum_reference_band_fraction"}, "cross_spectrum.stabilization")
+    for key, default in (("relative_floor", 1e-6), ("absolute_floor", 1e-12), ("minimum_reference_band_fraction", 1e-8)):
+        _positive_number(stabilization.get(key, default), f"stabilization.{key}")
+    if float(stabilization.get("minimum_reference_band_fraction", 1e-8)) >= 1:
+        raise ValueError("minimum_reference_band_fraction must be <1")
+    graph = family.get("graph", {})
+    _positive_number(graph.get("degeneracy_tolerance", 1e-6), "graph.degeneracy_tolerance")
+    intervals = graph.get("band_intervals")
+    if not isinstance(intervals, list) or len(intervals) < 2:
+        raise ValueError("second_order_blocks_v4 requires explicit graph.band_intervals")
+    previous, names = None, []
+    for interval in intervals:
+        if not isinstance(interval, Mapping):
+            raise TypeError("each eigenvalue band must be a mapping")
+        _reject_unknown(interval, {"name", "lower", "upper"}, "graph.band_intervals")
+        name = interval.get("name")
+        lower, upper = float(interval["lower"]), float(interval["upper"])
+        if not name or name in names or not math.isfinite(lower) or not math.isfinite(upper) or lower >= upper:
+            raise ValueError("eigenvalue bands need unique names and finite increasing endpoints")
+        if previous is not None and lower != previous:
+            raise ValueError("eigenvalue band intervals must be contiguous")
+        previous = upper
+        names.append(name)
+
+
+def _validate_adaptive_mode(config):
+    from ..training.fidelity_controller import FIDELITY_DEFAULTS, fidelity_settings
+
+    optimization = config["optimization"]
+    policy = optimization.get("update_policy", "legacy")
+    if policy not in {"legacy", "coherence_primal_dual"}:
+        raise ValueError("unknown optimization.update_policy")
+    new_keys = {"coherence_gradient_method", "cagrad_alpha", "cagrad_rescale"}
+    if policy == "legacy":
+        if "fidelity_controller" in config or new_keys & set(optimization):
+            raise ValueError("fidelity controller/coherence combiner requires coherence_primal_dual")
+        return
+    if optimization.get("gradient_balance", "weighted_sum") != "weighted_sum":
+        raise ValueError("coherence_primal_dual uses coherence_gradient_method and requires legacy gradient_balance=weighted_sum")
+    if optimization.get("coherence_gradient_method", "config") not in {"config", "weighted_sum", "cagrad"}:
+        raise ValueError("invalid coherence_gradient_method")
+    _positive_number(optimization.get("cagrad_alpha", .5), "cagrad_alpha", allow_zero=True)
+    if optimization.get("cagrad_rescale", 1) not in {0, 1, 2}:
+        raise ValueError("cagrad_rescale must be 0,1,2")
+    for name in ("data_retention", "endpoint", "source_anchor"):
+        term = config["objectives"].get(name, {})
+        if term.get("enabled", name == "data_retention") or float(term.get("weight", 0)) != 0:
+            raise ValueError("adaptive fidelity prohibits native/manual endpoint/source-anchor retention weights")
+    settings = fidelity_settings(config)
+    _reject_unknown(config.get("fidelity_controller", {}), set(FIDELITY_DEFAULTS), "fidelity_controller")
+    if settings["enabled"] is not True or settings["risk"] != "endpoint_model_mse":
+        raise ValueError("adaptive fidelity requires enabled endpoint_model_mse risk")
+    if settings["source_weight_selection"] != "live" or settings["same_noise_source"] is not True:
+        raise ValueError("adaptive fidelity requires matched live/live same-noise source")
+    if config["model"].get("model_ema_eval", False):
+        raise ValueError("adaptive fidelity rejects configured EMA/live mixing")
+    if settings["native_loss_role"] != "monitor":
+        raise ValueError("adaptive mode currently supports native_loss_role=monitor")
+    _reject_unknown(settings["anchor"], {"enabled"}, "fidelity_controller.anchor")
+    if settings["anchor"].get("enabled", False):
+        raise ValueError("adaptive anchor is not implemented; legacy source-anchor remains available")
+    for key in ("absolute_floor", "dual_lr", "augmented_rho", "multiplier_max"):
+        _positive_number(settings[key], f"fidelity_controller.{key}")
+    for key in ("relative_budget_total", "relative_budget_per_field", "absolute_allowance"):
+        _positive_number(settings[key], f"fidelity_controller.{key}", allow_zero=True)
+    decay = float(settings["ema_decay"])
+    if not math.isfinite(decay) or not 0 <= decay < 1:
+        raise ValueError("fidelity EMA decay must be in [0,1)")
+    for key in ("calibration_batches", "diagnostics_every_steps"):
+        _positive_integer(settings[key], f"fidelity_controller.{key}")
+    if not config["objectives"]["coherence"].get("enabled", True):
+        raise ValueError("adaptive mode requires active coherence")
+    schedule = config["coherence"].get("schedule", {})
+    if int(schedule.get("every_n_steps", 1)) != 1 or int(schedule.get("start_epoch", 1)) != 1:
+        raise ValueError("adaptive fidelity requires an endpoint and coherence at every update")
+    if schedule.get("interval_rescale", False) or int(schedule.get("weight_warmup_epochs", 0)) != 0:
+        raise ValueError("adaptive pilot requires fixed coherence weight/cadence")
+    if config.get("evaluation", {}).get("split", "validation") != "validation":
+        raise ValueError("adaptive checkpoint selection cannot tune on test data")
+    if config.get("checkpointing", {}).get("selection_metric") != "coherence_with_fidelity":
+        raise ValueError("adaptive mode requires coherence_with_fidelity selection")
+    if any(value.get("target_use", "training_reference") != "paired_supervised"
+           for value in config["coherence"]["families"].values() if value.get("enabled", True)):
+        raise ValueError("adaptive endpoint constraints require paired_supervised references")
 
 
 def _validate_common_sections(config: Mapping[str, Any]) -> None:
@@ -187,6 +320,13 @@ def _validate_common_sections(config: Mapping[str, Any]) -> None:
     _reject_unknown(output, {"experiment_name"}, "output")
     if not output.get("experiment_name"):
         raise ValueError("output.experiment_name is required")
+    experiment = PurePath(str(output["experiment_name"]))
+    if experiment.is_absolute() or ".." in experiment.parts:
+        raise ValueError("output.experiment_name must be relative without '..'")
+    if experiment.parts and experiment.parts[0] == "Test_1002":
+        epochs = config.get("optimization", {}).get("epochs", 1)
+        if isinstance(epochs, bool) or int(epochs) != epochs or not 0 < int(epochs) < 250:
+            raise ValueError("every Test_1002 pilot lineage requires strictly fewer than 250 epochs")
     evaluation = config.get("evaluation", {})
     if not isinstance(evaluation, Mapping):
         raise TypeError("evaluation must be a mapping")
@@ -279,8 +419,8 @@ def _validate_common_sections(config: Mapping[str, Any]) -> None:
         interval = checkpointing["validation_every_epochs"]
         if isinstance(interval, bool) or int(interval) != interval or int(interval) < 1:
             raise ValueError("checkpointing.validation_every_epochs must be a positive integer")
-        if checkpointing.get("selection_metric") != "topology_with_fidelity":
-            raise ValueError("validation_every_epochs currently requires topology_with_fidelity")
+        if checkpointing.get("selection_metric") not in {"topology_with_fidelity", "coherence_with_fidelity"}:
+            raise ValueError("validation_every_epochs requires a fidelity-qualified panel selector")
     if "epochs" in checkpointing:
         epochs = checkpointing["epochs"]
         if (
@@ -295,6 +435,7 @@ def _validate_common_sections(config: Mapping[str, Any]) -> None:
         "native_validation_loss",
         "reconstruction_mse",
         "topology_with_fidelity",
+        "coherence_with_fidelity",
     }:
         raise ValueError(
             "checkpointing.selection_metric must be native_validation_loss or reconstruction_mse"
@@ -585,8 +726,8 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
         if not isinstance(family, Mapping):
             raise TypeError(f"coherence.families.{family_name} must be a mapping")
         extra_keys = {
-            "global_distribution": set(),
-            "cross_spectrum": {"pairs", "graph", "eps"},
+            "global_distribution": {"definition"},
+            "cross_spectrum": {"pairs", "graph", "eps", "definition", "minimum_ensemble_size", "stabilization"},
             "topology": {
                 "geometry",
                 "filtration",
@@ -624,6 +765,14 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
                 raise ValueError("reference-bank and coherence compute point counts must match")
 
         components = family.get("components", {})
+        if family_name == "global_distribution":
+            definition = family.get("definition", "legacy_v1")
+            if definition not in {"legacy_v1", "marginal_copula_v2"}:
+                raise ValueError("unknown global_distribution.definition")
+        elif family_name == "cross_spectrum":
+            definition = family.get("definition", "legacy_v3")
+            if definition not in {"legacy_v3", "second_order_blocks_v4"}:
+                raise ValueError("unknown cross_spectrum.definition")
         topology_strategy = family.get("strategy", "betti_curves")
         if family_name == "topology":
             if topology_strategy not in {
@@ -670,6 +819,12 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
                 },
             },
         }[family_name]
+        if family_name == "global_distribution" and definition == "marginal_copula_v2":
+            component_keys["cross"] |= {"copula", "tail", "pairwise_diagnostics"}
+            cross = components.get("cross", {})
+            _validate_copula_settings(cross)
+            if components.get("mutual", {}).get("enabled", False):
+                raise ValueError("marginal_copula_v2 reserves pairwise SWD for diagnostics")
         if family_name == "topology" and topology_strategy == "spatial_self_mutual":
             from ..coherence.families.topology.spatial_objective import (
                 SPATIAL_COMPONENT_KEYS,
@@ -710,11 +865,14 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
             graph = family.get("graph", {})
             _reject_unknown(
                 graph,
-                {"k_neighbors", "sigma", "num_modes", "exclude_zero", "bands"},
+                {"k_neighbors", "sigma", "num_modes", "exclude_zero", "bands"}
+                | ({"band_intervals", "degeneracy_tolerance"} if definition == "second_order_blocks_v4" else set()),
                 "cross_spectrum.graph",
             )
             if int(graph.get("k_neighbors", 16)) < 1 or int(graph.get("num_modes", 64)) < 1:
                 raise ValueError("cross_spectrum graph sizes must be positive")
+            if definition == "second_order_blocks_v4":
+                _validate_covariance_block_settings(family, compute, config.get("evaluation", {}))
             cross_frequency = components.get("cross_frequency", {})
             cross_active = (
                 family_enabled
@@ -722,7 +880,7 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
                 and bool(cross_frequency.get("enabled", True))
                 and float(cross_frequency.get("weight", 1.0)) > 0
             )
-            if cross_active and int(compute["batch_size"]) < 3:
+            if cross_active and definition != "second_order_blocks_v4" and int(compute["batch_size"]) < 3:
                 raise ValueError("cross-frequency coherence requires compute batch_size>=3")
             same_frequency = components.get("same_frequency", {})
             same_active = (
@@ -733,7 +891,9 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
             )
             if same_active and int(compute["batch_size"]) < 2:
                 raise ValueError("same-frequency coherence requires compute batch_size>=2")
-            evaluation_minimum = 3 if cross_active else 2 if same_active else 1
+            evaluation_minimum = (int(family.get("minimum_ensemble_size", 32))
+                                  if definition == "second_order_blocks_v4"
+                                  else 3 if cross_active else 2 if same_active else 1)
             if int(config.get("evaluation", {}).get("max_samples", 1)) < evaluation_minimum:
                 raise ValueError(
                     f"evaluation.max_samples must be >= {evaluation_minimum} for active spectral components"
@@ -823,10 +983,15 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
             "training_subset",
             "sampling",
             "steps_per_epoch",
+            "update_policy",
+            "coherence_gradient_method",
+            "cagrad_alpha",
+            "cagrad_rescale",
         },
         "optimization",
     )
     _validate_optimization_values(optimization)
+    _validate_adaptive_mode(config)
     if "steps_per_epoch" in optimization:
         from ..training.update_budget import post_training_steps_per_epoch
 
@@ -1094,7 +1259,7 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
         not math.isfinite(float(field_budget)) or float(field_budget) < 0
     ):
         raise ValueError("per-field fidelity budget must be finite and nonnegative")
-    if config.get("checkpointing", {}).get("selection_metric") == "topology_with_fidelity":
+    if config.get("checkpointing", {}).get("selection_metric") in {"topology_with_fidelity", "coherence_with_fidelity"}:
         if (
             config.get("evaluation", {}).get("split", "validation") != "validation"
             or int(config.get("evaluation", {}).get("max_samples", 1)) < 2
@@ -1102,7 +1267,9 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
             raise ValueError("topology selection requires a multi-sample validation panel")
         if fidelity.get("max_relative_mse_increase") is None or field_budget is None:
             raise ValueError("topology selection requires total and per-field fidelity budgets")
-        if "topology" not in families or not families["topology"].get("enabled", True):
+        if config["checkpointing"]["selection_metric"] == "topology_with_fidelity" and (
+            "topology" not in families or not families["topology"].get("enabled", True)
+        ):
             raise ValueError("topology selection requires an enabled topology family")
     if config.get("evaluation", {}).get("sample_selection", "first") not in {"first", "uniform"}:
         raise ValueError("evaluation.sample_selection must be first or uniform")

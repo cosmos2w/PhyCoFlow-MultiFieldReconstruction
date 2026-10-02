@@ -2,20 +2,38 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 from collections.abc import Mapping
+from typing import Any
 
 import torch
 from torch import nn
 
 from ....contracts import CoherenceComponentSpec, CoherenceFamilySpec, FamilyResult, TermResult
-from .persistence import cubical_diagrams, sliced_diagram_distance, sliced_diagram_distances
+from .persistence import (
+    cubical_diagrams,
+    persistence_source,
+    sliced_diagram_distance,
+    sliced_diagram_distances,
+)
 from .spatial import central_gradient
 from .spatial_persistence import spatial_diagram_distance
 
 PERSISTENCE_COMPONENT_KEYS = {
     "self": {"enabled", "weight", "fields"},
-    "mutual": {"enabled", "weight", "groups", "lines", "seed", "direction_floor", "offset_range"},
+    "mutual": {
+        "enabled",
+        "weight",
+        "groups",
+        "lines",
+        "seed",
+        "direction_floor",
+        "offset_range",
+        "line_bank_size",
+        "training_subset_size",
+    },
 }
 PERSISTENCE_KEYS = {
     "projections",
@@ -129,6 +147,24 @@ def validate_persistence_config(config: Mapping, field_names=None) -> None:
         lines = mutual.get("lines", 8)
         if int(lines) != lines or lines < 1:
             raise ValueError("mutual.lines must be a positive integer")
+        if "line_bank_size" in mutual:
+            bank_size = mutual["line_bank_size"]
+            if isinstance(bank_size, bool) or int(bank_size) != bank_size or bank_size < 2:
+                raise ValueError("mutual.line_bank_size must be an integer >= 2")
+            subset_size = mutual.get("training_subset_size", min(4, int(bank_size)))
+            if (
+                isinstance(subset_size, bool)
+                or int(subset_size) != subset_size
+                or not 1 <= subset_size <= bank_size
+            ):
+                raise ValueError(
+                    "mutual.training_subset_size must be an integer in [1, line_bank_size]"
+                )
+        elif "training_subset_size" in mutual:
+            raise ValueError("mutual.training_subset_size requires mutual.line_bank_size")
+        seed = mutual.get("seed", 1729)
+        if isinstance(seed, bool) or int(seed) != seed:
+            raise ValueError("mutual.seed must be an integer")
         floor, extent = (
             float(mutual.get("direction_floor", 0.25)),
             float(mutual.get("offset_range", 1)),
@@ -149,6 +185,10 @@ class PersistenceTopologyObjective(nn.Module):
     def __init__(self, config: Mapping, field_names: tuple[str, ...]):
         super().__init__()
         validate_persistence_config(config, field_names)
+        self.config_identity = hashlib.sha256(
+            json.dumps(dict(config), sort_keys=True, separators=(",", ":"), default=str).encode()
+        ).hexdigest()
+        self._persistence_source_identity = None
         base_fields = tuple(config.get("fields") or field_names)
         self.ids = tuple(field_names.index(name) for name in base_fields)
         self.periodic = bool(config.get("geometry", {}).get("periodic", False))
@@ -179,6 +219,19 @@ class PersistenceTopologyObjective(nn.Module):
             if components.get(name, {}).get("enabled", name == "self")
         }
         mutual = components.get("mutual", {})
+        self.line_sampling_enabled = "line_bank_size" in mutual and bool(
+            mutual.get("enabled", False)
+        )
+        self.line_seed = int(mutual.get("seed", 1729))
+        self.training_subset_size = (
+            min(4, int(mutual["line_bank_size"]))
+            if self.line_sampling_enabled
+            else None
+        )
+        if self.line_sampling_enabled:
+            self.training_subset_size = int(
+                mutual.get("training_subset_size", self.training_subset_size)
+            )
         self.groups = (
             tuple(
                 tuple(self.fields.index(name) for name in group)
@@ -188,6 +241,9 @@ class PersistenceTopologyObjective(nn.Module):
             else ()
         )
         lines = int(mutual.get("lines", 8))
+        if self.line_sampling_enabled:
+            lines = int(mutual["line_bank_size"])
+        self.line_bank_size = lines
         for i, group in enumerate(self.groups):
             k = len(group)
             q = torch.quasirandom.SobolEngine(
@@ -230,9 +286,10 @@ class PersistenceTopologyObjective(nn.Module):
             for name in metric_groups
             for dim in self.dimensions
         ]
+        self.version = "4" if self.line_sampling_enabled else "3"
         self.spec = CoherenceFamilySpec(
             "topology",
-            "3",
+            self.version,
             tuple(specs),
             metadata={
                 "strategy": "cubical_persistence",
@@ -257,7 +314,95 @@ class PersistenceTopologyObjective(nn.Module):
                 fields.append(dv_dx / (self.periods[0] / w) - dy)
         return torch.stack(fields, dim=1)
 
-    def _filtrations(self, x):
+    def selected_line_indices(self, global_step: int | None, phase: str) -> tuple[tuple[int, ...], ...]:
+        """Return the fixed bank or a reproducible uniform subset for each group.
+
+        `global_step` is the zero-based committed optimizer update being evaluated.
+        Sampling is stateless so a checkpoint resume repeats exactly the same lines.
+        """
+        if phase not in {"train", "evaluation", "calibration"}:
+            raise ValueError("topology phase must be train, evaluation, or calibration")
+        if not self.groups:
+            return ()
+        if not self.line_sampling_enabled or phase != "train":
+            full = tuple(range(self.line_bank_size))
+            return tuple(full for _ in self.groups)
+        if global_step is None or isinstance(global_step, bool) or int(global_step) != global_step:
+            raise ValueError("sampled topology training requires a committed integer global_step")
+        if global_step < 0:
+            raise ValueError("topology global_step must be nonnegative")
+        selected = []
+        for group_index in range(len(self.groups)):
+            seed = (
+                self.line_seed + 1_000_003 * int(global_step) + 97_409 * group_index
+            ) % (2**63 - 1)
+            generator = torch.Generator(device="cpu").manual_seed(seed)
+            indices = torch.randperm(self.line_bank_size, generator=generator)[
+                : self.training_subset_size
+            ]
+            selected.append(tuple(sorted(int(index) for index in indices.tolist())))
+        return tuple(selected)
+
+    def sampling_artifact(self) -> dict[str, Any]:
+        """Describe the serialized line bank and deterministic resume rule."""
+        bank_digest = hashlib.sha256()
+        for index in range(len(self.groups)):
+            for suffix in ("directions", "offsets"):
+                tensor = getattr(self, f"line_{suffix}_{index}")
+                bank_digest.update(tensor.detach().to(device="cpu").contiguous().numpy().tobytes())
+        return {
+            "mode": "committed_update_subset" if self.line_sampling_enabled else "fixed_bank",
+            "seed": self.line_seed,
+            "line_bank_size": self.line_bank_size if self.groups else 0,
+            "training_subset_size": self.training_subset_size,
+            "bank_sha256": bank_digest.hexdigest(),
+            "update_index": "zero_based_committed_global_step",
+            "resume_rule": "CPU randperm from configured seed, committed global step, and group index",
+        }
+
+    def _reference_cache_identity(
+        self,
+        reference: torch.Tensor,
+        selected_lines: tuple[tuple[int, ...], ...],
+        phase: str,
+        source_identity: Any,
+    ) -> tuple[Any, ...]:
+        if self._persistence_source_identity is None:
+            self._persistence_source_identity = persistence_source()
+        source = self._persistence_source_identity
+        line_versions = tuple(
+            (
+                getattr(self, f"line_directions_{index}")._version,
+                getattr(self, f"line_offsets_{index}")._version,
+            )
+            for index in range(len(self.groups))
+        )
+        return (
+            id(self),
+            self.config_identity,
+            tuple(reference.shape),
+            tuple(reference.stride()),
+            str(reference.dtype),
+            str(reference.device),
+            source_identity,
+            self.periodic,
+            self.periods,
+            self.dimensions,
+            self.directions,
+            self.distance,
+            self.projections,
+            self.essential_weight,
+            self.scale_floor,
+            selected_lines,
+            phase,
+            line_versions,
+            tuple(sorted(source["source_sha256"].items())),
+            source["pairing_backend"],
+            source["gudhi_version"],
+            source["boundary"],
+        )
+
+    def _filtrations(self, x, selected_lines: tuple[tuple[int, ...], ...] | None = None):
         banks, labels, weights, metrics = [], [], [], []
         for direction in self.directions:
             sign = 1 if direction == "sublevel" else -1
@@ -269,8 +414,14 @@ class PersistenceTopologyObjective(nn.Module):
                     metrics.append(f"self.{field}")
             if self.weights.get("mutual.persistence", 0) > 0:
                 for g, group in enumerate(self.groups):
-                    a = getattr(self, f"line_directions_{g}").to(x)
-                    b = getattr(self, f"line_offsets_{g}").to(x)
+                    a_bank = getattr(self, f"line_directions_{g}").to(x)
+                    b_bank = getattr(self, f"line_offsets_{g}").to(x)
+                    indices = (
+                        tuple(range(len(a_bank))) if selected_lines is None else selected_lines[g]
+                    )
+                    index_tensor = torch.as_tensor(indices, device=x.device, dtype=torch.long)
+                    a = a_bank.index_select(0, index_tensor)
+                    b = b_bank.index_select(0, index_tensor)
                     for v, offset in zip(a, b):
                         banks.append(
                             (
@@ -289,21 +440,41 @@ class PersistenceTopologyObjective(nn.Module):
         reference: torch.Tensor,
         *,
         reference_cache: dict | None = None,
+        global_step: int | None = None,
+        phase: str = "train",
+        reference_identity: Any | None = None,
     ) -> FamilyResult:
-        # Cache lifetime is one transactional update. The family validates the
-        # original target and coordinate tensor identities/versions before reuse.
-        if reference_cache is not None and "signature" not in reference_cache:
-            original, version = reference_cache.setdefault(
-                "reference_identity", (reference, reference._version)
+        selected_lines = self.selected_line_indices(global_step, phase)
+        # Cache lifetime is one transactional update. Refuse changed targets,
+        # geometries, line subsets, or implementation/backend identities.
+        if reference_cache is not None:
+            source_identity = (
+                reference_identity
+                if reference_identity is not None
+                else (id(reference), reference._version)
             )
-            if original is not reference or version != reference._version:
+            existing_source_identity = reference_cache.setdefault(
+                "objective_reference_identity", source_identity
+            )
+            if existing_source_identity != source_identity:
                 raise ValueError("persistence reference cache target changed")
+            cache_identity = self._reference_cache_identity(
+                reference, selected_lines, phase, source_identity
+            )
+            existing_identity = reference_cache.setdefault("objective_identity", cache_identity)
+            if existing_identity != cache_identity:
+                raise ValueError("persistence reference cache objective, lines, or backend changed")
+        else:
+            cache_identity = None
         prepared = None if reference_cache is None else reference_cache.get("prepared")
         if prepared is None:
             y = self._descriptor_fields(reference.detach())
             mean = y.mean((-2, -1), keepdim=True)
             scale = y.std((-2, -1), keepdim=True, unbiased=False).clamp_min(self.scale_floor)
-            target, _, _, _ = self._filtrations((y - mean) / scale)
+            target, _, _, _ = self._filtrations(
+                (y - mean) / scale,
+                selected_lines if self.line_sampling_enabled else None,
+            )
             target_diagrams = cubical_diagrams(
                 target.flatten(0, 1),
                 periodic=self.periodic,
@@ -311,14 +482,25 @@ class PersistenceTopologyObjective(nn.Module):
                 locations=self.distance == "spatial_wasserstein",
                 cacheable=True,
             )
-            prepared = (mean, scale, target_diagrams, tuple(reference.shape), id(self))
+            prepared = (
+                mean,
+                scale,
+                target_diagrams,
+                tuple(reference.shape),
+                id(self),
+                cache_identity,
+            )
             if reference_cache is not None:
                 reference_cache["prepared"] = prepared
-        mean, scale, target_diagrams, shape, owner = prepared
+        mean, scale, target_diagrams, shape, owner, prepared_identity = prepared
         if shape != tuple(reference.shape) or owner != id(self):
             raise ValueError("persistence reference cache belongs to another objective or shape")
+        if prepared_identity != cache_identity:
+            raise ValueError("persistence reference cache identity mismatch")
         x = (self._descriptor_fields(generated) - mean) / scale
-        bank, labels, line_weights, metric_labels = self._filtrations(x)
+        bank, labels, line_weights, metric_labels = self._filtrations(
+            x, selected_lines if self.line_sampling_enabled else None
+        )
         n, batch, h, w = bank.shape
         diagrams = cubical_diagrams(
             bank.flatten(0, 1),
@@ -417,5 +599,20 @@ class PersistenceTopologyObjective(nn.Module):
                 "spatial_scope": "finite_creators_only"
                 if self.distance == "spatial_wasserstein"
                 else None,
+                "line_sampling": {
+                    "mode": (
+                        "committed_update_subset"
+                        if self.line_sampling_enabled and phase == "train"
+                        else "full_master_bank"
+                        if self.line_sampling_enabled
+                        else "fixed_bank"
+                    ),
+                    "phase": phase,
+                    "global_step": global_step,
+                    "line_bank_size": self.line_bank_size if self.groups else 0,
+                    "training_subset_size": self.training_subset_size,
+                    "selected_indices": [list(indices) for indices in selected_lines],
+                    "subset_estimator": "uniform_mean_of_weighted_distances_no_extra_rescale",
+                },
             },
         )

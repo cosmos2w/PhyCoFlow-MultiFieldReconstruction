@@ -42,6 +42,7 @@ This document describes the mathematical contract implemented by `phycoflow_reco
 - [10. Gradient combination](#10-gradient-combination)
 - [11. Evaluation definitions](#11-evaluation-definitions)
 - [12. Cross-cutting limitations](#12-cross-cutting-limitations)
+- [13. Opt-in 1002 definitions](#13-opt-in-1002-definitions)
 
 ## 0. Current implementation and settings
 
@@ -1244,3 +1245,73 @@ Case-owned diagnostics are evaluated in addition to these shared metrics. Brusse
 - Fixed normalization, fixed sensor protocols, and fixed geometry artifacts can limit transfer to shifted regimes or meshes.
 - Current uncertainty reporting is incomplete because standard reconstruction adapters generally return a single endpoint even when their sampling process is stochastic.
 - Fair model comparison requires the same dataset split, normalization, sensor manifest, query indices, generation seed/steps, and reference artifacts.
+
+## 13. Opt-in 1002 definitions
+
+The definitions in this section are explicit alternatives within the existing family packages. Omitting the new discriminators preserves the distribution definition v1 and graph-spectrum definition v3 described above. The topology core remains GUDHI cubical persistence; its master-line policy is opt-in. These three observables remain parallel descriptors, without an orthogonal or residualized Local–Pair–Collective decomposition.
+
+### 13.1 Marginal–copula distribution v2
+
+Select `definition: marginal_copula_v2` in `global_distribution`. The unstandardized marginal empirical W2 term from Section 7.2 is unchanged. Joint dependence uses separate marginal transforms for each generated and reference snapshot. Exact evaluation assigns deterministic average ranks to ties:
+
+$$
+U^X_{nc}=\frac{\operatorname{midrank}(X_{:c})_n-1/2}{N},\qquad
+U^Y_{nc}=\frac{\operatorname{midrank}(Y_{:c})_n-1/2}{N}.
+$$
+
+Training uses the quantile-landmark smooth-CDF approximation in [`copula.py`](src/phycoflow_reconstruction/coherence/families/global_distribution/components/copula.py): independently center and scale each marginal with a declared RMS floor, then average sigmoid comparisons against its own quantile landmarks. Gradients pass through generated centering, scale, and landmarks. Target transforms are detached. Chunking uses O(NM) comparisons rather than an N×N rank matrix; M is configurable. This surrogate is not exactly invariant to nonlinear monotone transforms. Exact midrank dependence remains a separate evaluation diagnostic, including explicit tie statistics.
+
+For serialized mixed unit directions without coordinate axes, let $d_r=W_2^2(U^X\theta_r,U^Y\theta_r)$. [`tail_risk.py`](src/phycoflow_reconstruction/coherence/families/global_distribution/components/tail_risk.py) computes
+
+$$
+L_{\rm dep}=(1-\alpha)\operatorname{mean}_r d_r+
+\alpha\left[\min_\eta\left\{\eta+\frac{\tau}{\rho R}
+\sum_r\operatorname{softplus}\left(\frac{d_r-\eta}{\tau}\right)\right\}-V_{\rho,\tau}(0)\right],
+$$
+
+where $V_{\rho,\tau}(0)=-\tau\log\rho-\tau(1-\rho)\log(1-\rho)/\rho$. For $\rho=1$ the implementation returns the mean directly. Eta is solved by deterministic detached bisection per snapshot; differentiating the evaluated value gives the envelope gradient. There is no persistent eta parameter. Temperature is frozen from training-only calibration. The new A total is $L_A=L_{\rm marg}+\lambda_{\rm dep}L_{\rm dep}$. Raw and copula selected-pair distances are diagnostics unless their optional training weight is explicitly nonzero. [`cross_copula.py`](src/phycoflow_reconstruction/coherence/families/global_distribution/components/cross_copula.py) records the bank, threshold residual, gradient weights, and exact versus smooth scores.
+
+### 13.2 Linear graph covariance blocks v4
+
+Select `definition: second_order_blocks_v4` in `cross_spectrum`. In a fixed orthonormal retained graph basis $U$, linear coefficients $a_{bki}=U_k^*X_{bi}$ have centered sample covariance
+
+$$
+\widehat C_{ij}[k,q]=\frac1{B-1}\sum_b(a_{bki}-\bar a_{ki})
+\overline{(a_{bqj}-\bar a_{qj})}.
+$$
+
+Explicit eigenvalue intervals define complete bands, without splitting a numerically degenerate eigenspace. Same-frequency means a same-band block, including its off-diagonal modes; cross-frequency means distinct-band blocks. Both preserve signed or complex entries. For band energy $E_{\ell i}=\operatorname{tr}\widehat C_{ii}^{\ell\ell}$, compare normalized blocks $R_{ij}^{\ell m}=\widehat C_{ij}^{\ell m}/D_{ij}^{\ell m}$ using squared Frobenius differences, averaged over eligible blocks. The common additive floor is
+
+$$
+\delta_{ij}^{\ell m}=\delta_{\rm abs}+\delta_{\rm rel}
+\sqrt{E_{\ell i}^{\rm cal}E_{mj}^{\rm cal}}.
+$$
+
+Reference normalization uses the current reference energies with a positive machine floor. Generated normalization clamps energies below the frozen calibration-relative floor before its square root, keeping the derivative finite at exact collapse. Eligibility depends only on frozen TRAIN reference-energy fractions. The two terms are weighted separately; auto-spectrum energy profiles are diagnostics, without an optimized self-spectrum term. See [`covariance_blocks.py`](src/phycoflow_reconstruction/coherence/families/cross_spectrum/covariance_blocks.py) and [`family.py`](src/phycoflow_reconstruction/coherence/families/cross_spectrum/family.py).
+
+This changes the legacy cross-band covariance of squared energies, which is fourth-order in the fields. V4 measures second-order spatial covariance in a truncated basis; it deliberately does not target that fourth-order information. Off-frequency covariance describes inhomogeneous or nonstationary structure, without establishing nonlinear energy transfer. Global evaluation pools coefficient sufficient statistics before normalization and separately reports aligned training-size groups. Family artifacts preserve basis, bands, masks, floors, field order, and calibration identity so source/current comparisons cannot silently fit different descriptors.
+
+### 13.3 Master-line topology policy
+
+With `mutual.line_bank_size` and `mutual.training_subset_size`, each field group has one serialized positive Sobol master bank. Training averages a deterministic uniform subset chosen by seed and committed optimizer-update index; calibration and evaluation use the full bank. Resume therefore reproduces the subset sequence. The separate diagram-projection bank is unchanged. The restriction $f(x)=\max_j((z_j(x)-b_j)/a_j)$ and line weight $\min_j a_j$ retain their existing definitions.
+
+[`persistence_objective.py`](src/phycoflow_reconstruction/coherence/families/topology/persistence_objective.py) retains exact cubical pairings and critical-value gradients, diagonal augmentation, and sliced projected L1 comparison. Finite projected distances are sums divided by H×W and averaged over diagram directions; essential births use a weighted sorted absolute-difference sum without that H×W division. Ties remain nonsmooth, with a valid selected critical-value gradient rather than a claim of global smoothness.
+
+Complete native lattices are gathered directly using their recorded coordinate permutation. Integer-factor complete-grid coarsening can use area averaging. Incomplete query sets and nonintegral factors retain the documented interpolation path. Sparse or coarse PH is not asserted equivalent to native PH: generated-field native audits remain separate. Reference-cache keys include source identity, coordinates, backend/version, raster, and line identity; generated diagrams are recomputed. Historical topology artifacts retain their existing strict implementation-hash contract.
+
+### 13.4 Separate coherence combination and endpoint fidelity
+
+Select `optimization.update_policy: coherence_primal_dual` to expose calibrated family gradients separately, with `optimization.coherence_gradient_method: config | cagrad | weighted_sum` and legacy `gradient_balance: weighted_sum`. [`gradient_balance.py`](src/phycoflow_reconstruction/training/gradient_balance.py) supports weighted sum, K-objective ConFIG, and CAGrad. ConFIG uses the installed implementation and accepts only finite directions with strictly positive dot products against every active family gradient; a failed common-descent check records an explicit weighted-sum fallback. CAGrad solves its simplex dual with the configured alpha and scaling; its default convention is the author function's mean-gradient result with `optimization.cagrad_rescale: 1`, without multiplying by K. Zero gradients and disconnected objectives are recorded explicitly. Family gradient calibration remains frozen and separate from risk normalization.
+
+[`fidelity_controller.py`](src/phycoflow_reconstruction/training/fidelity_controller.py) protects endpoint model-unit total and per-field MSE against a detached frozen live teacher on the same endpoint noise. Frozen training-only source risks $s_j$ define
+
+$$
+g_j=\frac{R_j(\theta)-(1+\epsilon_j)R_j(\theta_0)-a_j}{s_j},\qquad
+P(\theta,\lambda)=\sum_j\frac{[\lambda_j+\rho g_j]_+^2-\lambda_j^2}{2\rho}.
+$$
+
+Each accepted update combines the coherence direction with $\nabla_\theta P$, clips once, and takes one AdamW step. Then it advances a detached EMA of the pre-step violations, applies zero-initialization bias correction, updates the dual variables, and clamps them to the configured cap. Rejected updates do not advance dual or line-sampling state. Native flow loss is monitored; separate manually weighted retention is disabled in this mode. An optional adaptive source-anchor constraint is not implemented and is rejected explicitly.
+
+Telemetry distinguishes pre-step risks/pressure from post-step EMA/multipliers. It records family cosines, constraint gradients at the configured cadence, and actual $\nabla L^\top(\theta_{t+1}-\theta_t)$; a negative displacement dot indicates local decrease. ConFIG's raw-gradient check does not guarantee descent after fidelity pressure, clipping, or AdamW preconditioning. Real and imaginary parameter coordinates are preserved in flattening and clipping.
+
+The new `coherence_with_fidelity` selector requires both total and every field's fixed-panel validation budget. Eligible checkpoints minimize the equal-active-family mean of raw family losses divided by the matched source losses. The source is an explicit fallback candidate; selected, last, validation history, and a small feasible archive are retained. This selection rule and additional audits establish empirical eligibility, without a nonconvex convergence or physical-law guarantee. Opt-in adaptive history plots expose source-relative risks, multipliers, eligibility, and displacement dots alongside the existing reports.

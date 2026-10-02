@@ -29,9 +29,58 @@ from ..coherence.families.cross_spectrum.statistics import (
 )
 from ..coherence.registry import build_coherence_family
 from ..data.training_batches import fixed_query_indices
+from ..training.run_store import file_sha256
 from .topology_set import TopologySetAccumulator
 
 SUPPORTED_COHERENCE_FAMILIES = ("global_distribution", "cross_spectrum", "topology")
+
+
+def _restore_evaluation_family(
+    runtime: Any, family: Any, family_name: str
+) -> dict[str, Any]:
+    """Restore the training artifact; evaluation must never refit a new definition.
+
+    Paired source comparisons explicitly supply the child's artifact directory,
+    so both models share its directions, graph, bands and frozen training floors.
+    """
+    artifact_run_dir = getattr(runtime, "coherence_artifact_run_dir", None)
+    if artifact_run_dir is None:
+        artifact_run_dir = getattr(runtime, "run_dir", None)
+    if artifact_run_dir is None:
+        checkpoint_path = Path(runtime.checkpoint_path).resolve()
+        if checkpoint_path.parent.name != "checkpoints":
+            raise ValueError("new coherence evaluation requires an explicit artifact run directory")
+        artifact_run_dir = checkpoint_path.parent.parent
+    artifact_run_dir = Path(artifact_run_dir).resolve()
+    manifest_path = artifact_run_dir / "run_manifest.json"
+    artifact_path = artifact_run_dir / "artifacts" / f"{family_name}_family.pt"
+    if not manifest_path.is_file() or not artifact_path.is_file():
+        raise FileNotFoundError(f"evaluation is missing the frozen {family_name} run artifact")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    expected_hash = manifest.get("coherence_family_state_sha256s", {}).get(family_name)
+    artifact_hash = file_sha256(artifact_path)
+    if not expected_hash or artifact_hash != expected_hash:
+        raise ValueError(f"evaluation coherence family artifact hash mismatch: {family_name}")
+    source_hash = None
+    if manifest.get("stage") == "post_training":
+        source_checkpoint = manifest.get("source_checkpoint")
+        source_hash = manifest.get("source_hashes", {}).get("checkpoint")
+        if not manifest.get("parent_run") or not source_checkpoint or not source_hash:
+            raise ValueError("post-training coherence artifact is missing immutable source lineage")
+        source_checkpoint_path = Path(str(source_checkpoint)).expanduser().resolve()
+        if not source_checkpoint_path.is_file() or file_sha256(source_checkpoint_path) != source_hash:
+            raise ValueError("post-training coherence artifact source checkpoint hash has changed")
+    artifact = torch.load(artifact_path, map_location=runtime.device, weights_only=True)
+    family.load_state_artifact(artifact)
+    return {
+        "artifact_path": str(artifact_path),
+        "artifact_sha256": artifact_hash,
+        "artifact_run_dir": str(artifact_run_dir),
+        "source_run_id": manifest.get("source_run_id") or (
+            Path(str(manifest["parent_run"])).name if manifest.get("parent_run") else None
+        ),
+        "source_checkpoint_sha256": source_hash,
+    }
 
 
 def _finite_summary(values: np.ndarray) -> dict[str, float | int | None]:
@@ -1094,6 +1143,18 @@ class GlobalDistributionAccumulator:
     pairwise_total: list[float] = field(default_factory=list)
     joint_total: list[float] = field(default_factory=list)
     family_total: list[float] = field(default_factory=list)
+    exact_copula: list[float] = field(default_factory=list)
+    smooth_directional_mean: list[float] = field(default_factory=list)
+    hard_tail: list[float] = field(default_factory=list)
+    smooth_tail: list[float] = field(default_factory=list)
+    eta: list[float] = field(default_factory=list)
+    eta_residual: list[float] = field(default_factory=list)
+    directional_costs: list[np.ndarray] = field(default_factory=list)
+    effective_direction_weights: list[np.ndarray] = field(default_factory=list)
+    pairwise_raw_state: list[np.ndarray] = field(default_factory=list)
+    pairwise_soft_copula: list[np.ndarray] = field(default_factory=list)
+    pairwise_exact_copula: list[np.ndarray] = field(default_factory=list)
+    family_artifact_provenance: dict[str, Any] = field(default_factory=dict)
     extra_view: bool = False
     extra_query_point_count: int = 0
     extra_query_seed: int = 100045
@@ -1114,6 +1175,11 @@ class GlobalDistributionAccumulator:
         family = build_coherence_family(
             "global_distribution", settings, runtime.dataset.data_spec, runtime.dataset.normalizer
         ).to(runtime.device)
+        family_artifact_provenance = {}
+        if getattr(family, "definition", "legacy_v1") == "marginal_copula_v2":
+            family_artifact_provenance = _restore_evaluation_family(
+                runtime, family, "global_distribution"
+            )
         family.eval()
         coherence = runtime.config.get("coherence", {})
         compute = coherence.get("compute_budget", {}) if isinstance(coherence, Mapping) else {}
@@ -1124,6 +1190,7 @@ class GlobalDistributionAccumulator:
             family=family,
             data_spec=runtime.dataset.data_spec,
             config=settings,
+            family_artifact_provenance=family_artifact_provenance,
             extra_view=extra_view,
             extra_query_point_count=min(configured_points, bounded_points),
             extra_query_seed=int(compute.get("query_seed", 100045)),
@@ -1134,15 +1201,27 @@ class GlobalDistributionAccumulator:
         return tuple(self.family.field_names)
 
     @property
+    def definition(self) -> str:
+        return str(getattr(self.family, "definition", "legacy_v1"))
+
+    @property
     def pair_labels(self) -> tuple[str, ...]:
-        if "mutual_pairwise_swd" not in self.family.components_by_key:
-            return ()
-        component = self.family.components_by_key["mutual_pairwise_swd"]
         names = tuple(self.data_spec.field_names)
-        return tuple(f"{names[left]}–{names[right]}" for left, right in component.pairs)
+        return tuple(
+            f"{names[left]}–{names[right]}" for left, right in self.pair_indices
+        )
 
     @property
     def pair_indices(self) -> tuple[tuple[int, int], ...]:
+        if self.definition == "marginal_copula_v2":
+            component = self.family.components_by_key["cross_joint_copula_cvar"]
+            return tuple(
+                (
+                    int(component.field_ids[left]),
+                    int(component.field_ids[right]),
+                )
+                for left, right in component.pairs
+            )
         if "mutual_pairwise_swd" not in self.family.components_by_key:
             return ()
         component = self.family.components_by_key["mutual_pairwise_swd"]
@@ -1355,6 +1434,12 @@ class GlobalDistributionAccumulator:
             coordinates=coordinates,
             context={"sample_ids": [sample_id], "reference_ids": [sample_id]},
         )
+        if self.definition == "marginal_copula_v2":
+            self._update_v2(prediction, target, sample_id, result)
+            if self.extra_view:
+                self._append_extra(prediction, target)
+            return
+
         paths = {
             "marginal": "global_distribution.self.marginal_w2",
             "pairwise": "global_distribution.mutual.pairwise_swd",
@@ -1385,19 +1470,83 @@ class GlobalDistributionAccumulator:
         )
         self.family_total.append(float(result.per_sample_cost[0].detach().cpu()))
         if self.extra_view:
-            indices = fixed_query_indices(
-                prediction.shape[1], self.extra_query_point_count, seed=self.extra_query_seed
+            self._append_extra(prediction, target)
+
+    def _append_extra(self, prediction: torch.Tensor, target: torch.Tensor) -> None:
+        indices = fixed_query_indices(
+            prediction.shape[1], self.extra_query_point_count, seed=self.extra_query_seed
+        )
+        if indices is None:
+            raise RuntimeError("global-distribution extra-view indices are unavailable")
+        generated, reference = self.family._in_declared_units(prediction, target)
+        device_indices = indices.to(generated.device)
+        self.extra_generated.append(
+            generated[0, device_indices].detach().cpu().numpy().astype(np.float32)
+        )
+        self.extra_reference.append(
+            reference[0, device_indices].detach().cpu().numpy().astype(np.float32)
+        )
+
+    def _update_v2(self, prediction, target, sample_id: str, result) -> None:
+        paths = {
+            "marginal": "global_distribution.self.marginal_w2",
+            "joint": "global_distribution.cross.joint_copula_cvar",
+        }
+        marginal = result.component_results.get(paths["marginal"])
+        joint = result.component_results.get(paths["joint"])
+        if marginal is None or joint is None or joint.per_sample_cost is None:
+            raise ValueError(
+                "marginal_copula_v2 evaluation requires marginal and joint copula components"
             )
-            if indices is None:
-                raise RuntimeError("global-distribution extra-view indices are unavailable")
-            generated, reference = self.family._in_declared_units(prediction, target)
-            device_indices = indices.to(generated.device)
-            self.extra_generated.append(
-                generated[0, device_indices].detach().cpu().numpy().astype(np.float32)
-            )
-            self.extra_reference.append(
-                reference[0, device_indices].detach().cpu().numpy().astype(np.float32)
-            )
+        marginal_value = float(marginal.per_sample_cost[0].detach().cpu())
+        joint_value = float(joint.per_sample_cost[0].detach().cpu())
+        weights = self.family.component_weights
+        diagnostics = joint.diagnostics
+
+        self.sample_ids.append(sample_id)
+        self.marginal.append(
+            marginal.diagnostics["per_field_w2"][0].detach().cpu().numpy()
+        )
+        self.marginal_total.append(weights["self_marginal_w2"] * marginal_value)
+        # Mutual/pairwise terms are excluded from the v2 training contract.
+        self.pairwise_total.append(0.0)
+        self.joint.append(joint_value)
+        self.joint_total.append(weights["cross_joint_copula_cvar"] * joint_value)
+        self.family_total.append(float(result.per_sample_cost[0].detach().cpu()))
+        self.exact_copula.append(
+            float(diagnostics["exact_midranks_projected_w2_diagnostic"][0].detach().cpu())
+        )
+        self.smooth_directional_mean.append(
+            float(diagnostics["mean_directional_w2"][0].detach().cpu())
+        )
+        self.hard_tail.append(
+            float(diagnostics["hard_cvar_diagnostic"][0].detach().cpu())
+        )
+        self.smooth_tail.append(
+            float(diagnostics["identity_calibrated_smooth_cvar"][0].detach().cpu())
+        )
+        self.eta.append(float(diagnostics["eta"][0].detach().cpu()))
+        self.eta_residual.append(
+            float(diagnostics["eta_residual"][0].detach().cpu())
+        )
+        self.directional_costs.append(
+            diagnostics["per_direction_w2"][0].detach().cpu().numpy()
+        )
+        self.effective_direction_weights.append(
+            diagnostics["effective_direction_weights"][0].detach().cpu().numpy()
+        )
+        self.pairwise_raw_state.append(
+            diagnostics.get("pairwise_raw_state_swd", torch.empty(1, 0))
+            [0].detach().cpu().numpy()
+        )
+        self.pairwise_soft_copula.append(
+            diagnostics.get("pairwise_soft_copula_swd", torch.empty(1, 0))
+            [0].detach().cpu().numpy()
+        )
+        self.pairwise_exact_copula.append(
+            diagnostics.get("pairwise_exact_copula_swd", torch.empty(1, 0))
+            [0].detach().cpu().numpy()
+        )
 
     def finalize(
         self,
@@ -1410,6 +1559,14 @@ class GlobalDistributionAccumulator:
     ) -> dict[str, Any]:
         destination = Path(output_root) / "coherence" / "global_distribution"
         destination.mkdir(parents=True, exist_ok=True)
+        if self.definition == "marginal_copula_v2":
+            return self._finalize_v2(
+                destination,
+                split=split,
+                checkpoint_label=checkpoint_label,
+                run_label=run_label,
+                scale=scale,
+            )
         marginal = np.asarray(self.marginal, dtype=np.float64)
         pairwise = np.asarray(self.pairwise, dtype=np.float64)
         joint = np.asarray(self.joint, dtype=np.float64)[:, None]
@@ -1556,6 +1713,330 @@ class GlobalDistributionAccumulator:
             "extra": extra_output,
         }
 
+    def _finalize_v2(
+        self,
+        destination: Path,
+        *,
+        split: str,
+        checkpoint_label: str,
+        run_label: str,
+        scale: str,
+    ) -> dict[str, Any]:
+        """Write the v2 smooth objective and independent rank diagnostics."""
+        if not self.sample_ids:
+            raise ValueError("global-distribution evaluation contains no samples")
+
+        import hashlib
+
+        marginal = np.asarray(self.marginal, dtype=np.float64)
+        joint = np.asarray(self.joint, dtype=np.float64)
+        exact_copula = np.asarray(self.exact_copula, dtype=np.float64)
+        directional_mean = np.asarray(self.smooth_directional_mean, dtype=np.float64)
+        hard_tail = np.asarray(self.hard_tail, dtype=np.float64)
+        smooth_tail = np.asarray(self.smooth_tail, dtype=np.float64)
+        eta = np.asarray(self.eta, dtype=np.float64)
+        eta_residual = np.asarray(self.eta_residual, dtype=np.float64)
+        direction_costs = np.asarray(self.directional_costs, dtype=np.float64)
+        direction_weights = np.asarray(self.effective_direction_weights, dtype=np.float64)
+        family_total = np.asarray(self.family_total, dtype=np.float64)
+        component_totals = np.column_stack((self.marginal_total, self.joint_total))
+        if direction_costs.ndim != 2 or direction_weights.shape != direction_costs.shape:
+            raise ValueError("global-distribution v2 direction diagnostics are misaligned")
+
+        component = self.family.components_by_key["cross_joint_copula_cvar"]
+        direction_bank = component.directions.detach().cpu().numpy()
+        pair_direction_bank = component.pairwise_directions.detach().cpu().numpy()
+        bank_sha256 = hashlib.sha256(np.ascontiguousarray(direction_bank).tobytes()).hexdigest()
+        pair_bank_sha256 = hashlib.sha256(
+            np.ascontiguousarray(pair_direction_bank).tobytes()
+        ).hexdigest()
+        pairwise_enabled = bool(component.pairwise_diagnostics_enabled)
+        if pairwise_enabled:
+            pairwise_raw = np.asarray(self.pairwise_raw_state, dtype=np.float64)
+            pairwise_soft = np.asarray(self.pairwise_soft_copula, dtype=np.float64)
+            pairwise_exact = np.asarray(self.pairwise_exact_copula, dtype=np.float64)
+            if not (
+                pairwise_raw.shape == pairwise_soft.shape == pairwise_exact.shape
+                == (len(self.sample_ids), len(self.pair_labels))
+            ):
+                raise ValueError("enabled pairwise diagnostics are misaligned")
+        else:
+            pairwise_raw = np.empty((len(self.sample_ids), 0), dtype=np.float64)
+            pairwise_soft = np.empty_like(pairwise_raw)
+            pairwise_exact = np.empty_like(pairwise_raw)
+
+        payload_path = destination / "metrics.npz"
+        np.savez_compressed(
+            payload_path,
+            marginal_per_field_w2=marginal,
+            joint_copula_smooth_cvar=joint[:, None],
+            mean_directional_w2=directional_mean[:, None],
+            hard_empirical_cvar_diagnostic=hard_tail[:, None],
+            identity_calibrated_smooth_cvar=smooth_tail[:, None],
+            exact_midranks_projected_w2_diagnostic=exact_copula[:, None],
+            eta=eta[:, None],
+            eta_residual=eta_residual[:, None],
+            per_direction_w2=direction_costs,
+            effective_direction_weights=direction_weights,
+            weighted_component_totals=component_totals,
+            family_total=family_total[:, None],
+            component_names=np.asarray(("marginal", "joint_copula_mean_smooth_cvar")),
+            field_names=np.asarray(self.field_names),
+            pair_labels=np.asarray(self.pair_labels),
+            pairwise_raw_state_swd_diagnostic=pairwise_raw,
+            pairwise_soft_copula_swd_diagnostic=pairwise_soft,
+            pairwise_exact_midranks_swd_diagnostic=pairwise_exact,
+            pairwise_diagnostic_enabled=np.asarray(pairwise_enabled),
+            projection_directions=direction_bank,
+            projection_direction_sha256=np.asarray(bank_sha256),
+            pairwise_projection_directions=pair_direction_bank,
+            pairwise_projection_direction_sha256=np.asarray(pair_bank_sha256),
+            sample_ids=np.asarray(self.sample_ids),
+            split=np.asarray(split),
+            units=np.asarray(self.family.units),
+        )
+
+        csv_path = destination / "metrics.csv"
+        with csv_path.open("w", encoding="utf-8", newline="") as stream:
+            writer = csv.writer(stream)
+            writer.writerow(("sample_id", "component", "sub_term", "value"))
+            for row, sample_id in enumerate(self.sample_ids):
+                for column, name in enumerate(self.field_names):
+                    writer.writerow((sample_id, "marginal_w2", name, marginal[row, column]))
+                writer.writerow((sample_id, "joint_copula", "mean_smooth_cvar", joint[row]))
+                writer.writerow((sample_id, "joint_copula", "mean_directional_w2", directional_mean[row]))
+                writer.writerow((sample_id, "joint_copula_diagnostic", "hard_empirical_cvar", hard_tail[row]))
+                writer.writerow((sample_id, "joint_copula_diagnostic", "identity_calibrated_smooth_cvar", smooth_tail[row]))
+                writer.writerow((sample_id, "joint_copula_diagnostic", "exact_midranks_projected_w2", exact_copula[row]))
+                writer.writerow((sample_id, "joint_copula_diagnostic", "eta", eta[row]))
+                writer.writerow((sample_id, "joint_copula_diagnostic", "eta_residual", eta_residual[row]))
+                for direction, value in enumerate(direction_costs[row]):
+                    writer.writerow((sample_id, "projection_direction_w2", direction, value))
+                    writer.writerow(
+                        (sample_id, "effective_direction_weight", direction, direction_weights[row, direction])
+                    )
+                if pairwise_enabled:
+                    for column, label in enumerate(self.pair_labels):
+                        writer.writerow((sample_id, "pairwise_raw_state_swd_diagnostic", label, pairwise_raw[row, column]))
+                        writer.writerow((sample_id, "pairwise_soft_copula_swd_diagnostic", label, pairwise_soft[row, column]))
+                        writer.writerow((sample_id, "pairwise_exact_midranks_swd_diagnostic", label, pairwise_exact[row, column]))
+                for column, name in enumerate(("marginal", "joint_copula")):
+                    writer.writerow((sample_id, name, "weighted_component_total", component_totals[row, column]))
+                writer.writerow((sample_id, "global_distribution", "family_total", family_total[row]))
+
+        subtitle = (
+            f"{split} set · {checkpoint_label}.pt · n={len(self.sample_ids)} · "
+            f"paired ground truth · {self.family.units.replace('_', ' ')} · {scale} scale"
+        )
+        figures = {
+            "marginal": destination / "marginal_copula_v2_marginal_distributions.png",
+            "direction_spectrum": destination / "marginal_copula_v2_direction_spectrum.png",
+            "tail_diagnostics": destination / "marginal_copula_v2_tail_diagnostics.png",
+        }
+
+        def plot_scale(values: np.ndarray) -> str:
+            finite = values[np.isfinite(values)]
+            if scale == "log" and not np.any(finite > 0.0):
+                return "linear"
+            return scale
+
+        marginal_plot = np.column_stack((marginal, component_totals[:, 0], family_total))
+        render_coherence_distribution(
+            marginal_plot,
+            (*self.field_names, "Marginal total", "Family total"),
+            (*("detail" for _ in self.field_names), "component_total", "family_total"),
+            figures["marginal"],
+            title="Marginal W₂² distributions · marginal-copula v2",
+            subtitle=subtitle,
+            scale=plot_scale(marginal_plot),
+        )
+        direction_labels = tuple(
+            f"Projection {index + 1:02d}" for index in range(direction_costs.shape[1])
+        )
+        spectrum_plot = np.column_stack(
+            (direction_costs, directional_mean, smooth_tail, joint, family_total)
+        )
+        render_coherence_distribution(
+            spectrum_plot,
+            (
+                *direction_labels,
+                "Direction mean",
+                "Smooth CVaR",
+                "Joint total",
+                "Family total",
+            ),
+            (
+                *("detail" for _ in direction_labels),
+                "detail",
+                "detail",
+                "component_total",
+                "family_total",
+            ),
+            figures["direction_spectrum"],
+            title="Frozen projection direction spectrum · marginal-copula v2",
+            subtitle=subtitle,
+            ylabel=r"Squared copula-space discrepancy ($W_2^2$)",
+            scale=plot_scale(spectrum_plot),
+        )
+        tail_plot = np.column_stack(
+            (hard_tail, smooth_tail, exact_copula, joint, family_total)
+        )
+        render_coherence_distribution(
+            tail_plot,
+            (
+                "Hard empirical CVaR",
+                "Identity-calibrated smooth CVaR",
+                "Exact midrank diagnostic",
+                "Joint total",
+                "Family total",
+            ),
+            ("detail", "detail", "detail", "component_total", "family_total"),
+            figures["tail_diagnostics"],
+            title="Tail and exact-rank diagnostics · marginal-copula v2",
+            subtitle=subtitle,
+            ylabel=r"Squared copula-space discrepancy ($W_2^2$)",
+            scale=plot_scale(tail_plot),
+        )
+
+        extra_output = None
+        if self.extra_view:
+            extra_output = self.render_extra(
+                destination / "global_distribution_extra",
+                split=split,
+                checkpoint_label=checkpoint_label,
+                run_label=run_label,
+            )
+
+        cross_settings = self.config.get("components", {}).get("cross", {})
+        statistics = {
+            "marginal_per_field_w2": {
+                name: _finite_summary(marginal[:, index])
+                for index, name in enumerate(self.field_names)
+            },
+            "joint_copula_smooth_cvar": _finite_summary(joint),
+            "mean_directional_w2": _finite_summary(directional_mean),
+            "hard_empirical_cvar_diagnostic": _finite_summary(hard_tail),
+            "identity_calibrated_smooth_cvar": _finite_summary(smooth_tail),
+            "exact_midranks_projected_w2_diagnostic": _finite_summary(exact_copula),
+            "eta": _finite_summary(eta),
+            "eta_residual": _finite_summary(eta_residual),
+            "per_direction_w2": {
+                f"projection_{index + 1:02d}": _finite_summary(direction_costs[:, index])
+                for index in range(direction_costs.shape[1])
+            },
+            "effective_direction_weights": {
+                f"projection_{index + 1:02d}": _finite_summary(direction_weights[:, index])
+                for index in range(direction_weights.shape[1])
+            },
+            "weighted_component_totals": {
+                name: _finite_summary(component_totals[:, index])
+                for index, name in enumerate(("marginal", "joint_copula"))
+            },
+            "family_total": _finite_summary(family_total),
+        }
+        if pairwise_enabled:
+            statistics["pairwise_raw_state_swd_diagnostic"] = {
+                label: _finite_summary(pairwise_raw[:, index])
+                for index, label in enumerate(self.pair_labels)
+            }
+            statistics["pairwise_soft_copula_swd_diagnostic"] = {
+                label: _finite_summary(pairwise_soft[:, index])
+                for index, label in enumerate(self.pair_labels)
+            }
+            statistics["pairwise_exact_midranks_swd_diagnostic"] = {
+                label: _finite_summary(pairwise_exact[:, index])
+                for index, label in enumerate(self.pair_labels)
+            }
+
+        artifact_provenance = dict(self.family_artifact_provenance)
+        report = {
+            "family": "global_distribution",
+            "definition": "marginal_copula_v2",
+            "metric": "paired_reconstruction_to_ground_truth_marginal_w2_and_copula_projection_discrepancy",
+            "split": split,
+            "sample_count": len(self.sample_ids),
+            "sample_ids": list(self.sample_ids),
+            "target_use": self.family.target_use,
+            "units": self.family.units,
+            "statistic_scale": scale,
+            "point_measure": "equal_mass_empirical_points_after_the_evaluator_fixed_query_subset",
+            "field_names": list(self.field_names),
+            "field_pairs": list(self.pair_labels),
+            "family_weight": float(self.family.family_weight),
+            "component_weights": dict(self.family.component_weights),
+            "settings": self.config,
+            "objective": {
+                "canonicalizer": {
+                    "name": "quantile_landmark_smooth_cdf",
+                    "method": "per_field_center_and_rms_scale_then_sigmoid_cdf_quadrature_over_empirical_quantile_landmarks",
+                    "landmarks": component.landmarks,
+                    "bandwidth": component.bandwidth,
+                    "scale_floor": component.scale_floor,
+                    "chunk_size": component.chunk_size,
+                    "approximation": "The differentiable smooth-CDF coordinates approximate ranks; they are not exactly invariant to nonlinear monotone transforms. Positive-affine normalization is approximate when the configured scale floor is material.",
+                    "generated_gradients": "Autograd follows generated centering, RMS normalization, quantile landmarks, and sigmoid evaluations; reference coordinates are detached.",
+                },
+                "directional_discrepancy": "For each frozen direction, compute empirical one-dimensional squared W2 between generated and reference projections of the separately canonicalized multivariate point clouds.",
+                "mean_tail_mixture": {
+                    "formula": "L_joint = (1 - alpha) * mean_r(d_r) + alpha * smooth_CVaR_identity(d; rho, temperature)",
+                    "alpha": component.alpha,
+                    "rho": component.rho,
+                    "temperature": component.temperature,
+                    "temperature_policy": "fixed_configured_value; not source calibrated",
+                    "eta_solution": "Detached per-snapshot bisection solves mean_r(sigmoid((d_r - eta)/temperature)) approximately equal to rho; eta residual is reported.",
+                    "envelope_gradient": "Gradient flows through the softplus direction costs while eta is detached at the solved optimum.",
+                    "identity_calibration": "Subtract the smooth-CVaR value at an all-zero direction-cost vector so the smooth tail term is zero at identity.",
+                    "pairwise_double_counting": "The v2 training family contains marginal and joint terms only; pairwise scores are diagnostics and are not added to the family objective.",
+                },
+            },
+            "exact_rank_diagnostic": {
+                "definition": "Per-field empirical midranks with tied values assigned their average one-based rank, mapped to (rank - 0.5) / point_count; then frozen-direction projected W2.",
+                "gradient": "detached diagnostic; not part of the optimized loss",
+                "invariance": "Exactly invariant to strictly increasing transformations that preserve sample ordering and tie groups, subject to floating-point ordering.",
+            },
+            "projection_bank": {
+                "kind": "fixed_serialized_mixed_projection_bank",
+                "directions": int(direction_bank.shape[0]),
+                "dimension": int(direction_bank.shape[1]),
+                "include_axes": bool(cross_settings.get("include_axes", False)),
+                "qmc": bool(cross_settings.get("qmc", True)),
+                "seed": int(cross_settings.get("seed", 1234)),
+                "sha256": bank_sha256,
+                "artifact_restored": bool(artifact_provenance),
+            },
+            "pairwise_diagnostics": {
+                "enabled": pairwise_enabled,
+                "added_to_objective": False,
+                "values_available": pairwise_enabled,
+                "message": "Pairwise per-snapshot diagnostics are omitted unless cross.pairwise_diagnostics is true." if not pairwise_enabled else "Raw-state, smooth-copula, and exact-midrank pairwise SWD are diagnostics only.",
+                "projection_direction_sha256": pair_bank_sha256,
+            },
+            "family_artifact": artifact_provenance,
+            "statistics": statistics,
+            "artifacts": {
+                "metrics_csv": csv_path.name,
+                "metrics_payload": payload_path.name,
+                "figures": {name: path.name for name, path in figures.items()},
+                "vector_figures": {
+                    name: {fmt: path.with_suffix(f".{fmt}").name for fmt in ("pdf", "svg")}
+                    for name, path in figures.items()
+                },
+                "extra": extra_output,
+            },
+        }
+        report_path = destination / "report.json"
+        report_path.write_text(
+            json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        return {
+            "family": "global_distribution",
+            "definition": "marginal_copula_v2",
+            "directory": str(destination),
+            "report": str(report_path),
+            "figures": {name: str(path) for name, path in figures.items()},
+            "extra": extra_output,
+        }
+
 
 @dataclass
 class CrossSpectrumAccumulator:
@@ -1573,6 +2054,9 @@ class CrossSpectrumAccumulator:
     sample_ids: list[str] = field(default_factory=list)
     query_indices: torch.Tensor | None = None
     fixed_coordinates: torch.Tensor | None = None
+    run_dir: Path | None = None
+    family_artifact_sha256: str | None = None
+    family_artifact_provenance: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def build(
@@ -1586,7 +2070,27 @@ class CrossSpectrumAccumulator:
         )
         family = build_coherence_family(
             "cross_spectrum", settings, runtime.dataset.data_spec, runtime.dataset.normalizer
-        ).to(runtime.device)
+        )
+        run_dir_value = getattr(runtime, "run_dir", None)
+        if run_dir_value is None:
+            checkpoint_path = Path(runtime.checkpoint_path).resolve()
+            if checkpoint_path.parent.name == "checkpoints":
+                run_dir_value = checkpoint_path.parent.parent
+        run_dir = None if run_dir_value is None else Path(run_dir_value).resolve()
+        family_artifact_sha256 = None
+        family_artifact_provenance: dict[str, Any] = {}
+        if family.definition == "second_order_blocks_v4":
+            family_artifact_provenance = _restore_evaluation_family(
+                runtime, family, "cross_spectrum"
+            )
+            family_artifact_sha256 = family_artifact_provenance["artifact_sha256"]
+            if not family.calibrated_band_energies.numel():
+                raise ValueError(
+                    "second_order_blocks_v4 training artifact has no frozen calibration"
+                )
+            if family.units != "model_units":
+                raise ValueError("second_order_blocks_v4 evaluation requires fixed model units")
+        family = family.to(runtime.device)
         family.eval()
         coherence = runtime.config.get("coherence", {})
         compute = coherence.get("compute_budget", {}) if isinstance(coherence, Mapping) else {}
@@ -1608,6 +2112,9 @@ class CrossSpectrumAccumulator:
             aggregation=aggregation,
             ensemble_size=ensemble_size,
             ensemble_seed=int(runtime.seed),
+            run_dir=run_dir,
+            family_artifact_sha256=family_artifact_sha256,
+            family_artifact_provenance=family_artifact_provenance,
         )
 
     @property
@@ -1661,6 +2168,538 @@ class CrossSpectrumAccumulator:
         self.reference_coefficients.append(graph_fourier(reference, basis)[0].detach().cpu())
         self.sample_ids.append(sample_id)
 
+    def _finalize_second_order_v4(
+        self,
+        output_root: str | Path,
+        *,
+        split: str,
+        checkpoint_label: str,
+        run_label: str,
+    ) -> dict[str, Any]:
+        """Write versioned signed covariance-block diagnostics for v4 only."""
+        from ..coherence.families.cross_spectrum.covariance_blocks import (
+            LinearCoefficientCovarianceAccumulator,
+            covariance_band_energies,
+            linear_coefficient_covariance,
+            second_order_covariance_block_losses,
+        )
+
+        if len(self.sample_ids) < self.family.required_batch_size:
+            raise ValueError(
+                f"cross-spectrum evaluation requires at least {self.family.required_batch_size} "
+                "selected snapshots"
+            )
+        if self.query_indices is None:
+            raise RuntimeError("cross-spectrum query indices are unavailable")
+        if not self.family.calibrated_band_energies.numel():
+            raise ValueError("second_order_blocks_v4 requires restored frozen calibration")
+        if self.family.definition != "second_order_blocks_v4":
+            raise RuntimeError("v4 covariance evaluator called for a legacy family")
+
+        destination = Path(output_root) / "coherence" / "cross_spectrum"
+        destination.mkdir(parents=True, exist_ok=True)
+        generated = torch.stack(self.generated_coefficients)
+        reference = torch.stack(self.reference_coefficients)
+        selected_count = len(self.sample_ids)
+        band_ids = self.family.band_ids.detach().cpu()
+        calibration = self.family.calibrated_band_energies.detach().cpu()
+
+        order = np.random.default_rng(self.ensemble_seed).permutation(selected_count)
+        ordered_generated = generated[torch.as_tensor(order, dtype=torch.long)]
+        ordered_reference = reference[torch.as_tensor(order, dtype=torch.long)]
+        ordered_sample_ids = [self.sample_ids[int(index)] for index in order]
+        aligned_count = selected_count // self.ensemble_size
+        if self.aggregation == "training_aligned" and aligned_count < 1:
+            raise ValueError(
+                "training-aligned cross-spectrum evaluation requires at least "
+                f"{self.ensemble_size} selected snapshots; received {selected_count}"
+            )
+        aligned_used_count = aligned_count * self.ensemble_size
+        if aligned_used_count < self.family.required_batch_size and self.aggregation == "training_aligned":
+            raise ValueError("training-aligned covariance ensembles are below the v4 minimum size")
+
+        def evaluate_group(
+            generated_group: torch.Tensor,
+            reference_group: torch.Tensor,
+            sample_ids: Sequence[str],
+            ensemble_index: int,
+            covariances: tuple[torch.Tensor, torch.Tensor] | None = None,
+        ) -> dict[str, Any]:
+            generated_covariance, reference_covariance = (
+                (None, None) if covariances is None else covariances
+            )
+            result = second_order_covariance_block_losses(
+                generated_group,
+                reference_group,
+                band_ids,
+                self.family.pairs,
+                relative_floor=self.family.relative_floor,
+                absolute_floor=self.family.absolute_floor,
+                minimum_reference_band_fraction=self.family.minimum_reference_band_fraction,
+                include_block_values=True,
+                calibration_reference_energies=calibration,
+                calibration_ensemble_size=self.family.calibration_ensemble_size,
+                generated_covariance=generated_covariance,
+                reference_covariance=reference_covariance,
+            )
+            diagnostics = result.diagnostics
+            covariance_generated = (
+                linear_coefficient_covariance(generated_group)
+                if generated_covariance is None
+                else generated_covariance
+            )
+            covariance_reference = (
+                linear_coefficient_covariance(reference_group)
+                if reference_covariance is None
+                else reference_covariance
+            )
+            energy_generated = covariance_band_energies(covariance_generated, band_ids)
+            energy_reference = covariance_band_energies(covariance_reference, band_ids)
+
+            def fractions(energy: torch.Tensor) -> torch.Tensor:
+                totals = energy.sum(dim=0, keepdim=True)
+                return torch.where(
+                    totals > 0,
+                    energy / totals.clamp_min(torch.finfo(energy.dtype).tiny),
+                    torch.zeros_like(energy),
+                )
+
+            return {
+                "ensemble_index": ensemble_index,
+                "sample_count": int(generated_group.shape[0]),
+                "sample_ids": list(sample_ids),
+                "same_frequency_raw_loss": float(result.same_frequency.detach()),
+                "cross_frequency_raw_loss": float(result.cross_frequency.detach()),
+                "covariance_estimator": (
+                    "mergeable_sufficient_statistics"
+                    if covariances is not None
+                    else "centered_coefficients_within_training_aligned_ensemble"
+                ),
+                "diagnostics": diagnostics,
+                "reference_energy_fractions": fractions(energy_reference).cpu().tolist(),
+                "generated_energy_fractions": fractions(energy_generated).cpu().tolist(),
+            }
+
+        generated_pooled_statistics = LinearCoefficientCovarianceAccumulator()
+        reference_pooled_statistics = LinearCoefficientCovarianceAccumulator()
+        generated_pooled_statistics.update(generated)
+        reference_pooled_statistics.update(reference)
+        pooled_covariances = (
+            generated_pooled_statistics.covariance(),
+            reference_pooled_statistics.covariance(),
+        )
+        pooled_record = evaluate_group(
+            generated,
+            reference,
+            self.sample_ids,
+            0,
+            pooled_covariances,
+        )
+        aligned_records: list[dict[str, Any]] = []
+        for ensemble_index in range(aligned_count):
+            start = ensemble_index * self.ensemble_size
+            stop = start + self.ensemble_size
+            aligned_records.append(
+                evaluate_group(
+                    ordered_generated[start:stop],
+                    ordered_reference[start:stop],
+                    ordered_sample_ids[start:stop],
+                    ensemble_index,
+                )
+            )
+        aligned_dropped_ids = ordered_sample_ids[aligned_used_count:]
+
+        def summarize_records(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+            component_stats: dict[str, Any] = {}
+            for component, loss_key, block_key in (
+                ("same_frequency", "same_frequency_raw_loss", "same_frequency_blocks"),
+                ("cross_frequency", "cross_frequency_raw_loss", "cross_frequency_blocks"),
+            ):
+                values = np.asarray([float(record[loss_key]) for record in records])
+                per_pair_values: dict[str, list[float]] = {
+                    label: [] for label in self.pair_labels
+                }
+                for record in records:
+                    grouped: dict[str, list[float]] = {
+                        label: [] for label in self.pair_labels
+                    }
+                    for block in record["diagnostics"][block_key]:
+                        pair_index = tuple(int(value) for value in block["fields"])
+                        label = self.pair_labels[self.family.pairs.index(pair_index)]
+                        grouped[label].append(float(block["frobenius_squared"]))
+                    for label, block_values in grouped.items():
+                        if block_values:
+                            per_pair_values[label].append(float(np.mean(block_values)))
+                component_stats[component] = {
+                    "raw_block_loss_mean": float(values.mean()),
+                    "raw_block_loss_sample_sd": (
+                        float(values.std(ddof=1)) if values.size > 1 else 0.0
+                    ),
+                    "raw_block_loss_by_ensemble": values.tolist(),
+                    "per_field_pair": {
+                        label: {
+                            "raw_block_loss_mean": (
+                                float(np.mean(pair_values)) if pair_values else None
+                            ),
+                            "raw_block_loss_sample_sd": (
+                                float(np.std(pair_values, ddof=1))
+                                if len(pair_values) > 1
+                                else (0.0 if pair_values else None)
+                            ),
+                            "ensemble_values": pair_values,
+                        }
+                        for label, pair_values in per_pair_values.items()
+                    },
+                }
+            weighted = sum(
+                float(self.family.component_weights[key])
+                * component_stats[key]["raw_block_loss_mean"]
+                for key in component_stats
+            )
+            return {
+                "ensemble_count": len(records),
+                "sample_count": sum(int(record["sample_count"]) for record in records),
+                "sample_ids_by_ensemble": [record["sample_ids"] for record in records],
+                "components": component_stats,
+                "weighted_raw_family_loss": float(weighted),
+                "stored_signed_block_records": len(records),
+            }
+
+        reports = {
+            "pooled": summarize_records((pooled_record,)),
+            "training_aligned": summarize_records(aligned_records)
+            if aligned_records
+            else {
+                "ensemble_count": 0,
+                "sample_count": 0,
+                "sample_ids_by_ensemble": [],
+                "components": {},
+                "weighted_raw_family_loss": None,
+                "stored_signed_block_records": 0,
+                "unavailable_reason": (
+                    f"selected sample count {selected_count} is smaller than "
+                    f"configured ensemble size {self.ensemble_size}"
+                ),
+            },
+        }
+        reports["pooled"].update(
+            grouping_policy="single_centered_covariance_over_all_selected_snapshots",
+            ensemble_size=selected_count,
+            selected_order_sample_ids=list(self.sample_ids),
+        )
+        reports["training_aligned"].update(
+            grouping_policy="seeded_permutation_then_complete_training_batch_chunks",
+            grouping_seed=self.ensemble_seed,
+            configured_ensemble_size=self.ensemble_size,
+            dropped_sample_ids=aligned_dropped_ids,
+        )
+        primary_key = self.aggregation
+        primary_records = (pooled_record,) if primary_key == "pooled" else aligned_records
+        primary_report = reports[primary_key]
+        if not primary_records:
+            raise ValueError("no complete training-aligned covariance ensemble is available")
+
+        block_payload = {
+            "definition": "second_order_blocks_v4",
+            "field_names": list(self.family.field_names),
+            "band_names": list(self.family.band_names),
+            "basis_sha256": self.family.basis_sha256,
+            "calibration_sha256": self.family.calibration_sha256,
+            "calibration_ensemble_size": self.family.calibration_ensemble_size,
+            "calibration_source": "frozen_training_reference_panel",
+            "primary_aggregation": primary_key,
+            "reports": {
+                "pooled": {"summary": reports["pooled"], "ensembles": [pooled_record]},
+                "training_aligned": {
+                    "summary": reports["training_aligned"],
+                    "ensembles": aligned_records,
+                    "dropped_sample_ids": aligned_dropped_ids,
+                },
+            },
+        }
+        blocks_json = destination / "covariance_blocks_v4.json"
+        blocks_json.write_text(
+            json.dumps(block_payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+
+        csv_path = destination / "covariance_metrics_v4.csv"
+        with csv_path.open("w", encoding="utf-8", newline="") as stream:
+            writer = csv.writer(stream)
+            writer.writerow(
+                (
+                    "definition",
+                    "aggregation",
+                    "ensemble_index",
+                    "sample_ids_json",
+                    "component",
+                    "field_pair",
+                    "left_band",
+                    "right_band",
+                    "frobenius_squared_difference",
+                    "reference_energy_fraction_left",
+                    "reference_energy_fraction_right",
+                    "shared_floor",
+                )
+            )
+            for aggregation_name, records in (
+                ("pooled", (pooled_record,)),
+                ("training_aligned", aligned_records),
+            ):
+                for record in records:
+                    for component, block_key in (
+                        ("same_frequency", "same_frequency_blocks"),
+                        ("cross_frequency", "cross_frequency_blocks"),
+                    ):
+                        for block in record["diagnostics"][block_key]:
+                            pair_index = tuple(int(value) for value in block["fields"])
+                            pair_label = self.pair_labels[self.family.pairs.index(pair_index)]
+                            left_band, right_band = (
+                                int(value) for value in block["bands"]
+                            )
+                            fractions = block["reference_energy_fractions"]
+                            writer.writerow(
+                                (
+                                    "second_order_blocks_v4",
+                                    aggregation_name,
+                                    record["ensemble_index"],
+                                    json.dumps(record["sample_ids"]),
+                                    component,
+                                    pair_label,
+                                    self.family.band_names[left_band],
+                                    self.family.band_names[right_band],
+                                    block["frobenius_squared"],
+                                    fractions[0],
+                                    fractions[1],
+                                    block["shared_floor"],
+                                )
+                            )
+
+        figures: dict[str, Path] = {}
+        for component, value_key in (
+            ("same_frequency", "raw_block_loss_mean"),
+            ("cross_frequency", "raw_block_loss_mean"),
+        ):
+            pair_stats = primary_report["components"][component]["per_field_pair"]
+            labels = list(pair_stats)
+            values = np.asarray(
+                [0.0 if pair_stats[label][value_key] is None else pair_stats[label][value_key]
+                 for label in labels],
+                dtype=np.float64,
+            )
+            spreads = np.asarray(
+                [0.0 if pair_stats[label]["raw_block_loss_sample_sd"] is None
+                 else pair_stats[label]["raw_block_loss_sample_sd"] for label in labels],
+                dtype=np.float64,
+            )
+            import matplotlib
+
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+
+            figure, axis = plt.subplots(figsize=(7.4, max(3.8, 0.42 * len(labels) + 1.8)))
+            figure.patch.set_facecolor("white")
+            axis.set_facecolor("white")
+            positions = np.arange(len(labels))
+            axis.barh(positions, values, xerr=spreads, color="#28769B", capsize=3)
+            axis.set_yticks(positions, labels)
+            axis.invert_yaxis()
+            axis.set_xlabel("Mean squared Frobenius covariance-block difference")
+            axis.set_title(
+                f"{component.replace('_', ' ').title()} covariance blocks · "
+                f"{primary_key.replace('_', ' ')}"
+            )
+            axis.grid(axis="x", color="#DCE3E8", linewidth=0.65, zorder=0)
+            axis.set_axisbelow(True)
+            figure.tight_layout()
+            figures[component] = _save_publication_figure(
+                figure,
+                destination / f"{component}_covariance_block_loss_v4.png",
+                dpi=300,
+            )
+            plt.close(figure)
+
+        profile_reference = np.asarray(
+            [record["reference_energy_fractions"] for record in primary_records],
+            dtype=np.float64,
+        )
+        profile_generated = np.asarray(
+            [record["generated_energy_fractions"] for record in primary_records],
+            dtype=np.float64,
+        )
+        profile_reference_mean = profile_reference.mean(axis=0)
+        profile_generated_mean = profile_generated.mean(axis=0)
+        profile_reference_std = (
+            profile_reference.std(axis=0, ddof=1)
+            if len(primary_records) > 1
+            else np.zeros_like(profile_reference_mean)
+        )
+        profile_generated_std = (
+            profile_generated.std(axis=0, ddof=1)
+            if len(primary_records) > 1
+            else np.zeros_like(profile_generated_mean)
+        )
+        profile_figure = destination / "covariance_band_energy_profile_v4.png"
+        render_cross_spectrum_band_profiles(
+            profile_reference_mean,
+            profile_generated_mean,
+            self.family.band_names,
+            self.family.field_names,
+            profile_figure,
+            reference_std=profile_reference_std,
+            reconstruction_std=profile_generated_std,
+            title="Centered covariance energy across graph bands",
+            subtitle=(
+                f"{split} · {checkpoint_label}.pt · {primary_key.replace('_', ' ')} "
+                "· covariance trace fractions"
+            ),
+        )
+        figures["covariance_band_energy_profile"] = profile_figure
+
+        profile_csv = destination / "covariance_band_energy_profile_v4.csv"
+        with profile_csv.open("w", encoding="utf-8", newline="") as stream:
+            writer = csv.writer(stream)
+            writer.writerow(
+                (
+                    "definition",
+                    "aggregation",
+                    "field",
+                    "band",
+                    "reference_covariance_energy_fraction_mean",
+                    "reference_covariance_energy_fraction_sd",
+                    "generated_covariance_energy_fraction_mean",
+                    "generated_covariance_energy_fraction_sd",
+                )
+            )
+            for field_index, field_name in enumerate(self.family.field_names):
+                for band_index, band_name in enumerate(self.family.band_names):
+                    writer.writerow(
+                        (
+                            "second_order_blocks_v4",
+                            primary_key,
+                            field_name,
+                            band_name,
+                            profile_reference_mean[band_index, field_index],
+                            profile_reference_std[band_index, field_index],
+                            profile_generated_mean[band_index, field_index],
+                            profile_generated_std[band_index, field_index],
+                        )
+                    )
+
+        statistics = {
+            component: {
+                "raw_block_loss_mean": float(primary_report["components"][component]["raw_block_loss_mean"]),
+                "raw_block_loss_sample_sd": float(primary_report["components"][component]["raw_block_loss_sample_sd"]),
+                "per_field_pair": primary_report["components"][component]["per_field_pair"],
+            }
+            for component in ("same_frequency", "cross_frequency")
+        }
+        statistics["family_total"] = {
+            "weighted_raw_loss": float(primary_report["weighted_raw_family_loss"]),
+            "definition": "weighted sum of same/cross-frequency squared Frobenius covariance-block losses",
+        }
+        report = {
+            "family": "cross_spectrum",
+            "version": self.family.version,
+            "definition": self.family.definition,
+            "metric": "paired_centered_linear_graph_coefficient_covariance_block_difference",
+            "statistic_scale": "squared_frobenius_difference_in_fixed_model_units",
+            "components": {
+                "same_frequency": {
+                    "definition": "signed same-band cross-field covariance block difference",
+                    "path": "cross_spectrum.same_frequency.second_order_covariance_blocks",
+                },
+                "cross_frequency": {
+                    "definition": "signed cross-band cross-field covariance block difference",
+                    "path": "cross_spectrum.cross_frequency.second_order_covariance_blocks",
+                },
+            },
+            "covariance_estimator": {
+                "definition": "centered sample covariance of LINEAR graph coefficients",
+                "denominator": "B-1",
+                "pooled_path": "mergeable coefficient sums and cross-products",
+                "training_aligned_path": "centered coefficients per preserved ensemble",
+                "same_band_and_cross_band_blocks": "signed real or complex covariance",
+                "band_field_energy": "E[l,i] = sum over modes k in band l of Re(C[k,k,i,i])",
+                "eligibility": "frozen_training_fraction[l,i] and frozen_training_fraction[m,j] are each >= minimum_reference_band_fraction",
+                "shared_floor": "absolute_floor + relative_floor * sqrt(E_cal[l,i] * E_cal[m,j])",
+                "reference_denominator": "sqrt(max(E_ref[l,i], tiny) * max(E_ref[m,j], tiny)) + shared_floor",
+                "generated_denominator": "sqrt(max(E_gen[l,i], relative_floor*E_cal[l,i], tiny) * max(E_gen[m,j], relative_floor*E_cal[m,j], tiny)) + shared_floor",
+                "block_loss": "sum(abs(generated_normalized_block-reference_normalized_block)^2)",
+                "block_reduction": "mean over reference-eligible band/pair blocks",
+                "normalization": "frozen-reference eligibility and floors, current paired reference covariance target, positive calibration-derived generated-energy clamp",
+                "mask_source": "frozen_training_reference_band_energy_fractions",
+            },
+            "split": split,
+            "run_label": run_label,
+            "selected_sample_count": selected_count,
+            "selected_sample_ids": list(self.sample_ids),
+            "aggregation": primary_key,
+            "covariance_reports": reports,
+            "target_use": "paired_supervised",
+            "units": self.family.units,
+            "field_names": list(self.family.field_names),
+            "field_pairs": list(self.pair_labels),
+            "bands": list(self.family.band_names),
+            "family_weight": float(self.family.family_weight),
+            "component_weights": dict(self.family.component_weights),
+            "calibration": {
+                "source": "frozen_training_reference_panel",
+                "sha256": self.family.calibration_sha256,
+                "ensemble_size": self.family.calibration_ensemble_size,
+                "band_energies": calibration.tolist(),
+                "relative_floor": self.family.relative_floor,
+                "absolute_floor": self.family.absolute_floor,
+                "minimum_reference_band_fraction": self.family.minimum_reference_band_fraction,
+            },
+            "training_artifact": {
+                **self.family_artifact_provenance,
+                "evaluation_run_dir": None if self.run_dir is None else str(self.run_dir),
+                "family_artifact_sha256": self.family_artifact_sha256,
+                "basis_sha256": self.family.basis_sha256,
+                "geometry_sha256": self.family.geometry_sha256,
+            },
+            "graph": {
+                "query_policy": "fixed_shared",
+                "query_seed": self.query_seed,
+                "query_point_count": int(self.query_indices.numel()),
+                "query_indices": self.query_indices.detach().cpu().tolist(),
+                "k_neighbors": self.family.k_neighbors,
+                "resolved_sigma": self.family.resolved_sigma,
+                "num_modes": int(self.family.eigenvalues.numel()),
+                "eigenvalues": self.family.eigenvalues.detach().cpu().tolist(),
+                "band_intervals": self.family.config["graph"]["band_intervals"],
+                "band_mode_ids": self.family.band_ids.detach().cpu().tolist(),
+            },
+            "settings": self.config,
+            "statistics": statistics,
+            "artifacts": {
+                "covariance_metrics_csv": csv_path.name,
+                "signed_covariance_blocks_json": blocks_json.name,
+                "covariance_band_energy_profile_csv": profile_csv.name,
+                "figures": {name: path.name for name, path in figures.items()},
+                "vector_figures": {
+                    name: {
+                        "pdf": path.with_suffix(".pdf").name,
+                        "svg": path.with_suffix(".svg").name,
+                    }
+                    for name, path in figures.items()
+                },
+            },
+        }
+        report_path = destination / "report.json"
+        report_path.write_text(
+            json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        return {
+            "family": "cross_spectrum",
+            "definition": "second_order_blocks_v4",
+            "directory": str(destination),
+            "report": str(report_path),
+            "covariance_metrics_csv": str(csv_path),
+            "signed_covariance_blocks_json": str(blocks_json),
+            "figures": {name: str(path) for name, path in figures.items()},
+        }
+
     def finalize(
         self,
         output_root: str | Path,
@@ -1670,6 +2709,13 @@ class CrossSpectrumAccumulator:
         run_label: str,
         scale: str,
     ) -> dict[str, Any]:
+        if getattr(self.family, "definition", "legacy_v3") == "second_order_blocks_v4":
+            return self._finalize_second_order_v4(
+                output_root,
+                split=split,
+                checkpoint_label=checkpoint_label,
+                run_label=run_label,
+            )
         del scale  # Cross-spectrum scores always use their natural bounded linear scale.
         if len(self.sample_ids) < self.family.required_batch_size:
             raise ValueError(
