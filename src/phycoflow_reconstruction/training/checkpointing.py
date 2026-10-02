@@ -254,6 +254,15 @@ class PeriodicCheckpointManager:
                 if (bool(panel_report["eligible"]) and math.isfinite(metric_value)
                         and entry in self.feasible_archive):
                     self.store.save_checkpoint(f"feasible_{global_step:07d}", checkpoint)
+        if self.selection_metric == "coherence_with_fidelity":
+            # Recovery and milestone saves need the committed selector even
+            # between fixed-panel audits. The manifest may describe a newer
+            # panel after a crash and cannot replace this checkpoint state.
+            checkpoint["coherence_selector_state"] = {
+                "feasible_archive": self.feasible_archive,
+                "best_value": self.best_value,
+                "best_fidelity_value": self.best_fidelity_value,
+            }
         last_path = self.store.save_checkpoint("last", checkpoint) if last_due else None
         if last_path is not None and self.selection_metric == "coherence_with_fidelity":
             # Retain the previous committed archive until last.pt is atomic.

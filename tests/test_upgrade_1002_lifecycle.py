@@ -146,3 +146,50 @@ def test_selector_recovery_uses_committed_archive_and_retains_previous_files(tmp
     assert manifest["checkpoint_hashes"]["best"] == file_sha256(
         store.run_dir / "checkpoints/best.pt"
     )
+
+
+def test_off_panel_recovery_and_milestone_preserve_committed_selector(tmp_path):
+    config = {"stage": "post_training", "checkpointing": {
+        "every_epochs": 1, "validation_every_epochs": 5, "epochs": [1],
+        "selection_metric": "coherence_with_fidelity"}}
+    store = RunStore.create(tmp_path, "off_panel_recovery", config)
+    manager = PeriodicCheckpointManager(config, store=store, steps_per_epoch=1)
+    model = torch.nn.Linear(1, 1)
+    panels = []
+
+    class Preview:
+        enabled = False
+        def due(self, step):
+            return False
+        def update(self, *args, **kwargs):
+            return None
+
+    def panel(step):
+        panels.append(step)
+        return {"eligible": True, "metric": 1. / (step + 1), "mse": 1.,
+                "metrics": {}, "family_source_normalized_scores": {"A": 1.}}
+
+    manager.panel_evaluator = panel
+    manager.save({"model": model.state_dict()}, model=model, preview=Preview(),
+                 global_step=0, fallback_metric=0., force=True)
+    selected_hash = file_sha256(store.run_dir / "checkpoints/best.pt")
+    manager.save({"model": model.state_dict()}, model=model, preview=Preview(),
+                 global_step=1, fallback_metric=.5)
+    assert panels == [0]
+    committed = store.load_checkpoint("last")
+    assert committed["global_step"] == 1
+    milestone = store.load_checkpoint("epoch_001")
+    assert milestone["coherence_selector_state"] == committed["coherence_selector_state"]
+    assert committed["coherence_selector_state"]["feasible_archive"][0]["step"] == 0
+    assert file_sha256(store.run_dir / "checkpoints/best.pt") == selected_hash
+    # A newer manifest/panel must not cause recovery from step one to select
+    # weights or an archive that did not exist in the committed checkpoint.
+    manager.save({"model": model.state_dict()}, model=model, preview=Preview(),
+                 global_step=5, fallback_metric=.1)
+    recovered = PeriodicCheckpointManager(config, store=store, steps_per_epoch=1)
+    recovered.restore_coherence_selector(committed)
+    assert recovered.best_value == 1.
+    assert [item["step"] for item in recovered.feasible_archive] == [0]
+    assert store.load_checkpoint("best")["global_step"] == 0
+    with pytest.raises(TypeError, match="missing selector state"):
+        recovered.restore_coherence_selector({"global_step": 1})
