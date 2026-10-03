@@ -89,6 +89,7 @@ def _plot_preview(
     field_units: tuple[str, ...] | None = None,
     coordinate_space: str = "normalized",
     sample_id: str | None = None,
+    formats: tuple[str, ...] = ("png", "svg", "pdf"),
 ) -> tuple[Path, ...]:
     import matplotlib
 
@@ -327,7 +328,9 @@ def _plot_preview(
         figure.supylabel(axis_labels[1], x=0.007, fontsize=9.0)
     sample_label = f" — {sample_id}" if sample_id else ""
     figure.suptitle(f"Reconstruction preview — epoch {epoch:g}{sample_label}", fontsize=11.5)
-    outputs = tuple(path_stem.with_suffix(suffix) for suffix in (".png", ".svg", ".pdf"))
+    if not formats or any(fmt not in {"png", "svg", "pdf"} for fmt in formats):
+        raise ValueError("preview formats must be png, svg or pdf")
+    outputs = tuple(path_stem.with_suffix(f".{fmt}") for fmt in formats)
     path_stem.parent.mkdir(parents=True, exist_ok=True)
     for output in outputs:
         figure.savefig(output, dpi=300, bbox_inches="tight")
@@ -340,6 +343,7 @@ def render_preview_payload(
     *,
     output_stem: str | Path | None = None,
     epoch: float = 0.0,
+    formats: tuple[str, ...] = ("png", "svg", "pdf"),
 ) -> tuple[Path, ...]:
     """Re-render a saved training preview without model inference."""
     payload_path = Path(payload_path)
@@ -373,6 +377,7 @@ def render_preview_payload(
             field_units=field_units,
             coordinate_space=coordinate_space,
             sample_id=sample_id,
+            formats=formats,
         )
 
 
@@ -393,6 +398,9 @@ class TrainingReconstructionPreview:
         self.steps_per_epoch = max(1, int(steps_per_epoch))
         self.device = device
         self.settings = settings
+        self.formats = ("pdf",) if config.get("runtime", {}).get("plot_format") == "pdf" else (
+            "png", "svg", "pdf"
+        )
         self.dataset = None
         self.batch = None
         self.field_units: tuple[str, ...] = ()
@@ -563,6 +571,7 @@ class TrainingReconstructionPreview:
             npz_path,
             output_stem=self.output_dir / "latest_reconstruction",
             epoch=epoch,
+            formats=self.formats,
         )
         metrics = reconstruction_metrics(
             reconstruction.prediction,

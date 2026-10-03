@@ -301,6 +301,7 @@ def extract_adaptive_coherence_history(
     selected: Mapping[str, Any] | None = None,
     after: Mapping[str, Any] | None = None,
     config: Mapping[str, Any] | None = None,
+    steps_per_epoch: int | None = None,
 ) -> dict[str, Any]:
     """Extract adaptive fidelity and feasible-selector histories without a model.
 
@@ -309,6 +310,10 @@ def extract_adaptive_coherence_history(
     null, or non-finite diagnostics stay missing instead of becoming zero.
     """
     config = config or {}
+    epoch_axis = config.get("runtime", {}).get("plot_format") == "pdf"
+    if epoch_axis and (steps_per_epoch is None or steps_per_epoch <= 0):
+        raise ValueError("epoch reporting requires the saved steps_per_epoch mapping")
+    divisor = int(steps_per_epoch) if epoch_axis else 1
     checkpointing = config.get("checkpointing", {})
     controller_settings = config.get("fidelity_controller", {})
     if not isinstance(controller_settings, Mapping):
@@ -335,8 +340,10 @@ def extract_adaptive_coherence_history(
             for key in row
             if key.startswith("fidelity/") and key.endswith("/source_risk")
         }
-        field_names = tuple(sorted(telemetry_names - {"total"}))
+        field_names = tuple(sorted(telemetry_names - {"total", "native"}))
     constraints = ("total", *field_names)
+    if config.get("fidelity_controller", {}).get("native_loss_role") == "constraint":
+        constraints = (*constraints, "native")
 
     ordered_training = sorted(
         (row for row in training_rows if _finite_number(row.get("step")) is not None),
@@ -350,7 +357,7 @@ def extract_adaptive_coherence_history(
         if epoch is not None:
             epoch_by_step[step] = epoch
         # Rounded epoch indices can collapse separate training windows.
-        x_value = float(step)
+        x_value = float(step) / divisor
         fidelity = {}
         for name in constraints:
             prefix = f"fidelity/{name}/"
@@ -418,7 +425,7 @@ def extract_adaptive_coherence_history(
         validation_records.append(
             {
                 "step": step,
-                "x": float(step),
+                "x": float(step) / divisor,
                 "epoch": epoch,
                 "metric": _finite_number(row.get("metric")),
                 "eligible": bool(row.get("eligible", False)),
@@ -438,7 +445,7 @@ def extract_adaptive_coherence_history(
         selected_step = None if selected_step_value is None else int(selected_step_value)
         selected_summary = {
             "step": selected_step,
-            "x": None if selected_step is None else float(selected_step),
+            "x": None if selected_step is None else float(selected_step) / divisor,
             "eligible": bool(selected.get("eligible", False)),
             "metric": _finite_number(selected.get("metric")),
             "family_source_normalized_scores": _family_scores_from_row(
@@ -465,7 +472,7 @@ def extract_adaptive_coherence_history(
     return {
         "family_order": list(family_order),
         "constraints": list(constraints),
-        "x_label": "Optimizer updates (run step)",
+        "x_label": "Epoch" if epoch_axis else "Optimizer updates (run step)",
         "controller_settings": dict(controller_settings),
         "selector_settings": {
             "selection_metric": checkpointing.get("selection_metric"),
@@ -482,6 +489,7 @@ def extract_adaptive_coherence_history(
         "selected": selected_summary,
         "gradient_cosine_matrix": {
             "step": None if latest_cosine_record is None else latest_cosine_record["step"],
+            "x": None if latest_cosine_record is None else latest_cosine_record["x"],
             "families": list(family_order),
             "values": latest_matrix,
         },
@@ -879,7 +887,8 @@ def build_adaptive_coherence_figures(data: Mapping[str, Any], plt) -> dict[str, 
         step = matrix_data["step"]
         matrix_axis.set_title(
             "Family gradient-cosine matrix"
-            if step is None else f"Family gradient-cosine matrix · step {step}"
+            if step is None else f"Family gradient-cosine matrix · epoch {matrix_data['x']:g}"
+            if data["x_label"] == "Epoch" else f"Family gradient-cosine matrix · step {step}"
         )
     else:
         _empty_adaptive_axis(matrix_axis, "No configured family gradients")
@@ -995,6 +1004,8 @@ def render_adaptive_coherence_history(
         selected=selected,
         after=after,
         config=config,
+        steps_per_epoch=(read_json(run_dir / "run_manifest.json") or {}).get("steps_per_epoch")
+        if (run_dir / "run_manifest.json").is_file() else None,
     )
     if pyplot is None:
         try:
@@ -1016,7 +1027,8 @@ def render_adaptive_coherence_history(
     for name, figure in figures.items():
         stem = f"adaptive_{name}"
         paths = {}
-        for fmt in ("png", "pdf", "svg"):
+        for fmt in (("pdf",) if config.get("runtime", {}).get("plot_format") == "pdf"
+                    else ("png", "pdf", "svg")):
             path = destination / f"{stem}.{fmt}"
             figure.savefig(path, dpi=180 if fmt == "png" else None, format=fmt)
             paths[fmt] = path.name
@@ -1280,7 +1292,7 @@ def render_coherence_history(
     )
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_name(f".{destination.name}.tmp")
-    figure.savefig(temporary, dpi=180, format="png")
+    figure.savefig(temporary, dpi=180, format=destination.suffix.lstrip("."))
     pyplot.close(figure)
     os.replace(temporary, destination)
     return destination

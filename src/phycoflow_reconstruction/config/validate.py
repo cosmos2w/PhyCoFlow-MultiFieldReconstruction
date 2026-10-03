@@ -133,13 +133,19 @@ def _validate_covariance_block_settings(family, compute, evaluation):
 
 
 def _validate_adaptive_mode(config):
-    from ..training.fidelity_controller import FIDELITY_DEFAULTS, fidelity_settings
+    from ..training.fidelity_controller import (
+        ENDPOINT_VERSION,
+        FIDELITY_DEFAULTS,
+        FIDELITY_V2_DEFAULTS,
+        NATIVE_VERSION,
+        fidelity_settings,
+    )
 
     optimization = config["optimization"]
     policy = optimization.get("update_policy", "legacy")
     if policy not in {"legacy", "coherence_primal_dual"}:
         raise ValueError("unknown optimization.update_policy")
-    new_keys = {"coherence_gradient_method", "cagrad_alpha", "cagrad_rescale"}
+    new_keys = {"coherence_gradient_method", "cagrad_alpha", "cagrad_rescale", "coherence_direction_calibration"}
     if policy == "legacy":
         if "fidelity_controller" in config or new_keys & set(optimization):
             raise ValueError("fidelity controller/coherence combiner requires coherence_primal_dual")
@@ -156,15 +162,27 @@ def _validate_adaptive_mode(config):
         if term.get("enabled", name == "data_retention") or float(term.get("weight", 0)) != 0:
             raise ValueError("adaptive fidelity prohibits native/manual endpoint/source-anchor retention weights")
     settings = fidelity_settings(config)
-    _reject_unknown(config.get("fidelity_controller", {}), set(FIDELITY_DEFAULTS), "fidelity_controller")
+    _reject_unknown(config.get("fidelity_controller", {}), set(FIDELITY_DEFAULTS) | set(FIDELITY_V2_DEFAULTS), "fidelity_controller")
     if settings["enabled"] is not True or settings["risk"] != "endpoint_model_mse":
         raise ValueError("adaptive fidelity requires enabled endpoint_model_mse risk")
     if settings["source_weight_selection"] != "live" or settings["same_noise_source"] is not True:
         raise ValueError("adaptive fidelity requires matched live/live same-noise source")
     if config["model"].get("model_ema_eval", False):
         raise ValueError("adaptive fidelity rejects configured EMA/live mixing")
-    if settings["native_loss_role"] != "monitor":
-        raise ValueError("adaptive mode currently supports native_loss_role=monitor")
+    version = settings.get("version", ENDPOINT_VERSION)
+    if settings["native_loss_role"] != ("constraint" if version == NATIVE_VERSION else "monitor"):
+        raise ValueError("fidelity controller version/native_loss_role mismatch")
+    if version == NATIVE_VERSION:
+        _positive_number(settings["native_budget"], "fidelity_controller.native_budget", allow_zero=True)
+        if optimization.get("model_mode", "eval") != "eval":
+            raise ValueError("native constraints require matched LIVE/source inference mode")
+    elif "native_budget" in settings:
+        raise ValueError("native_budget requires endpoint_native_primal_dual_v2")
+    direction_policy = optimization.get("coherence_direction_calibration", "none")
+    if direction_policy not in {"none", "train_median_to_weighted_sum"}:
+        raise ValueError("invalid coherence_direction_calibration policy")
+    if direction_policy != "none" and config["coherence"].get("family_balance", {}).get("mode") != "initial_grad_norm":
+        raise ValueError("TRAIN direction calibration requires frozen initial_grad_norm family calibration")
     _reject_unknown(settings["anchor"], {"enabled"}, "fidelity_controller.anchor")
     if settings["anchor"].get("enabled", False):
         raise ValueError("adaptive anchor is not implemented; legacy source-anchor remains available")
@@ -177,6 +195,8 @@ def _validate_adaptive_mode(config):
         raise ValueError("fidelity EMA decay must be in [0,1)")
     for key in ("calibration_batches", "diagnostics_every_steps"):
         _positive_integer(settings[key], f"fidelity_controller.{key}")
+    if "calibration_seed" in settings:
+        _positive_integer(settings["calibration_seed"], "fidelity_controller.calibration_seed")
     if not config["objectives"]["coherence"].get("enabled", True):
         raise ValueError("adaptive mode requires active coherence")
     schedule = config["coherence"].get("schedule", {})
@@ -306,10 +326,13 @@ def _validate_common_sections(config: Mapping[str, Any]) -> None:
         "num_workers",
         "progress",
         "plot_every_steps",
+        "plot_format",
         "data_strategy",
         "vram_dataset_threshold_gb",
     }
     _reject_unknown(runtime, runtime_keys, "runtime")
+    if runtime.get("plot_format", "png") not in {"png", "pdf"}:
+        raise ValueError("runtime.plot_format must be png or pdf")
     if int(runtime.get("num_workers", 0)) < 0:
         raise ValueError("runtime.num_workers must be non-negative")
     if "progress" in runtime and not isinstance(runtime["progress"], bool):
@@ -346,9 +369,41 @@ def _validate_common_sections(config: Mapping[str, Any]) -> None:
             "sample_selection",
             "native_topology",
             "native_topology_audit",
+            "r2_protocol",
         },
         "evaluation",
     )
+    r2 = config.get("evaluation", {}).get("r2_protocol", {})
+    if not isinstance(r2, Mapping):
+        raise TypeError("evaluation.r2_protocol must be a mapping")
+    _reject_unknown(r2, {"enabled", "native_monitor_every_epochs", "native_train_count",
+                         "native_validation_count", "native_seeds", "previously_used_validation_indices"},
+                    "evaluation.r2_protocol")
+    if "enabled" in r2 and not isinstance(r2["enabled"], bool):
+        raise TypeError("evaluation.r2_protocol.enabled must be boolean")
+    if r2.get("enabled", False):
+        if config.get("stage") != "post_training" or "coherence" not in config:
+            raise ValueError("R2 protocol requires coherence post-training")
+        if config.get("evaluation", {}).get("split", "validation") != "validation":
+            raise ValueError("R2 protocol cannot select or monitor on test data")
+        if config.get("evaluation", {}).get("max_samples", 1) != 64:
+            raise ValueError("R2 selection uses exactly 64 snapshots in 16 strata")
+        if config["optimization"].get("model_mode", "eval") != "eval" or config["model"].get("model_ema_eval", False):
+            raise ValueError("R2 comparisons require LIVE/source inference mode")
+        _positive_integer(r2.get("native_monitor_every_epochs", 5), "r2 native_monitor_every_epochs")
+        for key in ("native_train_count", "native_validation_count"):
+            count = r2.get(key, 32)
+            _positive_integer(count, f"r2 {key}")
+            if count % 16 or (key == "native_validation_count" and count > 64):
+                raise ValueError("R2 native panel count must cover every one of 16 strata")
+        seeds = r2.get("native_seeds", [2027, 3027])
+        if not isinstance(seeds, list) or not seeds:
+            raise ValueError("R2 native seeds must be a nonempty fixed list")
+        for seed in seeds:
+            _positive_integer(seed, "R2 native seed")
+        used = r2.get("previously_used_validation_indices", [])
+        if not isinstance(used, list) or any(not isinstance(i, int) or isinstance(i, bool) or i < 0 for i in used) or len(set(used)) != len(used):
+            raise ValueError("R2 previous validation indices must be unique nonnegative integers")
     if config.get("evaluation", {}).get("sample_selection", "first") not in {"first", "uniform"}:
         raise ValueError("evaluation.sample_selection must be first or uniform")
     for key in ("max_samples", "query_points", "generation_steps"):
@@ -588,6 +643,7 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
                 "num_workers",
                 "progress",
                 "plot_every_steps",
+                "plot_format",
                 "data_strategy",
                 "vram_dataset_threshold_gb",
             },
@@ -992,6 +1048,7 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
             "coherence_gradient_method",
             "cagrad_alpha",
             "cagrad_rescale",
+            "coherence_direction_calibration",
         },
         "optimization",
     )
@@ -1215,6 +1272,7 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
             "num_workers",
             "progress",
             "plot_every_steps",
+            "plot_format",
             "data_strategy",
             "vram_dataset_threshold_gb",
         },
@@ -1232,6 +1290,7 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
             "sample_selection",
             "native_topology",
             "native_topology_audit",
+            "r2_protocol",
         },
         "evaluation",
     )
@@ -1297,15 +1356,18 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
         raise TypeError("evaluation.native_topology_audit must be a mapping")
     _reject_unknown(
         native_audit,
-        {"enabled", "every_steps", "max_samples", "seed"},
+        {"enabled", "every_steps", "every_epochs", "max_samples", "seed"},
         "evaluation.native_topology_audit",
     )
     if "enabled" in native_audit and not isinstance(native_audit["enabled"], bool):
         raise TypeError("evaluation.native_topology_audit.enabled must be boolean")
     if native_audit.get("enabled", False):
+        if "every_epochs" in native_audit and "every_steps" in native_audit:
+            raise ValueError("native topology audit must select one epoch or internal cadence")
+        cadence_key = "every_epochs" if "every_epochs" in native_audit else "every_steps"
         _positive_integer(
-            native_audit.get("every_steps", 0),
-            "evaluation.native_topology_audit.every_steps",
+            native_audit.get(cadence_key, 0),
+            f"evaluation.native_topology_audit.{cadence_key}",
         )
         _positive_integer(
             native_audit.get("max_samples", 4),
@@ -1338,9 +1400,15 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
             raise ValueError("native topology audit requires the fixed_shared saved-bank family policy")
         checkpointing = config.get("checkpointing", {})
         checkpoint_every = checkpointing.get("every_steps")
-        if not checkpointing.get("enabled", True) or checkpoint_every is None:
+        if cadence_key == "every_epochs":
+            checkpoint_epochs = checkpointing.get("every_epochs")
+            if not checkpointing.get("enabled", True) or (checkpoint_every is None and checkpoint_epochs is None):
+                raise ValueError("native topology audit requires periodic recoverable checkpoint saves")
+            if checkpoint_every is None and int(native_audit[cadence_key]) % int(checkpoint_epochs) != 0:
+                raise ValueError("native topology audit cadence must be a multiple of checkpointing.every_epochs")
+        elif not checkpointing.get("enabled", True) or checkpoint_every is None:
             raise ValueError("native topology audit requires enabled every_steps checkpoint saves")
-        if int(native_audit["every_steps"]) % int(checkpoint_every) != 0:
+        elif int(native_audit["every_steps"]) % int(checkpoint_every) != 0:
             raise ValueError(
                 "native topology audit cadence must be a multiple of checkpointing.every_steps"
             )

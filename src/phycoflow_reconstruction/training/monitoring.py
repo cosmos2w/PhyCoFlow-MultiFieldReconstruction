@@ -91,12 +91,16 @@ class TrainingMonitor:
         description: str,
         enabled: bool = True,
         plot_every_steps: int = 10,
+        plot_format: str = "png",
     ) -> None:
         self.run_dir = Path(run_dir)
         self.history_path = self.run_dir / "metrics" / "history.jsonl"
         self.validation_history_path = self.run_dir / "metrics" / "validation_history.jsonl"
-        self.plot_path = self.run_dir / "loss_history.png"
-        self.optimization_plot_path = self.run_dir / "optimization_diagnostics.png"
+        if plot_format not in {"png", "pdf"}:
+            raise ValueError("plot_format must be png or pdf")
+        self.plot_format = plot_format
+        self.plot_path = self.run_dir / f"loss_history.{plot_format}"
+        self.optimization_plot_path = self.run_dir / f"optimization_diagnostics.{plot_format}"
         self.final_step = int(final_step)
         self.configured_steps = int(configured_steps)
         self.steps_per_epoch = max(1, int(steps_per_epoch))
@@ -406,7 +410,7 @@ class TrainingMonitor:
         figure = self._build_loss_figure(plt)
         if figure is not None:
             temporary = self.plot_path.with_name(f".{self.plot_path.name}.tmp")
-            figure.savefig(temporary, dpi=180, format="png")
+            figure.savefig(temporary, dpi=180, format=self.plot_format)
             plt.close(figure)
             os.replace(temporary, self.plot_path)
         optimization_figure = self._build_optimization_figure(plt)
@@ -414,15 +418,21 @@ class TrainingMonitor:
             temporary = self.optimization_plot_path.with_name(
                 f".{self.optimization_plot_path.name}.tmp"
             )
-            optimization_figure.savefig(temporary, dpi=180, format="png")
+            optimization_figure.savefig(temporary, dpi=180, format=self.plot_format)
             plt.close(optimization_figure)
             os.replace(temporary, self.optimization_plot_path)
         from .coherence_history import render_coherence_history
 
-        render_coherence_history(self.run_dir, description=self.description, pyplot=plt)
+        render_coherence_history(
+            self.run_dir, description=self.description, pyplot=plt,
+            output_path=self.run_dir / f"coherence_history.{self.plot_format}",
+        )
         from .fidelity_history import render_fidelity_history
 
-        render_fidelity_history(self.run_dir, pyplot=plt)
+        render_fidelity_history(
+            self.run_dir, pyplot=plt,
+            output_path=self.run_dir / f"checkpoint_fidelity.{self.plot_format}",
+        )
 
     def _shown_loss_series(self, key: str) -> tuple[list[float], list[float]]:
         values = self._values[key]

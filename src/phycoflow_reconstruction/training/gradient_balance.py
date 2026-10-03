@@ -260,6 +260,8 @@ def coherence_primal_dual_update(
     constraint_losses: dict[str, torch.Tensor] | None = None,
     cagrad_alpha: float = 0.5,
     cagrad_rescale: int = 1,
+    native_loss: torch.Tensor | None = None,
+    coherence_direction_scale: float = 1.0,
 ) -> dict[str, Any]:
     """Assign/clip once, then apply exactly one optimizer step.
 
@@ -283,18 +285,32 @@ def coherence_primal_dual_update(
     coherence, report = combine_coherence_gradients(
         families, method=method, cagrad_alpha=cagrad_alpha, cagrad_rescale=cagrad_rescale
     )
+    import math
+
+    if not math.isfinite(coherence_direction_scale) or coherence_direction_scale <= 0:
+        raise ValueError("fixed coherence direction scale must be finite and positive")
+    raw_coherence_norm = float(torch.linalg.vector_norm(coherence.double()))
+    coherence = coherence * coherence_direction_scale
     final = coherence + fidelity
     row: dict[str, Any] = {"update_mode": f"coherence_primal_dual/{method}",
                           "update_accepted": True, "update/fallback_reason": report["fallback_reason"],
                           "coherence_combiner": report,
                           "combined_grad_norm": float(torch.linalg.vector_norm(final.double())),
-                          "fidelity_grad_norm": float(torch.linalg.vector_norm(fidelity.double()))}
+                          "fidelity_grad_norm": float(torch.linalg.vector_norm(fidelity.double())),
+                          "gradient/coherence_raw_norm": raw_coherence_norm,
+                          "gradient/coherence_direction_scale": coherence_direction_scale,
+                          "gradient/coherence_calibrated_norm": float(torch.linalg.vector_norm(coherence.double()))}
     for name, gradient in families.items():
         row[f"gradient/{name}/norm"] = float(torch.linalg.vector_norm(gradient.double()))
-        row[f"gradient/combined_coherence_dot/{name}"] = report["combined_dot"][name]
+        row[f"gradient/raw_combined_coherence_dot/{name}"] = report["combined_dot"][name]
+        row[f"gradient/combined_coherence_dot/{name}"] = coherence_direction_scale * report["combined_dot"][name]
         row[f"gradient/final_direction_dot/{name}"] = float(torch.dot(gradient.double(), final.double()))
     if diagnostics:
         vectors = {**families, "fidelity": fidelity}
+        if native_loss is not None:
+            vectors["native"] = objective_gradient(native_loss)
+            row["gradient/native/norm"] = float(torch.linalg.vector_norm(vectors["native"].double()))
+            row["gradient/final_direction_dot/native"] = float(torch.dot(vectors["native"].double(), final.double()))
         vectors.update({f"fidelity/{n}": _flat_gradient(v, parameters)
                         for n, v in (constraint_losses or {}).items()})
         before = torch.cat([(torch.view_as_real(p.detach()) if p.is_complex() else p.detach())
@@ -330,3 +346,41 @@ def coherence_primal_dual_update(
         for name, gradient in vectors.items():
             row[f"update/actual_dot/{name}"] = float(torch.dot(gradient.double(), displacement.double()))
     return row
+
+
+def calibrate_coherence_direction(grams, names, scales, *, cagrad_alpha=.5, cagrad_rescale=1):
+    """Fixed median norm matching using exact TRAIN gradient inner products.
+
+    An isometric Gram factor preserves raw combiner norms without retaining
+    large parameter vectors. No per-update normalization or optimizer change
+    occurs. All methods use the same calibrated source family gradients.
+    """
+    import statistics
+
+    norms = {method: [] for method in ("weighted_sum", "config", "cagrad")}
+    factors = torch.tensor([scales[name] for name in names], dtype=torch.float64)
+    for gram in grams:
+        raw = torch.as_tensor(gram, dtype=torch.float64)
+        if raw.shape != (len(names), len(names)) or not torch.isfinite(raw).all():
+            raise ValueError("invalid source TRAIN gradient Gram")
+        weighted = raw * factors[:, None] * factors[None, :]
+        eigenvalues, eigenvectors = torch.linalg.eigh((weighted + weighted.T) / 2)
+        if float(eigenvalues.min()) < -1e-10 * max(1.0, float(weighted.abs().max())):
+            raise ValueError("source gradient Gram must be positive semidefinite")
+        rows = eigenvectors * eigenvalues.clamp_min(0).sqrt()[None, :]
+        bank = dict(zip(names, rows))
+        for method, values in norms.items():
+            direction, _ = combine_coherence_gradients(
+                bank, method=method, cagrad_alpha=cagrad_alpha, cagrad_rescale=cagrad_rescale)
+            values.append(float(torch.linalg.vector_norm(direction)))
+    if not grams:
+        raise ValueError("source TRAIN direction calibration needs batches")
+    medians = {method: statistics.median(values) for method, values in norms.items()}
+    if any(value <= 1e-12 for value in medians.values()):
+        raise ValueError("cannot norm-match a vanishing source coherence direction")
+    reference = medians["weighted_sum"]
+    return {"version": "train_combined_direction_calibration_v1", "split": "train",
+            "gradient_representation": "exact_source_inner_product_isometry",
+            "reference_method": "weighted_sum", "reference_norm": reference,
+            "raw_norms_by_batch": norms, "raw_median_norms": medians,
+            "resolved_scales": {method: reference / value for method, value in medians.items()}}

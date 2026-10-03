@@ -331,7 +331,7 @@ def render_fidelity_history(
     destination = Path(output_path) if output_path is not None else run_dir / "checkpoint_fidelity.png"
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_name(f".{destination.name}.tmp")
-    figure.savefig(temporary, dpi=180, format="png")
+    figure.savefig(temporary, dpi=180, format=destination.suffix.lstrip("."))
     pyplot.close(figure)
     os.replace(temporary, destination)
     return destination

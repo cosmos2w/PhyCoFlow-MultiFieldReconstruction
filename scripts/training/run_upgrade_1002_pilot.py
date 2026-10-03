@@ -1,9 +1,9 @@
 #!/usr/bin/env python
 """Budget-guarded launcher for Test_1002 post-training pilot runs.
 
-The wrapper intentionally exposes only the existing post-training config,
-resume directory, and per-invocation step limit. It is a test-mode launcher:
-formal runs and outputs outside the reviewed Test_1002 tree are rejected.
+R2 exposes cumulative/additional epoch segments and separately accounts for
+the sustained campaign. Historical R1 counters remain readable. Formal runs
+and outputs outside the reviewed Test_1002 tree are rejected.
 """
 
 from __future__ import annotations
@@ -101,7 +101,7 @@ def _experiment_parts(value: Any) -> tuple[Path, str]:
         raise PilotContractError(
             "pilot output.experiment_name must be nested below Test_1002/"
         )
-    stage_match = re.match(r"^(T\d{2})(?:_|$)", relative.parts[1])
+    stage_match = re.match(r"^(R2_\d{2}|T\d{2})(?:_|$)", relative.parts[1])
     if stage_match is None:
         raise PilotContractError(
             "the first Test_1002 output directory must begin with a planned stage ID"
@@ -148,6 +148,9 @@ def validate_test_envelope(
     # This guard is unconditional: --max-steps never makes a >=250 epoch config safe.
     if epochs >= 250:
         raise PilotContractError("test-mode configs with optimization.epochs >= 250 are refused")
+    if (stage.startswith("R2_")
+            and stage not in planned_runs.get("non_scientific_stages", []) and epochs < 100):
+        raise PilotContractError("R2 scientific comparison horizons must be at least 100 epochs")
     if epochs > min(stage_epoch_cap, lineage_epoch_cap):
         raise PilotContractError(
             f"{stage} allows at most {min(stage_epoch_cap, lineage_epoch_cap)} configured epochs"
@@ -402,12 +405,16 @@ def _run_snapshot(run_dir: Path) -> dict[str, int]:
     return counters
 
 
-def _pending_history_counters(run_dir: Path, after_step: int) -> dict[str, int]:
+def _pending_history_counters(
+    run_dir: Path, after_step: int, *, include_update_stream: bool = False
+) -> dict[str, int]:
     attempted = accepted = 0
+    summary_cursor = int(after_step)
     for row in _read_history(run_dir / "metrics" / "history.jsonl"):
         if int(row.get("step", 0)) <= int(after_step):
             continue
         batches = int(row.get("batches", 1))
+        summary_cursor = max(summary_cursor, int(row.get("step", 0)))
         attempted += batches
         fraction = row.get("update_accepted_fraction")
         if isinstance(fraction, (int, float)):
@@ -417,6 +424,14 @@ def _pending_history_counters(run_dir: Path, after_step: int) -> dict[str, int]:
         else:
             # The default update path accepts every optimizer update.
             accepted += batches
+    if include_update_stream:
+        # A killed process can leave a partial epoch beyond the last flushed
+        # summary. Charge this durable tail before recovery truncates it.
+        tail = {int(row.get("step", 0)): row
+                for row in _read_history(run_dir / "metrics" / "coherence_updates.jsonl")
+                if int(row.get("step", 0)) > summary_cursor}
+        attempted += len(tail)
+        accepted += sum(row.get("update_accepted", True) is not False for row in tail.values())
     return {"attempted": attempted, "accepted": accepted}
 
 
@@ -427,7 +442,10 @@ def _attempt_delta(run_dir: Path, active: Mapping[str, Any]) -> dict[str, int]:
     start_accepted = int(active.get("start_accepted", start_step))
     committed_attempted = max(0, snapshot["attempted"] - start_attempted)
     committed_accepted = max(0, snapshot["accepted"] - start_accepted)
-    pending = _pending_history_counters(run_dir, snapshot["step"])
+    pending = _pending_history_counters(
+        run_dir, snapshot["step"],
+        include_update_stream=str(active.get("stage", "")).startswith("R2_"),
+    )
     return {
         "attempted": committed_attempted + pending["attempted"],
         "accepted": committed_accepted + pending["accepted"],
@@ -574,6 +592,14 @@ def _apply_attempt(
         "started_utc": active.get("started_utc"),
         "finished_utc": _utc_now(),
     }
+    if stage.startswith("R2_"):
+        epoch_size = int(active["steps_per_epoch"])
+        run.update(
+            start_epoch=int(active.get("start_step", 0)) / epoch_size,
+            end_epoch=int(delta.get("end_step", 0)) / epoch_size,
+            consumed_epochs=attempted / epoch_size,
+            minimum_scientific_horizon_reached=int(delta.get("end_step", 0)) >= 100 * epoch_size,
+        )
     if error:
         run["error"] = error[:1000]
     ledger.setdefault("runs", []).append(run)
@@ -636,6 +662,29 @@ def _effective_step_cap(
             int(lineage_remaining),
         ),
     )
+
+
+def epoch_segment_limit(
+    *, until_epoch: int | None, additional_epochs: int | None, start_step: int,
+    configured_epochs: int, steps_per_epoch: int = PINNED_STEPS_PER_EPOCH,
+) -> int | None:
+    """Translate scientist-facing epochs without resetting resumed lineage age."""
+    if until_epoch is not None and additional_epochs is not None:
+        raise PilotContractError("choose --until-epoch or --additional-epochs")
+    if until_epoch is None and additional_epochs is None:
+        return None
+    value = until_epoch if until_epoch is not None else additional_epochs
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise PilotContractError("epoch segment arguments must be positive integers")
+    target = (until_epoch * steps_per_epoch if until_epoch is not None
+              else start_step + additional_epochs * steps_per_epoch)
+    if target >= 250 * steps_per_epoch:
+        raise PilotContractError("cumulative pilot age must remain strictly below 250 epochs")
+    if target > configured_epochs * steps_per_epoch:
+        raise PilotContractError("requested epoch exceeds the frozen configured horizon")
+    if target <= start_step:
+        raise PilotContractError("requested epoch has already been reached")
+    return target - start_step
 
 
 def _verify_gpu0() -> dict[str, Any]:
@@ -821,6 +870,14 @@ def _print_contract(contract: Mapping[str, Any], *, output_path: Path, max_steps
     payload = dict(contract)
     payload["effective_max_steps"] = int(max_steps)
     payload["exact_output_path"] = str(output_path.resolve())
+    if contract.get("study") == "r2":
+        keys = (
+            "study", "stage", "branch", "implementation_commit", "config_sha256",
+            "configured_epochs", "start_epoch", "until_epoch", "campaign_consumed_epochs",
+            "minimum_scientific_horizon_epochs", "source", "gpu", "exact_output_path",
+            "formal_launch_authorized", "test_set_selection_enabled",
+        )
+        payload = {key: payload.get(key) for key in keys}
     print(json.dumps(payload, indent=2, sort_keys=True, default=str), flush=True)
     print(f"Output path: {output_path.resolve()}", flush=True)
 
@@ -830,6 +887,9 @@ def run_pilot(
     config_path: Path,
     resume_arg: str | Path | None = None,
     max_steps: int | None = None,
+    until_epoch: int | None = None,
+    additional_epochs: int | None = None,
+    study: str = "r1",
     dry_run: bool = False,
     env: Mapping[str, str] | None = None,
 ) -> Path | None:
@@ -838,7 +898,14 @@ def run_pilot(
     config_path = Path(config_path).expanduser().resolve()
     config = _resolved_config(config_path)
     source_contract = _read_json(SOURCE_CONTRACT_PATH)
-    planned_runs = _read_json(PLANNED_RUNS_PATH)
+    if study not in {"r1", "r2"}:
+        raise PilotContractError("study must be r1 or r2")
+    r2_root = AUDIT_DIR / "R2_campaign"
+    planned_path = r2_root / "planned_runs.json" if study == "r2" else PLANNED_RUNS_PATH
+    ledger_path = r2_root / "stage_ledger.json" if study == "r2" else LEDGER_PATH
+    planned_runs = _read_json(planned_path)
+    if max_steps is not None and (until_epoch is not None or additional_epochs is not None):
+        raise PilotContractError("epoch arguments cannot be combined with --max-steps")
     branch_identity = _git_identity()
     contract = _prepare_contract(
         config,
@@ -851,6 +918,8 @@ def run_pilot(
     resume = _resolve_resume_path(resume_arg)
     config_sha = str(contract["config_sha256"])
     stage = str(contract["stage"])
+    if (study == "r2") != stage.startswith("R2_"):
+        raise PilotContractError("output stage must match the declared study")
     output_root = Path(str(contract["output_root"])).resolve()
     test_root = TEST_ROOT.resolve()
     try:
@@ -858,12 +927,14 @@ def run_pilot(
     except ValueError as error:
         raise PilotContractError("resolved output path escaped Test_1002") from error
     global_cap = int(planned_runs.get("global_accepted_update_cap", 0))
+    if study == "r2" and global_cap != 1100 * PINNED_STEPS_PER_EPOCH:
+        raise PilotContractError("R2 campaign cap must be exactly 1100 historical epochs")
     if global_cap < 1:
         raise PilotContractError("planned_runs.json has no global accepted-update cap")
 
     lock_path = LOCK_PATH
     with _exclusive_lock(lock_path):
-        ledger = _load_ledger(LEDGER_PATH, global_cap)
+        ledger = _load_ledger(ledger_path, global_cap)
         recorded_branch = ledger.get("branch")
         if recorded_branch not in (None, branch_identity["branch"]):
             raise PilotContractError(
@@ -873,7 +944,7 @@ def run_pilot(
         if ledger.get("active_attempt") is not None:
             _reconcile_active(ledger)
             if not dry_run:
-                _save_ledger(LEDGER_PATH, ledger)
+                _save_ledger(ledger_path, ledger)
 
         stage_entry = _stage_entry(ledger, stage)
         configurations = stage_entry.setdefault("configurations", {})
@@ -915,14 +986,30 @@ def run_pilot(
                 revision_type = "initial"
 
         steps_per_epoch = int(contract["steps_per_epoch"])
+        epoch_limit = epoch_segment_limit(
+            until_epoch=until_epoch, additional_epochs=additional_epochs,
+            start_step=int(start_counters["step"]),
+            configured_epochs=int(contract["configured_epochs"]),
+            steps_per_epoch=steps_per_epoch,
+        )
+        if epoch_limit is not None:
+            max_steps = epoch_limit
         stage_remaining = int(contract["stage_attempted_update_cap"]) - int(
             stage_entry.get("attempted_updates", 0)
         )
-        global_remaining = global_cap - int(ledger.get("accepted_updates", 0))
+        # R2 charges lost/replayed work as well as accepted work. R1 keeps its
+        # original ledger mathematics and remains readable without migration.
+        consumption_key = "attempted_updates" if study == "r2" else "accepted_updates"
+        global_remaining = global_cap - int(ledger.get(consumption_key, 0))
         lineage_cap = (
             min(int(contract["lineage_attempted_update_cap"]), 249 * steps_per_epoch)
         )
         lineage_remaining = lineage_cap - lineage_attempted
+        if study == "r2":
+            requested_work = (max_steps if max_steps is not None else
+                              int(contract["configured_steps"]) - int(start_counters["step"]))
+            if requested_work > min(stage_remaining, global_remaining, lineage_remaining):
+                raise PilotContractError("requested epoch segment exceeds the remaining R2 budget")
         effective_max_steps = _effective_step_cap(
             requested_max_steps=max_steps,
             configured_steps=int(contract["configured_steps"]),
@@ -953,6 +1040,13 @@ def run_pilot(
         contract["resume"] = str(resume) if resume is not None else None
         contract["start_counters"] = dict(start_counters)
         contract["formal_launch_authorized"] = False
+        contract["study"] = study
+        contract["start_epoch"] = int(start_counters["step"]) / steps_per_epoch
+        contract["until_epoch"] = (
+            int(start_counters["step"]) + effective_max_steps
+        ) / steps_per_epoch
+        contract["minimum_scientific_horizon_epochs"] = 100 if study == "r2" else None
+        contract["campaign_consumed_epochs"] = int(ledger.get(consumption_key, 0)) / steps_per_epoch
         gpu_identity = None if dry_run else _verify_gpu0()
         contract["gpu"] = (
             gpu_identity
@@ -989,7 +1083,7 @@ def run_pilot(
         if resume is None:
             active["lineage_key"] = lineage_key
         ledger["active_attempt"] = active
-        _save_ledger(LEDGER_PATH, ledger)
+        _save_ledger(ledger_path, ledger)
 
         try:
             from phycoflow_reconstruction.training.post_training import run_post_training
@@ -1018,7 +1112,7 @@ def run_pilot(
             )
             _apply_attempt(ledger, active, run_dir=run_dir, status=str(final_status))
             ledger["branch"] = branch_identity["branch"]
-            _save_ledger(LEDGER_PATH, ledger)
+            _save_ledger(ledger_path, ledger)
             print(f"Run directory: {run_dir}", flush=True)
             return run_dir
         except BaseException as error:
@@ -1031,7 +1125,7 @@ def run_pilot(
                 error=f"{type(error).__name__}: {error}",
             )
             ledger["branch"] = branch_identity["branch"]
-            _save_ledger(LEDGER_PATH, ledger)
+            _save_ledger(ledger_path, ledger)
             raise
 
 
@@ -1039,13 +1133,20 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--resume", type=Path)
-    parser.add_argument("--max-steps", type=int)
+    parser.add_argument("--study", choices=("r1", "r2"), default="r1")
+    segment = parser.add_mutually_exclusive_group()
+    segment.add_argument("--max-steps", type=int)
+    segment.add_argument("--until-epoch", type=int)
+    segment.add_argument("--additional-epochs", type=int)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
     run_pilot(
         config_path=args.config,
         resume_arg=args.resume,
         max_steps=args.max_steps,
+        until_epoch=args.until_epoch,
+        additional_epochs=args.additional_epochs,
+        study=args.study,
         dry_run=args.dry_run,
     )
     return 0

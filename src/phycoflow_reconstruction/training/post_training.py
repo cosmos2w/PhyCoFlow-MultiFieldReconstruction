@@ -49,13 +49,20 @@ from .common import (
     sensor_protocol_from_config,
 )
 from .fidelity_controller import (
+    NATIVE_VERSION,
     FidelityController,
     coherence_selection_report,
     endpoint_risks,
     fidelity_settings,
+    matched_native_losses,
     unobserved_endpoint_risks,
 )
-from .gradient_balance import coherence_primal_dual_update, data_only_update, two_objective_update
+from .gradient_balance import (
+    calibrate_coherence_direction,
+    coherence_primal_dual_update,
+    data_only_update,
+    two_objective_update,
+)
 from .model_lifecycle import (
     add_training_aux_state,
     after_optimizer_step,
@@ -434,11 +441,12 @@ def _calibrate_endpoint_fidelity(model, train_dataset, config, device, source_ha
     """Fit source risk scales on fixed TRAIN batches and preserve caller RNG."""
     settings = fidelity_settings(config)
     count = int(settings["calibration_batches"])
-    calibration_seed = int(config["runtime"].get("seed", 42)) + 700_061
+    calibration_seed = int(settings.get("calibration_seed", int(config["runtime"].get("seed", 42)) + 700_061))
     rng = (torch.get_rng_state(), random.getstate(), np.random.get_state())
     cuda_rng = torch.cuda.get_rng_state_all() if device.type == "cuda" else []
     batches = None
-    risks, records = [], []
+    risks, records, native_losses = [], [], []
+    native_constrained = settings.get("version") == NATIVE_VERSION
     try:
         indices = iter_unique_batch_indices(
             len(train_dataset), count, int(config["optimization"]["batch_size"]),
@@ -452,6 +460,24 @@ def _calibrate_endpoint_fidelity(model, train_dataset, config, device, source_ha
         )
         with torch.no_grad():
             for index, batch in enumerate(batches):
+                native_record = {}
+                if native_constrained:
+                    # Frozen source native calibration uses the ordinary full
+                    # TRAIN batch, independently of endpoint subset scales.
+                    native_seed = calibration_seed + 2_000_003 + index
+                    torch.manual_seed(native_seed)
+                    if device.type == "cuda":
+                        torch.cuda.manual_seed_all(native_seed)
+                    random.seed(native_seed)
+                    np.random.seed(native_seed % 2**32)
+                    native = model.training_loss(batch).total.detach()
+                    if native.ndim != 0 or not torch.isfinite(native) or native < 0:
+                        raise FloatingPointError("invalid TRAIN source native calibration loss")
+                    native_losses.append(float(native))
+                    native_record = {"native_seed": native_seed,
+                                     "native_sample_ids": list(batch.sample_ids),
+                                     "native_query_sha256": _query_digest(batch.metadata["query_indices"]),
+                                     "source_native_loss": float(native)}
                 generator = torch.Generator(device=device).manual_seed(calibration_seed + 1_000_003 + index)
                 complete = _slice_batch(batch, int(config["coherence"]["compute_budget"]["batch_size"]))
                 selected = subset_query_batch(complete, int(config["coherence"]["compute_budget"]["point_count"]), generator=generator)
@@ -467,7 +493,7 @@ def _calibrate_endpoint_fidelity(model, train_dataset, config, device, source_ha
                 records.append({"sample_ids": list(selected.sample_ids),
                                 "query_sha256": _query_digest(selected.metadata["query_indices"]),
                                 "noise_seed": calibration_seed + 1_000_003 + index,
-                                "source_field_risks": risk.cpu().tolist()})
+                                "source_field_risks": risk.cpu().tolist(), **native_record})
     finally:
         if batches is not None:
             batches.close()
@@ -478,11 +504,21 @@ def _calibrate_endpoint_fidelity(model, train_dataset, config, device, source_ha
             torch.cuda.set_rng_state_all(cuda_rng)
     fields = torch.stack(risks).mean(dim=0)
     risk_vector = torch.cat((fields.mean()[None], fields)).clamp_min(float(settings["absolute_floor"]))
-    return {"version": "endpoint_model_mse_source_calibration_v1", "split": "train",
+    artifact = {"version": "endpoint_model_mse_source_calibration_v1", "split": "train",
             "source_checkpoint_sha256": source_hash, "source_weight_selection": "live",
             "field_names": list(train_dataset.field_names), "source_risks": risk_vector.tolist(),
             "unfloored_source_field_risks": fields.tolist(), "settings": settings,
             "calibration_seed": calibration_seed, "batches": records}
+    if native_constrained:
+        mean_native = statistics.mean(native_losses)
+        artifact["version"] = "endpoint_native_source_calibration_v2"
+        artifact["native"] = {"version": "native_source_calibration_v2", "split": "train",
+                              "source_scale": max(mean_native, float(settings["absolute_floor"])),
+                              "unfloored_source_loss": mean_native,
+                              "source_checkpoint_sha256": source_hash,
+                              "source_weight_selection": "live",
+                              "random_policy": "global_rng_same_native_draws_restore_post_live_v2"}
+    return artifact
 
 
 def _calibrate_topology_components(
@@ -844,6 +880,8 @@ def _calibrate_family_balance(
     torch_cuda_rng = torch.cuda.get_rng_state_all() if device.type == "cuda" else []
     python_rng = random.getstate()
     numpy_rng = np.random.get_state()
+    direction_grams = []
+    calibrate_direction = config["optimization"].get("coherence_direction_calibration", "none") != "none"
     try:
         post_training_mode(model, config)
         for batch_index, batch in enumerate(batch_source):
@@ -880,6 +918,15 @@ def _calibrate_family_balance(
                 family_losses[name] = float(raw_loss.detach())
                 family_gradients[name] = loss_gradients(raw_loss, parameters)
             diagnostics = gradient_diagnostics(data_gradients, family_gradients, epsilon=epsilon)
+            if calibrate_direction:
+                matrix = torch.stack([
+                    torch.cat([(torch.view_as_real(g) if g.is_complex() else g).reshape(-1).double()
+                               if g is not None else
+                               torch.zeros(p.numel() * (2 if p.is_complex() else 1), device=p.device, dtype=torch.float64)
+                               for p, g in zip(parameters, family_gradients[name])])
+                    for name in families])
+                direction_grams.append((matrix @ matrix.T).cpu().tolist())
+                del matrix
             selected = subset_query_batch(
                 _slice_batch(batch, int(config["coherence"]["compute_budget"]["batch_size"])),
                 int(config["coherence"]["compute_budget"]["point_count"]),
@@ -926,7 +973,7 @@ def _calibrate_family_balance(
         for name in families
         if not math.isclose(scales[name], unclipped_scales[name], rel_tol=1.0e-12)
     ]
-    return {
+    artifact = {
         "version": 1,
         "mode": mode,
         "settings": settings,
@@ -962,6 +1009,18 @@ def _calibrate_family_balance(
         },
         "calibration_batches": batch_records,
     }
+    if calibrate_direction:
+        direction = calibrate_coherence_direction(
+            direction_grams, list(families),
+            {name: outer_weights[name] * scales[name] for name in families},
+            cagrad_alpha=float(config["optimization"].get("cagrad_alpha", .5)),
+            cagrad_rescale=int(config["optimization"].get("cagrad_rescale", 1)),
+        )
+        direction.update(source_checkpoint_sha256=source_hashes_before["checkpoint"],
+                         sample_ids=artifact["sample_ids"], query_digests=artifact["query_digests"],
+                         seeds=artifact["seeds"], raw_source_gradient_grams=direction_grams)
+        artifact["combined_direction"] = direction
+    return artifact
 
 
 def _sparse_family_gradient_diagnostics(
@@ -1038,6 +1097,14 @@ def _build_evaluation_batch(
     if count < 1:
         raise ValueError(f"evaluation split {dataset.split_name!r} contains no samples")
     selection = config.get("evaluation", {}).get("sample_selection", "first")
+    r2 = config.get("evaluation", {}).get("r2_protocol", {})
+    if r2.get("enabled", False):
+        from ..evaluation.upgrade_1002_r2_protocol import declare_panels
+
+        indices = declare_panels(
+            len(dataset), previously_used_indices=r2.get("previously_used_validation_indices", ())
+        )["selection"]["dataset_indices"]
+        return build_observation_batch([dataset[index] for index in indices], protocol, query_points=None).to(device)
     indices = (
         np.linspace(0, len(dataset) - 1, count).round().astype(int).tolist()
         if selection == "uniform"
@@ -1434,7 +1501,9 @@ def run_post_training(
         from .native_topology_audit import contract_payload as native_audit_contract_payload
 
     adaptive = config["optimization"].get("update_policy", "legacy") == "coherence_primal_dual"
-    if native_audit is not None or adaptive or config["optimization"].get("gradient_balance") in {
+    r2_settings = config.get("evaluation", {}).get("r2_protocol", {})
+    r2_enabled = bool(r2_settings.get("enabled", False))
+    if native_audit is not None or adaptive or r2_enabled or config["optimization"].get("gradient_balance") in {
         "component_constrained",
         "topology_regularized",
     }:
@@ -1477,6 +1546,7 @@ def run_post_training(
     source_anchor_model = None
     if (
         native_audit is not None
+        or r2_enabled
         or adaptive
         or constrained
         or config.get("objectives", {}).get("source_anchor", {}).get("enabled", False)
@@ -1518,6 +1588,13 @@ def run_post_training(
         torch.set_rng_state(checkpoint["rng_state"]["torch_cpu"])
         if device.type == "cuda" and checkpoint["rng_state"].get("torch_cuda"):
             torch.cuda.set_rng_state_all(checkpoint["rng_state"]["torch_cuda"])
+        if adaptive and fidelity_settings(config).get("version") == NATIVE_VERSION:
+            if not {"python", "numpy"} <= checkpoint["rng_state"].keys():
+                raise ValueError("native v2 resume is missing Python/NumPy RNG state")
+            random.setstate(checkpoint["rng_state"]["python"])
+            numpy_state = checkpoint["rng_state"]["numpy"]
+            np.random.set_state((numpy_state[0], np.asarray(numpy_state[1], dtype=np.uint32),
+                                 *numpy_state[2:]))
 
     if subset_manifest is not None:
         subset_path = store.run_dir / "artifacts/training_subset.json"
@@ -1620,6 +1697,15 @@ def run_post_training(
         if checkpoint.get("family_scales") != calibration.get("resolved_scales"):
             raise ValueError("resume checkpoint family scales differ from calibration artifact")
     family_scales = {name: float(calibration["resolved_scales"][name]) for name in families}
+    coherence_direction_scale = 1.0
+    if config["optimization"].get("coherence_direction_calibration", "none") != "none":
+        direction = calibration.get("combined_direction", {})
+        if direction.get("split") != "train" or direction.get("version") != "train_combined_direction_calibration_v1":
+            raise ValueError("missing frozen TRAIN combined-direction calibration")
+        method = config["optimization"].get("coherence_gradient_method", "config")
+        coherence_direction_scale = float(direction["resolved_scales"][method])
+        if resume is not None and checkpoint.get("coherence_direction_scale") != coherence_direction_scale:
+            raise ValueError("resume combined-direction scalar differs from frozen TRAIN calibration")
     controller = None
     if adaptive:
         if "endpoint_fidelity" not in calibration:
@@ -1719,6 +1805,59 @@ def run_post_training(
     protocol = sensor_protocol_from_config(config)
     evaluation_batch = _build_evaluation_batch(evaluation_dataset, config, protocol, device)
     comparison_batch = _build_comparison_batch(evaluation_batch, config)
+    evaluate_fn = _evaluate
+    native_monitor_batches = {}
+    if r2_enabled:
+        from ..evaluation.upgrade_1002_r2_protocol import (
+            build_panel_batch,
+            declare_panels,
+            grouped_evaluate,
+            matched_native_monitor,
+            save_declaration,
+            selection_indices,
+        )
+
+        evaluate_fn = grouped_evaluate
+        declaration = declare_panels(
+            len(evaluation_dataset),
+            previously_used_indices=r2_settings.get("previously_used_validation_indices", ()),
+        )
+        native_validation_count = int(r2_settings.get("native_validation_count", 32))
+        selected_ids = declaration["selection"]["dataset_indices"]
+        positions = np.linspace(0, 4, native_validation_count // 16, endpoint=False).astype(int).tolist()
+        native_indices = {
+            "train": selection_indices(len(train_dataset), int(r2_settings.get("native_train_count", 32)), 16),
+            "validation": [selected_ids[start + position] for start in range(0, 64, 4) for position in positions],
+        }
+        declaration["native_monitor"] = {
+            "dataset_indices": native_indices,
+            "native_seeds": list(r2_settings.get("native_seeds", [2027, 3027])),
+            "every_epochs": int(r2_settings.get("native_monitor_every_epochs", 5)),
+            "query_policy": config["coherence"]["compute_budget"].get("query_policy", "random_per_sample"),
+            "role": "monitor_only_no_calibration_or_gradient",
+        }
+        path = save_declaration(store.run_dir / "artifacts/r2_panel_declaration.json", declaration)
+        store.update_manifest(r2_panel_declaration_sha256=file_sha256(path),
+                              coherence_direction_scale=coherence_direction_scale,
+                              r2_B_aggregation="equal_sample_group32_mean_with_separate_pooled_B")
+        for role, dataset in (("train", train_dataset), ("validation", evaluation_dataset)):
+            full = build_panel_batch(dataset, protocol, native_indices[role], device)
+            batch = _build_comparison_batch(full, config)
+            native_monitor_batches[role] = batch
+            manifest = manifest_from_batch(batch, dataset.path, role)
+            manifest_path = store.run_dir / f"artifacts/r2_native_{role}_sensor_manifest.json"
+            manifest.save(manifest_path)
+            store.save_artifact(f"r2_native_{role}_query_indices.pt", {"query_indices": batch.metadata["query_indices"]})
+            del full
+
+        def frozen_native_monitor():
+            return matched_native_monitor(
+                model, source_anchor_model, native_monitor_batches,
+                seeds=r2_settings.get("native_seeds", [2027, 3027]),
+            )
+
+        if resume is None:
+            store.write_json("evaluation/native_before.json", frozen_native_monitor())
     if any(
         getattr(family, "strategy", None) == "cubical_persistence" for family in families.values()
     ):
@@ -1743,7 +1882,7 @@ def run_post_training(
     store.update_manifest(evaluation_query_indices_sha256=file_sha256(query_path))
     before_metrics = None
     if resume is None:
-        before_metrics = _evaluate(
+        before_metrics = evaluate_fn(
             model,
             evaluation_batch,
             comparison_batch,
@@ -1781,14 +1920,31 @@ def run_post_training(
     if native_audit is not None:
         if "topology" not in families or source_anchor_model is None:
             raise ValueError("native topology audit requires a frozen source anchor and topology family")
+        excluded_audit_ids = list(evaluation_batch.sample_ids)
+        reserved_final_audit_ids = []
+        if r2_enabled:
+            from .native_topology_audit import _sample_id_for_index
+
+            reserved_final_audit_ids = [
+                _sample_id_for_index(evaluation_dataset, index)
+                for index in declaration["audit"]["dataset_indices"]
+            ]
+            excluded_audit_ids.extend(reserved_final_audit_ids)
         native_audit_batch, native_audit_batch_metadata = build_disjoint_validation_batch(
             evaluation_dataset,
             protocol,
-            selector_sample_ids=evaluation_batch.sample_ids,
+            selector_sample_ids=excluded_audit_ids,
             max_samples=int(native_audit.get("max_samples", 4)),
             seed=int(native_audit.get("seed", 2027)),
             device=device,
         )
+        if r2_enabled:
+            native_audit_batch_metadata.update(
+                selector_sample_ids=list(evaluation_batch.sample_ids),
+                reserved_final_audit_sample_ids=reserved_final_audit_ids,
+                all_excluded_sample_ids=excluded_audit_ids,
+                panel_role="periodic_development_native_audit",
+            )
         native_audit_family, native_audit_provenance = build_native_topology_family(
             config,
             evaluation_dataset,
@@ -1800,7 +1956,7 @@ def run_post_training(
             native_audit_family,
             native_audit_batch,
             tuple(config["dataset"]["grid_shape"]),
-            excluded_sample_ids=evaluation_batch.sample_ids,
+            excluded_sample_ids=excluded_audit_ids,
         )
         native_audit_provenance["native_geometry"] = native_audit_geometry
         native_audit_sensor_manifest = manifest_from_batch(
@@ -1816,6 +1972,15 @@ def run_post_training(
             config_sha256=store.config_hash,
             selector_manifest_sha256=evaluation_manifest.digest(),
         )
+        if r2_enabled:
+            native_audit_contract.update(
+                reserved_final_audit_sample_ids=reserved_final_audit_ids,
+                all_excluded_sample_ids=excluded_audit_ids,
+                panel_role="periodic_development_native_audit",
+            )
+            native_audit_contract["identity"]["reserved_final_audit_sample_ids"] = reserved_final_audit_ids
+        if "every_epochs" in native_audit:
+            native_audit_contract["audit_sampling"]["every_epochs"] = int(native_audit["every_epochs"])
         write_idempotent_report(
             store,
             f"{AUDIT_SUBDIR}/contract.json",
@@ -1828,6 +1993,13 @@ def run_post_training(
     if not 0.0 < fraction <= 1.0:
         raise ValueError("optimization.train_fraction must lie in (0,1]")
     steps_per_epoch = post_training_steps_per_epoch(config, len(train_dataset))
+    if native_audit is not None and "every_epochs" in native_audit:
+        native_audit = {**native_audit, "every_steps": int(native_audit["every_epochs"]) * steps_per_epoch}
+        checkpoint_interval = config.get("checkpointing", {}).get("every_steps") or (
+            int(config.get("checkpointing", {}).get("every_epochs", 1)) * steps_per_epoch
+        )
+        if native_audit["every_steps"] % int(checkpoint_interval):
+            raise ValueError("native epoch audit cadence must coincide with recoverable checkpoints")
     configured_steps = epochs * steps_per_epoch
     final_step = (
         min(configured_steps, start_step + max_steps) if max_steps is not None else configured_steps
@@ -1938,6 +2110,7 @@ def run_post_training(
         description=f"post:{config['model']['name']}",
         enabled=bool(config["runtime"].get("progress", True)),
         plot_every_steps=int(config["runtime"].get("plot_every_steps", 10)),
+        plot_format=str(config["runtime"].get("plot_format", "png")),
     )
     preview = TrainingReconstructionPreview(
         config,
@@ -1962,7 +2135,7 @@ def run_post_training(
             metrics = (
                 source_metrics
                 if step == 0
-                else _evaluate(
+                else evaluate_fn(
                     model,
                     evaluation_batch,
                     comparison_batch,
@@ -1998,6 +2171,7 @@ def run_post_training(
                     coherence_calibration_sha256=calibration_hash,
                     family_scales=family_scales,
                     controller=controller,
+                    coherence_direction_scale=coherence_direction_scale,
                 ),
                 model=model,
                 preview=preview,
@@ -2047,11 +2221,15 @@ def run_post_training(
         epoch = global_step // steps_per_epoch + 1
         post_training_mode(model, config)
         step_started = perf_counter()
+        native_started = perf_counter()
         if adaptive:
-            # Native flow/noise loss is monitored; it supplies no hidden
-            # manually weighted gradient in the adaptive update.
-            with torch.no_grad():
-                data_loss = model.training_loss(batch).total.detach()
+            source_native_loss = None
+            if controller.native_constrained:
+                data_loss, source_native_loss = matched_native_losses(model, source_anchor_model, batch)
+            else:
+                # Preserve v1: the native objective supplies zero gradient.
+                with torch.no_grad():
+                    data_loss = model.training_loss(batch).total.detach()
         else:
             data_loss = torch.zeros((), device=device) if constrained else model.training_loss(batch).total
         every = int(config["coherence"]["schedule"].get("every_n_steps", 1))
@@ -2069,6 +2247,7 @@ def run_post_training(
             "epoch": epoch,
             "data_loss": float(data_loss.detach().cpu()),
             "native_data_loss": float(data_loss.detach().cpu()),
+            "runtime/native_pair_seconds": perf_counter() - native_started,
             "data_retention_objective": (
                 "native_plus_endpoint_retention"
                 if retention_active
@@ -2141,6 +2320,8 @@ def run_post_training(
                 violations, live_risks, source_risks = controller.violations(
                     step_context["prediction"], step_context["source_prediction"],
                     step_context["reference"], step_context["batch"].query_valid_mask,
+                    native_loss=data_loss if controller.native_constrained else None,
+                    source_native_loss=source_native_loss,
                 )
                 fidelity_loss, fidelity_terms, pressure = controller.primal(violations)
                 family_losses = {
@@ -2157,20 +2338,24 @@ def run_post_training(
                     constraint_losses=fidelity_terms if diagnose else None,
                     cagrad_alpha=float(config["optimization"].get("cagrad_alpha", 0.5)),
                     cagrad_rescale=int(config["optimization"].get("cagrad_rescale", 1)),
+                    native_loss=data_loss if controller.native_constrained else None,
+                    coherence_direction_scale=coherence_direction_scale,
                 )
                 if device.type == "cuda":
                     torch.cuda.synchronize(device)
                 controller.advance(violations)
                 row.update(controller.telemetry(violations, live_risks, source_risks, pressure))
                 row.update({"data_update_weight": 0.0, "coherence_update_weight": coherence_weight,
-                            "data_retention_objective": "endpoint_primal_dual_native_monitor",
-                            "loss/native": float(data_loss), "loss/endpoint_total": float(live_risks[0].detach()),
+                            "data_retention_objective": ("endpoint_native_primal_dual_v2" if controller.native_constrained
+                                                         else "endpoint_primal_dual_native_monitor"),
+                            "native_loss_role": controller.settings["native_loss_role"],
+                            "loss/native": float(data_loss.detach()), "loss/endpoint_total": float(live_risks[0].detach()),
                             "loss/fidelity_augmented": float(fidelity_loss.detach()),
                             "runtime/rollout_seconds": step_context["rollout_seconds"],
                             "runtime/source_forward_seconds": step_context["source_forward_seconds"],
                             "runtime/backward_and_optimizer_seconds": perf_counter() - backward_started,
                             "runtime/peak_cuda_bytes": torch.cuda.max_memory_allocated(device) if device.type == "cuda" else 0})
-                for name, value in zip(train_dataset.field_names, live_risks[1:]):
+                for name, value in zip(train_dataset.field_names, live_risks[1:1 + len(train_dataset.field_names)]):
                     row[f"loss/endpoint/{name}"] = float(value.detach())
                 if diagnose:
                     unobserved = unobserved_endpoint_risks(
@@ -2191,6 +2376,7 @@ def run_post_training(
                     if name == "topology" and "line_sampling" in family_result.diagnostics:
                         row["topology/line_sampling"] = family_result.diagnostics["line_sampling"]
                 del fidelity_loss, fidelity_terms, family_losses, violations, live_risks, source_risks, pressure
+                del source_native_loss
             elif constrained:
                 gradient = _constrained_topology_update(
                     controller,
@@ -2271,8 +2457,18 @@ def run_post_training(
         )
         if constrained:
             row["total"] = row.get("regularized_loss_before", row["balanced_topology_before"])
+        if r2_enabled and (global_step + 1) % steps_per_epoch == 0 and epoch % int(
+            r2_settings.get("native_monitor_every_epochs", 5)
+        ) == 0:
+            monitor_started = perf_counter()
+            native_reports = frozen_native_monitor()
+            for role, report in native_reports.items():
+                for key in ("candidate", "source", "ratio"):
+                    row[f"native_monitor/{role}/{key}"] = report[key]
+            row["runtime/native_monitor_seconds"] = perf_counter() - monitor_started
+            store.write_json(f"evaluation/native_epoch_{epoch:03d}.json", native_reports)
         monitor.record(row, lr=optimizer.param_groups[0]["lr"])
-        if adaptive:
+        if adaptive or r2_enabled:
             store.append_coherence_update(row)
         checkpoint_result = None
         if checkpoint_manager.due_for_preview_or_checkpoint(global_step + 1, preview):
@@ -2297,6 +2493,7 @@ def run_post_training(
                     coherence_calibration_sha256=calibration_hash,
                     family_scales=family_scales,
                     controller=controller,
+                    coherence_direction_scale=coherence_direction_scale,
                 ),
                 model=model,
                 preview=preview,
@@ -2377,7 +2574,7 @@ def run_post_training(
     post_training_seconds = perf_counter() - training_started
     after_metrics = panel_metrics_cache.get(final_step)
     if after_metrics is None:
-        after_metrics = _evaluate(
+        after_metrics = evaluate_fn(
             model,
             evaluation_batch,
             comparison_batch,
@@ -2418,6 +2615,7 @@ def run_post_training(
         coherence_calibration_sha256=calibration_hash,
         family_scales=family_scales,
         controller=controller,
+        coherence_direction_scale=coherence_direction_scale,
     )
     if checkpoint_manager.selection_metric in {"topology_with_fidelity", "coherence_with_fidelity"}:
         checkpoint_manager.panel_evaluator = lambda step: selection_report(
@@ -2553,6 +2751,7 @@ def _post_checkpoint_payload(
     coherence_calibration_sha256: str,
     family_scales: Mapping[str, float],
     controller=None,
+    coherence_direction_scale=1.0,
 ) -> dict[str, Any]:
     """Build an internally consistent post-training recovery checkpoint."""
     payload = {
@@ -2581,6 +2780,20 @@ def _post_checkpoint_payload(
     if controller is not None:
         key = "fidelity_controller" if isinstance(controller, FidelityController) else "component_controller"
         payload[key] = controller.state_dict()
+        if isinstance(controller, FidelityController) and controller.native_constrained:
+            numpy_state = np.random.get_state()
+            # Keep the existing restricted weights-only checkpoint loader:
+            # NumPy reconstruct/pickle globals are never needed for RNG keys.
+            payload["rng_state"].update(
+                python=random.getstate(),
+                numpy=(numpy_state[0], numpy_state[1].tolist(), *numpy_state[2:]),
+            )
+    if config.get("evaluation", {}).get("r2_protocol", {}).get("enabled", False) or (
+        isinstance(controller, FidelityController) and controller.native_constrained
+    ):
+        payload["epoch"] = int(global_step) / post_training_steps_per_epoch(config, len(train_dataset))
     if hasattr(train_dataset, "training_subset_manifest"):
         payload["training_subset_sha256"] = train_dataset.training_subset_manifest["sha256"]
+    if config["optimization"].get("coherence_direction_calibration", "none") != "none":
+        payload["coherence_direction_scale"] = coherence_direction_scale
     return add_training_aux_state(payload, model)
