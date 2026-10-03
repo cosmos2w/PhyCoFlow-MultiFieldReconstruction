@@ -71,6 +71,63 @@ def test_common_native_draws_live_graph_teacher_detachment_and_public_rng():
     assert source.weight.grad is None
 
 
+def test_cuda_common_native_draws_restore_cpu_cuda_python_numpy_public_streams():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required for native CPU/CUDA common-randomness replay")
+
+    class MixedDeviceNative(RandomNative):
+        def training_loss(self, batch):
+            cpu_draw = torch.rand(3, dtype=self.weight.dtype, device="cpu").sum()
+            cuda_draw = torch.rand(3, dtype=self.weight.dtype, device=self.weight.device).sum()
+            draw = cpu_draw.to(self.weight.device) + cuda_draw + random.random() + np.random.rand()
+            return SimpleNamespace(total=(self.weight * draw - batch).square())
+
+    live = MixedDeviceNative().to("cuda:0").eval()
+    source = deepcopy(live).requires_grad_(False).eval()
+    source_before = {name: value.detach().clone() for name, value in source.state_dict().items()}
+    original_python, original_numpy = random.getstate(), np.random.get_state()
+    try:
+        with torch.random.fork_rng(devices=[0]):
+            torch.manual_seed(321)
+            torch.cuda.manual_seed(321)
+            random.seed(321)
+            np.random.seed(321)
+            before = (torch.get_rng_state(), torch.cuda.get_rng_state(0),
+                      random.getstate(), np.random.get_state())
+            ordinary = live.training_loss(0.).total
+            after = (torch.get_rng_state(), torch.cuda.get_rng_state(0),
+                     random.getstate(), np.random.get_state())
+            expected_next = (torch.rand(4, device="cpu"), torch.rand(4, device="cuda:0"),
+                             random.random(), np.random.rand(4))
+            torch.set_rng_state(before[0])
+            torch.cuda.set_rng_state(before[1], 0)
+            random.setstate(before[2])
+            np.random.set_state(before[3])
+
+            candidate, reference = matched_native_losses(live, source, 0.)
+            assert candidate.device == reference.device == torch.device("cuda:0")
+            assert torch.equal(candidate, ordinary) and torch.equal(candidate, reference)
+            assert candidate.requires_grad and candidate.grad_fn is not None
+            assert not reference.requires_grad and reference.grad_fn is None
+            assert torch.equal(torch.get_rng_state(), after[0])
+            assert torch.equal(torch.cuda.get_rng_state(0), after[1])
+            assert random.getstate() == after[2]
+            assert np.array_equal(np.random.get_state()[1], after[3][1])
+            assert np.random.get_state()[2:] == after[3][2:]
+            assert torch.equal(torch.rand(4, device="cpu"), expected_next[0])
+            assert torch.equal(torch.rand(4, device="cuda:0"), expected_next[1])
+            assert random.random() == expected_next[2]
+            assert np.array_equal(np.random.rand(4), expected_next[3])
+
+            candidate.backward()
+            assert torch.isfinite(live.weight.grad) and live.weight.grad != 0
+            assert source.weight.grad is None
+            assert all(torch.equal(value, source_before[name]) for name, value in source.state_dict().items())
+    finally:
+        random.setstate(original_python)
+        np.random.set_state(original_numpy)
+
+
 def test_native_teacher_failure_restores_post_live_stream():
     live = RandomNative()
     source = deepcopy(live)

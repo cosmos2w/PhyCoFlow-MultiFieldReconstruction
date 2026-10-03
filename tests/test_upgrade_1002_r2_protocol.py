@@ -136,6 +136,112 @@ def test_slice_preserves_nested_sample_context():
     sliced.validate()
 
 
+def test_negative_mature_arm_retains_latest_ineligible_neighbor_evidence():
+    records = [
+        {"epoch": epoch, "eligible": False, "metric": 1.2} for epoch in (5, 100, 110, 140, 150)
+    ]
+    result = mature_checkpoint_summary(records)
+    assert result["best_eligible_mature"] is None
+    assert result["center_role"] == "latest_mature"
+    assert result["center_eligible"] is False
+    assert result["neighbor_center"]["epoch"] == 150
+    assert [item["epoch"] for item in result["nearby_mature"]] == [150, 140, 110]
+    missing = mature_checkpoint_summary(records[:1])
+    assert missing["neighbor_center"] is None and missing["nearby_mature"] == []
+    assert missing["center_role"] is None and missing["center_eligible"] is None
+
+
+def test_native_broad_audit_splits_exact32_and_replays_seeds():
+    from phycoflow_reconstruction.contracts import ObservationBatch
+    from phycoflow_reconstruction.evaluation.upgrade_1002_r2_protocol import grouped_native_monitor
+
+    class Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.tensor(2.0))
+
+        def training_loss(self, batch):
+            assert len(batch.sample_ids) == 32
+            return SimpleNamespace(
+                total=self.weight.square() + batch.target_fields.mean() + torch.rand(())
+            )
+
+    batch = ObservationBatch(
+        obs_coords=torch.zeros(128, 1, 2),
+        obs_values=torch.zeros(128, 1, 1),
+        obs_field_ids=torch.zeros(128, 1, dtype=torch.long),
+        obs_valid_mask=torch.ones(128, 1, dtype=torch.bool),
+        query_coords=torch.zeros(128, 3, 2),
+        query_valid_mask=torch.ones(128, 3, dtype=torch.bool),
+        target_fields=torch.arange(128).float().reshape(128, 1, 1).expand(-1, 3, 1),
+        sample_ids=tuple(str(i) for i in range(128)),
+        metadata={},
+    )
+    live, source = Model().train(), Model().eval().requires_grad_(False)
+    state = torch.get_rng_state().clone()
+    baseline = grouped_native_monitor(live, source, {"extended": batch}, (2027, 3027))["extended"]
+    check = grouped_native_monitor(live, source, {"extended": batch}, (6027, 2027, 3027))[
+        "extended"
+    ]
+    assert len(baseline["groups"]) == 4 and baseline["ratio"] == 1.0
+    assert baseline["draws"] == check["draws"][1:]
+    assert baseline["candidate"] == pytest.approx(
+        np.mean([group["candidate"] for group in baseline["groups"]])
+    )
+    assert torch.equal(state, torch.get_rng_state()) and live.training and not source.training
+    assert live.weight.grad is None and source.weight.grad is None
+    with pytest.raises(ValueError, match="32"):
+        grouped_native_monitor(live, source, {"invalid": slice_panel(batch, 0, 33)})
+
+
+def test_legacy_grouped_metadata_does_not_claim_pooled_B(monkeypatch):
+    import phycoflow_reconstruction.training.post_training as training
+    from phycoflow_reconstruction.contracts import ObservationBatch
+    from phycoflow_reconstruction.evaluation.upgrade_1002_r2_protocol import grouped_evaluate
+
+    batch = ObservationBatch(
+        obs_coords=torch.zeros(64, 1, 2),
+        obs_values=torch.zeros(64, 1, 1),
+        obs_field_ids=torch.zeros(64, 1, dtype=torch.long),
+        obs_valid_mask=torch.ones(64, 1, dtype=torch.bool),
+        query_coords=torch.zeros(64, 3, 2),
+        query_valid_mask=torch.ones(64, 3, dtype=torch.bool),
+        target_fields=torch.zeros(64, 3, 1),
+        sample_ids=tuple(str(i) for i in range(64)),
+        metadata={"query_indices": torch.arange(3).repeat(64, 1)},
+    )
+
+    class Model(torch.nn.Module):
+        capabilities = SimpleNamespace(structured_grid_required=False)
+
+        def reconstruct(self, batch):
+            return SimpleNamespace(prediction=batch.target_fields)
+
+    def saved_group(model, complete, comparison, *args, **kwargs):
+        model.reconstruct(comparison)
+        total = 1.0 if complete.sample_ids[0] == "0" else 3.0
+        return {
+            "sample_ids": list(complete.sample_ids),
+            "query_ids": comparison.metadata["query_indices"].tolist(),
+            "inference": {"samples": 32, "seconds": 1.0},
+            "coherence": {"families": {"cross_spectrum": {"total": total, "reference_ids": []}}},
+        }
+
+    monkeypatch.setattr(training, "_evaluate", saved_group)
+    result = grouped_evaluate(
+        Model(),
+        batch,
+        batch,
+        {"cross_spectrum": SimpleNamespace(definition="legacy_v3")},
+        {},
+        ("p",),
+        {},
+    )
+    assert result["aggregation"] == "equal_sample_group32_mean" and "pooled_B" not in result
+    assert result["coherence"]["families"]["cross_spectrum"]["total"] == 2.0
+    assert len(result["group_reports"]) == 2
+
+
 def test_grouped_evaluator_reuses_groups_and_pools_covariance(tmp_path, monkeypatch):
     from test_upgrade_1002_spectrum_evaluation import _field_snapshots, _runtime_with_artifact
 
@@ -200,6 +306,7 @@ def test_grouped_evaluator_reuses_groups_and_pools_covariance(tmp_path, monkeypa
     monkeypatch.setattr(training, "_evaluate", fake_evaluate)
     model = Model().train()
     result = grouped_evaluate(model, batch, batch, {"cross_spectrum": family}, {}, ("u", "v"), {})
+    assert result["aggregation"] == "equal_sample_group32_mean_with_separate_pooled_B"
     assert model._ema_eval is True and model.training
     assert result["evaluation_weight_source"] == "live_checkpoint_model_weights"
     assert [len(call) for call in calls] == [32, 32]

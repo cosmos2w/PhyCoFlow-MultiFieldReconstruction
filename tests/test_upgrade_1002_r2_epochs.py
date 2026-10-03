@@ -74,3 +74,37 @@ def test_interrupted_partial_epoch_stream_is_charged_without_summary_duplication
     }
     # The historical R1 accounting remains unchanged.
     assert pilot._pending_history_counters(tmp_path, 38) == {"attempted": 38, "accepted": 38}
+
+
+def test_predeclared_replay_headroom_does_not_extend_scientific_horizon():
+    config = {
+        "stage": "post_training", "case": "turbulent_combustion",
+        "output": {"experiment_name": "Test_1002/R2_10_endpoint_only"},
+        "optimization": {"epochs": 100, "batch_size": 32, "train_fraction": .15},
+        "runtime": {"device": "cuda:0"},
+    }
+    planned = {"maximum_initial_epochs": {"R2_10": 110, "T10": 110},
+               "every_lineage_epoch_cap": 249}
+    envelope = pilot.validate_test_envelope(config, planned_runs=planned, train_count=8000)
+    assert envelope["configured_steps"] == 100 * 38
+    assert envelope["lineage_attempted_update_cap"] == 110 * 38
+    # Five lost epochs are charged; the unchanged lineage can still finish100.
+    requested = pilot.epoch_segment_limit(
+        until_epoch=100, additional_epochs=None, start_step=95 * 38,
+        configured_epochs=100,
+    )
+    assert pilot._effective_step_cap(
+        requested_max_steps=requested, configured_steps=envelope["configured_steps"],
+        start_step=95 * 38, stage_remaining=10 * 38, global_remaining=1000 * 38,
+        lineage_remaining=envelope["lineage_attempted_update_cap"] - 100 * 38,
+        is_resume=True,
+    ) == 5 * 38
+    with pytest.raises(pilot.PilotContractError, match="configured horizon"):
+        pilot.epoch_segment_limit(
+            until_epoch=101, additional_epochs=None, start_step=95 * 38,
+            configured_epochs=100,
+        )
+    config["output"]["experiment_name"] = "Test_1002/T10_legacy"
+    assert pilot.validate_test_envelope(config, planned_runs=planned, train_count=8000)[
+        "lineage_attempted_update_cap"
+    ] == 100 * 38

@@ -207,8 +207,11 @@ def validate_test_envelope(
         "stage_epoch_cap": stage_epoch_cap,
         "stage_attempted_update_cap": stage_epoch_cap * PINNED_STEPS_PER_EPOCH,
         "lineage_epoch_cap": lineage_epoch_cap,
-        "lineage_attempted_update_cap": min(epochs, lineage_epoch_cap)
-        * PINNED_STEPS_PER_EPOCH,
+        # R2's predeclared stage headroom covers lost/replayed work without
+        # changing the frozen accepted-epoch horizon. R1 keeps its old cap.
+        "lineage_attempted_update_cap": min(
+            stage_epoch_cap if stage.startswith("R2_") else epochs, lineage_epoch_cap
+        ) * PINNED_STEPS_PER_EPOCH,
         "batch_size": int(batch_size),
         "train_fraction": float(fraction),
         "evaluation_split": "validation",

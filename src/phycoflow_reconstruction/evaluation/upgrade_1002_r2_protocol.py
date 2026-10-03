@@ -173,6 +173,50 @@ def matched_native_monitor(
     return reports
 
 
+def grouped_native_monitor(model, source_model, batches, seeds=(2027, 3027)) -> dict:
+    """Audit-only native draws in exact groups32, without altering training monitors."""
+    reports = {}
+    for role, batch in batches.items():
+        count = len(batch.sample_ids)
+        if count < 32 or count % 32:
+            raise ValueError("grouped native audit requires complete groups of 32")
+        groups = []
+        for start in range(0, count, 32):
+            group = matched_native_monitor(
+                model, source_model, {role: slice_panel(batch, start, start + 32)}, seeds
+            )[role]
+            groups.append({"group_index": start // 32, **group})
+        draws = []
+        for index, seed in enumerate(seeds):
+            candidate = float(np.mean([group["draws"][index]["candidate"] for group in groups]))
+            source = float(np.mean([group["draws"][index]["source"] for group in groups]))
+            draws.append(
+                {
+                    "seed": int(seed),
+                    "candidate": candidate,
+                    "source": source,
+                    "ratio": candidate / source if source > 0 else None,
+                }
+            )
+        candidate = float(np.mean([draw["candidate"] for draw in draws]))
+        source = float(np.mean([draw["source"] for draw in draws]))
+        reports[role] = {
+            "candidate": candidate,
+            "source": source,
+            "ratio": candidate / source if source > 0 else None,
+            "draws": draws,
+            "groups": groups,
+            "sample_ids": list(batch.sample_ids),
+            "group_size": 32,
+            "aggregation": "equal_group_mean_then_equal_draw_mean",
+            "rng_policy": "reset_each_declared_seed_for_each_group_source_candidate_matched",
+            "source_weight_selection": "live",
+            "candidate_weight_selection": "live",
+            "role": "audit_only_no_calibration_or_gradient",
+        }
+    return reports
+
+
 def error_decomposition(prediction, target, valid_mask=None) -> dict:
     """Per-snapshot mean-offset and centered MSE; retain original production error."""
     error = (prediction.detach() - target.detach()).double()
@@ -355,7 +399,7 @@ def _grouped_evaluate_live(
         }
         compact_groups.append(compact)
     report["group_reports"] = compact_groups
-    report["aggregation"] = "equal_sample_group32_mean_with_separate_pooled_B"
+    report["aggregation"] = "equal_sample_group32_mean"
     report["evaluation_weight_source"] = "live_checkpoint_model_weights"
     report["generation_seed_policy"] = (
         "reset_declared_seed_per_group32_identically_for_source_and_candidate"
@@ -408,6 +452,7 @@ def _grouped_evaluate_live(
                 + cross.component_weights["cross_frequency"] * pooled.cross_frequency
             ),
         }
+        report["aggregation"] = "equal_sample_group32_mean_with_separate_pooled_B"
     return report
 
 
@@ -423,15 +468,30 @@ def mature_checkpoint_summary(records: Sequence[Mapping[str, Any]]) -> dict:
     last_epoch = int(latest["epoch"]) if latest else 0
     recent = [item for item in records if last_epoch - 50 < int(item["epoch"]) <= last_epoch]
     best = min(eligible, key=lambda item: float(item["metric"]), default=None)
+    center = (
+        best if best is not None else max(mature, key=lambda item: int(item["epoch"]), default=None)
+    )
+    late_mature = [item for item in mature if last_epoch - 50 < int(item["epoch"]) <= last_epoch]
+    neighbors = late_mature if center in late_mature else mature
     nearby = (
-        sorted(mature, key=lambda item: abs(int(item["epoch"]) - int(best["epoch"])))[:3]
-        if best
+        sorted(
+            neighbors,
+            key=lambda item: (abs(int(item["epoch"]) - int(center["epoch"])), -int(item["epoch"])),
+        )[:3]
+        if center is not None
         else []
     )
     return {
         "best_eligible_mature": best,
         "latest": latest,
         "nearby_mature": nearby,
+        "neighbor_center": center,
+        "center_role": "best_eligible_mature"
+        if best is not None
+        else "latest_mature"
+        if center is not None
+        else None,
+        "center_eligible": bool(center.get("eligible", False)) if center is not None else None,
         "eligible_fraction_last_50_epochs": sum(bool(item.get("eligible")) for item in recent)
         / len(recent)
         if recent

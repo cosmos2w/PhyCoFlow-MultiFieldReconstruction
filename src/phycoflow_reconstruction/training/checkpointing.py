@@ -52,6 +52,22 @@ class PeriodicCheckpointManager:
         manifest = json.loads(manifest_path.read_text()) if manifest_path.is_file() else {}
         self.best_fidelity_value = float(manifest.get("best_panel_mse", math.inf))
         self.feasible_archive = list(manifest.get("coherence_feasible_archive", []))
+        self.retain_mature = bool(config.get("evaluation", {}).get("r2_protocol", {}).get("enabled", False))
+
+    def _choose_feasible_archive(self, candidates):
+        ranked = sorted(candidates, key=lambda item: (item["metric"], item["step"]))
+        mature = [item for item in ranked if int(item["step"]) >= 100 * self.steps_per_epoch]
+        if not self.retain_mature or not mature:
+            return ranked[:3]
+        retained = ranked[:2]
+        if mature[0] not in retained:
+            retained.append(mature[0])
+        for item in ranked:
+            if len(retained) == 3:
+                break
+            if item not in retained:
+                retained.append(item)
+        return sorted(retained, key=lambda item: (item["metric"], item["step"]))
 
     def restore_coherence_selector(self, checkpoint: Mapping[str, Any]) -> None:
         """Recover selection from the committed checkpoint, not a newer manifest."""
@@ -68,10 +84,33 @@ class PeriodicCheckpointManager:
             path = (self.store.run_dir / item["checkpoint"]).resolve()
             if path.parent != (self.store.run_dir / "checkpoints").resolve() or not path.is_file():
                 raise ValueError("recovered coherence archive checkpoint is unavailable")
+        mature_entry = None
+        epoch = self._epoch(step)
+        report = checkpoint.get("coherence_selection_report")
+        metric = checkpoint.get("checkpoint_metric", {})
+        if (self.retain_mature and epoch is not None and epoch >= 100
+                and isinstance(report, Mapping) and report.get("eligible", False)
+                and math.isfinite(float(report["metric"]))
+                and metric.get("name") == "fixed_panel_coherence_with_fidelity"
+                and metric.get("value") == report["metric"]):
+            # Older R2 checkpoints can carry only early global candidates in
+            # their archive. The current committed weights and current panel
+            # report suffice to retain this mature candidate without a scan.
+            mature_entry = {"step": step, "metric": float(report["metric"]),
+                            "mse": float(report["mse"]),
+                            "family_scores": report["family_source_normalized_scores"],
+                            "checkpoint": f"checkpoints/feasible_{step:07d}.pt"}
+            candidates = [item for item in archive if int(item["step"]) != step] + [mature_entry]
+            archive = self._choose_feasible_archive(candidates)
         self.feasible_archive = archive
         self.best_value = float(state["best_value"])
         self.best_fidelity_value = float(state["best_fidelity_value"])
         self.best_name = str(checkpoint["best_metric_name"])
+        if mature_entry is not None and mature_entry in archive:
+            mature_payload = {**checkpoint, "coherence_selector_state": {
+                "feasible_archive": archive, "best_value": self.best_value,
+                "best_fidelity_value": self.best_fidelity_value}}
+            self.store.save_checkpoint(f"feasible_{step:07d}", mature_payload)
         if archive:
             selected = min(archive, key=lambda item: (item["metric"], item["step"]))
             selected_checkpoint = self.store.load_checkpoint(Path(selected["checkpoint"]).stem)
@@ -247,7 +286,7 @@ class PeriodicCheckpointManager:
                              "checkpoint": f"checkpoints/feasible_{global_step:07d}.pt"}
                     previous = list(self.feasible_archive)
                     candidates = [item for item in previous if item["step"] != global_step] + [entry]
-                    self.feasible_archive = sorted(candidates, key=lambda item: (item["metric"], item["step"]))[:3]
+                    self.feasible_archive = self._choose_feasible_archive(candidates)
                 checkpoint["coherence_selector_state"] = {"feasible_archive": self.feasible_archive,
                                                           "best_value": self.best_value,
                                                           "best_fidelity_value": self.best_fidelity_value}
