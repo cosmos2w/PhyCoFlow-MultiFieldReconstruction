@@ -548,6 +548,17 @@ def _apply_attempt(
     stage = str(active["stage"])
     stage_entry = _stage_entry(ledger, stage)
     accepted, attempted = int(delta["accepted"]), int(delta["attempted"])
+    observed_attempted = attempted
+    # Each post-training iteration emits its update row before the next
+    # optimizer attempt. Interruption before emission can therefore leave
+    # at most one additional started attempt unobserved.
+    unlogged_attempt_bound = int(
+        stage.startswith("R2_")
+        and status in {"recovered_interrupted", "failed"}
+        and run_dir is not None and run_dir.is_dir()
+        and observed_attempted < int(active.get("planned_max_steps", 0))
+    )
+    attempted += unlogged_attempt_bound
     ledger["accepted_updates"] = int(ledger.get("accepted_updates", 0)) + accepted
     ledger["attempted_updates"] = int(ledger.get("attempted_updates", 0)) + attempted
     stage_entry["accepted_updates"] = int(stage_entry.get("accepted_updates", 0)) + accepted
@@ -598,6 +609,8 @@ def _apply_attempt(
     if stage.startswith("R2_"):
         epoch_size = int(active["steps_per_epoch"])
         run.update(
+            observed_attempted_updates=observed_attempted,
+            unlogged_attempt_bound_updates=unlogged_attempt_bound,
             start_epoch=int(active.get("start_step", 0)) / epoch_size,
             end_epoch=int(delta.get("end_step", 0)) / epoch_size,
             consumed_epochs=attempted / epoch_size,
