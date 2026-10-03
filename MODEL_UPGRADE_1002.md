@@ -36,13 +36,13 @@ Protocol reference is the actual resolved config/history of:
 
 Its batch32, fraction0.15, **38-update epochs**, sensors and two-Euler-step protocol were retained. Its epoch3025 endpoint and mixed configured-source-EMA/post-live headlines were not pilot initializers or matched numerical baselines.
 
-All evidence is saved under the exact **ignored, machine-local** root:
+All scientific runs and their original artifacts are saved under the exact **ignored, machine-local** root:
 
 ```text
 T = /home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/runs/Test_1002
 ```
 
-`T/` paths below expand to that directory. Evidence/checkpoints are not uploaded as Git data. Initial identity and environment are `T/_audit/source_contract.json`, `T/_audit/environment.json`; final preservation is `T/_audit/source_immutability_final.json`.
+`T/` paths below expand to that directory. Checkpoints, raw numerical evidence, and original run artifacts are not uploaded as Git data. Byte-identical PNG presentation copies are versioned under `docs/assets/model_upgrade_1002/` for portable local and GitHub Markdown previews; their manifest records source PNG and PDF-master paths and SHA256 hashes. Initial identity and environment are `T/_audit/source_contract.json`, `T/_audit/environment.json`; final preservation is `T/_audit/source_immutability_final.json`.
 
 ## 2. Scope preserved and data roles
 
@@ -375,49 +375,172 @@ Actual training-on/off/resume parity is demonstrated in the CPU lifecycle fixtur
 
 ## 12. Key figures and machine-readable evidence
 
-A short figure index: [fidelity panels](#figure-1-four-panel-fidelity), [family scores](#figure-2-raw-family-ratios), [Pareto trajectories](#figure-3-fidelitycoherence-pareto), [native fields](#figure-4-native-generated-fields), [topology representations](#figure-5-nativecoarsesparse-topology), [gradient diagnostics](#figure-6-controller-and-gradient-history). Every raster below has a retained PDF master next to it; numerical tables remain separate from rendering.
+A short figure index: [fidelity panels](#figure-1-four-panel-fidelity), [family scores](#figure-2-raw-family-ratios), [Pareto trajectories](#figure-3-fidelitycoherence-pareto), [native fields](#figure-4-native-generated-fields), [topology representations](#figure-5-nativecoarsesparse-topology), [controller/gradient histories](#figure-6-controller-and-gradient-history), [legacy B diagnostics](#figure-7-legacy-b-continuity). Every figure below is embedded using a document-relative Markdown image path. The 25 PNG presentation copies in `docs/assets/model_upgrade_1002/` retain the exact original bytes; `manifest.json` records each original PNG and retained PDF master under T. Numerical tables and original scientific artifacts remain in their recorded directories.
 
 ### Figure 1: Four-panel fidelity
 
-![Four-panel source-relative fidelity ratios](/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/runs/Test_1002/_reports/final20_four_panel_A/final20_fidelity_source_ratios.png)
+![Four-panel source-relative fidelity ratios](docs/assets/model_upgrade_1002/final20_fidelity_source_ratios.png)
 
 Selected190/380/380 preserve fixed-panel total and five-field gates, but all fail the first disjoint panel on p (+24.74/+10.94/+11.49%). Shared.8–1.4 axes include all ratios (.84037–1.34591), exposing rather than clipping negative results. These32-snapshot panel means show validation sensitivity; they do not establish independent-trajectory uncertainty. PDF and48-row CSV: `T/_reports/final20_four_panel_A/final20_fidelity_source_ratios.pdf`, `final20_paired_validation_rows.csv`.
 
 ### Figure 2: Raw family ratios
 
-![A/B/C source-relative family ratios](/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/runs/Test_1002/_reports/final20_four_panel_A/final20_family_source_ratios.png)
+![A/B/C source-relative family ratios](docs/assets/model_upgrade_1002/final20_family_source_ratios.png)
 
 The selected fixed-panel C ratios.5582/.5207/.6469 improve, but T51/T52 B ratios1.0529/1.1043 regress. Latest coherence improvement can coexist with field failure. Each panel has its own matched source; all ratios use the same new definitions within an arm. PDF/raws: `final20_family_source_ratios.pdf`, same JSON/CSV directory.
 
 ### Figure 3: Fidelity–coherence Pareto
 
-![Frozen balanced scores versus worst total or field fidelity](/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/runs/Test_1002/_reports/pilot_pareto_topology_A/abc_fidelity_pareto_steps.png)
+![Frozen balanced scores versus worst total or field fidelity](docs/assets/model_upgrade_1002/abc_fidelity_pareto_steps.png)
 
 This plot uses15 unique trained arm-step points plus coincident source records, with x=max(total/five-field source ratio)−1 and the predeclared5% boundary. Ten points fail; selected worst-risk changes1.5182/.6605/.5250% have S.8161/.7981/.8696. The envelope summarizes saved points without a confidence interval or superiority claim. PDF/CSV/hash QA: `T/_reports/pilot_pareto_topology_A/{abc_fidelity_pareto_steps.pdf,abc_fidelity_pareto_points.csv,output_manifest.json,visual_qa.json}`.
 
 ### Figure 4: Native generated fields
 
-![Raw-coordinate native fields and signed errors on validation8032](/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/runs/Test_1002/_reports/native_fields_raw_coordinates/validation_8032_raw_coordinates.png)
+![Raw-coordinate native fields and signed errors on validation8032](docs/assets/model_upgrade_1002/validation_8032_raw_coordinates.png)
 
-GT/source/selected190/latest190 and signed errors share fixed field/color scales. The four-state full-grid comparison has total−2.85% while p+26.164% fails, so a visually improved scalar field or lower aggregate cannot certify fidelity. Values and coordinate units follow dataset metadata (unknown physical unit labels). Four PDF masters, manifest and all remaining state panels are in the same directory; source numerical archive is the NPZ in §11.1.
+GT/source/selected190/latest190 and signed errors share fixed field/color scales. The four-state full-grid comparison has total−2.85% while p+26.164% fails, so a visually improved scalar field or lower aggregate cannot certify fidelity. Values and coordinate units follow dataset metadata (unknown physical unit labels). All four validation snapshots are embedded below, using the same field/color scales. Their original PDF masters and manifest remain in `T/_reports/native_fields_raw_coordinates/`; the numerical archive is the NPZ in §11.1.
+
+
+**Validation snapshot 8033.**
+
+![Raw-coordinate native fields and signed errors on validation 8033](docs/assets/model_upgrade_1002/validation_8033_raw_coordinates.png)
+
+**Validation snapshot 8034.**
+
+![Raw-coordinate native fields and signed errors on validation 8034](docs/assets/model_upgrade_1002/validation_8034_raw_coordinates.png)
+
+**Validation snapshot 8035.**
+
+![Raw-coordinate native fields and signed errors on validation 8035](docs/assets/model_upgrade_1002/validation_8035_raw_coordinates.png)
 
 ### Figure 5: Native/coarse/sparse topology
 
-![Archived ground-truth topology ratios by representation](/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/runs/Test_1002/_reports/pilot_pareto_topology_A/native_topology_selected_source_ratios.png)
+![Archived ground-truth topology ratios by representation](docs/assets/model_upgrade_1002/native_topology_selected_source_ratios.png)
 
 Across18 H0/H1 self/mutual groups, selected/source descriptive ratios.3905–1.0120 reveal one sparseT H0 regression. The common native40300 finite denominator and unscaled .1 essential term make the display a separate descriptive diagnostic; nested line-weighted training C differs. Four snapshots, two signs and shared banks are correlated replicates, without CI. PDF/tables: `native_topology_selected_source_ratios.pdf`, `native_topology_selected_source_ratios.csv`, byte-identical54-row `native_topology_group_summary_input.csv`.
 
 ### Figure 6: Controller and gradient history
 
-![Actual gradient geometry and AdamW displacement for T50](/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/runs/Test_1002/_reports/T50_R1_epoch20_history_80e17c9/adaptive_gradient_geometry.png)
+These histories use actual child update coordinates, including all staged segments, with selected steps190/380/380 and latest760. Training diagnostics and fixed-panel selection remain separate from the independent fidelity audit. Exact per-update records cover steps381–760; earlier summaries do not establish every-update behavior.
 
-![Fidelity controller history for T50](/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/runs/Test_1002/_reports/T50_R1_epoch20_history_80e17c9/adaptive_controller_state.png)
+#### T50: ConFIG
 
-Late T50 records49/380 explicit ConFIG fallbacks and352/380 clipped updates; diagnostic descent geometry does not prevent independent pressure failure. These panels use child update coordinates and distinguish pre-step risks from post-step multipliers. Parallel T51/T52 reports and all PDF/SVG masters: `T/_reports/T{50,51,52}_R1_epoch20_history_80e17c9/`; exported JSON/hash manifest `T/_reports/final20_public_history_reports_manifest.json`.
+Selected step190; latest step760. In the late380-update window, 352/380 updates were clipped. ConFIG used49 explicit weighted-sum fallbacks.
+
+**Coherence and optimization history.**
+
+![T50 coherence and optimization history](docs/assets/model_upgrade_1002/T50_coherence_history.png)
+
+Family-loss histories expose A/B/C tradeoffs across the staged segments; lower coherence scores alone do not establish fidelity.
+
+**Total and five-field fidelity histories.**
+
+![T50 total and five-field fidelity histories](docs/assets/model_upgrade_1002/T50_adaptive_fidelity_risks.png)
+
+Total and all five protected field risks are shown separately; these training/selection diagnostics do not replace disjoint validation.
+
+**Fidelity-gated checkpoint selection.**
+
+![T50 fidelity-gated checkpoint selection](docs/assets/model_upgrade_1002/T50_adaptive_selector_trajectories.png)
+
+The selector records eligible checkpoints and their balanced score on the frozen selection panel; the selected checkpoint remains subject to independent audits.
+
+**Gradient geometry and AdamW displacement.**
+
+![T50 gradient geometry and AdamW displacement](docs/assets/model_upgrade_1002/T50_adaptive_gradient_geometry.png)
+
+Gradient/cosine diagnostics and actual optimizer displacement describe local updates, with no guarantee of held-out improvement.
+
+**Primal-dual fidelity controller.**
+
+![T50 primal-dual fidelity controller](docs/assets/model_upgrade_1002/T50_adaptive_controller_state.png)
+
+Multiplier and violation histories show the field-specific fidelity pressure; no late-window multiplier reached cap100.
+
+#### T51: weighted sum
+
+Selected step380; latest step760. In the late380-update window, 181/380 updates were clipped.
+
+**Coherence and optimization history.**
+
+![T51 coherence and optimization history](docs/assets/model_upgrade_1002/T51_coherence_history.png)
+
+Family-loss histories expose A/B/C tradeoffs across the staged segments; lower coherence scores alone do not establish fidelity.
+
+**Total and five-field fidelity histories.**
+
+![T51 total and five-field fidelity histories](docs/assets/model_upgrade_1002/T51_adaptive_fidelity_risks.png)
+
+Total and all five protected field risks are shown separately; these training/selection diagnostics do not replace disjoint validation.
+
+**Fidelity-gated checkpoint selection.**
+
+![T51 fidelity-gated checkpoint selection](docs/assets/model_upgrade_1002/T51_adaptive_selector_trajectories.png)
+
+The selector records eligible checkpoints and their balanced score on the frozen selection panel; the selected checkpoint remains subject to independent audits.
+
+**Gradient geometry and AdamW displacement.**
+
+![T51 gradient geometry and AdamW displacement](docs/assets/model_upgrade_1002/T51_adaptive_gradient_geometry.png)
+
+Gradient/cosine diagnostics and actual optimizer displacement describe local updates, with no guarantee of held-out improvement.
+
+**Primal-dual fidelity controller.**
+
+![T51 primal-dual fidelity controller](docs/assets/model_upgrade_1002/T51_adaptive_controller_state.png)
+
+Multiplier and violation histories show the field-specific fidelity pressure; no late-window multiplier reached cap100.
+
+#### T52: CAGrad
+
+Selected step380; latest step760. In the late380-update window, 245/380 updates were clipped.
+
+**Coherence and optimization history.**
+
+![T52 coherence and optimization history](docs/assets/model_upgrade_1002/T52_coherence_history.png)
+
+Family-loss histories expose A/B/C tradeoffs across the staged segments; lower coherence scores alone do not establish fidelity.
+
+**Total and five-field fidelity histories.**
+
+![T52 total and five-field fidelity histories](docs/assets/model_upgrade_1002/T52_adaptive_fidelity_risks.png)
+
+Total and all five protected field risks are shown separately; these training/selection diagnostics do not replace disjoint validation.
+
+**Fidelity-gated checkpoint selection.**
+
+![T52 fidelity-gated checkpoint selection](docs/assets/model_upgrade_1002/T52_adaptive_selector_trajectories.png)
+
+The selector records eligible checkpoints and their balanced score on the frozen selection panel; the selected checkpoint remains subject to independent audits.
+
+**Gradient geometry and AdamW displacement.**
+
+![T52 gradient geometry and AdamW displacement](docs/assets/model_upgrade_1002/T52_adaptive_gradient_geometry.png)
+
+Gradient/cosine diagnostics and actual optimizer displacement describe local updates, with no guarantee of held-out improvement.
+
+**Primal-dual fidelity controller.**
+
+![T52 primal-dual fidelity controller](docs/assets/model_upgrade_1002/T52_adaptive_controller_state.png)
+
+Multiplier and violation histories show the field-specific fidelity pressure; no late-window multiplier reached cap100.
+
+Original reports and PDF/SVG masters: `T/_reports/T{50,51,52}_R1_epoch20_history_80e17c9/`; exported JSON/hash manifest: `T/_reports/final20_public_history_reports_manifest.json`.
+
+### Figure 7: Legacy B continuity
+
+![Legacy B same-frequency source ratios across all arms and validation panels](docs/assets/model_upgrade_1002/legacy_v3_same_frequency_ratios.png)
+
+The pinned v3 same-frequency definition gives fixed-panel selected source ratios1.0968/1.0099/1.0712 for T50/T51/T52; these regressions are distinct from the upgraded signed covariance-block scores.
+
+![Legacy B cross-frequency source ratios across all arms and validation panels](docs/assets/model_upgrade_1002/legacy_v3_cross_frequency_ratios.png)
+
+The pinned v3 cross-frequency definition gives fixed-panel selected source ratios1.2127/1.0843/1.2378. These cached5/10-epoch comparisons do not score the uncached final step760; exact numerical tables and PDF masters remain in `T/_audit/B/pilot_monitor/`.
 
 Final20 detailed audit directories are `T/_reports/validation_audits/T{50,51,52}_R1_to20_source_selected_last_epoch010/`. Their `audit.json.gz` and16 role/panel metric JSON.gz files per arm are **losslessly compressed**, with original/gzip SHA256, byte counts and verified decompression in each compression manifest. Sensors, hashes, histories and numerical content remain recoverable (`gzip -dk <file.json.gz>`). Older10-window caches remain unchanged. Completed synthetic pytest fixture directories also have verified recovery archives/manifests under `_audit/completed_synthetic_fixture_archives`; no source or actual pilot checkpoint/history was deleted. Only three reproducible compiler .so cache files were removed after no-open-handle/hash checks (`compiler_cache_cleanup_receipt.json`). Shared-volume free space varied independently; no payload was relocated outside T.
 
-Additional complete indexes: `T/_reports/pilot_inventory_final_inputs/` contains the frozen JSON/CSV/Markdown inventory, release-gate review, manifest and SHA256SUMS; live-path copies are `T/_reports/pilot_inventory.{json,csv,md}` and `release_gate_review.md`. The frozen inventory JSON SHA256 is `6acf671f49d024f35a8436a403a5f3dc8e8550f2b735dc94eda8e9e450c9d6b6`; bundle manifest SHA256 is `f48c8740c50e99cece16f2957e7d62a091b279a46d50c1058b314edeb77427a2`. The budget and stopped-study state are `T/_audit/stage_ledger.json` and `study_final_state.json`. Evidence is machine-local/ignored; the branch contains source/tests/documentation, not large run data.
+Additional complete indexes: `T/_reports/pilot_inventory_final_inputs/` contains the frozen JSON/CSV/Markdown inventory, release-gate review, manifest and SHA256SUMS; live-path copies are `T/_reports/pilot_inventory.{json,csv,md}` and `release_gate_review.md`. The frozen inventory JSON SHA256 is `6acf671f49d024f35a8436a403a5f3dc8e8550f2b735dc94eda8e9e450c9d6b6`; bundle manifest SHA256 is `f48c8740c50e99cece16f2957e7d62a091b279a46d50c1058b314edeb77427a2`. The budget and stopped-study state are `T/_audit/stage_ledger.json` and `study_final_state.json`. Raw evidence is machine-local/ignored; the branch contains source/tests/documentation and the lightweight PNG presentation copies, with no checkpoints or large run data.
 
 The final Pareto/topology figures read frozen input copies under `T/_reports/pilot_pareto_topology_A/inputs/`. An earlier derived inventory JSON was replaced when final test-status metadata was corrected; its original SHA256 (`387da03677ace830745b6530a9a394e84aaf0cdf983b98823d7228f36f8eb37b`) is recorded, but its exact bytes were not archived and are unavailable. Earlier exports/metadata remain in `superseded_metadata_v1/`, and the subsequent unpadded frozen-input batch remains in `superseded_layout_v2/`; no historical-byte recovery is claimed. All three scientific CSV exports and all plotted-data hashes/axis limits match the preceding batch. Final PDF padding is0.18in: both PDFs have zero out-of-page word boxes, with title minimum y=+1.729475pt. After cropping the added white border, topology pixels are identical and Pareto differences are confined to y-axis tick-label antialiasing (0.0638% of interior pixels). Exact checks are `frozen_input_rerender_qa.json` (SHA256 `278c3b1328a28d8a23fbb8f2f2b759d0a78c151891b7fa8346c2cf50e78d8184`); final `output_manifest.json` SHA256 is `28ac5aae20f5f44b8a97c4f2edcc855152d27a47a5b40bfe4ccb83a3f4b8378d`. This export repair added no training or inference.
 

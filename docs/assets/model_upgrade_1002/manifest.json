@@ -1,0 +1,310 @@
+{
+  "schema": "phycoflow.model_upgrade_1002.preview_assets.v1",
+  "report": "MODEL_UPGRADE_1002.md",
+  "created_at_utc": "2026-10-03T04:13:17.099515+00:00",
+  "copy_policy": "Byte-identical PNG presentation copies; original test artifacts and PDF masters remain under Test_1002.",
+  "figure_count": 25,
+  "total_png_bytes": 10578531,
+  "figures": [
+    {
+      "asset": "docs/assets/model_upgrade_1002/final20_family_source_ratios.png",
+      "sha256": "2ddabb171b9453791eb5ca37f8ef86e53f04485642548ce5841e483935ea013a",
+      "bytes": 503378,
+      "dimensions_pixels": [
+        2941,
+        1897
+      ],
+      "original_png": "cases/turbulent_combustion/runs/Test_1002/_reports/final20_four_panel_A/final20_family_source_ratios.png",
+      "pdf_master": "cases/turbulent_combustion/runs/Test_1002/_reports/final20_four_panel_A/final20_family_source_ratios.pdf",
+      "pdf_master_sha256": "b1afaf7c2c9690f0afcd094b1e2b373b6a4c2717491d152e323a25e53654473d"
+    },
+    {
+      "asset": "docs/assets/model_upgrade_1002/final20_fidelity_source_ratios.png",
+      "sha256": "687807b4c019dca84feec89cf96c24f5cc43e9f5e24fc364af672a248d01cdad",
+      "bytes": 498082,
+      "dimensions_pixels": [
+        2954,
+        1897
+      ],
+      "original_png": "cases/turbulent_combustion/runs/Test_1002/_reports/final20_four_panel_A/final20_fidelity_source_ratios.png",
+      "pdf_master": "cases/turbulent_combustion/runs/Test_1002/_reports/final20_four_panel_A/final20_fidelity_source_ratios.pdf",
+      "pdf_master_sha256": "169ce7c8566a9b6157e409f39e2f10177a180544a4a3fa13028c5eb090cb3d32"
+    },
+    {
+      "asset": "docs/assets/model_upgrade_1002/validation_8032_raw_coordinates.png",
+      "sha256": "f24b07ea2384de298c95ea606892e02f72305a472784e4f53f8d5c471b2edd64",
+      "bytes": 858728,
+      "dimensions_pixels": [
+        3960,
+        1404
+      ],
+      "original_png": "cases/turbulent_combustion/runs/Test_1002/_reports/native_fields_raw_coordinates/validation_8032_raw_coordinates.png",
+      "pdf_master": "cases/turbulent_combustion/runs/Test_1002/_reports/native_fields_raw_coordinates/validation_8032_raw_coordinates.pdf",
+      "pdf_master_sha256": "9a0c123d3165b571f6f0793fb42b847774c3160ad39fb51391002ceaa1ad8528"
+    },
+    {
+      "asset": "docs/assets/model_upgrade_1002/validation_8033_raw_coordinates.png",
+      "sha256": "1bf91e5d8d0ea4ca363c926032b0c0bf65ab0dc6f9f8cda4c593a735bb2bdb3c",
+      "bytes": 862816,
+      "dimensions_pixels": [
+        3960,
+        1404
+      ],
+      "original_png": "cases/turbulent_combustion/runs/Test_1002/_reports/native_fields_raw_coordinates/validation_8033_raw_coordinates.png",
+      "pdf_master": "cases/turbulent_combustion/runs/Test_1002/_reports/native_fields_raw_coordinates/validation_8033_raw_coordinates.pdf",
+      "pdf_master_sha256": "9b03a7065cb19f4e4fc2da157f0aaba4e642a65196d27a80de9abe682798ed27"
+    },
+    {
+      "asset": "docs/assets/model_upgrade_1002/validation_8034_raw_coordinates.png",
+      "sha256": "acf5bf50a6c89f6a5bf14a329d7bcf4afcf4db509bf312fa811280c88c22dfe7",
+      "bytes": 855299,
+      "dimensions_pixels": [
+        3960,
+        1404
+      ],
+      "original_png": "cases/turbulent_combustion/runs/Test_1002/_reports/native_fields_raw_coordinates/validation_8034_raw_coordinates.png",
+      "pdf_master": "cases/turbulent_combustion/runs/Test_1002/_reports/native_fields_raw_coordinates/validation_8034_raw_coordinates.pdf",
+      "pdf_master_sha256": "5d0c78efbf2344d0204246ad2f55907538b87e18e8ed9e109e143d74eab9465f"
+    },
+    {
+      "asset": "docs/assets/model_upgrade_1002/validation_8035_raw_coordinates.png",
+      "sha256": "8927b99b7cde79cfe8aceb358fc4fc9a9ee0b7ae65a8f254792263c99b7edf73",
+      "bytes": 851700,
+      "dimensions_pixels": [
+        3960,
+        1404
+      ],
+      "original_png": "cases/turbulent_combustion/runs/Test_1002/_reports/native_fields_raw_coordinates/validation_8035_raw_coordinates.png",
+      "pdf_master": "cases/turbulent_combustion/runs/Test_1002/_reports/native_fields_raw_coordinates/validation_8035_raw_coordinates.pdf",
+      "pdf_master_sha256": "2214d883c422876e274484d2ea8c8ddd2890e0d3bed2110cff82ec49b8f26cdc"
+    },
+    {
+      "asset": "docs/assets/model_upgrade_1002/abc_fidelity_pareto_steps.png",
+      "sha256": "8220c8870dfa1e26a95f3515eb377cdf1a278d817dff0a24fc21d938b920386b",
+      "bytes": 367155,
+      "dimensions_pixels": [
+        2744,
+        1522
+      ],
+      "original_png": "cases/turbulent_combustion/runs/Test_1002/_reports/pilot_pareto_topology_A/abc_fidelity_pareto_steps.png",
+      "pdf_master": "cases/turbulent_combustion/runs/Test_1002/_reports/pilot_pareto_topology_A/abc_fidelity_pareto_steps.pdf",
+      "pdf_master_sha256": "0e349015094212d0ed6a7c964a5cdc2da4494e0a544c6f41de9bcfc8c7348103"
+    },
+    {
+      "asset": "docs/assets/model_upgrade_1002/native_topology_selected_source_ratios.png",
+      "sha256": "cc2c24f129a0e768deac6cb390bd000dc5a0cda1ff8cc6eee4e2a07c848fae82",
+      "bytes": 250656,
+      "dimensions_pixels": [
+        3005,
+        1387
+      ],
+      "original_png": "cases/turbulent_combustion/runs/Test_1002/_reports/pilot_pareto_topology_A/native_topology_selected_source_ratios.png",
+      "pdf_master": "cases/turbulent_combustion/runs/Test_1002/_reports/pilot_pareto_topology_A/native_topology_selected_source_ratios.pdf",
+      "pdf_master_sha256": "8cd80fb8dcd97e9309f8172388e500811e735300b64d3c8f1c04e61b3cd28607"
+    },
+    {
+      "asset": "docs/assets/model_upgrade_1002/legacy_v3_cross_frequency_ratios.png",
+      "sha256": "89aa33abb178de98d4356f9f68a3b73ea5abd5916ca92a4e2eb4abd938fb62d2",
+      "bytes": 226551,
+      "dimensions_pixels": [
+        2732,
+        1476
+      ],
+      "original_png": "cases/turbulent_combustion/runs/Test_1002/_audit/B/pilot_monitor/legacy_v3_cross_frequency_ratios.png",
+      "pdf_master": "cases/turbulent_combustion/runs/Test_1002/_audit/B/pilot_monitor/legacy_v3_cross_frequency_ratios.pdf",
+      "pdf_master_sha256": "71f9cabfce7da73880429b82d1f1f1b2c03031d194f6d2b7053d4c653f227928"
+    },
+    {
+      "asset": "docs/assets/model_upgrade_1002/legacy_v3_same_frequency_ratios.png",
+      "sha256": "046c56a92f23d4c5c20b77d86b6b91ca686f39c81144ed4cc699a0e646853b5f",
+      "bytes": 236925,
+      "dimensions_pixels": [
+        2732,
+        1476
+      ],
+      "original_png": "cases/turbulent_combustion/runs/Test_1002/_audit/B/pilot_monitor/legacy_v3_same_frequency_ratios.png",
+      "pdf_master": "cases/turbulent_combustion/runs/Test_1002/_audit/B/pilot_monitor/legacy_v3_same_frequency_ratios.pdf",
+      "pdf_master_sha256": "ab0ebfad5d64d4a74bf34f495ac5852bf6c9a2f46daa436bad48084f6dd791c7"
+    },
+    {
+      "asset": "docs/assets/model_upgrade_1002/T50_adaptive_controller_state.png",
+      "sha256": "30d03ef6dabaf118a000994b1e5394edb5219aa18991b629009310b2b4fa89ae",
+      "bytes": 354764,
+      "dimensions_pixels": [
+        2160,
+        2700
+      ],
+      "original_png": "cases/turbulent_combustion/runs/Test_1002/_reports/T50_R1_epoch20_history_80e17c9/adaptive_controller_state.png",
+      "pdf_master": "cases/turbulent_combustion/runs/Test_1002/_reports/T50_R1_epoch20_history_80e17c9/adaptive_controller_state.pdf",
+      "pdf_master_sha256": "eb6ae099377ab042df3546b3fdb586e68fb6e274e4e5eaa33bdf0d26d994f022"
+    },
+    {
+      "asset": "docs/assets/model_upgrade_1002/T50_adaptive_fidelity_risks.png",
+      "sha256": "b0b5139dd149e678aa36969fd8d31ba5b59a421ce9bc9d84330f9da92ae6fae5",
+      "bytes": 164478,
+      "dimensions_pixels": [
+        2070,
+        1044
+      ],
+      "original_png": "cases/turbulent_combustion/runs/Test_1002/_reports/T50_R1_epoch20_history_80e17c9/adaptive_fidelity_risks.png",
+      "pdf_master": "cases/turbulent_combustion/runs/Test_1002/_reports/T50_R1_epoch20_history_80e17c9/adaptive_fidelity_risks.pdf",
+      "pdf_master_sha256": "42df7ae312aabe663d2fdf8dba27bb2c26737e5bc2988b817ad2fc11b70ed19d"
+    },
+    {
+      "asset": "docs/assets/model_upgrade_1002/T50_adaptive_gradient_geometry.png",
+      "sha256": "d42cf63c91594be382e00660f5d3354eb5e078bf270701047cc9b89d5a7279c9",
+      "bytes": 228529,
+      "dimensions_pixels": [
+        2376,
+        1080
+      ],
+      "original_png": "cases/turbulent_combustion/runs/Test_1002/_reports/T50_R1_epoch20_history_80e17c9/adaptive_gradient_geometry.png",
+      "pdf_master": "cases/turbulent_combustion/runs/Test_1002/_reports/T50_R1_epoch20_history_80e17c9/adaptive_gradient_geometry.pdf",
+      "pdf_master_sha256": "97143d1774b1ef88d45a71979fdf803b73316569feab89541065748bffa0cc68"
+    },
+    {
+      "asset": "docs/assets/model_upgrade_1002/T50_adaptive_selector_trajectories.png",
+      "sha256": "65e3db62ac0abd2ea8128e18f3012b61bb244e8deeb2c70451fd4fcde8bf135b",
+      "bytes": 148775,
+      "dimensions_pixels": [
+        2070,
+        1044
+      ],
+      "original_png": "cases/turbulent_combustion/runs/Test_1002/_reports/T50_R1_epoch20_history_80e17c9/adaptive_selector_trajectories.png",
+      "pdf_master": "cases/turbulent_combustion/runs/Test_1002/_reports/T50_R1_epoch20_history_80e17c9/adaptive_selector_trajectories.pdf",
+      "pdf_master_sha256": "f8e1e05c4b13e191a731e5d489d342273711ea820ce143c5589ea1942c628ea3"
+    },
+    {
+      "asset": "docs/assets/model_upgrade_1002/T50_coherence_history.png",
+      "sha256": "ad9e257d146c9939a6953bff292d0a3a16d8923085614837d30aaf2099d5b5f0",
+      "bytes": 824650,
+      "dimensions_pixels": [
+        2268,
+        2744
+      ],
+      "original_png": "cases/turbulent_combustion/runs/Test_1002/_reports/T50_R1_epoch20_history_80e17c9/coherence_history.png",
+      "pdf_master": "cases/turbulent_combustion/runs/Test_1002/_reports/T50_R1_epoch20_history_80e17c9/coherence_history.pdf",
+      "pdf_master_sha256": "56ab26b153fe45530b24a6bdf6fba31494c3638a2242fd69095bc00743d0e12b"
+    },
+    {
+      "asset": "docs/assets/model_upgrade_1002/T51_adaptive_controller_state.png",
+      "sha256": "c1dad915b28ca4ecd1d1856bd0e7f7646439f4ce808c4a5da699ac0511dd7a7e",
+      "bytes": 353328,
+      "dimensions_pixels": [
+        2160,
+        2700
+      ],
+      "original_png": "cases/turbulent_combustion/runs/Test_1002/_reports/T51_R1_epoch20_history_80e17c9/adaptive_controller_state.png",
+      "pdf_master": "cases/turbulent_combustion/runs/Test_1002/_reports/T51_R1_epoch20_history_80e17c9/adaptive_controller_state.pdf",
+      "pdf_master_sha256": "f95289eed335bb6fc480a6a54825f119beb8724af95a559866f7935c2c8ebb73"
+    },
+    {
+      "asset": "docs/assets/model_upgrade_1002/T51_adaptive_fidelity_risks.png",
+      "sha256": "52b20c72197fff106abffc3befa65f355809b988156299bdf0604a96708577b9",
+      "bytes": 170494,
+      "dimensions_pixels": [
+        2070,
+        1044
+      ],
+      "original_png": "cases/turbulent_combustion/runs/Test_1002/_reports/T51_R1_epoch20_history_80e17c9/adaptive_fidelity_risks.png",
+      "pdf_master": "cases/turbulent_combustion/runs/Test_1002/_reports/T51_R1_epoch20_history_80e17c9/adaptive_fidelity_risks.pdf",
+      "pdf_master_sha256": "0c622fff467f9fa981e568014d416c97e960a8d3857f416092050382ca7e8223"
+    },
+    {
+      "asset": "docs/assets/model_upgrade_1002/T51_adaptive_gradient_geometry.png",
+      "sha256": "532fc12a5c1d5152a4e77c121b479e9b6e68db38751c7553510833530f90726f",
+      "bytes": 244997,
+      "dimensions_pixels": [
+        2376,
+        1080
+      ],
+      "original_png": "cases/turbulent_combustion/runs/Test_1002/_reports/T51_R1_epoch20_history_80e17c9/adaptive_gradient_geometry.png",
+      "pdf_master": "cases/turbulent_combustion/runs/Test_1002/_reports/T51_R1_epoch20_history_80e17c9/adaptive_gradient_geometry.pdf",
+      "pdf_master_sha256": "c0ddb29c39a18450b6c0d649cc7764017e29fc9257362f73305bb886a19556bf"
+    },
+    {
+      "asset": "docs/assets/model_upgrade_1002/T51_adaptive_selector_trajectories.png",
+      "sha256": "ae4b64b001c21495eecd01c8922c007ac001804531f8f367826eb539c4e8fd50",
+      "bytes": 148135,
+      "dimensions_pixels": [
+        2070,
+        1044
+      ],
+      "original_png": "cases/turbulent_combustion/runs/Test_1002/_reports/T51_R1_epoch20_history_80e17c9/adaptive_selector_trajectories.png",
+      "pdf_master": "cases/turbulent_combustion/runs/Test_1002/_reports/T51_R1_epoch20_history_80e17c9/adaptive_selector_trajectories.pdf",
+      "pdf_master_sha256": "58e5e6fdbe70692d978ee20f780eac676b282489193655a64d96d98eac090fb4"
+    },
+    {
+      "asset": "docs/assets/model_upgrade_1002/T51_coherence_history.png",
+      "sha256": "305fc67e0a52ccda3f30515178ee3f1961afcf7cce7fb90767d11df17f57a2cb",
+      "bytes": 738455,
+      "dimensions_pixels": [
+        2268,
+        2744
+      ],
+      "original_png": "cases/turbulent_combustion/runs/Test_1002/_reports/T51_R1_epoch20_history_80e17c9/coherence_history.png",
+      "pdf_master": "cases/turbulent_combustion/runs/Test_1002/_reports/T51_R1_epoch20_history_80e17c9/coherence_history.pdf",
+      "pdf_master_sha256": "943c90d6f4be4f6844f5a669ed1a1d6121da625bf227b380120ca0a914229580"
+    },
+    {
+      "asset": "docs/assets/model_upgrade_1002/T52_adaptive_controller_state.png",
+      "sha256": "14eebed14b8dc1084d9fa3b72e3c9a94938d6ba81fd7e91aa38a171d54d35ea5",
+      "bytes": 342690,
+      "dimensions_pixels": [
+        2160,
+        2700
+      ],
+      "original_png": "cases/turbulent_combustion/runs/Test_1002/_reports/T52_R1_epoch20_history_80e17c9/adaptive_controller_state.png",
+      "pdf_master": "cases/turbulent_combustion/runs/Test_1002/_reports/T52_R1_epoch20_history_80e17c9/adaptive_controller_state.pdf",
+      "pdf_master_sha256": "74847d018db085c1ff9ae8a02eba111f881b7f2ec1ace7aa5f07f1cbd5966212"
+    },
+    {
+      "asset": "docs/assets/model_upgrade_1002/T52_adaptive_fidelity_risks.png",
+      "sha256": "b813ffe8b6260484f70e1cdf2ca4ee81d087e206e6f8aff7621c743f6ee60a37",
+      "bytes": 158284,
+      "dimensions_pixels": [
+        2070,
+        1044
+      ],
+      "original_png": "cases/turbulent_combustion/runs/Test_1002/_reports/T52_R1_epoch20_history_80e17c9/adaptive_fidelity_risks.png",
+      "pdf_master": "cases/turbulent_combustion/runs/Test_1002/_reports/T52_R1_epoch20_history_80e17c9/adaptive_fidelity_risks.pdf",
+      "pdf_master_sha256": "e87c7578a7bea1c42b12ad252dba2cd3f64e77ac03687bc80cc26eaf69331a2f"
+    },
+    {
+      "asset": "docs/assets/model_upgrade_1002/T52_adaptive_gradient_geometry.png",
+      "sha256": "873b7aac0586798f38d14f38f31634329a5d0fcf1826cab750c393704aecc9a3",
+      "bytes": 252673,
+      "dimensions_pixels": [
+        2376,
+        1080
+      ],
+      "original_png": "cases/turbulent_combustion/runs/Test_1002/_reports/T52_R1_epoch20_history_80e17c9/adaptive_gradient_geometry.png",
+      "pdf_master": "cases/turbulent_combustion/runs/Test_1002/_reports/T52_R1_epoch20_history_80e17c9/adaptive_gradient_geometry.pdf",
+      "pdf_master_sha256": "00c7c5f10e61d4ec8538991eb1cf6558ed69f92990eee85287be3d3c4471c711"
+    },
+    {
+      "asset": "docs/assets/model_upgrade_1002/T52_adaptive_selector_trajectories.png",
+      "sha256": "40071690309c41d5472de1e0b7fe9011935f5c68adcc6e697fcc7b7a43c94e17",
+      "bytes": 152948,
+      "dimensions_pixels": [
+        2070,
+        1044
+      ],
+      "original_png": "cases/turbulent_combustion/runs/Test_1002/_reports/T52_R1_epoch20_history_80e17c9/adaptive_selector_trajectories.png",
+      "pdf_master": "cases/turbulent_combustion/runs/Test_1002/_reports/T52_R1_epoch20_history_80e17c9/adaptive_selector_trajectories.pdf",
+      "pdf_master_sha256": "fe0e44f8769e14853a04b4eff81df4508272823b5a3d194f282b79f0e8aec7a8"
+    },
+    {
+      "asset": "docs/assets/model_upgrade_1002/T52_coherence_history.png",
+      "sha256": "0412b6f093bc65a819ff3da74d76c97553f6efeeadbbbb8c26458180a9668c79",
+      "bytes": 784041,
+      "dimensions_pixels": [
+        2268,
+        2744
+      ],
+      "original_png": "cases/turbulent_combustion/runs/Test_1002/_reports/T52_R1_epoch20_history_80e17c9/coherence_history.png",
+      "pdf_master": "cases/turbulent_combustion/runs/Test_1002/_reports/T52_R1_epoch20_history_80e17c9/coherence_history.pdf",
+      "pdf_master_sha256": "51417dd6bfb81b3e216dac0b1f708e907b1aaa904128fa519903bb133a39428a"
+    }
+  ]
+}
