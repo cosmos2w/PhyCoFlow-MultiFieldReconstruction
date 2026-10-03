@@ -345,6 +345,7 @@ def _validate_common_sections(config: Mapping[str, Any]) -> None:
             "preview",
             "sample_selection",
             "native_topology",
+            "native_topology_audit",
         },
         "evaluation",
     )
@@ -1230,6 +1231,7 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
             "preview",
             "sample_selection",
             "native_topology",
+            "native_topology_audit",
         },
         "evaluation",
     )
@@ -1290,6 +1292,58 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
             config["dataset"]["grid_shape"]
         ):
             raise ValueError("native_topology requires all native grid query points")
+    native_audit = config.get("evaluation", {}).get("native_topology_audit", {})
+    if not isinstance(native_audit, Mapping):
+        raise TypeError("evaluation.native_topology_audit must be a mapping")
+    _reject_unknown(
+        native_audit,
+        {"enabled", "every_steps", "max_samples", "seed"},
+        "evaluation.native_topology_audit",
+    )
+    if "enabled" in native_audit and not isinstance(native_audit["enabled"], bool):
+        raise TypeError("evaluation.native_topology_audit.enabled must be boolean")
+    if native_audit.get("enabled", False):
+        _positive_integer(
+            native_audit.get("every_steps", 0),
+            "evaluation.native_topology_audit.every_steps",
+        )
+        _positive_integer(
+            native_audit.get("max_samples", 4),
+            "evaluation.native_topology_audit.max_samples",
+            minimum=2,
+        )
+        if int(native_audit.get("max_samples", 4)) > 4:
+            raise ValueError("evaluation.native_topology_audit.max_samples must be in [2,4]")
+        seed = native_audit.get("seed", 2027)
+        if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
+            raise ValueError("evaluation.native_topology_audit.seed must be a non-negative integer")
+        topology = families.get("topology", {})
+        mutual = topology.get("components", {}).get("mutual", {})
+        if (
+            topology.get("enabled", True) is False
+            or topology.get("strategy") != "cubical_persistence"
+            or topology.get("target_use", "paired_supervised") != "paired_supervised"
+            or len(config["dataset"].get("grid_shape", [])) != 2
+            or not mutual.get("enabled", True)
+            or int(mutual.get("line_bank_size", 0)) < 1
+        ):
+            raise ValueError(
+                "native topology audit requires paired cubical persistence on a 2D grid "
+                "with a saved mutual line bank"
+            )
+        if config.get("evaluation", {}).get("split", "validation") != "validation":
+            raise ValueError("native topology audit is restricted to the validation split")
+        compute = config.get("coherence", {}).get("compute_budget", {})
+        if compute.get("query_policy", "random_per_sample") != "fixed_shared":
+            raise ValueError("native topology audit requires the fixed_shared saved-bank family policy")
+        checkpointing = config.get("checkpointing", {})
+        checkpoint_every = checkpointing.get("every_steps")
+        if not checkpointing.get("enabled", True) or checkpoint_every is None:
+            raise ValueError("native topology audit requires enabled every_steps checkpoint saves")
+        if int(native_audit["every_steps"]) % int(checkpoint_every) != 0:
+            raise ValueError(
+                "native topology audit cadence must be a multiple of checkpointing.every_steps"
+            )
     native_budget = fidelity.get("max_relative_native_topology_increase")
     if native_budget is not None:
         if not config.get("evaluation", {}).get("native_topology", False):

@@ -1408,8 +1408,33 @@ def run_post_training(
     resume: str | Path | None = None,
 ) -> Path:
     """Create or resume one immutable child post-training run."""
+    evaluation_settings = config.get("evaluation", {})
+    native_audit_settings = (
+        evaluation_settings.get("native_topology_audit", {})
+        if isinstance(evaluation_settings, Mapping)
+        else {}
+    )
+    native_audit = (
+        native_audit_settings
+        if isinstance(native_audit_settings, Mapping)
+        and bool(native_audit_settings.get("enabled", False))
+        else None
+    )
+    if native_audit is not None:
+        from .native_topology_audit import (
+            AUDIT_SUBDIR,
+            audit_due,
+            build_disjoint_validation_batch,
+            build_native_topology_family,
+            execute_native_audit,
+            initialize_native_geometry,
+            verify_saved_family_hash,
+            write_idempotent_report,
+        )
+        from .native_topology_audit import contract_payload as native_audit_contract_payload
+
     adaptive = config["optimization"].get("update_policy", "legacy") == "coherence_primal_dual"
-    if adaptive or config["optimization"].get("gradient_balance") in {
+    if native_audit is not None or adaptive or config["optimization"].get("gradient_balance") in {
         "component_constrained",
         "topology_regularized",
     }:
@@ -1450,7 +1475,12 @@ def run_post_training(
         "topology_regularized",
     }
     source_anchor_model = None
-    if adaptive or constrained or config.get("objectives", {}).get("source_anchor", {}).get("enabled", False):
+    if (
+        native_audit is not None
+        or adaptive
+        or constrained
+        or config.get("objectives", {}).get("source_anchor", {}).get("enabled", False)
+    ):
         # Snapshot before loading a resumed child: the anchor is always the source.
         source_anchor_model = deepcopy(model).eval().requires_grad_(False)
     if not len(train_dataset):
@@ -1743,6 +1773,55 @@ def run_post_training(
         }
     )
 
+    native_audit_family = None
+    native_audit_batch = None
+    native_audit_contract = None
+    native_audit_provenance = None
+    native_audit_geometry = None
+    if native_audit is not None:
+        if "topology" not in families or source_anchor_model is None:
+            raise ValueError("native topology audit requires a frozen source anchor and topology family")
+        native_audit_batch, native_audit_batch_metadata = build_disjoint_validation_batch(
+            evaluation_dataset,
+            protocol,
+            selector_sample_ids=evaluation_batch.sample_ids,
+            max_samples=int(native_audit.get("max_samples", 4)),
+            seed=int(native_audit.get("seed", 2027)),
+            device=device,
+        )
+        native_audit_family, native_audit_provenance = build_native_topology_family(
+            config,
+            evaluation_dataset,
+            train_dataset.normalizer,
+            store.run_dir,
+            device,
+        )
+        native_audit_geometry = initialize_native_geometry(
+            native_audit_family,
+            native_audit_batch,
+            tuple(config["dataset"]["grid_shape"]),
+            excluded_sample_ids=evaluation_batch.sample_ids,
+        )
+        native_audit_provenance["native_geometry"] = native_audit_geometry
+        native_audit_sensor_manifest = manifest_from_batch(
+            native_audit_batch, evaluation_dataset.path, "validation"
+        )
+        native_audit_contract = native_audit_contract_payload(
+            config=config,
+            dataset=evaluation_dataset,
+            batch=native_audit_batch,
+            batch_metadata=native_audit_batch_metadata,
+            sensor_manifest=native_audit_sensor_manifest,
+            family_provenance=native_audit_provenance,
+            config_sha256=store.config_hash,
+            selector_manifest_sha256=evaluation_manifest.digest(),
+        )
+        write_idempotent_report(
+            store,
+            f"{AUDIT_SUBDIR}/contract.json",
+            native_audit_contract,
+        )
+
     batch_size = int(config["optimization"].get("batch_size", 1))
     epochs = int(config["optimization"].get("epochs", 1))
     fraction = float(config["optimization"].get("train_fraction", 1.0))
@@ -1759,6 +1838,43 @@ def run_post_training(
     reporting_only = resume is not None and start_step == configured_steps
     if start_step > configured_steps or (start_step >= final_step and not reporting_only):
         raise ValueError("post-training would perform no optimizer steps")
+    if native_audit is not None and resume is not None and start_step > 0 and not reporting_only:
+        resumed_committed_step = (
+            int(controller.counts["accepted"]) if constrained else int(start_step)
+        )
+        if audit_due(
+            resumed_committed_step,
+            int(native_audit.get("every_steps", 0)),
+            durable=True,
+        ):
+            last_checkpoint = store.run_dir / "checkpoints" / "last.pt"
+            native_audit_provenance["current_child_artifact_sha256"] = verify_saved_family_hash(
+                store
+            )
+            execute_native_audit(
+                store=store,
+                config=config,
+                current_model=model,
+                source_model=source_anchor_model,
+                native_family=native_audit_family,
+                batch=native_audit_batch,
+                field_names=train_dataset.field_names,
+                normalizer=train_dataset.normalizer,
+                family_scales=family_scales,
+                evaluate_fn=_evaluate,
+                contract=native_audit_contract,
+                family_provenance=native_audit_provenance,
+                geometry_provenance=native_audit_geometry,
+                committed_step=resumed_committed_step,
+                attempt_step=start_step,
+                durable_references=[
+                    {
+                        "kind": "last",
+                        "path": str(last_checkpoint.relative_to(store.run_dir)),
+                        "sha256": file_sha256(last_checkpoint),
+                    }
+                ],
+            )
     index_generator = torch.Generator(device="cpu").manual_seed(seed + 17)
     if checkpoint is not None:
         index_generator.set_state(checkpoint["rng_state"]["index_generator"])
@@ -1888,6 +2004,40 @@ def run_post_training(
                 global_step=0,
                 fallback_metric=0.0,
                 force=True,
+            )
+    if native_audit is not None and start_step == 0:
+        source_checkpoint = source_checkpoint_path(config)
+        if file_sha256(source_checkpoint) != source_hashes_before["checkpoint"]:
+            raise ValueError("native topology audit source checkpoint changed before step zero")
+        if audit_due(
+            0,
+            int(native_audit.get("every_steps", 0)),
+            durable=True,
+            initial=True,
+        ):
+            execute_native_audit(
+                store=store,
+                config=config,
+                current_model=model,
+                source_model=source_anchor_model,
+                native_family=native_audit_family,
+                batch=native_audit_batch,
+                field_names=train_dataset.field_names,
+                normalizer=train_dataset.normalizer,
+                family_scales=family_scales,
+                evaluate_fn=_evaluate,
+                contract=native_audit_contract,
+                family_provenance=native_audit_provenance,
+                geometry_provenance=native_audit_geometry,
+                committed_step=0,
+                attempt_step=0,
+                durable_references=[
+                    {
+                        "kind": "immutable_source_checkpoint",
+                        "path": str(source_checkpoint),
+                        "sha256": source_hashes_before["checkpoint"],
+                    }
+                ],
             )
     last_coherence_loss = None
     for offset, batch in enumerate(batch_source):
@@ -2165,6 +2315,52 @@ def run_post_training(
                     "update_mode": row.get("update_mode"),
                 },
             )
+        if (
+            native_audit is not None
+            and row.get("update_accepted", True)
+            and global_step + 1 < final_step
+        ):
+            committed_step = (
+                int(controller.counts["accepted"]) if constrained else int(global_step + 1)
+            )
+            durable_references = []
+            if checkpoint_result is not None:
+                for kind, path in zip(("last", "best"), checkpoint_result):
+                    if path is not None:
+                        durable_references.append(
+                            {
+                                "kind": kind,
+                                "path": str(Path(path).relative_to(store.run_dir)),
+                                "sha256": file_sha256(path),
+                            }
+                        )
+            if audit_due(
+                committed_step,
+                int(native_audit.get("every_steps", 0)),
+                durable=bool(durable_references),
+                update_accepted=bool(row.get("update_accepted", True)),
+            ):
+                native_audit_provenance["current_child_artifact_sha256"] = (
+                    verify_saved_family_hash(store)
+                )
+                execute_native_audit(
+                    store=store,
+                    config=config,
+                    current_model=model,
+                    source_model=source_anchor_model,
+                    native_family=native_audit_family,
+                    batch=native_audit_batch,
+                    field_names=train_dataset.field_names,
+                    normalizer=train_dataset.normalizer,
+                    family_scales=family_scales,
+                    evaluate_fn=_evaluate,
+                    contract=native_audit_contract,
+                    family_provenance=native_audit_provenance,
+                    geometry_provenance=native_audit_geometry,
+                    committed_step=committed_step,
+                    attempt_step=global_step + 1,
+                    durable_references=durable_references,
+                )
         monitor.finish_step(
             checkpoint_checked=(
                 checkpoint_result is not None and checkpoint_manager.last_best_checked
@@ -2242,6 +2438,36 @@ def run_post_training(
     last_path, saved_best_path = saved
     if last_path is None:
         raise RuntimeError("forced final save did not create last.pt")
+    if native_audit is not None:
+        committed_final_step = (
+            int(controller.counts["accepted"]) if constrained else int(final_step)
+        )
+        native_audit_provenance["current_child_artifact_sha256"] = verify_saved_family_hash(store)
+        execute_native_audit(
+            store=store,
+            config=config,
+            current_model=model,
+            source_model=source_anchor_model,
+            native_family=native_audit_family,
+            batch=native_audit_batch,
+            field_names=train_dataset.field_names,
+            normalizer=train_dataset.normalizer,
+            family_scales=family_scales,
+            evaluate_fn=_evaluate,
+            contract=native_audit_contract,
+            family_provenance=native_audit_provenance,
+            geometry_provenance=native_audit_geometry,
+            committed_step=committed_final_step,
+            attempt_step=int(final_step),
+            durable_references=[
+                {
+                    "kind": "last",
+                    "path": str(Path(last_path).relative_to(store.run_dir)),
+                    "sha256": file_sha256(last_path),
+                }
+            ],
+            terminal=True,
+        )
     monitor.record_validation(checkpoint_manager.last_validation_report)
     best_checkpoint_saved = saved_best_path is not None
     best_path = store.run_dir / "checkpoints" / "best.pt"
