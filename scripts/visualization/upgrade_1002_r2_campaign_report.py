@@ -884,7 +884,7 @@ def plot_pareto_run(axis, run, color):
         axis.annotate(
             "Source e0" if panel == "source" else f"e{epoch:g}",
             (x, y),
-            xytext=(4, 4),
+            xytext=(4, -10 if epoch % 10 == 5 else 4),
             textcoords="offset points",
             fontsize=6,
             color=color,
@@ -1362,7 +1362,7 @@ def render_campaign(runs, output, field_inputs=()):
     )
     figure.text(
         0.5,
-        0.002,
+        -0.05,
         "Source, best mature, latest, boundaries/neighbors; one audit per panel/epoch; full histories in CSV",
         ha="center",
         fontsize=7,
