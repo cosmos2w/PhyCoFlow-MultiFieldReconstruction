@@ -78,7 +78,7 @@ The legacy reader/metadata correction subsequently passed **26 focused CPU check
 |---|---:|---|
 | R2_00 historical legacy ABC/manual-retention control | 100 epochs | Not yet observed |
 | R2_10 upgraded ABC/endpoint-only control | 100 epochs | Not yet observed |
-| R2_20 native+endpoint ConFIG | 150 epochs; unchanged finalist may reach 200 | Completed 100; broad audit and unchanged continuation pending |
+| R2_20 native+endpoint ConFIG | 150 epochs; unchanged finalist may reach 200 | Completed 150; broad epoch-100/150 audits complete; four-state mature audits complete |
 | R2_21 native+endpoint weighted | 150 epochs | Not yet observed |
 | R2_22 native+endpoint CAGrad | 150 epochs | Not yet observed |
 | R2_30 frozen winning recipe, second training seed | 150 epochs | Pending recipe choice |
@@ -112,7 +112,7 @@ At epoch 80, the selection endpoint panel remains eligible, but frozen native va
 
 At epoch 90, selection remains eligible but B regresses 4.12%, and native validation is +3.43% over source. At epoch 95, selection pressure regresses 10.86% (total +2.18%) and A regresses 8.88%; the state is ineligible. Frozen native TRAIN/validation ratios are 0.950022 / 0.990828 at epoch 95. These ordinary failures remain in the history and do not shorten the epoch-100/150 horizon.
 
-The first segment completed **100 epochs** normally. Its epoch-100 checkpoint is ineligible on selection64: total MSE ratio 1.025868 and p 1.107272; the other four fields remain within budget. A/B/C ratios are 1.098551 / 0.944990 / 0.885895. Frozen native TRAIN/validation ratios are 1.036426 / 1.007317, so TRAIN exceeds the descriptive 2% tolerance at this boundary. Seven of ten selection evaluations over epochs 55–100 pass; failures occur at 65, 95 and 100. The retained selector/archive is still early (selected 45; archive 45/70/60), with no eligible mature state yet. Broad matched epoch-100 audits are now complete; unchanged continuation to epoch 150 follows. This is neither readiness nor a completed optimizer comparison.
+The first segment completed **100 epochs** normally. Its epoch-100 checkpoint is ineligible on selection64: total MSE ratio 1.025868 and p 1.107272; the other four fields remain within budget. A/B/C ratios are 1.098551 / 0.944990 / 0.885895. Frozen native TRAIN/validation ratios are 1.036426 / 1.007317, so TRAIN exceeds the descriptive 2% tolerance at this boundary. Seven of ten selection evaluations over epochs 55–100 pass; failures occur at 65, 95 and 100. The retained selector/archive is still early (selected 45; archive 45/70/60), with no eligible mature state yet. Broad matched epoch-100 audits and the unchanged continuation to epoch 150 are now complete. This is neither readiness nor a completed optimizer comparison.
 
 On the two native-grid development snapshots at epoch 100, total/p MSE ratios are 0.968039 / 0.917853, while CO is 1.016953 and its decoded relative L2 rises 0.474072 → 0.478981. Native C is 0.854481; finite/essential ratios are 0.981834 / 0.851883, and essential terms account for 99.75% of total reduction. This contrast with selection64 emphasizes panel sensitivity and estimator scope. Sixty saved descriptor reconstruction checks through epoch 100 agree within 4.89e-9; they validate the decomposition, not physical causality or uniform field/topology improvement.
 
@@ -125,7 +125,61 @@ The [exact frozen32 noise audit](cases/turbulent_combustion/runs/Test_1002/_audi
 The [root numerical review](cases/turbulent_combustion/runs/Test_1002/_audit/R2_campaign/epoch100_boundary_review/epoch100_root_review.json) verifies the three saved native-lattice arrays: all 40,300 positions, all five fields and signed errors, raw coordinates, finite decoded values, and only actual T sensor locations. At validation indices 32/437/999, pressure MSE ratios are 1.082894 / 0.974038 / 1.043037; CO at 437 is 1.054224 and U_1 at 999 is 1.204890. These representative contour cases expose local regressions rather than replacing the 128-snapshot metrics. No numerical emergency or gross multi-field collapse has been identified.
 
 
+Mature selection and frozen-monitor observations now extend through epoch 150. These are the default two common native draws, not the eight-draw estimator reviewed at epoch 100. Nine of eleven mature selection evaluations through 150 are eligible; failures at 100 and 125 remain explicit. This single continuing trajectory does not replace the unobserved corrected arms, controls or second seed.
+
+| Epoch | Native TRAIN / validation | Total / p MSE ratios | A / B / C ratios | Selection64 eligible |
+| ---: | --- | --- | --- | --- |
+| 100 | 1.036426 / 1.007317 | 1.025868 / 1.107272 | 1.098551 / 0.944990 / 0.885895 | no |
+| 105 | 0.969405 / 0.969661 | 1.001147 / 1.008143 | 0.984673 / 1.006877 / 0.909594 | yes |
+| 110 | 1.010053 / 0.980454 | 0.986055 / 0.974302 | 0.948348 / 1.005836 / 0.881278 | yes |
+| 115 | 0.978527 / 0.997150 | 0.986123 / 0.925592 | 0.901508 / 1.037274 / 0.950679 | yes |
+| 120 | 0.954221 / 1.005845 | 0.995296 / 1.033941 | 1.015414 / 0.974878 / 0.912582 | yes |
+| 125 | 0.950577 / 0.956605 | 1.014015 / 1.053376 | 1.026409 / 0.993525 / 0.909812 | no |
+| 130 | 0.991934 / 0.994309 | 0.987695 / 0.958500 | 0.920026 / 0.999311 / 0.889459 | yes |
+| 135 | 0.972942 / 1.008883 | 0.980078 / 0.956777 | 0.934514 / 1.009306 / 0.953075 | yes |
+| 140 | 0.985523 / 1.013074 | 1.002929 / 1.003212 | 0.988326 / 1.042140 / 0.906332 | yes |
+| 145 | 0.987901 / 1.029743 | 1.012624 / 1.009554 | 0.986411 / 1.021775 / 0.882602 | yes |
+| 150 | 0.997878 / 1.012379 | 1.006712 / 0.981389 | 0.942288 / 1.041276 / 0.908263 | yes |
+| 150 | 0.997878 / 1.012379 | 1.006712 / 0.981389 | 0.942288 / 1.041276 / 0.908263 | yes |
+
+At epoch 140, the retained best eligible mature state is epoch 130 (score 0.936265), while the global selected state remains epoch 45. The predeclared epoch-140 neighbor was actually captured and verified by restricted CPU load, source/config identity and file SHA. These roles are distinct; the pending broad mature audits must assess their fidelity rather than infer it from selection scores.
+
+The [actual direction review through epoch 140](cases/turbulent_combustion/runs/Test_1002/_audit/R2_campaign/actual_direction_review_through_epoch140.json) covers saved diagnostic cadence only. All 266 recorded native-gradient dots with actual AdamW displacement are negative; native pressure is active throughout epochs 26–140. All updates after epoch 25 are clipped. During epochs 101–140, 4 A and 11 C recorded diagnostics have a favorable final proposed direction but an unfavorable actual displacement. This shows local optimizer/update differences, not a guarantee of finite-epoch fidelity or evidence that clipping alone causes drift.
+
+At epoch 125, the same two development native-grid snapshots have total/p MSE ratios 0.965127 / 0.978588, while native C is 0.970198, versus 0.854481 at epoch 100. Finite/essential C ratios are 0.965175 / 0.970300; essential terms still account for 97.66% of the absolute reduction. T H0 essential/total ratios are **1.138573 / 1.121053**, and mutual H0 essential/total ratios are 1.006791 / 1.005876. Aggregate C therefore conceals these component regressions. CO H0 essential is 0.960695; H1 finite ratios for CO/T/mutual are 0.978172 / 0.919651 / 0.969995. Seventy-two component reconstruction checks across six native audits agree within 5.59e-9. These values quantify estimator behavior on two snapshots and do not establish uniform topology repair or physical causality.
+
 The predeclared mature review preserves rolling states at epochs 140 and 145 for each corrected primary arm (190 and 195 only for an authorized finalist continuation). This supplements global-best/mature retention with two distinct nearby late-window states regardless of their eligibility. Each CPU-only copy verifies epoch, source, config and file hash without changing optimization or selection.
+
+The ConFIG primary arm completed its declared **150 epochs** normally. The [saved epoch-150 numerical synthesis](cases/turbulent_combustion/runs/Test_1002/_audit/R2_campaign/epoch150_boundary_review/epoch150_history_synthesis.json) preserves full window ranges, 25-epoch bins, components, counts and input hashes. The source remains immutable, and the settled ledger charges **151 aggregate epochs** including the one-epoch implementation smoke. Nine of ten selection evaluations in epochs 101–150 pass; only epoch 125 fails pressure. Best eligible mature remains epoch 130, while the global selected state is epoch 45. Exact epochs 140/145 were both captured and restricted-load/SHA verified.
+
+| Epoch window | Stochastic native median | Matched source median | Median paired epoch risk ratio | Frozen TRAIN / validation medians | Selection A / B / C medians |
+| --- | ---: | ---: | ---: | --- | --- |
+| 1–25 | 0.127069 | 0.125556 | 1.010676 | 0.992710 / 1.021606 | 0.974794 / 0.996548 / 0.857268 |
+| 26–50 | 0.126534 | 0.126007 | 1.004185 | 0.988811 / 1.015318 | 0.958980 / 0.985867 / 0.851206 |
+| 51–100 | 0.128713 | 0.128423 | 1.005549 | 0.961525 / 1.002847 | 0.969546 / 0.980560 / 0.874434 |
+| 101–150 | 0.126088 | 0.125193 | 1.003897 | 0.982025 / 1.001497 | 0.966510 / 1.008091 / 0.908929 |
+
+Native frozen panels have 5/5/10/10 recorded observations in these windows; stochastic windows contain 25/25/50/50 historical epochs. The latest-50-epoch Theil–Sen slopes are **+0.00046238 / +0.00108642 native risk ratio per epoch** for TRAIN/validation, versus +2.8574e-6 native objective units per epoch for the ordinary stochastic series. Root independently reconstructed both frozen-panel pairwise-median slopes exactly. Lower window medians therefore do not establish a descending late trajectory. B median is 1.008091 in epochs 101–150 and its slope is +0.00100752 per epoch; the same-frequency B component has late median/terminal ratios 1.021607/1.058307. A/C improvements do not imply uniform coherence improvement.
+
+On the same two development native-grid snapshots at epoch 150, total/p MSE ratios are 0.963162/0.793152, while **CO is 1.056926** and decoded CO relative L2 is 1.028792 times source. Native C ratio is 0.941066; finite/essential ratios are 0.974627/0.940382, and essential terms account for 99.14% of total reduction. CO/T/mutual H0 finite ratios are 0.988694/0.949490/0.992454; essential ratios are 0.942951/0.867941/0.935894. Eighty-four saved component reconstruction checks agree within 5.59e-9. This bounded diagnostic retains field and topology limits rather than substituting for the pending extended128 mature audit.
+
+
+The [epoch-150 extended128 audit](cases/turbulent_combustion/runs/Test_1002/_audit/R2_campaign/epoch150_boundary_review/epoch150_extended128/audit.json) passes total/all-field endpoint budgets: total/CH4/CO/T/U_1/p ratios are **0.998588 / 0.986792 / 1.011238 / 0.984446 / 1.001425 / 0.988608**. A/B/C ratios are 0.962124 / **1.022250** / 0.916095. Separately pooled B is 1.032844, distinct from grouped B. Pressure MSE falls 0.457040 → 0.451833; offset squared error falls 0.240571 → 0.238067 and centered error 0.216468 → 0.213766. Both error contributions improve here, unlike the epoch-100 offset regression. This result does not replace neighboring-checkpoint, other-arm or second-seed comparisons.
+
+The [epoch-150 frozen32 noise audit](cases/turbulent_combustion/runs/Test_1002/_audit/R2_campaign/epoch150_boundary_review/epoch150_frozen32_noise.json) again reproduces all source-before/checkpoint/default-replay values exactly. Across eight declared draws, TRAIN/validation ratios of mean losses are **1.007810 / 1.021355**, versus default-two 0.997878 / 1.012379. Seven of eight draws worsen in each role; ratio ranges are 0.981528–1.016260 / 0.981111–1.044939, with descriptive population standard deviations 0.010235 / 0.019569. The validation eight-draw estimate slightly exceeds 2%; this threshold is descriptive, not statistical significance, and the optimization budget remains zero. Extended128 eight-draw native ratio is 1.002716 (default-two 0.997250), with four group ratios 0.980950 / 1.037324 / 0.997931 / 0.991276. Frozen32 and extended-group estimators remain separate.
+
+The [root epoch-150 numerical review](cases/turbulent_combustion/runs/Test_1002/_audit/R2_campaign/epoch150_boundary_review/epoch150_root_review.json) confirms exact source/GT/raw-coordinate/query/sensor-array agreement with epoch 100, all 40,300 native positions, exact 403-point pressure profiles, finite signed errors and T-only sensors. Native pressure ratios at indices 32/437/999 are 0.685072 / 0.725231 / 1.004060. Index 999 still has CH4/CO/T/U_1 ratios 1.059018 / 1.050021 / 1.046426 / 1.102658; a broad passing gate does not mean every local field improves. The saved units remain unspecified and no pressure gauge is subtracted.
+
+All four retained mature LIVE states pass the same extended128 total/per-field endpoint budgets. [The restricted identity review](cases/turbulent_combustion/runs/Test_1002/_audit/R2_campaign/epoch150_identity_review/20261003T101348Z_312178e4/identity.json) verifies actual epochs, model-weight digests, config/source associations and all 85 protected hashes. Epoch 130 is the selection64 best eligible mature state; 140/145 are the predeclared neighbors, and 150 is latest. The native column below uses only the two shared baseline draws on grouped extended128; the separately reported eight-draw/frozen32 estimators are not substituted.
+
+| Epoch | Total / p MSE ratios | Worst field ratio | A / grouped B / C ratios | Pooled B ratio | Extended native two-draw ratio |
+| ---: | --- | ---: | --- | ---: | ---: |
+| 130 | 0.990211 / 0.994566 | 1.003731 | 0.967132 / 0.985304 / 0.857746 | 0.984131 | 0.986789 |
+| 140 | 1.004482 / 0.999174 | 1.018639 | 0.984557 / 1.024289 / 0.905876 | 1.028487 | 1.009242 |
+| 145 | 1.006621 / 0.997284 | 1.015655 | 0.970150 / 1.018061 / 0.858394 | 0.993297 | 1.007765 |
+| 150 | 0.998588 / 0.988608 | 1.011238 | 0.962124 / 1.022250 / 0.916095 | 1.032844 | 0.997250 |
+
+These checkpoints provide nearby mature endpoint evidence rather than a latest-checkpoint-only verdict. B regresses on the grouped estimator at 140/145/150, and its pooled result differs at 145. The completed trajectory, native-noise sensitivity and local-field exceptions remain material limitations. Other optimizers, causal controls and second-seed confirmation are still required.
 
 Final tables will report windows 1–25, 26–50, 51–100, 101–150, and 151–200 where observed; 25-epoch medians, ten-epoch smoothing, and latest-50-epoch robust slopes. Checkpoint comparison includes source, best eligible mature candidate, latest, neighboring mature snapshots, late-window eligibility, every family, all five fields, pressure decomposition, and matched contours. Missing windows stay unobserved.
 

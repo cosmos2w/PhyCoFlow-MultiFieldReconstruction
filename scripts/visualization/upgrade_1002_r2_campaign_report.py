@@ -38,6 +38,7 @@ from phycoflow_reconstruction.training.run_store import file_sha256
 FAMILIES = ("global_distribution", "cross_spectrum", "topology")
 LABELS = {"global_distribution": "A", "cross_spectrum": "B", "topology": "C"}
 COLORS = ("#2476A5", "#C7772A", "#577D46", "#A05B86", "#7B688F", "#3B8B87")
+PDF_PAD_INCHES = 0.15
 AUDIT_MARKERS = {
     "selection": ("D", "saved selection64"),
     "extended": ("s", "extended128"),
@@ -661,7 +662,7 @@ def finish(figure, axes, path, title, latest_epoch):
                 color=".4",
             )
     figure.suptitle(title, fontsize=11)
-    figure.savefig(path, bbox_inches="tight")
+    figure.savefig(path, bbox_inches="tight", pad_inches=PDF_PAD_INCHES)
     plt.close(figure)
 
 
@@ -736,6 +737,22 @@ def summarize(run):
         "epoch_series": epoch_series,
         "controller_gradient_diagnostics": controller_diagnostics(run["epochs"]),
         "mature_checkpoint_evidence": mature,
+        "pareto_display_scope": "Display-only source/best eligible mature/latest/declared maturity boundaries and mature neighbors; first supplied audit per panel/epoch; full original selector and audit histories retained in CSV; no cross-definition ranking",
+        "pareto_plotted_points": [
+            {
+                key: row.get(key)
+                for key in (
+                    "epoch",
+                    "panel",
+                    "point_role",
+                    "pareto_metric",
+                    "metric",
+                    "eligible",
+                    "family_ratios",
+                )
+            }
+            for row in pareto_plot_records(run)
+        ],
         "effective_topology_bank": topology_bank_label(run["config"]),
         "family_mature_regression_above_5pct": family_flags,
         "family_regression_reporting_threshold": 0.05,
@@ -774,7 +791,266 @@ def summarize(run):
     }
 
 
-def render_campaign(runs, output):
+def pareto_plot_records(run):
+    """Bounded displayed epochs; full histories retain the original selector."""
+    rows = [row for row in run["selection"] if not row["is_source_baseline"]]
+    maturity = mature_checkpoint_summary([row for row in rows if row["metric"] is not None])
+    roles = defaultdict(list)
+    for epoch in (100, 150, 200):
+        roles[epoch].append("declared_maturity_boundary")
+    for epoch in (140, 145, 190, 195):
+        roles[epoch].append("predeclared_late_neighbor")
+    for name in ("best_eligible_mature", "latest"):
+        row = maturity[name]
+        if row is not None:
+            roles[row["epoch"]].append(name)
+    for row in maturity["nearby_mature"]:
+        roles[row["epoch"]].append("nearest_scored_mature")
+    records = []
+    source_ratios = family_reporting_ratios(run["before"], run["before"])
+    source_mean = family_mean_diagnostic(source_ratios)
+    if source_mean is not None:
+        records.append(
+            {
+                "epoch": 0,
+                "panel": "source",
+                "point_role": "matched_live_source",
+                "worst_field_relative_change": 0.0,
+                "pareto_metric": source_mean,
+                "family_ratios": source_ratios,
+                "is_source_baseline": True,
+            }
+        )
+    for row in rows:
+        if (
+            row["epoch"] in roles
+            and row["pareto_metric"] is not None
+            and row["worst_field_relative_change"] is not None
+        ):
+            records.append(
+                {**row, "panel": "selection", "point_role": "|".join(roles[row["epoch"]])}
+            )
+    seen_audits = set()
+    for row in run.get("audits", []):
+        if (
+            row["split"] == "validation"
+            and row["epoch"] in roles
+            and row["pareto_metric"] is not None
+            and row["worst_field_relative_change"] is not None
+            and (row["panel"], row["epoch"]) not in seen_audits
+        ):
+            records.append({**row, "point_role": "|".join(roles[row["epoch"]])})
+            seen_audits.add((row["panel"], row["epoch"]))
+    return records
+
+
+def plot_pareto_run(axis, run, color):
+    records, seen = pareto_plot_records(run), set()
+    for row in records:
+        panel, epoch = row["panel"], row["epoch"]
+        role = (
+            "matched LIVE source"
+            if panel == "source"
+            else (
+                "legacy diagnostic"
+                if run.get("selection_history") == "topology_validation"
+                else "selector"
+            )
+            if panel == "selection"
+            else AUDIT_MARKERS[panel][1]
+        )
+        label = run["label"] + " " + role
+        marker = (
+            "*"
+            if panel == "source"
+            else ("o" if epoch >= 100 else "+")
+            if panel == "selection"
+            else AUDIT_MARKERS[panel][0]
+        )
+        kwargs = (
+            {"color": color}
+            if panel in {"source", "selection"}
+            else {"edgecolors": color, "facecolors": "none"}
+        )
+        x, y = row["worst_field_relative_change"], row["pareto_metric"]
+        axis.scatter(
+            [x],
+            [y],
+            marker=marker,
+            s=80 if panel == "source" else 30,
+            label=label if label not in seen else None,
+            **kwargs,
+        )
+        axis.annotate(
+            "Source e0" if panel == "source" else f"e{epoch:g}",
+            (x, y),
+            xytext=(4, 4),
+            textcoords="offset points",
+            fontsize=6,
+            color=color,
+        )
+        seen.add(label)
+    return records
+
+
+def native_pressure_profile(names, data, sample_index):
+    """An exact central raw-y lattice row and full-lattice pressure errors."""
+    if not bool(data.get("full_native_grid", False)) or "p" not in names:
+        return None
+    p_index = names.index("p")
+    coords = data["coordinates_raw"][sample_index]
+    levels = np.unique(coords[:, 1])
+    y = levels[np.argmin(np.abs(levels - (levels[0] + levels[-1]) / 2))]
+    indices = np.flatnonzero(coords[:, 1] == y)
+    indices = indices[np.argsort(coords[indices, 0], kind="stable")]
+    if len(indices) < 2 or len(np.unique(coords[indices, 0])) != len(indices):
+        raise ValueError(
+            "native pressure profile requires an exact row of distinct raw x coordinates"
+        )
+    values = {
+        key: data[key][sample_index, :, p_index].astype(np.float64)
+        for key in ("ground_truth", "source_live", "candidate_live")
+    }
+
+    def decomposition(target, prediction):
+        error = prediction - target
+        mean = float(error.mean())
+        return {
+            "mse": float(np.mean(error**2)),
+            "mean_error": mean,
+            "mean_offset_squared": mean**2,
+            "centered_mse": float(np.mean((error - mean) ** 2)),
+        }
+
+    decoded = {
+        role: decomposition(values["ground_truth"], values[role])
+        for role in ("source_live", "candidate_live")
+    }
+    model = None
+    if all(key + "_model" in data for key in values):
+        model = {
+            role: decomposition(
+                data["ground_truth_model"][sample_index, :, p_index].astype(np.float64),
+                data[role + "_model"][sample_index, :, p_index].astype(np.float64),
+            )
+            for role in ("source_live", "candidate_live")
+        }
+    return {
+        "epoch": int(data["epoch"]),
+        "sample_id": str(data["sample_ids"][sample_index]),
+        "native_point_count": len(coords),
+        "profile_policy": "central_raw_y_row_exact_points_no_interpolation",
+        "raw_y": float(y),
+        "point_indices": indices.tolist(),
+        "raw_x": coords[indices, 0].tolist(),
+        "profile": {key: value[indices].tolist() for key, value in values.items()},
+        "decoded_native_error": decoded,
+        "model_native_error": model,
+        "production_metric_gauge_subtracted": False,
+    }
+
+
+def render_pressure_profiles(field_inputs, pdf, output):
+    evidence, points_rows = [], []
+    for label, path in field_inputs:
+        names, data = load_saved_field_array(path)
+        for sample_index in range(len(data["sample_ids"])):
+            item = native_pressure_profile(names, data, sample_index)
+            if item is None:
+                continue
+            item.update(label=label, array_path=str(path), array_sha256=file_sha256(path))
+            evidence.append(item)
+            x = np.asarray(item["raw_x"])
+            values = {key: np.asarray(value) for key, value in item["profile"].items()}
+            figure, axes = plt.subplots(1, 3, figsize=(13, 4), layout="constrained")
+            for index, role in enumerate(("ground_truth", "source_live", "candidate_live")):
+                axes[0].plot(x, values[role], label=role.replace("_", " "), color=COLORS[index])
+            for index, role in enumerate(("source_live", "candidate_live"), start=1):
+                axes[1].plot(
+                    x,
+                    values[role] - values["ground_truth"],
+                    label=role.replace("_", " ") + " − GT",
+                    color=COLORS[index],
+                )
+            error_units = (
+                "model units squared"
+                if item["model_native_error"] is not None
+                else "decoded dataset values squared; units unspecified"
+            )
+            decomposition = item["model_native_error"] or item["decoded_native_error"]
+            for index, role in enumerate(("source_live", "candidate_live")):
+                axes[2].bar(
+                    np.arange(3) + index * 0.35,
+                    [
+                        decomposition[role][key]
+                        for key in ("mse", "mean_offset_squared", "centered_mse")
+                    ],
+                    width=0.35,
+                    label=role.replace("_", " "),
+                    color=COLORS[index + 1],
+                )
+            axes[2].set_xticks(np.arange(3) + 0.175, ["full MSE", "offset²", "centered MSE"])
+            axes[2].set_ylabel(error_units)
+            for axis in axes[:2]:
+                axis.set_xlabel("Raw x coordinate; units unspecified")
+            axes[0].set_ylabel("Decoded p; units unspecified")
+            axes[1].set_ylabel("Signed p error; units unspecified")
+            for axis in axes:
+                axis.legend(fontsize=7, frameon=False)
+                axis.grid(alpha=0.2)
+            figure.suptitle(
+                f"{label} · e{item['epoch']} · {item['sample_id']} · exact raw y={item['raw_y']:g}\n"
+                f"Matched native pressure profiles; decomposition uses all {item['native_point_count']} points; no gauge removal",
+                fontsize=10,
+            )
+            pdf.savefig(figure, bbox_inches="tight", pad_inches=PDF_PAD_INCHES)
+            plt.close(figure)
+            for j, point_index in enumerate(item["point_indices"]):
+                points_rows.append(
+                    {
+                        "label": label,
+                        "epoch": item["epoch"],
+                        "sample_id": item["sample_id"],
+                        "point_index": point_index,
+                        "raw_x": x[j],
+                        "raw_y": item["raw_y"],
+                        **{key: value[j] for key, value in values.items()},
+                        **{
+                            role + "_signed_error": values[role][j] - values["ground_truth"][j]
+                            for role in ("source_live", "candidate_live")
+                        },
+                    }
+                )
+    write_csv(output / "native_pressure_profiles.csv", points_rows)
+    write_csv(
+        output / "native_pressure_decomposition.csv",
+        [
+            {
+                key: value
+                for key, value in item.items()
+                if key not in {"profile", "raw_x", "point_indices"}
+            }
+            for item in evidence
+        ],
+    )
+    (output / "native_pressure_profile_evidence.json").write_text(
+        json.dumps(
+            {
+                "profiles": evidence,
+                "missing_reason": None
+                if evidence
+                else "Supply native-grid arrays containing p; saved query arrays cannot provide an exact lattice profile",
+                "runs_inference": False,
+                "production_metric_gauge_subtracted": False,
+            },
+            indent=2,
+            allow_nan=False,
+        )
+        + "\n"
+    )
+
+
+def render_campaign(runs, output, field_inputs=()):
     output.mkdir(parents=True, exist_ok=True)
     latest_epoch = max(
         max(run["latest_epoch"], max((row["epoch"] for row in run.get("audits", [])), default=0))
@@ -922,7 +1198,7 @@ def render_campaign(runs, output):
                 f"{run['label']} · raw families/components; training C uses sampled lines",
                 fontsize=10,
             )
-            pdf.savefig(figure, bbox_inches="tight")
+            pdf.savefig(figure, bbox_inches="tight", pad_inches=PDF_PAD_INCHES)
             plt.close(figure)
 
     with (
@@ -1010,7 +1286,7 @@ def render_campaign(runs, output):
                 else:
                     axis.text(0.5, 0.5, "Not recorded", transform=axis.transAxes, ha="center")
             figure.suptitle(run["label"], fontsize=11)
-            pdf.savefig(figure, bbox_inches="tight")
+            pdf.savefig(figure, bbox_inches="tight", pad_inches=PDF_PAD_INCHES)
             plt.close(figure)
             config = deepcopy(run["config"])
             config.setdefault("runtime", {})["plot_format"] = "pdf"
@@ -1028,11 +1304,13 @@ def render_campaign(runs, output):
             for axis in figures["controller_state"].axes:
                 if axis.get_xlabel() == "Epoch":
                     epoch_axis(axis, run["latest_epoch"])
-            controller_pdf.savefig(figures["controller_state"], bbox_inches="tight")
+            controller_pdf.savefig(
+                figures["controller_state"], bbox_inches="tight", pad_inches=PDF_PAD_INCHES
+            )
             for value in figures.values():
                 plt.close(value)
             gradient_page = controller_gradient_page(run)
-            controller_pdf.savefig(gradient_page, bbox_inches="tight")
+            controller_pdf.savefig(gradient_page, bbox_inches="tight", pad_inches=PDF_PAD_INCHES)
             plt.close(gradient_page)
 
     figure, axes = plt.subplots(1, 2, figsize=(11, 4), layout="constrained")
@@ -1075,54 +1353,19 @@ def render_campaign(runs, output):
 
     figure, axis = plt.subplots(figsize=(8, 5), layout="constrained")
     for index, run in enumerate(runs):
-        for mature in (False, True):
-            records = [
-                row
-                for row in run["selection"]
-                if (row["epoch"] >= 100) == mature
-                and row["worst_field_relative_change"] is not None
-                and row["pareto_metric"] is not None
-                and not row["is_source_baseline"]
-            ]
-            if records:
-                axis.scatter(
-                    [row["worst_field_relative_change"] for row in records],
-                    [row["pareto_metric"] for row in records],
-                    color=COLORS[index % len(COLORS)],
-                    marker="o" if mature else "+",
-                    s=24,
-                    label=run["label"]
-                    + (" mature" if mature else " early")
-                    + (
-                        " legacy diagnostic"
-                        if run.get("selection_history") == "topology_validation"
-                        else " selector"
-                    ),
-                )
-        for panel, (marker, label) in AUDIT_MARKERS.items():
-            records = [
-                row
-                for row in run.get("audits", [])
-                if row["panel"] == panel
-                and row["split"] == "validation"
-                and row["pareto_metric"] is not None
-                and row["worst_field_relative_change"] is not None
-            ]
-            if records:
-                axis.scatter(
-                    [row["worst_field_relative_change"] for row in records],
-                    [row["pareto_metric"] for row in records],
-                    edgecolors=COLORS[index % len(COLORS)],
-                    facecolors="none",
-                    marker=marker,
-                    s=46,
-                    label=run["label"] + " " + label,
-                )
+        plot_pareto_run(axis, run, COLORS[index % len(COLORS)])
     axis.axvline(0.05, color=".3", linestyle="--", linewidth=0.8)
     axis.set_xlabel("Worst per-field MSE fractional increase versus matched source")
     axis.set_ylabel("Within-arm mean A/B/C source ratio")
     axis.set_title(
         "Modern selector / legacy reporting diagnostic · definitions differ; no cross-definition ranking"
+    )
+    figure.text(
+        0.5,
+        0.002,
+        "Source, best mature, latest, boundaries/neighbors; one audit per panel/epoch; full histories in CSV",
+        ha="center",
+        fontsize=7,
     )
     axis.grid(alpha=0.2)
     if axis.collections:
@@ -1131,7 +1374,9 @@ def render_campaign(runs, output):
         axis.text(
             0.5, 0.5, "No checkpoint evidence recorded", transform=axis.transAxes, ha="center"
         )
-    figure.savefig(output / "fidelity_coherence_pareto.pdf", bbox_inches="tight")
+    figure.savefig(
+        output / "fidelity_coherence_pareto.pdf", bbox_inches="tight", pad_inches=PDF_PAD_INCHES
+    )
     plt.close(figure)
 
     with PdfPages(output / "pressure_error_decomposition.pdf") as pdf:
@@ -1173,14 +1418,16 @@ def render_campaign(runs, output):
                 run["label"] + " · MSE = offset squared + centered MSE; no gauge removal",
                 fontsize=10,
             )
-            pdf.savefig(figure, bbox_inches="tight")
+            pdf.savefig(figure, bbox_inches="tight", pad_inches=PDF_PAD_INCHES)
             plt.close(figure)
+        render_pressure_profiles(field_inputs, pdf, output)
 
     summaries = {run["label"]: summarize(run) for run in runs}
     for run in runs:
         safe = run["label"].replace("/", "_")
         write_csv(output / f"{safe}_epoch_metrics.csv", run["epochs"])
         write_csv(output / f"{safe}_checkpoint_metrics.csv", run["selection"])
+        write_csv(output / f"{safe}_pareto_plotted_points.csv", pareto_plot_records(run))
         write_csv(
             output / f"{safe}_controller_gradient_diagnostics.csv",
             controller_diagnostics(run["epochs"]),
@@ -1230,38 +1477,44 @@ def render_campaign(runs, output):
     return summaries
 
 
+def load_saved_field_array(path):
+    """Shared saved-array validation for contours and pressure profiles."""
+    with np.load(path, allow_pickle=False) as payload:
+        data = {key: np.asarray(payload[key]) for key in payload.files}
+    required = {
+        "coordinates_raw",
+        "ground_truth",
+        "source_live",
+        "candidate_live",
+        "field_names",
+        "epoch",
+        "sample_ids",
+    }
+    if not required <= data.keys():
+        raise ValueError("field arrays missing required source-grounded metadata: " + str(path))
+    names = [str(name) for name in data["field_names"]]
+    gt = data["ground_truth"]
+    if (
+        gt.ndim != 3
+        or gt.shape != data["source_live"].shape
+        or gt.shape != data["candidate_live"].shape
+    ):
+        raise ValueError("saved fields must be aligned [samples,points,fields]")
+    if len(names) != gt.shape[-1] or len(data["sample_ids"]) != gt.shape[0]:
+        raise ValueError("saved field names/sample IDs disagree with numerical arrays")
+    if data["coordinates_raw"].ndim == 2:
+        data["coordinates_raw"] = np.broadcast_to(data["coordinates_raw"], (*gt.shape[:2], 2))
+    if data["coordinates_raw"].shape != (*gt.shape[:2], 2):
+        raise ValueError("raw coordinates must align with the saved field points")
+    return names, data
+
+
 def render_saved_fields(specifications, output):
     """Export native/query field arrays without rerunning an evaluator."""
     grouped = defaultdict(list)
     for label, path in specifications:
-        with np.load(path, allow_pickle=False) as payload:
-            data = {key: np.asarray(payload[key]) for key in payload.files}
-        required = {
-            "coordinates_raw",
-            "ground_truth",
-            "source_live",
-            "candidate_live",
-            "field_names",
-            "epoch",
-            "sample_ids",
-        }
-        if not required <= data.keys():
-            raise ValueError("field arrays missing required source-grounded metadata: " + str(path))
+        names, data = load_saved_field_array(path)
         epoch = int(data["epoch"])
-        names = [str(name) for name in data["field_names"]]
-        gt = data["ground_truth"]
-        if (
-            gt.ndim != 3
-            or gt.shape != data["source_live"].shape
-            or gt.shape != data["candidate_live"].shape
-        ):
-            raise ValueError("saved fields must be aligned [samples,points,fields]")
-        if len(names) != gt.shape[-1] or len(data["sample_ids"]) != gt.shape[0]:
-            raise ValueError("saved field names/sample IDs disagree with numerical arrays")
-        if data["coordinates_raw"].ndim == 2:
-            data["coordinates_raw"] = np.broadcast_to(data["coordinates_raw"], (*gt.shape[:2], 2))
-        if data["coordinates_raw"].shape != (*gt.shape[:2], 2):
-            raise ValueError("raw coordinates must align with the saved field points")
         grouped[epoch].append((label, names, data))
     written = []
     for epoch, arrays in sorted(grouped.items()):
@@ -1364,7 +1617,7 @@ def render_saved_fields(specifications, output):
                             ha="center",
                             fontsize=8,
                         )
-                    pdf.savefig(figure, bbox_inches="tight")
+                    pdf.savefig(figure, bbox_inches="tight", pad_inches=PDF_PAD_INCHES)
                     plt.close(figure)
         written.append(path.name)
     return written
@@ -1420,7 +1673,6 @@ def main(argv=None):
         run["field_names"] = list(
             dict.fromkeys([*run["field_names"], *item["source_baseline"]["per_field_mse"]])
         )
-    render_campaign(runs, args.output)
     field_inputs = []
     for argument in args.fields_array:
         label, value = argument.split("=", 1)
@@ -1428,6 +1680,7 @@ def main(argv=None):
         path.relative_to(test_root)
         input_hashes[str(path)] = file_sha256(path)
         field_inputs.append((label, path))
+    render_campaign(runs, args.output, field_inputs=field_inputs)
     fields = render_saved_fields(field_inputs, args.output)
     for path, digest in input_hashes.items():
         if file_sha256(path) != digest:

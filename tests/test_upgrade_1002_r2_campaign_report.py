@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -20,6 +21,104 @@ _audit_path = Path(__file__).resolve().parents[1] / "scripts/evaluation/audit_up
 _audit_spec = importlib.util.spec_from_file_location("r2_native_fields", _audit_path)
 audit = importlib.util.module_from_spec(_audit_spec)
 _audit_spec.loader.exec_module(audit)
+
+
+def test_pareto_bounds_display_epochs_labels_source_and_preserves_legacy_score():
+    source = {"coherence": {"families": {name: {"total": 2.0} for name in report.FAMILIES}}}
+    rows = [
+        {
+            "epoch": epoch,
+            "metric": 0.1 if epoch == 120 else 10.0,
+            "pareto_metric": 1 + epoch / 1000,
+            "worst_field_relative_change": 0.01,
+            "eligible": True,
+            "is_source_baseline": epoch == 0,
+            "family_ratios": dict.fromkeys(report.FAMILIES, 1 + epoch / 1000),
+        }
+        for epoch in range(0, 201, 5)
+    ]
+    original = deepcopy(rows)
+    run = {
+        "label": "legacy",
+        "before": source,
+        "selection": rows,
+        "audits": [],
+        "selection_history": "topology_validation",
+    }
+    selected = report.pareto_plot_records(run)
+    epochs = {row["epoch"] for row in selected}
+    assert {0, 100, 120, 140, 145, 150, 190, 195, 200} <= epochs
+    assert 5 not in epochs and len(selected) <= 12
+    assert selected[0]["panel"] == "source" and selected[0]["pareto_metric"] == 1
+    best = next(row for row in selected if row["epoch"] == 120)
+    assert "best_eligible_mature" in best["point_role"]
+    assert best["metric"] == 0.1 and best["pareto_metric"] == 1.12
+    figure, axis = report.plt.subplots()
+    drawn = report.plot_pareto_run(axis, run, "black")
+    assert len(axis.collections) == len(drawn) == len(axis.texts)
+    assert {text.get_text() for text in axis.texts} == {"Source e0"} | {
+        f"e{epoch:g}" for epoch in epochs - {0}
+    }
+    report.plt.close(figure)
+    assert rows == original
+    audit_row = {**rows[-1], "panel": "extended", "split": "validation"}
+    run["audits"] = [audit_row, deepcopy(audit_row)]
+    assert len([row for row in report.pareto_plot_records(run) if row["panel"] == "extended"]) == 1
+    assert len(run["audits"]) == 2
+
+
+def test_native_pressure_profile_exact_raw_row_full_lattice_errors_and_saved_export(tmp_path):
+    coords = np.array([(x, y) for y in (0.0, 2.0, 5.0) for x in range(5)])[::-1]
+    target = np.stack((np.zeros(15), coords[:, 0] + coords[:, 1]), axis=-1)[None]
+    source, candidate = target.copy(), target.copy()
+    source[..., 1] += 2
+    candidate[..., 1] += coords[:, 0]
+    data = {
+        "coordinates_raw": coords[None],
+        "ground_truth": target,
+        "source_live": source,
+        "candidate_live": candidate,
+        "ground_truth_model": target / 10,
+        "source_live_model": source / 10,
+        "candidate_live_model": candidate / 10,
+        "field_names": np.array(["T", "p"]),
+        "sample_ids": np.array(["native_fixture"]),
+        "epoch": np.array(150),
+        "full_native_grid": np.array(True),
+    }
+    item = report.native_pressure_profile(["T", "p"], data, 0)
+    assert item["raw_y"] == 2 and item["raw_x"] == list(range(5))
+    assert item["native_point_count"] == 15
+    assert item["profile"]["ground_truth"] == [2, 3, 4, 5, 6]
+    assert item["profile"]["source_live"] == [4, 5, 6, 7, 8]
+    assert item["decoded_native_error"]["source_live"]["mse"] == 4
+    child = item["decoded_native_error"]["candidate_live"]
+    assert child["mse"] == child["mean_offset_squared"] + child["centered_mse"] == 6
+    assert item["model_native_error"]["candidate_live"]["mse"] == pytest.approx(0.06)
+    assert item["production_metric_gauge_subtracted"] is False
+    assert (
+        report.native_pressure_profile(["T", "p"], {**data, "full_native_grid": np.array(False)}, 0)
+        is None
+    )
+    path = tmp_path / "native.npz"
+    np.savez_compressed(path, **data)
+
+    class PDF:
+        pages = 0
+
+        def savefig(self, figure, **kwargs):
+            self.pages += 1
+            assert kwargs["pad_inches"] > 0.1
+            np.testing.assert_array_equal(figure.axes[0].lines[0].get_xdata(), range(5))
+            np.testing.assert_array_equal(figure.axes[0].lines[1].get_ydata(), [4, 5, 6, 7, 8])
+
+    pdf = PDF()
+    report.render_pressure_profiles([("arm", path)], pdf, tmp_path)
+    assert pdf.pages == 1
+    evidence = json.loads((tmp_path / "native_pressure_profile_evidence.json").read_text())
+    assert evidence["missing_reason"] is None and not evidence["runs_inference"]
+    assert evidence["profiles"][0]["array_sha256"] == report.file_sha256(path)
+    assert (tmp_path / "native_pressure_profiles.csv").read_text().count("native_fixture") == 5
 
 
 def test_partial_epoch_merge_uses_metric_finite_counts_not_batch_counts():
