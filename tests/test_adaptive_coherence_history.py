@@ -151,8 +151,8 @@ def test_adaptive_extraction_aligns_validation_and_keeps_undefined_values_null()
         config=_config(),
     )
 
-    assert [row["x"] for row in data["training_records"]] == [1.0, 2.0]
-    assert [row["x"] for row in data["validation_records"]] == [1.0, 2.0]
+    assert [row["x"] for row in data["training_records"]] == [10.0, 20.0]
+    assert [row["x"] for row in data["validation_records"]] == [10.0, 20.0]
     assert data["family_order"] == ["A", "B"]
     assert data["constraints"] == ["total", "u", "v"]
     assert data["training_records"][0]["fidelity"]["total"]["relative_change"] == pytest.approx(0.04)
@@ -162,6 +162,21 @@ def test_adaptive_extraction_aligns_validation_and_keeps_undefined_values_null()
     assert data["gradient_cosine_matrix"]["values"]["A"]["B"] is None
     assert data["training_records"][0]["fidelity"]["u"]["cap_saturated_fraction"] == 0.75
     assert data["evaluation_endpoints"]["after"]["per_field_mse_normalized"]["u"] is None
+
+
+def test_partial_epoch_windows_keep_distinct_run_steps_and_selected_marker() -> None:
+    training, validation = _training_rows(), _validation_rows()
+    for step, train, valid in zip((3, 38), training, validation):
+        train.update(step=step, epoch=1)
+        valid.update(step=step, epoch=1)
+    data = extract_adaptive_coherence_history(
+        training, validation, before=_before(),
+        selected={**_selected(), "global_step": 38}, config=_config(),
+    )
+    assert [row["x"] for row in data["training_records"]] == [3., 38.]
+    assert [row["x"] for row in data["validation_records"]] == [3., 38.]
+    assert data["selected"]["x"] == 38.
+    assert data["x_label"] == "Optimizer updates (run step)"
 
 
 def test_adaptive_figures_show_fidelity_limits_selector_labels_and_adamw_sign() -> None:
@@ -178,7 +193,7 @@ def test_adaptive_figures_show_fidelity_limits_selector_labels_and_adamw_sign() 
     assert "Per-field +5% limit" in risk_labels
     assert "pre-step" in risk_axis.get_title()
     assert selector_axis.get_ylabel() == "Raw family total · candidate / source"
-    assert selector_axis.get_xlabel() == "Training epoch"
+    assert selector_axis.get_xlabel() == "Optimizer updates (run step)"
     assert any(collection.get_offsets().shape[0] for collection in selector_axis.collections)
     assert any(text.get_text() == "—" for text in matrix_axis.texts)
     assert "Negative predicts local first-order decrease" in {

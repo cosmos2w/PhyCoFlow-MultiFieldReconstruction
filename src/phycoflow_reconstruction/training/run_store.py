@@ -204,6 +204,25 @@ class RunStore:
         with path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(dict(row), sort_keys=True) + "\n")
 
+    def append_coherence_update(self, row: Mapping[str, Any]) -> None:
+        """Persist adaptive scalar telemetry for this optimizer update.
+
+        Epoch means remain in history.jsonl. This separate stream retains
+        multiplier ordering, sampled lines and sparse displacement diagnostics;
+        it is truncated to the durable checkpoint during recovery.
+        """
+        names = {
+            "step", "epoch", "update_mode", "update_accepted",
+            "coherence_combiner", "topology/line_sampling",
+        }
+        prefixes = ("loss/", "fidelity/", "gradient/", "update/", "runtime/")
+        payload = {key: value for key, value in row.items()
+                   if key in names or key.startswith(prefixes)}
+        serialized = json.dumps(payload, sort_keys=True, allow_nan=False) + "\n"
+        path = self.run_dir / "metrics" / "coherence_updates.jsonl"
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(serialized)
+
     def recover_metric_histories(self, completed_step: int) -> None:
         """Trim writes beyond the checkpoint, including a torn trailing JSON row.
 
@@ -211,7 +230,8 @@ class RunStore:
         therefore leave metrics for updates that recovery will replay. Repeated
         validation of the same checkpoint is reduced to its last complete row.
         """
-        for name in ("history", "validation_history", "topology_validation", "coherence_validation"):
+        for name in ("history", "validation_history", "topology_validation", "coherence_validation",
+                     "coherence_updates"):
             path = self.run_dir / "metrics" / f"{name}.jsonl"
             if not path.exists():
                 continue

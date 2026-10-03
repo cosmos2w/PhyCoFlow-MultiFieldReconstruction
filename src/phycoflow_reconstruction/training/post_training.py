@@ -2036,6 +2036,10 @@ def run_post_training(
                     row[f"loss/coherence/{name}/raw"] = float(family_result.scalar_loss.detach())
                     row[f"loss/coherence/{name}/calibrated"] = float(family_losses[name].detach())
                     row[f"runtime/{name}_seconds"] = step_context["family_seconds"][name]
+                    for component, value in _component_scalars(family_result).items():
+                        row[f"loss/coherence/{component}"] = value
+                    if name == "topology" and "line_sampling" in family_result.diagnostics:
+                        row["topology/line_sampling"] = family_result.diagnostics["line_sampling"]
                 del fidelity_loss, fidelity_terms, family_losses, violations, live_risks, source_risks, pressure
             elif constrained:
                 gradient = _constrained_topology_update(
@@ -2118,6 +2122,8 @@ def run_post_training(
         if constrained:
             row["total"] = row.get("regularized_loss_before", row["balanced_topology_before"])
         monitor.record(row, lr=optimizer.param_groups[0]["lr"])
+        if adaptive:
+            store.append_coherence_update(row)
         checkpoint_result = None
         if checkpoint_manager.due_for_preview_or_checkpoint(global_step + 1, preview):
             # Keep the case artifacts and checkpoint family state at the same

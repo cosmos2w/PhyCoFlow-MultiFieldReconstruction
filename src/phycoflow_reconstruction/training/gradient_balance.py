@@ -308,8 +308,18 @@ def coherence_primal_dual_update(
                     row[key + "/undefined_reason"] = "zero_gradient"
     optimizer.zero_grad(set_to_none=True)
     _assign_flat_gradient(parameters, final)
+    clip_coefficient = 1.0
     if grad_clip:
-        stable_clip_grad_norm_(parameters, float(grad_clip))
+        preclip_norm = float(stable_clip_grad_norm_(parameters, float(grad_clip)))
+        clip_coefficient = min(1.0, float(grad_clip) / (preclip_norm + 1.0e-6))
+    else:
+        preclip_norm = row["combined_grad_norm"]
+    row.update({
+        "gradient/preclip_norm": preclip_norm,
+        "gradient/clip_limit": float(grad_clip) if grad_clip else None,
+        "gradient/clip_coefficient": clip_coefficient,
+        "gradient/clipping_applied": clip_coefficient < 1.0,
+    })
     optimizer.step()
     if diagnostics:
         after = torch.cat([(torch.view_as_real(p.detach()) if p.is_complex() else p.detach())

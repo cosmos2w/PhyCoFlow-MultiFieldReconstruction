@@ -349,7 +349,8 @@ def extract_adaptive_coherence_history(
         epoch = _finite_number(row.get("epoch"))
         if epoch is not None:
             epoch_by_step[step] = epoch
-        x_value = epoch if epoch is not None else float(step)
+        # Rounded epoch indices can collapse separate training windows.
+        x_value = float(step)
         fidelity = {}
         for name in constraints:
             prefix = f"fidelity/{name}/"
@@ -417,7 +418,7 @@ def extract_adaptive_coherence_history(
         validation_records.append(
             {
                 "step": step,
-                "x": float(epoch if epoch is not None else step),
+                "x": float(step),
                 "epoch": epoch,
                 "metric": _finite_number(row.get("metric")),
                 "eligible": bool(row.get("eligible", False)),
@@ -435,16 +436,9 @@ def extract_adaptive_coherence_history(
     if isinstance(selected, Mapping):
         selected_step_value = _finite_number(selected.get("global_step"))
         selected_step = None if selected_step_value is None else int(selected_step_value)
-        selected_epoch = epoch_by_step.get(selected_step) if selected_step is not None else None
-        if selected_epoch is None:
-            selected_epoch = _finite_number(selected.get("training_epoch"))
         selected_summary = {
             "step": selected_step,
-            "x": (
-                float(selected_epoch)
-                if selected_epoch is not None
-                else None if selected_step is None else float(selected_step)
-            ),
+            "x": None if selected_step is None else float(selected_step),
             "eligible": bool(selected.get("eligible", False)),
             "metric": _finite_number(selected.get("metric")),
             "family_source_normalized_scores": _family_scores_from_row(
@@ -471,9 +465,7 @@ def extract_adaptive_coherence_history(
     return {
         "family_order": list(family_order),
         "constraints": list(constraints),
-        "x_label": "Training epoch"
-        if any(record["epoch"] is not None for record in training_records)
-        else "Optimizer step",
+        "x_label": "Optimizer updates (run step)",
         "controller_settings": dict(controller_settings),
         "selector_settings": {
             "selection_metric": checkpointing.get("selection_metric"),
@@ -851,9 +843,7 @@ def build_adaptive_coherence_figures(data: Mapping[str, Any], plt) -> dict[str, 
                 )
         selector_axis.axvline(selected["x"], color="#B58900", linestyle=":", linewidth=0.9)
     selector_axis.set_title("Source-normalized raw-family validation trajectories")
-    selector_axis.set_xlabel(
-        "Training epoch" if validation and all(row["epoch"] is not None for row in validation) else "Optimizer step"
-    )
+    selector_axis.set_xlabel(x_label)
     selector_axis.set_ylabel("Raw family total · candidate / source")
     if plotted_selector:
         selector_axis.legend(fontsize=8, ncol=3)
