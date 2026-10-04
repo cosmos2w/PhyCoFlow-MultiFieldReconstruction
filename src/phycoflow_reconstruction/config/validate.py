@@ -463,9 +463,26 @@ def _validate_common_sections(config: Mapping[str, Any]) -> None:
             "save_epoch_one",
             "selection_metric",
             "validation_every_epochs",
+            "exploratory_policy",
         },
         "checkpointing",
     )
+    exploratory = checkpointing.get("exploratory_policy")
+    if exploratory is not None:
+        if not isinstance(exploratory, Mapping):
+            raise TypeError("checkpointing.exploratory_policy must be a mapping")
+        _reject_unknown(exploratory, {"version", "max_relative_mse_increase",
+                        "max_relative_field_mse_increase", "minimum_epoch"},
+                        "checkpointing.exploratory_policy")
+        if exploratory.get("version") != "r3_endpoint_corridor_v1":
+            raise ValueError("unsupported exploratory checkpoint policy")
+        if checkpointing.get("selection_metric") != "coherence_with_fidelity":
+            raise ValueError("exploratory policy requires coherence_with_fidelity")
+        if exploratory.get("minimum_epoch") != 100:
+            raise ValueError("R3 exploratory candidates require minimum_epoch=100")
+        if (exploratory.get("max_relative_mse_increase") != 0.05
+                or exploratory.get("max_relative_field_mse_increase") != 0.10):
+            raise ValueError("R3 exploratory endpoint envelope is total +5%, fields +10%")
     for key in ("enabled", "save_epoch_one"):
         if key in checkpointing and not isinstance(checkpointing[key], bool):
             raise TypeError(f"checkpointing.{key} must be boolean")

@@ -55,11 +55,13 @@ from .fidelity_controller import (
     endpoint_risks,
     fidelity_settings,
     matched_native_losses,
+    r3_coherence_selection_report,
     unobserved_endpoint_risks,
 )
 from .gradient_balance import (
     calibrate_coherence_direction,
     coherence_primal_dual_update,
+    combine_coherence_gradients,
     data_only_update,
     two_objective_update,
 )
@@ -819,6 +821,72 @@ def _median_nested_cosines(records: list[Mapping[str, Any]], key: str) -> dict[s
     }
 
 
+def _calibrate_finite_primary(
+    model, train_dataset, families, banks, config, device, source_hash,
+):
+    """Fit finite/essential units on the fixed TRAIN source panel, before gradients.
+
+    The source predictions use the same panel and rollout seeds as family balance.
+    Calibration evaluates the full master bank; training still samples four lines.
+    These units are internal to C, while family balance supplies one outer scalar.
+    """
+    topology = families.get("topology")
+    objective = getattr(topology, "spatial_objective", None)
+    r3_reporting = config.get("checkpointing", {}).get("exploratory_policy", {}).get("version") == "r3_endpoint_corridor_v1"
+    if objective is None or (getattr(objective, "aggregation", None) != "finite_primary_v1"
+                             and not r3_reporting):
+        return None
+    settings = config["coherence"].get("family_balance", {})
+    count = int(settings.get("calibration_batches", 2))
+    if not 1 <= count <= 8:
+        raise ValueError("finite-primary TRAIN calibration requires one to eight batches")
+    seed = int(settings.get("seed", config["runtime"].get("seed", 42) + 700_001))
+    indices = iter_unique_batch_indices(
+        len(train_dataset), count, int(config["optimization"].get("batch_size", 1)),
+        generator=torch.Generator().manual_seed(seed),
+    )
+    source = build_training_batch_source(
+        train_dataset, indices, config,
+        query_points=(None if model.capabilities.structured_grid_required
+                      else int(config["coherence"]["compute_budget"]["point_count"])),
+        device=device, start_step=0,
+    )
+    records, panels = [], []
+    cpu_rng, python_rng, numpy_rng = torch.get_rng_state(), random.getstate(), np.random.get_state()
+    cuda_rng = torch.cuda.get_rng_state_all() if device.type == "cuda" else []
+    try:
+        post_training_mode(model, config)
+        with torch.no_grad():
+            for index, batch in enumerate(source):
+                rollout_seed = seed + 1_000_003 + index
+                result, _ = _coherence_objective(
+                    model, batch, {"topology": topology}, {"topology": banks["topology"]},
+                    config, step=index, generator=torch.Generator(device=device).manual_seed(rollout_seed),
+                    phase="calibration",
+                )
+                records.append(objective.collect_source_components(result))
+                selected = subset_query_batch(
+                    _slice_batch(batch, int(config["coherence"]["compute_budget"]["batch_size"])),
+                    int(config["coherence"]["compute_budget"]["point_count"]),
+                    generator=torch.Generator(device=device).manual_seed(rollout_seed),
+                )
+                panels.append({"sample_ids": list(selected.sample_ids),
+                               "query_sha256": _query_digest(selected.metadata["query_indices"]),
+                               "rollout_seed": rollout_seed})
+    finally:
+        source.close()
+        torch.set_rng_state(cpu_rng)
+        if device.type == "cuda":
+            torch.cuda.set_rng_state_all(cuda_rng)
+        random.setstate(python_rng)
+        np.random.set_state(numpy_rng)
+    return objective.freeze_source_calibration(records, {
+        "split": "train", "source_checkpoint_sha256": source_hash,
+        "weight_identity": "live_training_weights", "calibration_seed": seed,
+        "panels": panels, "raw_source_components": records,
+    }, representation="training_raster")
+
+
 def _calibrate_family_balance(
     model,
     train_dataset: FieldDataset,
@@ -882,6 +950,9 @@ def _calibrate_family_balance(
     numpy_rng = np.random.get_state()
     direction_grams = []
     calibrate_direction = config["optimization"].get("coherence_direction_calibration", "none") != "none"
+    r3_diagnostics = config.get("checkpointing", {}).get("exploratory_policy", {}).get("version") == "r3_endpoint_corridor_v1"
+    if r3_diagnostics and not 1 <= count <= 8:
+        raise ValueError("R3 TRAIN component diagnosis requires at most eight batches")
     try:
         post_training_mode(model, config)
         for batch_index, batch in enumerate(batch_source):
@@ -898,11 +969,13 @@ def _calibrate_family_balance(
                     selected_reference.target_fields, selected_reference.query_coords
                 )
             data_loss = model.training_loss(batch).total
-            data_gradients = loss_gradients(data_loss, parameters)
+            data_gradients = loss_gradients(data_loss, parameters, retain_graph=r3_diagnostics)
             family_gradients = {}
             family_losses = {}
+            component_diagnostics = {}
             rollout_seed = calibration_seed + 1_000_003 + batch_index
             for name, family in families.items():
+                context = {} if r3_diagnostics else None
                 result, _ = _coherence_objective(
                     model,
                     batch,
@@ -912,13 +985,29 @@ def _calibrate_family_balance(
                     step=batch_index,
                     generator=torch.Generator(device=device).manual_seed(rollout_seed),
                     phase="calibration",
+                    **({"step_context": context, "source_anchor_model": model}
+                       if r3_diagnostics else {}),
                 )
+                if r3_diagnostics:
+                    from .coherence_diagnostics import component_gradient_diagnostics
+
+                    endpoint = endpoint_risks(context["prediction"], context["reference"]).mean()
+                    component_diagnostics[name] = component_gradient_diagnostics(
+                        context["family_results"], {name: family}, parameters,
+                        batch_index=batch_index, sample_ids=context["batch"].sample_ids,
+                        source_checkpoint_sha256=source_hashes_before["checkpoint"],
+                        native_loss=data_loss if name == "topology" else None,
+                        endpoint_loss=endpoint if name == "topology" else None,
+                        native_pressure=data_loss * 0 if name == "topology" else None,
+                        endpoint_pressure=endpoint * 0 if name == "topology" else None,
+                    )
+                    component_diagnostics[name]["pressure_context"] = "SOURCE initialization; zero multipliers and feasible slack; pressure gradient is zero"
                 outer_weight = float(getattr(family, "family_weight", 1.0))
                 raw_loss = result.scalar_loss / outer_weight
                 family_losses[name] = float(raw_loss.detach())
                 family_gradients[name] = loss_gradients(raw_loss, parameters)
             diagnostics = gradient_diagnostics(data_gradients, family_gradients, epsilon=epsilon)
-            if calibrate_direction:
+            if calibrate_direction or r3_diagnostics:
                 matrix = torch.stack([
                     torch.cat([(torch.view_as_real(g) if g.is_complex() else g).reshape(-1).double()
                                if g is not None else
@@ -942,6 +1031,7 @@ def _calibrate_family_balance(
                     "query_digest": _query_digest(query_ids),
                     "native_data_loss": float(data_loss.detach()),
                     "family_losses": family_losses,
+                    **({"R3_component_diagnostics": component_diagnostics} if r3_diagnostics else {}),
                     **diagnostics,
                 }
             )
@@ -1020,6 +1110,26 @@ def _calibrate_family_balance(
                          sample_ids=artifact["sample_ids"], query_digests=artifact["query_digests"],
                          seeds=artifact["seeds"], raw_source_gradient_grams=direction_grams)
         artifact["combined_direction"] = direction
+    if r3_diagnostics:
+        factors = torch.tensor([outer_weights[name] * scales[name] for name in families], dtype=torch.float64)
+        direction_scale = artifact.get("combined_direction", {}).get("resolved_scales", {}).get("config", 1.0)
+        for record, gram in zip(batch_records, direction_grams, strict=True):
+            weighted = torch.as_tensor(gram, dtype=torch.float64) * factors[:, None] * factors[None, :]
+            values, vectors = torch.linalg.eigh((weighted + weighted.T) / 2)
+            rows = vectors * values.clamp_min(0).sqrt()[None, :]
+            combined, combiner = combine_coherence_gradients(dict(zip(families, rows)), method="config")
+            norm = float(torch.linalg.vector_norm(combined)) * direction_scale
+            for name, diagnosis in record["R3_component_diagnostics"].items():
+                diagnosis.update(ABC_norm=norm, ABC_norm_role="exact_TRAIN_ConFIG_gradient_Gram_isometry",
+                                 coherence_direction_scale=direction_scale, combiner=combiner)
+                for path, item in diagnosis["components"].items():
+                    if path.startswith(name + ".") and not path.endswith(("finite_raw", "essential_raw")):
+                        item["weight"] *= scales[name]
+                        item["weighted_value"] *= scales[name]
+                        if item["weighted_parameter_gradient_norm"] is not None:
+                            item["weighted_parameter_gradient_norm"] *= scales[name]
+                    item["norm_relative_to_ABC"] = (item["weighted_parameter_gradient_norm"] / norm
+                        if norm > 0 and item["weighted_parameter_gradient_norm"] is not None else None)
     return artifact
 
 
@@ -1650,6 +1760,10 @@ def run_post_training(
         }
     calibration_path = store.run_dir / "artifacts" / "coherence_calibration.json"
     if resume is None:
+        finite_primary_calibration = _calibrate_finite_primary(
+            model, train_dataset, families, banks, config, device,
+            source_hashes_before["checkpoint"],
+        )
         calibration = _calibrate_family_balance(
             model,
             train_dataset,
@@ -1659,6 +1773,8 @@ def run_post_training(
             device=device,
             source_hashes_before=source_hashes_before,
         )
+        if finite_primary_calibration is not None:
+            calibration["finite_primary_topology"] = finite_primary_calibration
         if adaptive:
             calibration["endpoint_fidelity"] = _calibrate_endpoint_fidelity(
                 source_anchor_model, train_dataset, config, device, source_hashes_before["checkpoint"]
@@ -1696,6 +1812,14 @@ def run_post_training(
             raise ValueError("resume coherence family-balance mode mismatch")
         if checkpoint.get("family_scales") != calibration.get("resolved_scales"):
             raise ValueError("resume checkpoint family scales differ from calibration artifact")
+    finite_primary_calibration = calibration.get("finite_primary_topology")
+    topology_objective = getattr(families.get("topology"), "spatial_objective", None)
+    if finite_primary_calibration is not None:
+        if finite_primary_calibration["provenance"]["source_checkpoint_sha256"] != source_hashes_before["checkpoint"]:
+            raise ValueError("finite-primary TRAIN calibration source checkpoint mismatch")
+        topology_objective.load_source_calibration(finite_primary_calibration)
+    elif getattr(topology_objective, "aggregation", None) == "finite_primary_v1":
+        raise ValueError("finite-primary run is missing its frozen TRAIN calibration")
     family_scales = {name: float(calibration["resolved_scales"][name]) for name in families}
     coherence_direction_scale = 1.0
     if config["optimization"].get("coherence_direction_calibration", "none") != "none":
@@ -1875,12 +1999,41 @@ def run_post_training(
         comparison_batch, evaluation_dataset.path, evaluation_split
     )
     evaluation_manifest.save(store.run_dir / "artifacts" / "evaluation_sensor_manifest.json")
+    if config.get("checkpointing", {}).get("exploratory_policy") is not None:
+        from ..data.manifest import SensorManifest
+
+        campaign = Path(case_dir) / "runs/Test_1002/_audit/R3_campaign"
+        frozen = SensorManifest.load(campaign / "selection_sensor_manifest.json")
+        if evaluation_manifest.digest() != frozen.digest():
+            raise ValueError("R3 actual selection sensors differ from the prospective frozen panel")
+        frozen_declaration = json.loads((campaign / "panel_declaration.json").read_text())
+        if declaration["selection"]["dataset_indices"] != frozen_declaration["selection"]["dataset_indices"]:
+            raise ValueError("R3 actual selection IDs differ from the frozen declaration")
     query_path = store.save_artifact(
         "evaluation_query_indices.pt",
         {"query_indices": comparison_batch.metadata.get("query_indices")},
     )
     store.update_manifest(evaluation_query_indices_sha256=file_sha256(query_path))
     before_metrics = None
+    r3_reporting = checkpoint_manager_policy = config.get("checkpointing", {}).get("exploratory_policy")
+
+    def capture_r3_coefficients(role, epoch):
+        def capture(generated, reference):
+            store.save_artifact(f"R3_B_coefficients_{role}_epoch_{epoch:03d}.pt", {
+                "generated": generated.detach().cpu(), "reference": reference.detach().cpu(),
+                "epoch": epoch, "panel_role": "frozen_selection64",
+                "source_checkpoint_sha256": source_hashes_before["checkpoint"],
+                "sensor_manifest_sha256": evaluation_manifest.digest(),
+                "representation": "fixed4096_graph_linear_coefficients",
+            })
+            if role == "source":
+                from .coherence_diagnostics import cached_B_regrouping
+
+                store.write_json("evaluation/R3_B_regrouping_source.json", cached_B_regrouping(
+                    generated.cpu(), generated.cpu(), reference.cpu(), families["cross_spectrum"],
+                ))
+        return capture
+
     if resume is None:
         before_metrics = evaluate_fn(
             model,
@@ -1892,6 +2045,7 @@ def run_post_training(
             config,
             normalizer=train_dataset.normalizer,
             family_scales=family_scales,
+            **({"coefficient_callback": capture_r3_coefficients("source", 0)} if r3_reporting else {}),
         )
         before_metrics["sensor_manifest_sha256"] = evaluation_manifest.digest()
         store.write_json("evaluation/before.json", before_metrics)
@@ -2111,6 +2265,7 @@ def run_post_training(
         enabled=bool(config["runtime"].get("progress", True)),
         plot_every_steps=int(config["runtime"].get("plot_every_steps", 10)),
         plot_format=str(config["runtime"].get("plot_format", "png")),
+        **({"epoch_only": True} if r3_reporting else {}),
     )
     preview = TrainingReconstructionPreview(
         config,
@@ -2127,7 +2282,9 @@ def run_post_training(
         checkpoint_manager.restore_coherence_selector(checkpoint)
     panel_metrics_cache = {}
     if checkpoint_manager.selection_metric in {"topology_with_fidelity", "coherence_with_fidelity"}:
-        selection_report = (coherence_selection_report
+        selection_report = ((r3_coherence_selection_report
+                             if checkpoint_manager.exploratory_policy is not None
+                             else coherence_selection_report)
                             if checkpoint_manager.selection_metric == "coherence_with_fidelity"
                             else topology_selection_report)
 
@@ -2145,6 +2302,8 @@ def run_post_training(
                     config,
                     normalizer=train_dataset.normalizer,
                     family_scales=family_scales,
+                    **({"coefficient_callback": capture_r3_coefficients("candidate", step // steps_per_epoch)}
+                       if checkpoint_manager_policy and step >= 100 * steps_per_epoch else {}),
                 )
             )
             metrics["sensor_manifest_sha256"] = evaluation_manifest.digest()
@@ -2329,6 +2488,23 @@ def run_post_training(
                     * family_result.scalar_loss
                     for name, family_result in step_context["family_results"].items()
                 }
+                if (checkpoint_manager.exploratory_policy is not None
+                        and global_step % steps_per_epoch == 0 and epoch % 25 == 0):
+                    from .coherence_diagnostics import component_gradient_diagnostics
+
+                    component_diagnosis = component_gradient_diagnostics(
+                        step_context["family_results"], families,
+                        tuple(p for p in model.parameters() if p.requires_grad),
+                        sample_ids=step_context["batch"].sample_ids,
+                        source_checkpoint_sha256=source_hashes_before["checkpoint"],
+                        family_scales=family_scales,
+                        native_loss=data_loss, endpoint_loss=live_risks[0],
+                        native_pressure=fidelity_terms["native"],
+                        endpoint_pressure=sum(value for name, value in fidelity_terms.items() if name != "native"),
+                        coherence_direction_scale=coherence_direction_scale,
+                    )
+                    component_diagnosis.update(epoch=epoch, panel_role="one_stochastic_TRAIN_batch_sparse_diagnostic")
+                    store.write_json(f"evaluation/R3_component_gradients_epoch_{epoch:03d}.json", component_diagnosis)
                 diagnose = global_step % int(controller.settings["diagnostics_every_steps"]) == 0
                 backward_started = perf_counter()
                 gradient = coherence_primal_dual_update(

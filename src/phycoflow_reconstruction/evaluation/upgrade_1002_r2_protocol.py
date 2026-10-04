@@ -267,6 +267,7 @@ def grouped_evaluate(
     family_scales=None,
     group_size=32,
     endpoint_callback=None,
+    coefficient_callback=None,
 ) -> dict:
     """Reuse the trainer evaluator in exact frozen groups; separately pool B statistics."""
     from ..training.native_topology_audit import _preserve_audit_state
@@ -284,6 +285,7 @@ def grouped_evaluate(
             family_scales=family_scales,
             group_size=group_size,
             endpoint_callback=endpoint_callback,
+            coefficient_callback=coefficient_callback,
         )
 
 
@@ -300,6 +302,7 @@ def _grouped_evaluate_live(
     family_scales=None,
     group_size=32,
     endpoint_callback=None,
+    coefficient_callback=None,
 ) -> dict:
     from ..coherence.families.cross_spectrum.covariance_blocks import (
         LinearCoefficientCovarianceAccumulator,
@@ -428,6 +431,8 @@ def _grouped_evaluate_live(
         generated, reference = (
             torch.cat([pair[index] for pair in coefficients]) for index in (0, 1)
         )
+        if coefficient_callback is not None:
+            coefficient_callback(generated.detach(), reference.detach())
         pooled = second_order_covariance_block_losses(
             generated,
             reference,

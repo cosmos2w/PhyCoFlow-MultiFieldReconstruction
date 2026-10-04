@@ -8,6 +8,7 @@ and outputs outside the reviewed Test_1002 tree are rejected.
 
 from __future__ import annotations
 
+import _thread
 import argparse
 import fcntl
 import hashlib
@@ -18,6 +19,8 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import uuid
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
@@ -101,7 +104,7 @@ def _experiment_parts(value: Any) -> tuple[Path, str]:
         raise PilotContractError(
             "pilot output.experiment_name must be nested below Test_1002/"
         )
-    stage_match = re.match(r"^(R2_\d{2}|T\d{2})(?:_|$)", relative.parts[1])
+    stage_match = re.match(r"^(R[23]_\d{2}|T\d{2})(?:_|$)", relative.parts[1])
     if stage_match is None:
         raise PilotContractError(
             "the first Test_1002 output directory must begin with a planned stage ID"
@@ -148,9 +151,9 @@ def validate_test_envelope(
     # This guard is unconditional: --max-steps never makes a >=250 epoch config safe.
     if epochs >= 250:
         raise PilotContractError("test-mode configs with optimization.epochs >= 250 are refused")
-    if (stage.startswith("R2_")
+    if (stage.startswith(("R2_", "R3_"))
             and stage not in planned_runs.get("non_scientific_stages", []) and epochs < 100):
-        raise PilotContractError("R2 scientific comparison horizons must be at least 100 epochs")
+        raise PilotContractError("R2/R3 scientific comparison horizons must be at least 100 epochs")
     if epochs > min(stage_epoch_cap, lineage_epoch_cap):
         raise PilotContractError(
             f"{stage} allows at most {min(stage_epoch_cap, lineage_epoch_cap)} configured epochs"
@@ -210,7 +213,7 @@ def validate_test_envelope(
         # R2's predeclared stage headroom covers lost/replayed work without
         # changing the frozen accepted-epoch horizon. R1 keeps its old cap.
         "lineage_attempted_update_cap": min(
-            stage_epoch_cap if stage.startswith("R2_") else epochs, lineage_epoch_cap
+            stage_epoch_cap if stage.startswith(("R2_", "R3_")) else epochs, lineage_epoch_cap
         ) * PINNED_STEPS_PER_EPOCH,
         "batch_size": int(batch_size),
         "train_fraction": float(fraction),
@@ -268,10 +271,112 @@ def validate_source_identity(
     }
 
 
+def validate_r3_frozen_panels(config: Mapping[str, Any]) -> dict[str, Any]:
+    from phycoflow_reconstruction.data.manifest import SensorManifest
+    from phycoflow_reconstruction.evaluation.upgrade_1002_r2_protocol import declare_panels
+    root = AUDIT_DIR / "R3_campaign"
+    declaration = _read_json(root / "panel_declaration.json")
+    expected = declare_panels(int(declaration["dataset_size"]), previously_used_indices=
+        config["evaluation"]["r2_protocol"].get("previously_used_validation_indices", ()))
+    for role, old_role in (("selection", "selection"), ("robustness", "audit")):
+        frozen = declaration[role]
+        for key in ("dataset_indices", "groups", "sensor_seed_offset", "generation_seed",
+                    "native_seeds", "weight_selection", "topology_bank"):
+            if frozen[key] != expected[old_role][key]:
+                raise PilotContractError(f"frozen R3 {role} {key} differs from the configured panel")
+        path = root / f"{role}_sensor_manifest.json"
+        if _sha256(path) != frozen["frozen_sensor_manifest_file_sha256"]:
+            raise PilotContractError(f"frozen R3 {role} sensor manifest changed")
+        manifest = SensorManifest.load(path)
+        expected_seed = int(config["observations"].get("seed", 42)) + int(frozen["sensor_seed_offset"])
+        if manifest.protocol["seed"] != expected_seed:
+            raise PilotContractError(f"frozen R3 {role} sensor seed differs from config")
+    if declaration["native_monitor"]["every_epochs"] != config["evaluation"]["r2_protocol"]["native_monitor_every_epochs"]:
+        raise PilotContractError("frozen R3 native-monitor cadence differs from config")
+    return declaration
+
+
+def r3_emergency_evidence(run_dir: Path) -> dict[str, Any] | None:
+    """Only repeated catastrophic fixed-panel risks trigger a scientific stop."""
+    endpoint = _read_history(run_dir / "metrics/coherence_validation.jsonl")
+    native = _read_history(run_dir / "metrics/history.jsonl")
+    streams: dict[str, list[tuple[float, float]]] = {}
+    for row in endpoint:
+        epoch = int(row.get("step", 0)) / PINNED_STEPS_PER_EPOCH
+        for name, increase in row.get("relative_mse_increase", {}).items():
+            if isinstance(increase, (int, float)):
+                if not math.isfinite(increase):
+                    return {"reason": "nonfinite_fixed_panel_risk", "epoch": epoch, "quantity": name}
+                if epoch > 40:
+                    streams.setdefault(f"endpoint/{name}", []).append((epoch, 1 + increase))
+    for row in native:
+        epoch = int(row.get("step", 0)) / PINNED_STEPS_PER_EPOCH
+        ratio = row.get("native_monitor/validation/ratio")
+        if isinstance(ratio, (int, float)):
+            if not math.isfinite(ratio):
+                return {"reason": "nonfinite_fixed_native_risk", "epoch": epoch}
+            if epoch > 40:
+                streams.setdefault("native/validation", []).append((epoch, ratio))
+    for name, records in streams.items():
+        threshold = 1.20 if name in {"endpoint/total", "native/validation"} else 1.35
+        start = len(records)
+        while start > 0 and records[start - 1][1] > threshold:
+            start -= 1
+        recent = records[start:]
+        if len(recent) >= 2 and recent[-1][0] - recent[0][0] >= 20:
+            return {"reason": "sustained_catastrophic_fixed_panel_risk", "quantity": name,
+                    "threshold": threshold, "first_epoch": recent[0][0],
+                    "last_epoch": recent[-1][0], "observations": recent}
+    return None
+
+
+class R3SafetyMonitor:
+    """Bounded watchdog reuses durable epoch telemetry and existing recovery."""
+    def __init__(self, active: Mapping[str, Any], *, remaining_seconds: float):
+        self.active = active
+        self.remaining_seconds = remaining_seconds
+        self.finished = threading.Event()
+        self.started = time.monotonic()
+        self.failure: dict[str, Any] | None = None
+        self.thread = threading.Thread(target=self._watch, name="r3-safety", daemon=True)
+
+    def start(self):
+        self.thread.start()
+
+    def close(self):
+        self.finished.set()
+        self.thread.join(timeout=1)
+
+    def _watch(self):
+        while not self.finished.wait(min(10., max(.1, self.remaining_seconds))):
+            elapsed = time.monotonic() - self.started
+            if elapsed >= self.remaining_seconds:
+                self.failure = {"reason": "physical_GPU_use_ceiling_24_hours",
+                                "elapsed_invocation_seconds_upper_bound": elapsed}
+            else:
+                run_dir = _locate_active_run(self.active)
+                if run_dir is not None:
+                    self.failure = r3_emergency_evidence(run_dir)
+            if self.failure is not None:
+                print(json.dumps({"R3_emergency_stop": self.failure}), flush=True)
+                _thread.interrupt_main()
+                return
+
+
+def _physical_gpu0_uuid() -> str:
+    try:
+        return subprocess.check_output(
+            ["nvidia-smi", "--id=0", "--query-gpu=uuid", "--format=csv,noheader"],
+            text=True, stderr=subprocess.PIPE,
+        ).strip()
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise PilotContractError(f"cannot identify physical GPU 0: {error}") from error
+
+
 def _validate_visible_device(config: Mapping[str, Any], visible_devices: str | None) -> None:
-    if visible_devices != "0":
+    if visible_devices != "0" and visible_devices != _physical_gpu0_uuid():
         raise PilotContractError(
-            "set CUDA_VISIBLE_DEVICES=0; the pilot launcher will not select another GPU"
+            "set CUDA_VISIBLE_DEVICES=0 or the physical GPU 0 UUID; no other GPU is allowed"
         )
     if config.get("runtime", {}).get("device") != "cuda:0":
         raise PilotContractError("runtime.device must be cuda:0 after exposing physical GPU 0")
@@ -447,7 +552,7 @@ def _attempt_delta(run_dir: Path, active: Mapping[str, Any]) -> dict[str, int]:
     committed_accepted = max(0, snapshot["accepted"] - start_accepted)
     pending = _pending_history_counters(
         run_dir, snapshot["step"],
-        include_update_stream=str(active.get("stage", "")).startswith("R2_"),
+        include_update_stream=str(active.get("stage", "")).startswith(("R2_", "R3_")),
     )
     return {
         "attempted": committed_attempted + pending["attempted"],
@@ -553,7 +658,7 @@ def _apply_attempt(
     # optimizer attempt. Interruption before emission can therefore leave
     # at most one additional started attempt unobserved.
     unlogged_attempt_bound = int(
-        stage.startswith("R2_")
+        stage.startswith(("R2_", "R3_"))
         and status in {"recovered_interrupted", "failed"}
         and run_dir is not None and run_dir.is_dir()
         and observed_attempted < int(active.get("planned_max_steps", 0))
@@ -606,7 +711,7 @@ def _apply_attempt(
         "started_utc": active.get("started_utc"),
         "finished_utc": _utc_now(),
     }
-    if stage.startswith("R2_"):
+    if stage.startswith(("R2_", "R3_")):
         epoch_size = int(active["steps_per_epoch"])
         run.update(
             observed_attempted_updates=observed_attempted,
@@ -619,6 +724,11 @@ def _apply_attempt(
     if error:
         run["error"] = error[:1000]
     ledger.setdefault("runs", []).append(run)
+    if active.get("study") == "r3":
+        elapsed = max(0.0, (datetime.now(timezone.utc) - datetime.fromisoformat(
+            str(active["started_utc"]).replace("Z", "+00:00"))).total_seconds())
+        ledger["gpu_use_seconds_upper_bound"] = float(ledger.get("gpu_use_seconds_upper_bound", 0.0)) + elapsed
+        run["gpu_use_seconds_upper_bound"] = elapsed
     ledger["active_attempt"] = None
     return delta
 
@@ -740,7 +850,7 @@ def _verify_gpu0() -> dict[str, Any]:
         "uuid": uuid,
         "name": physical_name,
         "logical_device": "cuda:0",
-        "cuda_visible_devices": "0",
+        "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES", "0"),
     }
 
 
@@ -859,6 +969,7 @@ def _make_active_attempt(
     config_sha = str(contract["config_sha256"])
     return {
         "attempt_id": str(uuid.uuid4()),
+        "study": contract.get("study"),
         "stage": str(contract["stage"]),
         "kind": "resume" if resume is not None else "initial",
         "run_dir": str(resume.resolve()) if resume is not None else None,
@@ -886,7 +997,7 @@ def _print_contract(contract: Mapping[str, Any], *, output_path: Path, max_steps
     payload = dict(contract)
     payload["effective_max_steps"] = int(max_steps)
     payload["exact_output_path"] = str(output_path.resolve())
-    if contract.get("study") == "r2":
+    if contract.get("study") in {"r2", "r3"}:
         keys = (
             "study", "stage", "branch", "implementation_commit", "config_sha256",
             "configured_epochs", "start_epoch", "until_epoch", "campaign_consumed_epochs",
@@ -894,6 +1005,9 @@ def _print_contract(contract: Mapping[str, Any], *, output_path: Path, max_steps
             "formal_launch_authorized", "test_set_selection_enabled",
         )
         payload = {key: payload.get(key) for key in keys}
+        if contract.get("study") == "r3":
+            payload["source"] = {key: value for key, value in payload["source"].items()
+                                 if key != "source_global_step"}
     print(json.dumps(payload, indent=2, sort_keys=True, default=str), flush=True)
     print(f"Output path: {output_path.resolve()}", flush=True)
 
@@ -914,11 +1028,11 @@ def run_pilot(
     config_path = Path(config_path).expanduser().resolve()
     config = _resolved_config(config_path)
     source_contract = _read_json(SOURCE_CONTRACT_PATH)
-    if study not in {"r1", "r2"}:
-        raise PilotContractError("study must be r1 or r2")
-    r2_root = AUDIT_DIR / "R2_campaign"
-    planned_path = r2_root / "planned_runs.json" if study == "r2" else PLANNED_RUNS_PATH
-    ledger_path = r2_root / "stage_ledger.json" if study == "r2" else LEDGER_PATH
+    if study not in {"r1", "r2", "r3"}:
+        raise PilotContractError("study must be r1, r2 or r3")
+    campaign_root = AUDIT_DIR / f"{study.upper()}_campaign"
+    planned_path = campaign_root / "planned_runs.json" if study != "r1" else PLANNED_RUNS_PATH
+    ledger_path = campaign_root / "stage_ledger.json" if study != "r1" else LEDGER_PATH
     planned_runs = _read_json(planned_path)
     if max_steps is not None and (until_epoch is not None or additional_epochs is not None):
         raise PilotContractError("epoch arguments cannot be combined with --max-steps")
@@ -934,8 +1048,18 @@ def run_pilot(
     resume = _resolve_resume_path(resume_arg)
     config_sha = str(contract["config_sha256"])
     stage = str(contract["stage"])
-    if (study == "r2") != stage.startswith("R2_"):
+    if (study == "r1" and stage.startswith(("R2_", "R3_"))) or (study != "r1" and not stage.startswith(study.upper() + "_")):
         raise PilotContractError("output stage must match the declared study")
+    if study == "r3":
+        validate_r3_frozen_panels(config)
+        if max_steps is not None:
+            raise PilotContractError("R3 accepts epoch arguments only")
+        if stage in {"R3_10", "R3_20"} and resume is None and until_epoch != 150:
+            raise PilotContractError("initial matched R3 arms require --until-epoch 150")
+        if stage == "R3_30" and int(contract["configured_epochs"]) != 150:
+            raise PilotContractError("R3 SOURCE seed confirmation horizon must be 150 epochs")
+        if stage == "R3_40" and int(contract["configured_epochs"]) != 100:
+            raise PilotContractError("optional R3 repair horizon must be 100 epochs")
     output_root = Path(str(contract["output_root"])).resolve()
     test_root = TEST_ROOT.resolve()
     try:
@@ -945,6 +1069,8 @@ def run_pilot(
     global_cap = int(planned_runs.get("global_accepted_update_cap", 0))
     if study == "r2" and global_cap != 1100 * PINNED_STEPS_PER_EPOCH:
         raise PilotContractError("R2 campaign cap must be exactly 1100 historical epochs")
+    if study == "r3" and global_cap != 610 * PINNED_STEPS_PER_EPOCH:
+        raise PilotContractError("R3 campaign cap must be exactly 610 historical epochs")
     if global_cap < 1:
         raise PilotContractError("planned_runs.json has no global accepted-update cap")
 
@@ -962,6 +1088,14 @@ def run_pilot(
             if not dry_run:
                 _save_ledger(ledger_path, ledger)
 
+        if study == "r3":
+            used_seconds = float(ledger.get("gpu_use_seconds_upper_bound", 0.0)) + float(ledger.get("evaluation_gpu_seconds", 0.0))
+            if float(ledger.get("evaluation_gpu_seconds", 0.0)) > 2 * 3600:
+                raise PilotContractError("R3 evaluation-only GPU ceiling of two hours is exhausted")
+            if used_seconds >= 24 * 3600:
+                raise PilotContractError("R3 physical GPU-use ceiling of 24 hours is exhausted")
+            if stage == "R3_40" and not planned_runs.get("optional_evidence_trigger"):
+                raise PilotContractError("optional R3 repair requires a recorded evidence trigger")
         stage_entry = _stage_entry(ledger, stage)
         configurations = stage_entry.setdefault("configurations", {})
         existing_revision = configurations.get(config_sha)
@@ -1015,17 +1149,17 @@ def run_pilot(
         )
         # R2 charges lost/replayed work as well as accepted work. R1 keeps its
         # original ledger mathematics and remains readable without migration.
-        consumption_key = "attempted_updates" if study == "r2" else "accepted_updates"
+        consumption_key = "attempted_updates" if study in {"r2", "r3"} else "accepted_updates"
         global_remaining = global_cap - int(ledger.get(consumption_key, 0))
         lineage_cap = (
             min(int(contract["lineage_attempted_update_cap"]), 249 * steps_per_epoch)
         )
         lineage_remaining = lineage_cap - lineage_attempted
-        if study == "r2":
+        if study in {"r2", "r3"}:
             requested_work = (max_steps if max_steps is not None else
                               int(contract["configured_steps"]) - int(start_counters["step"]))
             if requested_work > min(stage_remaining, global_remaining, lineage_remaining):
-                raise PilotContractError("requested epoch segment exceeds the remaining R2 budget")
+                raise PilotContractError("requested epoch segment exceeds the remaining campaign budget")
         effective_max_steps = _effective_step_cap(
             requested_max_steps=max_steps,
             configured_steps=int(contract["configured_steps"]),
@@ -1061,7 +1195,7 @@ def run_pilot(
         contract["until_epoch"] = (
             int(start_counters["step"]) + effective_max_steps
         ) / steps_per_epoch
-        contract["minimum_scientific_horizon_epochs"] = 100 if study == "r2" else None
+        contract["minimum_scientific_horizon_epochs"] = 100 if study in {"r2", "r3"} else None
         contract["campaign_consumed_epochs"] = int(ledger.get(consumption_key, 0)) / steps_per_epoch
         gpu_identity = None if dry_run else _verify_gpu0()
         contract["gpu"] = (
@@ -1072,7 +1206,7 @@ def run_pilot(
                 "uuid": None,
                 "name": "not probed in dry-run",
                 "logical_device": "cuda:0",
-                "cuda_visible_devices": "0",
+                "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES", "0"),
             }
         )
         display_path = resume if resume is not None else output_root
@@ -1100,6 +1234,12 @@ def run_pilot(
             active["lineage_key"] = lineage_key
         ledger["active_attempt"] = active
         _save_ledger(ledger_path, ledger)
+        safety_monitor = None
+        if study == "r3":
+            safety_monitor = R3SafetyMonitor(active, remaining_seconds=
+                24 * 3600 - float(ledger.get("gpu_use_seconds_upper_bound", 0.0))
+                - float(ledger.get("evaluation_gpu_seconds", 0.0)))
+            safety_monitor.start()
 
         try:
             from phycoflow_reconstruction.training.post_training import run_post_training
@@ -1110,6 +1250,8 @@ def run_pilot(
                 max_steps=effective_max_steps,
                 resume=resume,
             )
+            if safety_monitor is not None:
+                safety_monitor.close()
             run_dir = Path(result).resolve()
             try:
                 run_dir.relative_to(test_root)
@@ -1132,6 +1274,10 @@ def run_pilot(
             print(f"Run directory: {run_dir}", flush=True)
             return run_dir
         except BaseException as error:
+            if safety_monitor is not None:
+                safety_monitor.close()
+                if safety_monitor.failure is not None:
+                    ledger.setdefault("emergency_stops", []).append(safety_monitor.failure)
             current_run = _locate_active_run(active)
             _apply_attempt(
                 ledger,
@@ -1149,7 +1295,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--resume", type=Path)
-    parser.add_argument("--study", choices=("r1", "r2"), default="r1")
+    parser.add_argument("--study", choices=("r1", "r2", "r3"), default="r1")
     segment = parser.add_mutually_exclusive_group()
     segment.add_argument("--max-steps", type=int)
     segment.add_argument("--until-epoch", type=int)

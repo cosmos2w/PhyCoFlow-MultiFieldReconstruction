@@ -577,7 +577,7 @@ class TopologyFamily(nn.Module):
         )
 
     def state_artifact(self) -> dict[str, Any]:
-        return {
+        artifact = {
             "family": self.family_name,
             "version": self.version,
             "scientific_source": persistence_source()
@@ -602,6 +602,12 @@ class TopologyFamily(nn.Module):
             else None,
             "state_dict": self.state_dict(),
         }
+        if self.strategy == "cubical_persistence" and (
+            self.spatial_objective.aggregation == "finite_primary_v1"
+            or self.spatial_objective.source_calibration is not None
+        ):
+            artifact["finite_primary_calibration"] = deepcopy(self.spatial_objective.source_calibration)
+        return artifact
 
     def load_state_artifact(self, artifact: Mapping[str, Any]) -> None:
         if artifact.get("family") != self.family_name or artifact.get("version") != self.version:
@@ -649,3 +655,8 @@ class TopologyFamily(nn.Module):
             artifact.get("sampling_state") != self.spatial_objective.sampling_artifact()
         ):
             raise ValueError("persistence family serialized line-bank identity mismatch")
+        if self.strategy == "cubical_persistence":
+            calibration = artifact.get("finite_primary_calibration")
+            if calibration is not None:
+                self.spatial_objective.load_source_calibration(
+                    calibration, representation=calibration.get("representation"))

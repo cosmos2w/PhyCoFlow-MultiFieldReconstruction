@@ -92,6 +92,7 @@ class TrainingMonitor:
         enabled: bool = True,
         plot_every_steps: int = 10,
         plot_format: str = "png",
+        epoch_only: bool = False,
     ) -> None:
         self.run_dir = Path(run_dir)
         self.history_path = self.run_dir / "metrics" / "history.jsonl"
@@ -105,6 +106,9 @@ class TrainingMonitor:
         self.configured_steps = int(configured_steps)
         self.steps_per_epoch = max(1, int(steps_per_epoch))
         self.total_epochs = max(1, math.ceil(self.configured_steps / self.steps_per_epoch))
+        self.epoch_only = bool(epoch_only)
+        if self.epoch_only:
+            self.total_epochs = max(1, math.ceil(self.final_step / self.steps_per_epoch))
         # Keep the established config key for compatibility, but interpret its
         # value as an epoch interval.  History and plots should scale with the
         # number of epochs, not with potentially millions of optimizer steps.
@@ -152,6 +156,7 @@ class TrainingMonitor:
             unit="batch",
             dynamic_ncols=True,
             disable=not self.enabled,
+            **({"bar_format": "{desc}{postfix}"} if self.epoch_only else {}),
         )
 
     def _load_existing_history(self) -> None:
@@ -297,6 +302,8 @@ class TrainingMonitor:
                 "best": best_status,
             }
         )
+        if self.epoch_only:
+            postfix.pop("rate", None)
         self.progress.set_postfix(postfix, refresh=True)
         self.progress.close()
         self.last_epoch_report = report

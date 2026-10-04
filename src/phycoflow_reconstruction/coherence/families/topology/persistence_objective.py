@@ -5,7 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import statistics
 from collections.abc import Mapping
+from copy import deepcopy
 from typing import Any
 
 import torch
@@ -44,6 +46,9 @@ PERSISTENCE_KEYS = {
     "spatial_weight",
     "spatial_mode",
     "max_assignment_size",
+    "aggregation",
+    "component_scale_floor",
+    "component_floor_fraction",
 }
 
 
@@ -63,6 +68,15 @@ def validate_persistence_config(config: Mapping, field_names=None) -> None:
     distance = settings.get("distance", "sliced_wasserstein")
     if distance not in {"sliced_wasserstein", "spatial_wasserstein"}:
         raise ValueError("unknown persistence.distance")
+    aggregation = settings.get("aggregation", "legacy")
+    if aggregation not in {"legacy", "finite_primary_v1"}:
+        raise ValueError("unknown persistence.aggregation")
+    if aggregation == "finite_primary_v1" and distance != "sliced_wasserstein":
+        raise ValueError("finite_primary_v1 requires sliced_wasserstein")
+    for key, default in (("component_scale_floor", 1e-4), ("component_floor_fraction", 0.1)):
+        value = float(settings.get(key, default))
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(f"persistence.{key} must be finite and positive")
     spatial_keys = {"spatial_weight", "spatial_mode", "max_assignment_size"}
     if distance == "sliced_wasserstein" and spatial_keys & settings.keys():
         raise ValueError("spatial persistence settings require distance=spatial_wasserstein")
@@ -205,6 +219,11 @@ class PersistenceTopologyObjective(nn.Module):
         self.periods = tuple(config.get("geometry", {}).get("periods") or (1.0, 1.0))
         self.projections = int(settings.get("projections", 32))
         self.essential_weight = float(settings.get("essential_weight", 0.1))
+        self.aggregation = settings.get("aggregation", "legacy")
+        self.component_scale_floor = float(settings.get("component_scale_floor", 1e-4))
+        self.component_floor_fraction = float(settings.get("component_floor_fraction", 0.1))
+        self.source_calibration = None
+        self.representation_shape = tuple(config.get("geometry", {}).get("grid_shape", (32, 32)))
         self.scale_floor = float(settings.get("scale_floor", 1e-4))
         self.distance = settings.get("distance", "sliced_wasserstein")
         self.spatial_weight = float(settings.get("spatial_weight", 1.0))
@@ -267,12 +286,16 @@ class PersistenceTopologyObjective(nn.Module):
                 name,
                 "paired_supervised",
                 config.get("units", "model_units"),
-                True,
+                self.aggregation != "finite_primary_v1",
                 required_geometry="fixed_2d_raster",
                 aggregation="per_sample",
             )
             for name in self.weights
         ]
+        if self.aggregation == "finite_primary_v1":
+            specs.append(CoherenceComponentSpec(
+                "finite_primary", "paired_supervised", config.get("units", "model_units"),
+                True, required_geometry="fixed_2d_raster", aggregation="per_sample"))
         specs += [
             CoherenceComponentSpec(
                 f"{name}.h{dim}",
@@ -287,6 +310,8 @@ class PersistenceTopologyObjective(nn.Module):
             for dim in self.dimensions
         ]
         self.version = "4" if self.line_sampling_enabled else "3"
+        if self.aggregation == "finite_primary_v1":
+            self.version = "5-finite-primary-v1"
         self.spec = CoherenceFamilySpec(
             "topology",
             self.version,
@@ -297,6 +322,90 @@ class PersistenceTopologyObjective(nn.Module):
             },
         )
         self.spec.validate()
+
+    def reporting_group_weights(self) -> dict[str, float]:
+        """Normalize category weights, then weight actual field/degree groups equally.
+
+        Polarity and sampled lines retain the historical averages inside each group.
+        Evaluation aliases never enter this list.
+        """
+        categories = {}
+        if self.weights.get("self.persistence", 0) > 0:
+            categories["self.persistence"] = [f"self.{field}.h{d}" for field in self.self_fields for d in self.dimensions]
+        if self.weights.get("mutual.persistence", 0) > 0:
+            categories["mutual.persistence"] = [
+                "mutual." + "+".join(self.fields[i] for i in group) + f".h{d}"
+                for group in self.groups for d in self.dimensions
+            ]
+        total = sum(self.weights[name] for name in categories)
+        return {group: self.weights[name] / total / len(groups)
+                for name, groups in categories.items() for group in groups}
+
+    def collect_source_components(self, result: FamilyResult) -> dict[str, dict[str, float]]:
+        return {group: {part: float(result.component_results[f"topology.{group}.{part}"].scalar_loss.detach())
+                        for part in ("finite", "essential")}
+                for group in self.reporting_group_weights()}
+
+    def freeze_source_calibration(self, records, provenance, *, representation="training_raster"):
+        """Freeze separately calibrated positive TRAIN scales before optimization."""
+        if self.source_calibration is not None:
+            raise ValueError("finite-primary source calibration is already frozen")
+        if provenance.get("split") != "train" or not provenance.get("source_checkpoint_sha256"):
+            raise ValueError("finite-primary calibration requires TRAIN source checkpoint provenance")
+        if representation not in {"training_raster", "native_grid"} or not records:
+            raise ValueError("invalid finite-primary representation or empty calibration")
+        groups = self.reporting_group_weights()
+        if any(set(record) != set(groups) for record in records):
+            raise ValueError("finite-primary calibration group mismatch")
+        if any(set(parts) != {"finite", "essential"} or any(
+            not math.isfinite(float(value)) or float(value) < 0 for value in parts.values())
+            for record in records for parts in record.values()):
+            raise FloatingPointError("finite-primary source components must be finite and nonnegative")
+        means, floors, scales, zero = {}, {}, {}, {}
+        for part in ("finite", "essential"):
+            means[part] = {group: statistics.mean(float(record[group][part]) for record in records)
+                           for group in groups}
+            if any(not math.isfinite(value) or value < 0 for value in means[part].values()):
+                raise FloatingPointError("finite-primary source components must be finite and nonnegative")
+            positive = [value for value in means[part].values() if value > 0]
+            floors[part] = self.component_scale_floor + self.component_floor_fraction * (
+                statistics.median(positive) if positive else 0.0)
+            scales[part] = {group: max(value, floors[part]) for group, value in means[part].items()}
+            zero[part] = [group for group, value in means[part].items() if value == 0]
+        artifact = {
+            "version": "finite_primary_train_source_calibration_v1", "aggregation": "finite_primary_v1",
+            "representation": representation, "grid_shape": list(self.representation_shape),
+            "source_means": means, "scales": scales, "floors": floors, "zero_source_groups": zero,
+            "weights": groups, "finite_weight": 0.9, "essential_weight": 0.1,
+            "provenance": deepcopy(dict(provenance)), "sampling_state": self.sampling_artifact(),
+            "scientific_source": persistence_source(), "config_identity": self.config_identity,
+        }
+        self.load_source_calibration(artifact, representation=representation)
+        return deepcopy(artifact)
+
+    def load_source_calibration(self, artifact, *, representation="training_raster"):
+        if (representation not in {"training_raster", "native_grid"}
+            or artifact.get("version") != "finite_primary_train_source_calibration_v1"
+            or artifact.get("aggregation") != "finite_primary_v1"
+            or artifact.get("representation") != representation
+            or artifact.get("grid_shape") != list(self.representation_shape)
+            or artifact.get("weights") != self.reporting_group_weights()
+            or artifact.get("sampling_state") != self.sampling_artifact()
+            or artifact.get("scientific_source") != persistence_source()
+            or artifact.get("config_identity") != self.config_identity
+            or artifact.get("provenance", {}).get("split") != "train"
+            or not artifact.get("provenance", {}).get("source_checkpoint_sha256")
+            or artifact.get("finite_weight") != 0.9 or artifact.get("essential_weight") != 0.1):
+            raise ValueError("finite-primary calibration identity/provenance mismatch")
+        for part in ("finite", "essential"):
+            values = artifact.get("scales", {}).get(part, {})
+            if set(values) != set(self.reporting_group_weights()) or any(
+                not math.isfinite(float(value)) or float(value) < self.component_scale_floor
+                for value in values.values()):
+                raise ValueError("finite-primary calibration scales must be finite and positive")
+        if self.source_calibration is not None and self.source_calibration != artifact:
+            raise ValueError("cannot replace frozen finite-primary calibration")
+        self.source_calibration = deepcopy(dict(artifact))
 
     def _descriptor_fields(self, grid):
         fields = [grid[:, i] for i in self.ids]
@@ -526,14 +635,21 @@ class PersistenceTopologyObjective(nn.Module):
         terms = {name: [] for name in self.weights if self.weights[name] > 0}
         by_dimension = {f"{name}.h{d}": [] for name in terms for d in self.dimensions}
         batched_costs = None
+        component_costs = None
+        component_groups = {group: {"finite": [], "essential": []}
+                            for group in self.reporting_group_weights()}
         if self.distance == "sliced_wasserstein":
-            batched_costs = sliced_diagram_distances(
+            finite_costs, essential_costs = sliced_diagram_distances(
                 [item[d] for item in diagrams for d in self.dimensions],
                 [item[d] for item in target_diagrams for d in self.dimensions],
                 projections=self.projections,
                 essential_weight=self.essential_weight,
                 normalization=h * w,
-            ).reshape(n, batch, len(self.dimensions))
+                return_components=True,
+            )
+            component_costs = (finite_costs.reshape(n, batch, len(self.dimensions)),
+                               essential_costs.reshape(n, batch, len(self.dimensions)))
+            batched_costs = component_costs[0] + self.essential_weight * component_costs[1]
         for i, (label, weight) in enumerate(zip(labels, line_weights)):
             dim_costs = []
             for dim_index, dim in enumerate(self.dimensions):
@@ -555,18 +671,71 @@ class PersistenceTopologyObjective(nn.Module):
                 ) * weight
                 by_dimension[f"{label}.h{dim}"].append(cost)
                 by_dimension.setdefault(f"{metric_labels[i]}.h{dim}", []).append(cost)
+                if component_costs is not None:
+                    group = f"{metric_labels[i]}.h{dim}"
+                    for part, packed in zip(("finite", "essential"), component_costs):
+                        component_groups[group][part].append(packed[i, :, dim_index] * weight)
                 dim_costs.append(cost)
             terms[label].append(torch.stack(dim_costs).mean(0))
         results, total = {}, x.sum((1, 2, 3)) * 0
         for name, costs in terms.items():
             value = torch.stack(costs).mean(0)
-            results[f"topology.{name}"] = TermResult(value, value.mean())
+            results[f"topology.{name}"] = TermResult(value, value.mean(), diagnostics=(
+                {"evaluation_only": True} if self.aggregation == "finite_primary_v1" else {}))
             total = total + self.weights[name] * value
         for name, costs in by_dimension.items():
             value = torch.stack(costs).mean(0)
             results[f"topology.{name}"] = TermResult(
                 value, value.mean(), diagnostics={"evaluation_only": True}
             )
+        legacy_total = total
+        finite_primary = None
+        ratios = {}
+        if component_costs is not None:
+            raw_parts = {part: x.sum((1, 2, 3)) * 0 for part in ("finite", "essential")}
+            historical_weight = sum(self.weights.values())
+            for group, parts in component_groups.items():
+                ratios[group] = {}
+                for part, costs in parts.items():
+                    value = torch.stack(costs).mean(0)
+                    results[f"topology.{group}.{part}"] = TermResult(
+                        value, value.mean(), diagnostics={"evaluation_only": True, "raw": True})
+                    raw_parts[part] = raw_parts[part] + historical_weight * self.reporting_group_weights()[group] * value
+                    if self.source_calibration is not None:
+                        source = self.source_calibration["source_means"][part][group]
+                        ratios[group][part] = None if source == 0 else float(value.mean().detach()) / source
+            for part, value in raw_parts.items():
+                results[f"topology.{part}_raw"] = TermResult(
+                    value, value.mean(), diagnostics={"evaluation_only": True, "raw": True,
+                                                     "aggregation": "historical_category_weights"})
+            results["topology.legacy"] = TermResult(legacy_total, legacy_total.mean(),
+                                                   diagnostics={"evaluation_only": True})
+            if self.source_calibration is not None:
+                if [h, w] != self.source_calibration["grid_shape"]:
+                    raise ValueError("finite-primary calibration raster differs from evaluated representation")
+                finite_primary = x.sum((1, 2, 3)) * 0
+                normalized_parts = {part: x.sum((1, 2, 3)) * 0 for part in ("finite", "essential")}
+                for group, group_weight in self.reporting_group_weights().items():
+                    f = results[f"topology.{group}.finite"].per_sample_cost
+                    e = results[f"topology.{group}.essential"].per_sample_cost
+                    contribution = group_weight * (
+                        0.9 * f / self.source_calibration["scales"]["finite"][group]
+                        + 0.1 * e / self.source_calibration["scales"]["essential"][group])
+                    finite_primary = finite_primary + contribution
+                    normalized_parts["finite"] = normalized_parts["finite"] + group_weight * f / self.source_calibration["scales"]["finite"][group]
+                    normalized_parts["essential"] = normalized_parts["essential"] + group_weight * e / self.source_calibration["scales"]["essential"][group]
+                for part, value in normalized_parts.items():
+                    results[f"topology.normalized_{part}"] = TermResult(
+                        value, value.mean(), diagnostics={"evaluation_only": True,
+                                                         "finite_primary_coefficient": 0.9 if part == "finite" else 0.1})
+                results["topology.finite_primary"] = TermResult(
+                    finite_primary, finite_primary.mean(), diagnostics={
+                        "evaluation_only": self.aggregation != "finite_primary_v1"})
+            if self.aggregation == "finite_primary_v1":
+                if finite_primary is None and phase != "calibration":
+                    raise ValueError("finite_primary_v1 requires frozen TRAIN source calibration")
+                if finite_primary is not None:
+                    total = finite_primary
         return FamilyResult(
             results,
             total,
@@ -586,6 +755,12 @@ class PersistenceTopologyObjective(nn.Module):
                 else None,
                 "finite_slice_approximation": True,
                 "essential_classes_included": True,
+                "objective_aggregation": self.aggregation,
+                "finite_primary_calibration_pending": self.aggregation == "finite_primary_v1" and finite_primary is None,
+                "component_source_relative_ratios": ratios,
+                "component_representation": (
+                    self.source_calibration["representation"] if self.source_calibration is not None
+                    else "uncalibrated_raster"),
                 "point_normalization": h * w,
                 "descriptor_fields": self.fields,
                 "self_descriptor_fields": self.self_fields,

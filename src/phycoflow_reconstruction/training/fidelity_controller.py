@@ -285,3 +285,38 @@ def coherence_selection_report(source: Mapping, candidate: Mapping, settings: Ma
                   family_scale_floor=1e-12)
     report["eligible"] &= math.isfinite(score) and all(math.isfinite(v) for v in ratios.values())
     return report
+
+
+def r3_coherence_selection_report(source: Mapping, candidate: Mapping, settings: Mapping):
+    """Screen both R3 arms with raw A/B and the same TRAIN finite-primary C.
+
+    Training C remains visible with its original semantics. This explicit
+    prospective selector never changes the legacy R2 dispatch or gradients.
+    """
+    accounting = {}
+
+    def with_selection_c(metrics: Mapping, role: str) -> dict:
+        families = dict(metrics["coherence"]["families"])
+        topology = families["topology"]
+        components = topology.get("component_scalars", {})
+        if "topology.finite_primary" not in components:
+            raise ValueError("R3 selection requires TRAIN-calibrated topology.finite_primary")
+        finite_primary = float(components["topology.finite_primary"])
+        if not math.isfinite(finite_primary) or finite_primary < 0:
+            raise ValueError("R3 finite-primary selection scalar must be finite and nonnegative")
+        accounting[role] = {"training_total": float(topology["total"]),
+                            "legacy": float(components.get("topology.legacy", topology["total"])),
+                            "finite_primary": finite_primary}
+        families["topology"] = {**topology, "total": finite_primary}
+        return {**metrics, "coherence": {**metrics["coherence"], "families": families}}
+
+    report = coherence_selection_report(with_selection_c(source, "source"),
+                                       with_selection_c(candidate, "candidate"), settings)
+    # Preserve the original training-definition metrics and publish the
+    # selection accounting separately so no old topology score is relabelled.
+    report["metrics"] = dict(candidate)
+    report["definition"] = "equal_raw_A_B_finite_primary_C_mean_source_ratio_r3_v1"
+    report["topology_selection_accounting"] = accounting
+    report["topology_selection_representation"] = "training_raster_full16"
+    report["selection_scales"] = "matched_SOURCE_raw_family_values_not_gradient_balance"
+    return report

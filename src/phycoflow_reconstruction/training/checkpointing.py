@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -52,7 +53,58 @@ class PeriodicCheckpointManager:
         manifest = json.loads(manifest_path.read_text()) if manifest_path.is_file() else {}
         self.best_fidelity_value = float(manifest.get("best_panel_mse", math.inf))
         self.feasible_archive = list(manifest.get("coherence_feasible_archive", []))
+        self.exploratory_policy = settings.get("exploratory_policy")
+        self.exploratory_archive = list(manifest.get("coherence_exploratory_archive", []))
         self.retain_mature = bool(config.get("evaluation", {}).get("r2_protocol", {}).get("enabled", False))
+
+    def _exploratory_report(self, report: Mapping[str, Any], epoch: int | None) -> dict[str, Any]:
+        """R3 endpoint screening is separate from strict and native adoption gates."""
+        policy = self.exploratory_policy
+        increases = report.get("relative_mse_increase", {})
+        total = increases.get("total")
+        fields = [value for name, value in increases.items() if name != "total"]
+        eligible = (epoch is not None and epoch >= int(policy["minimum_epoch"])
+                    and isinstance(total, (int, float)) and math.isfinite(total)
+                    and total <= float(policy["max_relative_mse_increase"])
+                    and bool(fields) and all(isinstance(value, (int, float))
+                        and math.isfinite(value)
+                        and value <= float(policy["max_relative_field_mse_increase"])
+                        for value in fields)
+                    and math.isfinite(float(report["metric"])))
+        return {"eligible": eligible, "policy": dict(policy),
+                "native_fidelity_status": "requires_fixed_native_audit",
+                "rolling_coherence_status": "requires_final_50_epoch_audit"}
+
+    def _retain_exploratory(self, checkpoint: dict[str, Any], report: Mapping[str, Any],
+                            global_step: int, epoch: int | None) -> None:
+        screening = self._exploratory_report(report, epoch)
+        checkpoint["coherence_exploratory_selection"] = screening
+        if screening["eligible"]:
+            entry = {"epoch": epoch, "metric": float(report["metric"]),
+                     "checkpoint": f"checkpoints/exploratory_epoch_{epoch:03d}.pt"}
+            candidates = [item for item in self.exploratory_archive
+                          if item["epoch"] != epoch] + [entry]
+            ranked = sorted(candidates, key=lambda item: (item["metric"], item["epoch"]))
+            retained = ranked[:2]
+            latest = max(candidates, key=lambda item: item["epoch"])
+            if latest not in retained:
+                retained.append(latest)
+            self.exploratory_archive = retained
+            checkpoint["coherence_exploratory_selector_state"] = retained
+            if entry in retained:
+                self.store.save_checkpoint(Path(entry["checkpoint"]).stem, checkpoint)
+            selected = ranked[0]
+            # An atomic relative alias avoids another full tensor duplicate.
+            directory = self.store.run_dir / "checkpoints"
+            temporary = directory / ".best_exploratory.tmp"
+            temporary.unlink(missing_ok=True)
+            temporary.symlink_to(Path(selected["checkpoint"]).name)
+            os.replace(temporary, directory / "best_exploratory.pt")
+            self.store.write_json("evaluation/selected_exploratory.json", {
+                "epoch": selected["epoch"], "metric": selected["metric"],
+                "checkpoint": selected["checkpoint"], "screening": screening,
+                "strict_eligibility_unchanged": True})
+        checkpoint["coherence_exploratory_selector_state"] = list(self.exploratory_archive)
 
     def _choose_feasible_archive(self, candidates):
         ranked = sorted(candidates, key=lambda item: (item["metric"], item["step"]))
@@ -103,6 +155,28 @@ class PeriodicCheckpointManager:
             candidates = [item for item in archive if int(item["step"]) != step] + [mature_entry]
             archive = self._choose_feasible_archive(candidates)
         self.feasible_archive = archive
+        if self.exploratory_policy is not None:
+            recovered = checkpoint.get("coherence_exploratory_selector_state", [])
+            if len(recovered) > 3 or any(int(item["epoch"]) * self.steps_per_epoch > step for item in recovered):
+                raise ValueError("invalid recovered exploratory archive")
+            self.exploratory_archive = list(recovered)
+            for item in self.exploratory_archive:
+                path = (self.store.run_dir / item["checkpoint"]).resolve()
+                if path.parent != (self.store.run_dir / "checkpoints").resolve() or not path.is_file():
+                    raise ValueError("recovered exploratory checkpoint is unavailable")
+            directory = self.store.run_dir / "checkpoints"
+            alias = directory / "best_exploratory.pt"
+            if self.exploratory_archive:
+                selected = min(self.exploratory_archive, key=lambda item: (item["metric"], item["epoch"]))
+                temporary = directory / ".best_exploratory.tmp"
+                temporary.unlink(missing_ok=True)
+                temporary.symlink_to(Path(selected["checkpoint"]).name)
+                os.replace(temporary, alias)
+                self.store.write_json("evaluation/selected_exploratory.json", {
+                    **selected, "native_fidelity_status": "requires_fixed_native_audit",
+                    "rolling_coherence_status": "requires_final_50_epoch_audit"})
+            else:
+                alias.unlink(missing_ok=True)
         self.best_value = float(state["best_value"])
         self.best_fidelity_value = float(state["best_fidelity_value"])
         self.best_name = str(checkpoint["best_metric_name"])
@@ -293,6 +367,10 @@ class PeriodicCheckpointManager:
                 if (bool(panel_report["eligible"]) and math.isfinite(metric_value)
                         and entry in self.feasible_archive):
                     self.store.save_checkpoint(f"feasible_{global_step:07d}", checkpoint)
+        if panel_report is not None and self.exploratory_policy is not None:
+            self._retain_exploratory(checkpoint, panel_report, global_step, epoch)
+        if self.exploratory_policy is not None:
+            checkpoint["coherence_exploratory_selector_state"] = list(self.exploratory_archive)
         if self.selection_metric == "coherence_with_fidelity":
             # Recovery and milestone saves need the committed selector even
             # between fixed-panel audits. The manifest may describe a newer
@@ -308,6 +386,11 @@ class PeriodicCheckpointManager:
             keep = {item["checkpoint"] for item in self.feasible_archive}
             for path in (self.store.run_dir / "checkpoints").glob("feasible_*.pt"):
                 if str(path.relative_to(self.store.run_dir)) not in keep:
+                    path.unlink()
+        if last_path is not None and self.exploratory_policy is not None:
+            keep_exploratory = {Path(item["checkpoint"]).name for item in self.exploratory_archive}
+            for path in (self.store.run_dir / "checkpoints").glob("exploratory_epoch_*.pt"):
+                if path.name not in keep_exploratory:
                     path.unlink()
         milestone_path = None
         if milestone_due:
@@ -348,6 +431,8 @@ class PeriodicCheckpointManager:
             "checkpoint_hashes": checkpoint_hashes,
             "best_metric": {"name": self.best_name, "value": self.best_value},
         }
+        if self.exploratory_policy is not None:
+            manifest_details["coherence_exploratory_archive"] = self.exploratory_archive
         if panel_report is not None:
             manifest_details["best_panel_mse"] = self.best_fidelity_value
             if self.selection_metric == "coherence_with_fidelity":

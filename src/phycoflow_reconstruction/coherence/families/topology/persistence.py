@@ -164,7 +164,8 @@ def sliced_diagram_distance(
     projections: int = 32,
     essential_weight: float = 0.1,
     normalization: float = 1.0,
-) -> torch.Tensor:
+    return_components: bool = False,
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """Finite-angle SW1 with cross-diagonal augmentation, plus essential births.
 
     This is a quadrature approximation of Carriere/Cuturi/Oudot (ICML 2017),
@@ -187,11 +188,14 @@ def sliced_diagram_distance(
     b = (torch.cat((y, x_diag)) @ directions).sort(dim=0).values
     finite = (a - b).abs().sum(dim=0).mean() / normalization
     essential = (left.essential.sort().values - right.essential.sort().values).abs().sum()
+    if return_components:
+        return finite, essential
     return finite + essential_weight * essential
 
 
 def sliced_diagram_distances(
-    left, right, *, projections=32, essential_weight=0.1, normalization=1.0
+    left, right, *, projections=32, essential_weight=0.1, normalization=1.0,
+    return_components=False,
 ):
     """Exact batching of the existing finite-angle distance, with bounded padding.
 
@@ -201,24 +205,27 @@ def sliced_diagram_distances(
     if len(left) != len(right) or not left or projections < 2 or normalization <= 0:
         raise ValueError("invalid batched diagram inputs")
     if os.environ.get("PHYCOFLOW_TOPOLOGY_BATCHED", "1") == "0":
-        return torch.stack(
-            [
+        rows = [
                 sliced_diagram_distance(
                     a,
                     b,
                     projections=projections,
                     essential_weight=essential_weight,
                     normalization=normalization,
+                    return_components=return_components,
                 )
                 for a, b in zip(left, right)
             ]
-        )
+        if return_components:
+            return tuple(torch.stack([row[index] for row in rows]) for index in (0, 1))
+        return torch.stack(rows)
     device, dtype = left[0].finite.device, left[0].finite.dtype
     theta = (torch.arange(projections, device=device, dtype=dtype) + 0.5) * (math.pi / projections)
     directions = torch.stack((theta.cos(), theta.sin()))
     lengths = [len(a.finite) + len(b.finite) for a, b in zip(left, right)]
     order = sorted(range(len(left)), key=lambda i: lengths[i])
     result = [None] * len(left)
+    finite_result, essential_result = [None] * len(left), [None] * len(left)
     limit = max(1, int(os.environ.get("PHYCOFLOW_TOPOLOGY_DISTANCE_ELEMENTS", "2000000")))
     start = 0
     while start < len(order):
@@ -247,9 +254,13 @@ def sliced_diagram_distances(
         a = a.masked_fill(~valid, float("inf")).sort(dim=1).values
         b = b.masked_fill(~valid, float("inf")).sort(dim=1).values
         delta = a.masked_fill(~valid, 0.0) - b.masked_fill(~valid, 0.0)
-        costs = delta.abs().sum(1).mean(1) / normalization + essential_weight * torch.stack(
-            essentials
-        )
+        finite = delta.abs().sum(1).mean(1) / normalization
+        essential = torch.stack(essentials)
+        costs = finite + essential_weight * essential
         for i, cost in zip(ids, costs.unbind()):
             result[i] = cost
+        for i, f, e in zip(ids, finite.unbind(), essential.unbind()):
+            finite_result[i], essential_result[i] = f, e
+    if return_components:
+        return torch.stack(finite_result), torch.stack(essential_result)
     return torch.stack(result)
