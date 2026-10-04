@@ -1,0 +1,494 @@
+stage: post_training
+case: turbulent_combustion
+source_run: /home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/runs/tc_gl_rbf_cq_cached_kv_5000ep/20260826T212231Z_7b68c461
+source_checkpoint: last.pt
+inherit_base_config: true
+source:
+  kind: native_run
+  allow_integration_source: false
+objectives:
+  data_retention:
+    enabled: false
+    weight: 0.0
+  coherence:
+    enabled: true
+    weight: 1.0
+rollout:
+  steps: 2
+  solver: euler
+observation_consistency:
+  mode: endpoint_smooth
+  strength: 1.0
+  sigma: 0.05
+  schedule_power: 2.0
+  final_clamp: true
+  chunk_size: 4096
+trainable:
+  scope: full_model
+optimization:
+  epochs: 200
+  batch_size: 32
+  train_fraction: 0.15
+  lr: 5.0e-05
+  weight_decay: 1.0e-06
+  grad_clip: 1.0
+  gradient_balance: weighted_sum
+  update_policy: coherence_primal_dual
+  coherence_gradient_method: config
+  coherence_direction_calibration: train_median_to_weighted_sum
+runtime:
+  seed: 42
+  device: cuda:0
+  deterministic: true
+  num_workers: 0
+  data_strategy: async_cpu
+  progress: true
+  plot_every_steps: 380
+  plot_format: pdf
+evaluation:
+  split: validation
+  max_samples: 64
+  query_points: 4096
+  generation_steps: 2
+  seed: 2027
+  preview:
+    enabled: true
+    loss_every_epochs: 25
+    reconstruct_every_epochs: 100
+    split: validation
+    sample_index: 0
+    query_points: 40300
+    generation_steps: 2
+    seed: 2027
+    keep_history: false
+  sample_selection: uniform
+  r2_protocol:
+    enabled: true
+    native_monitor_every_epochs: 25
+    native_train_count: 32
+    native_validation_count: 32
+    native_seeds:
+    - 2027
+    - 3027
+    previously_used_validation_indices:
+    - 0
+    - 1
+    - 2
+    - 3
+    - 4
+    - 5
+    - 6
+    - 7
+    - 8
+    - 9
+    - 10
+    - 11
+    - 12
+    - 13
+    - 14
+    - 15
+    - 16
+    - 17
+    - 18
+    - 19
+    - 20
+    - 21
+    - 22
+    - 23
+    - 24
+    - 25
+    - 26
+    - 27
+    - 28
+    - 29
+    - 30
+    - 31
+    - 32
+    - 33
+    - 34
+    - 35
+    - 36
+    - 37
+    - 38
+    - 39
+    - 40
+    - 41
+    - 42
+    - 43
+    - 44
+    - 45
+    - 46
+    - 47
+    - 48
+    - 49
+    - 50
+    - 51
+    - 52
+    - 53
+    - 54
+    - 55
+    - 56
+    - 57
+    - 58
+    - 59
+    - 60
+    - 61
+    - 62
+    - 63
+    - 64
+    - 65
+    - 66
+    - 67
+    - 68
+    - 69
+    - 70
+    - 71
+    - 72
+    - 73
+    - 74
+    - 75
+    - 76
+    - 77
+    - 78
+    - 79
+    - 80
+    - 81
+    - 82
+    - 83
+    - 84
+    - 85
+    - 86
+    - 87
+    - 88
+    - 89
+    - 90
+    - 91
+    - 92
+    - 93
+    - 94
+    - 95
+    - 643
+  native_topology_audit:
+    enabled: false
+    max_samples: 2
+    seed: 2027
+    every_epochs: 100
+checkpointing:
+  enabled: true
+  every_epochs: 10
+  save_epoch_one: true
+  selection_metric: coherence_with_fidelity
+  validation_every_epochs: 10
+  epochs:
+  - 1
+  - 100
+  - 150
+  - 200
+  exploratory_policy:
+    version: r3_endpoint_corridor_v1
+    minimum_epoch: 100
+    max_relative_mse_increase: 0.05
+    max_relative_field_mse_increase: 0.1
+posttrain_fidelity:
+  max_relative_mse_increase: 0.05
+  behavior: report
+  max_relative_field_mse_increase: 0.05
+coherence:
+  schedule:
+    start_epoch: 1
+    every_n_steps: 1
+    weight_warmup_epochs: 0
+    interval_rescale: false
+  compute_budget:
+    batch_size: 32
+    point_count: 4096
+    query_policy: fixed_shared
+    query_seed: 100045
+  family_balance:
+    mode: initial_grad_norm
+    calibration_batches: 2
+    reference: median
+    epsilon: 1.0e-12
+    scale_min: 1.0e-05
+    scale_max: 100.0
+    max_batch_ratio: 100.0
+    gradient_diagnostics_every_epochs: 1
+    seed: 700043
+  families:
+    global_distribution:
+      enabled: true
+      weight: 1.0
+      target_use: paired_supervised
+      units: model_units
+      fields:
+      - CH4
+      - CO
+      - T
+      - U_1
+      - p
+      reference_bank:
+        enabled: false
+      components:
+        self:
+          enabled: true
+          weight: 1.0
+        mutual:
+          enabled: false
+          weight: 0.0
+        cross:
+          enabled: true
+          weight: 1.0
+          directions: 32
+          seed: 1234
+          include_axes: false
+          qmc: true
+          copula:
+            canonicalizer: quantile_landmark_smooth_cdf
+            landmarks: 64
+            bandwidth: 0.1
+            scale_floor: 1.0e-06
+            chunk_size: 512
+          tail:
+            alpha: 0.25
+            rho: 0.1
+            temperature: 3.7980360502842816e-06
+            eta_tolerance: 1.0e-06
+            eta_max_iterations: 80
+          pairwise_diagnostics: false
+      definition: marginal_copula_v2
+    cross_spectrum:
+      enabled: true
+      weight: 1.0
+      target_use: paired_supervised
+      units: model_units
+      fields:
+      - CH4
+      - CO
+      - T
+      - U_1
+      - p
+      pairs:
+      - - CO
+        - T
+      - - T
+        - CH4
+      - - T
+        - U_1
+      - - CH4
+        - U_1
+      reference_bank:
+        enabled: false
+      graph:
+        k_neighbors: 16
+        sigma: null
+        num_modes: 48
+        exclude_zero: true
+        band_intervals:
+        - name: low
+          lower: 0.0
+          upper: 0.016293895430862904
+        - name: mid
+          lower: 0.016293895430862904
+          upper: 0.034264786168932915
+        - name: high
+          lower: 0.034264786168932915
+          upper: 2.0
+        degeneracy_tolerance: 1.0e-06
+      eps: 1.0e-08
+      components:
+        self_spectrum:
+          enabled: false
+          weight: 1.0
+        same_frequency:
+          enabled: true
+          weight: 1.0
+        cross_frequency:
+          enabled: true
+          weight: 1.0
+        band_energy:
+          enabled: false
+          weight: 0.0
+      definition: second_order_blocks_v4
+      minimum_ensemble_size: 32
+      stabilization:
+        relative_floor: 1.0e-06
+        absolute_floor: 1.0e-12
+        minimum_reference_band_fraction: 1.0e-08
+        energy_floor_policy: symmetric_calibrated
+    topology:
+      enabled: true
+      strategy: cubical_persistence
+      weight: 1.0
+      target_use: paired_supervised
+      units: model_units
+      fields:
+      - CO
+      - T
+      reference_bank:
+        enabled: false
+      geometry:
+        grid_shape:
+        - 32
+        - 128
+        axes:
+        - 0
+        - 1
+        neighbors: 4
+        power: 2.0
+        periodic: false
+        allow_projected_collisions: false
+        antialias_downsample: true
+      filtration:
+        dimensions:
+        - 0
+        - 1
+        directions:
+        - sublevel
+        - superlevel
+        smoothing_sigma: 0.0
+      persistence:
+        projections: 32
+        essential_weight: 0.1
+        scale_floor: 0.0001
+        distance: sliced_wasserstein
+        aggregation: finite_primary_v1
+        component_scale_floor: 0.0001
+        component_floor_fraction: 0.1
+      components:
+        self:
+          enabled: true
+          weight: 1.0
+          fields:
+          - CO
+          - T
+        mutual:
+          enabled: true
+          weight: 1.0
+          groups:
+          - - CO
+            - T
+          lines: 3
+          seed: 1729
+          direction_floor: 0.25
+          offset_range: 1.0
+          line_bank_size: 16
+          training_subset_size: 4
+model:
+  name: gl_rbf_cq
+  backbone: GL_rbf_ENH_CQ
+  sigma_min: 0.0001
+  prior: rff
+  rff_features: 256
+  rff_lengthscale: 0.15
+  hidden_dim: 256
+  cond_dim: 128
+  field_embed_dim: 128
+  rbf_sigma: 0.05
+  USE_FOURIER_PE: true
+  fourier_pe_num_bands: 32
+  fourier_pe_max_freq: 64.0
+  latent_dim: 256
+  num_latents: 128
+  num_heads: 8
+  num_latent_blocks: 4
+  ff_mult: 4
+  attn_dropout: 0.0
+  mlp_dropout: 0.0
+  summary_type: mean
+  sensor_coord_encoding: fourier
+  latent_sensor_reinject: true
+  latent_reinject_every: 1
+  condition_attention_execution: cached_kv
+  sensor_attention_padding_mode: full
+  gather_mode: topk_rbf_glres
+  gather_topk: 32
+  gather_query_chunk_size: 2048
+  learnable_rbf_sigma: true
+  neighbor_backend: keops
+  sensor_local_topk: 16
+  sensor_local_dropout: 0.0
+  query_latent_readout: true
+  query_readout_type: coord
+  query_readout_scale_init: 0.01
+  enhanced_head_norm: true
+  glres_scale_init: 0.01
+  cq_query_dim: 128
+  cq_readout_mode: lowrank
+  cq_readout_rank: 64
+  cq_readout_heads: 4
+  cq_fusion_mode: additive
+  cq_global_scale_init: 1.0
+  cq_local_scale_init: 1.0
+  cq_readout_scale_init: 0.01
+  cq_time_conditioning: sinusoidal_film
+  cq_time_embed_dim: 128
+  cq_time_max_period: 10000.0
+  cq_time_film_zero_init: true
+  cq_measurement_support_mode: rbf_value_support
+  cq_measurement_support_normalize: true
+  model_ema_enabled: true
+  model_ema_decay: 0.999
+  model_ema_eval: false
+  query_points: 4096
+  train_query_microbatch_size: 2048
+  reuse_condition_context_across_query_microbatches: true
+  reconstruction_execution_mode: cached_streamed
+  reconstruction_query_chunk_size: 8192
+  reconstruction_cache_level: static_features
+  ode_solver: euler
+output:
+  experiment_name: Test_1002/R3_20_finite_primary
+dataset:
+  path: /home/wanglz/Desktop/src/PhyCoFlow/0_demo_TurbulentCombustion/Dataset/Merged_CH4COTU1P.h5
+  split: train
+  reconstruction_unit: snapshot
+  field_names:
+  - CH4
+  - CO
+  - T
+  - U_1
+  - p
+  field_units:
+  - unknown
+  - unknown
+  - unknown
+  - unknown
+  - unknown
+  normalization: mean_std
+  time_stride: 1
+  benchmark_eligible: true
+  coordinate_dim: 2
+  grid_shape:
+  - 100
+  - 403
+  coordinate_reorder: lexicographic_yx
+  grid_mapping_verified: true
+  normalization_stats_path: /home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/cases/turbulent_combustion/configs/normalization/train_mean_std.json
+observations:
+  protocol: random_uniform
+  seed: 42
+  fields:
+    T:
+      count_min: 192
+      count_max: 384
+fidelity_controller:
+  enabled: true
+  risk: endpoint_model_mse
+  relative_budget_total: 0.05
+  relative_budget_per_field: 0.05
+  absolute_floor: 1.0e-08
+  absolute_allowance: 0.0
+  source_weight_selection: live
+  same_noise_source: true
+  calibration_batches: 8
+  dual_lr: 0.05
+  ema_decay: 0.9
+  augmented_rho: 1.0
+  multiplier_max: 100.0
+  native_loss_role: constraint
+  anchor:
+    enabled: false
+  diagnostics_every_steps: 20
+  version: endpoint_native_primal_dual_v2
+  native_budget: 0.02
+  calibration_seed: 700103
