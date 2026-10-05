@@ -26,9 +26,11 @@ All full-workload timings below used physical GPU0, RTX 6000 Ada UUID `GPU-233fc
 | R3 exactly as stopped | 97.242 | 104.178 | Reproduced regression |
 | R3 with optional reporting/diagnostics disabled | 96.919 (one epoch) | 107.684 | Ordinary training machinery dominates; this is not a warmed speed pass |
 | Modern ABC, historical native0.1/aggregate-ConFIG route, repaired execution | 64.270 | 72.155 | 33.91% lower training cost than R3; 1.0694× historical control |
-| Epoch-controlled scalar adaptive route | Pending | Pending | Requires full-workload measurement and mature evidence |
+| Epoch-controlled scalar adaptive route, fully matched teacher | 71.224 | 78.416 | 26.76% lower training cost than R3; `partial_speed_recovery` because it misses the absolute target |
 
 Short final-selector/checkpoint overhead is deliberately visible. The two-epoch simple profile has 12.27% loop overhead; it does not establish the mature-cadence ≤10% monitoring criterion. The 100/150/200-epoch pilots will measure its amortization.
+
+Training code is frozen at `a4981db`. The simple reference is running with the immutable 200-epoch configuration and a 100-epoch stage limit. Its first 16 complete epochs have median training time 63.645 seconds, 34.55% below the measured R3 warm epoch. This establishes early sustained runtime evidence only. At fixed-panel epoch 10, equal-family coherence is 0.90830×SOURCE, total endpoint MSE 1.02823×, and matched validation native loss 1.07572×. Native fidelity is outside the corridor at this early observation; no mature qualification is claimed.
 
 R3's synchronized warm timers attribute approximately 38.93 seconds/epoch to C forward and 37.94 to backward/optimizer, versus 5.57 A, 0.98 B, 5.51 live rollout, 4.92 source rollout and 2.28 matched native work. Those components describe the original synchronized path; asynchronous repaired host-enqueue timers are not mislabeled device timings. A/B operation microbenchmarks are supporting attribution, not epoch-speed claims.
 
@@ -52,6 +54,8 @@ The stopped trajectory also improves again around epoch 118. That later recovery
 | Estimator approximation | None adopted | Frozen teacher remains fully matched on every adaptive batch |
 
 GPU A/B value and gradient tests matched bitwise; measured A forward/backward 0.1832→0.0868 seconds and B 0.0397→0.0289 seconds. Scalar mixed real/complex/unused AdamW updates differed by at most 4.77e−7. These are operation checks, not sustained-training evidence. Extreme float32/complex64 clipping tests preserve the oracle's wide multiplication semantics.
+
+The simple route records epoch-mean pre-clipping parameter norms but omits per-update clipping flags and actual displacement. A clipped-batch fraction cannot be inferred from that mean. Those quantities remain unavailable in its ordinary journal; four predeclared, disposable matched TRAIN probes will provide explicitly sampled mature diagnostics. They do not substitute for whole-trajectory clipping telemetry.
 
 ### Exact epoch-controller equation and calibration
 
@@ -90,3 +94,7 @@ The rebound alarm averages scheduled fixed-panel observations in `(epoch−20,ep
 - [GPU operation parity](cases/turbulent_combustion/runs/Test_1002/R4_00_exact_math/gpu_math_parity.json)
 
 Code maps: `training/{checkpointing,preview,monitoring,coherence_history,post_training,fidelity_controller,gradient_balance,rebound_monitor}.py`, A `components/{tail_risk,cross_copula}.py`, B `covariance_blocks.py`, and `config/validate.py`. New temporary/profiling/analysis outputs remain under `Test_1002/R4_*` or `_audit/R4_campaign`; meaningful SOURCE/HIST/stopped-formal/R1–R3 artifacts are preserved. Main figures will be PDF-only under `Test_1002/R4_reports`, with a short deletion manifest only for disposable new intermediates.
+
+The full CPU suite initially recorded 711 passes, nine expected skips and one resume failure: a concurrent `post_training.py` edit correctly triggered the source-digest guard. Both physical reconstruction roundtrips then passed with source frozen, and the current-revision focused group passed 181 tests with one expected skip. The guard was preserved; this is not reported as a clean full-suite pass. Evidence is [CPU validation summary](cases/turbulent_combustion/runs/Test_1002/R4_tests/cpu_validation_summary.json).
+
+One disposable new 3.44-GB profiler trace was removed after digest/link/open-handle checks. Compact streamed counts, local counterfactuals and calibration JSON are retained with hashes in the [deletion receipt](cases/turbulent_combustion/runs/Test_1002/_audit/R4_campaign/R4_disposable_trace_deletion_receipt.json). No historical run evidence was deleted.
