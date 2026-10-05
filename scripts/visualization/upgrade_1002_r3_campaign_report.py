@@ -29,6 +29,48 @@ COLORS = ("#27698e", "#c77b29", "#537b40")
 FAMILIES = ("global_distribution", "cross_spectrum", "topology")
 
 
+def read_r3_run(label, run_dir):
+    """Preserve each raw R3 selection observation in saved file order."""
+    run = READER.read_run(label, run_dir)
+    divisor = int(run["manifest"]["steps_per_epoch"])
+    source_fields = run["before"].get("per_field_mse_normalized", {})
+    selection = []
+    for observation_index, row in enumerate(
+        READER._read_jsonl(Path(run_dir) / "metrics/coherence_validation.jsonl")
+    ):
+        metrics = row.get("metrics", {})
+        ratios = row.get("family_source_normalized_scores", {})
+        item = {
+            "epoch": float(row["step"]) / divisor,
+            "eligible": bool(row.get("eligible", False)),
+            "is_source_baseline": bool(row.get("is_source_baseline", False)) or row["step"] == 0,
+            "metric": READER._finite_number(row.get("metric")),
+            "mse": READER._finite_number(row.get("mse")),
+            "failed_fidelity_fields": row.get("failed_fidelity_fields", []),
+            "family_ratios": ratios,
+            "family_ratio_role": "selector_components",
+            "family_mean_diagnostic": READER.family_mean_diagnostic(ratios),
+            "selector_definition": row.get("definition", "equal_active_family_mean_source_ratio_v1"),
+            "pareto_metric": READER._finite_number(row.get("metric")),
+            "per_field_mse": metrics.get("per_field_mse_normalized", {}),
+            "decoded_relative_l2": metrics.get("per_field_relative_l2_physical", {}),
+            "error_decomposition": metrics.get("error_decomposition", {}),
+            "observation_index": observation_index,
+            "raw_record": row,
+        }
+        item["per_field_relative_change"] = {
+            field: value / source_fields[field] - 1
+            for field, value in item["per_field_mse"].items()
+            if source_fields.get(field, 0) > 0 and READER._finite_number(value) is not None
+        }
+        item["worst_field_relative_change"] = max(
+            item["per_field_relative_change"].values(), default=None
+        )
+        selection.append(item)
+    run["selection"] = selection
+    return run
+
+
 def windows(rows, value):
     latest = max((row["epoch"] for row in rows), default=0)
     payload = {}
@@ -327,7 +369,9 @@ def render_fields(specifications, pdf):
             if not bool(data["full_native_grid"]):
                 raise ValueError("R3 contours require complete native lattice")
             names = data["field_names"].tolist()
-            count = min(2, len(data["ground_truth"]))
+            count = len(data["ground_truth"])
+            if count > 4:
+                raise ValueError("R3 contours permit at most four frozen DEV cases")
             for index in range(count):
                 coords = data["coordinates_raw"][index]
                 nx, ny = len(np.unique(coords[:, 0])), len(np.unique(coords[:, 1]))
@@ -451,7 +495,7 @@ def render(runs, output, fields=(), calibration=(), audits=()):
                 "Frozen validation native draws",
                 "A own-CDF/smooth-tail",
                 "B grouped32 signed blocks",
-                "C same-definition source ratio",
+                "C finite-primary / SOURCE",
             ),
         ):
             axis.set_title(title)
@@ -507,7 +551,7 @@ def render(runs, output, fields=(), calibration=(), audits=()):
             axes.flat,
             (
                 "Finite old/HW",
-                "Essential raw unscaled/HW",
+                "Essential raw (no HW division)",
                 "Historical C, separate definition",
                 "Finite TRAIN normalized",
                 "Essential TRAIN normalized",
@@ -557,11 +601,19 @@ def render(runs, output, fields=(), calibration=(), audits=()):
                 for axis in axes:
                     axis.set_xticks(
                         np.arange(len(names)),
-                        [name.rsplit(".", 1)[-1] for name in names],
+                        [
+                            "B cross-band" if ".cross_frequency." in name else
+                            "B same-band" if ".same_frequency." in name else
+                            name.rsplit(".", 2)[-2] + " raw"
+                            if name.endswith(".raw")
+                            else name.rsplit(".", 1)[-1]
+                            for name in names
+                        ],
                         rotation=35,
                         ha="right",
                         fontsize=6,
                     )
+                    axis.set_xlabel("Component")
             axes[0].set_title("Fixed TRAIN component contributions")
             axes[1].set_title("Model-parameter gradient norms")
             finish(
@@ -647,17 +699,20 @@ def render(runs, output, fields=(), calibration=(), audits=()):
             axis.set_title(f"{field}: original endpoint MSE ratio")
             for level, style in ((1, ":"), (1.05, "--"), (1.10, ":")):
                 axis.axhline(level, c="grey" if level == 1 else "#a7473d", ls=style, lw=0.6)
-        for audit in audits:
+        for audit_index, audit in enumerate(audits):
+            audit_label = "DEV audits" if audit_index == 0 else None
             for axis, field in zip(axes.flat, names):
                 axis.plot(
-                    audit["epoch"], audit["field_MSE_ratios"][field], "*", color="black", ms=7
+                    audit["epoch"], audit["field_MSE_ratios"][field], "*", color="black", ms=7,
+                    label=audit_label,
                 )
             axes.flat[-1].plot(
-                audit["total_MSE_ratio"], audit["ABC_mean_ratio"], "*", color="black", ms=7
+                audit["total_MSE_ratio"], audit["ABC_mean_ratio"], "*", color="black", ms=7,
+                label=audit_label,
             )
         axes.flat[-1].set_title("Mature selection observations ≥100 epochs")
         axes.flat[-1].set_xlabel("Total endpoint MSE / SOURCE")
-        axes.flat[-1].set_ylabel("Mean A/B/C source ratio")
+        axes.flat[-1].set_ylabel("Mean A/B/finite-primary C ratio")
         finish(
             fig,
             axes,
@@ -709,7 +764,7 @@ def main(argv=None):
         label, path = value.split("=", 1)
         if not Path(path).resolve().relative_to(root.resolve()).parts[0].startswith("R3_"):
             raise ValueError("R3 campaign report accepts only R3 runs")
-        runs.append(READER.read_run(label, Path(path)))
+        runs.append(read_r3_run(label, Path(path)))
     fields = [(label, Path(path)) for label, path in (value.split("=", 1) for value in args.fields)]
     calibration = [
         (label, load_calibration(path))
