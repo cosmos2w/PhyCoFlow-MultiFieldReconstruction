@@ -34,7 +34,9 @@ All full-workload timings below used physical GPU0, RTX 6000 Ada UUID `GPU-233fc
 
 Short final-selector/checkpoint overhead is deliberately visible. The two-epoch simple profile has 12.27% loop overhead; it does not establish the mature-cadence ≤10% monitoring criterion. The 100/150/200-epoch pilots will measure its amortization.
 
-Training code is frozen at `a4981db`. The simple reference is running with the immutable 200-epoch configuration and a 100-epoch stage limit. Its first 50 complete epochs have mean training time 64.015 seconds and median 63.720 seconds, with all 38 updates per epoch; the mean is 34.17% below the measured R3 warm epoch. Diagnostic epochs peak at 66.463 seconds. Mature-cadence all-inclusive overhead remains pending. At fixed-panel epoch 50, equal-family coherence is 0.84882×SOURCE, A/B/C are 0.78675/1.00355/0.75614×, total endpoint MSE is 1.00322×, and matched validation native loss is 1.03030×. CO is 1.05168×SOURCE and narrowly misses the stricter per-field +5% standard. Earlier native-panel ratios at epochs 10–40 exceeded 1.05; the favorable epoch-50 point does not establish a passing trailing window or mature qualification. Endpoint-selected epoch 20 remains distinct from a native-qualified scientific finalist.
+Training code is frozen at `a4981db`. The simple reference completed its 100-epoch stage with the immutable 200-epoch configuration: exactly 3,800 updates and 121,600 training samples. Mean training time is **63.9046 seconds/epoch**, median 63.696, and the mean reduction relative to the pinned R3 replay is **34.283%**. Ordinary epochs average 63.6536 seconds; diagnostic epochs average 66.1640 seconds and exceed the absolute 65-second target. Amortized training meets 60–65 seconds with unchanged exposure. Whole-process time is 6,546.336 seconds, or 65.4634 seconds/epoch. The 155.872-second residual (2.381% of process time) combines startup, data wait, evaluation, logging, checkpointing and PDF work; it is not an isolated monitoring measurement.
+
+The reference fixes execution and retains useful coherence gains through 100 epochs, but fails the unchanged native VALIDATION corridor. Its favorable current endpoint checkpoint does not qualify a formal recipe. The required adaptive150, finalist200 and independent-seed150 comparisons remain pending.
 
 R3's synchronized warm timers attribute approximately 38.93 seconds/epoch to C forward and 37.94 to backward/optimizer, versus 5.57 A, 0.98 B, 5.51 live rollout, 4.92 source rollout and 2.28 matched native work. Those components describe the original synchronized path; asynchronous repaired host-enqueue timers are not mislabeled device timings. A/B operation microbenchmarks are supporting attribution, not epoch-speed claims.
 
@@ -59,7 +61,34 @@ The stopped trajectory also improves again around epoch 118. That later recovery
 
 GPU A/B value and gradient tests matched bitwise; measured A forward/backward 0.1832→0.0868 seconds and B 0.0397→0.0289 seconds. Scalar mixed real/complex/unused AdamW updates differed by at most 4.77e−7. These are operation checks, not sustained-training evidence. Extreme float32/complex64 clipping tests preserve the oracle's wide multiplication semantics.
 
-The simple route records epoch-mean pre-clipping parameter norms but omits per-update clipping flags and actual displacement. A clipped-batch fraction cannot be inferred from that mean. Those quantities remain unavailable in its ordinary journal; four predeclared, disposable matched TRAIN probes will provide explicitly sampled mature diagnostics. They do not substitute for whole-trajectory clipping telemetry.
+The simple route records epoch-mean pre-clipping parameter norms but omits per-update clipping flags and actual displacement. A clipped-batch fraction cannot be inferred from that mean. Four predeclared matched TRAIN batches were independently restored to the actual epoch-100 model and AdamW state. All followed the existing `weighted_sum_aligned` branch; pre-clipping parameter norms were 0.183–0.221 and clipping was **0/4 sampled batches**. Every sampled family, native and aggregate endpoint gradient had a negative dot product with the measured actual AdamW displacement. These dots are first-order local predictions; no post-update loss rescore was performed. They show no reversal in these samples, not a whole-trajectory or validation guarantee. The source and child checkpoint hashes remained unchanged. The four disposable updates consume 4/38 campaign epochs; the initial ten-epoch profiling cap remains separate as explicitly scoped in the plan.
+
+### Completed 100-epoch reference: fixed-window evidence
+
+The [stage100 assessment](cases/turbulent_combustion/runs/Test_1002/R4_reports/stage100_reference_review.json) binds SOURCE, estimator/panel/normalizer identity and raw numerators. Windows contain the actual scheduled observations in `(100−window,100]`: epochs 80/90/100 for 25 epochs and 60/70/80/90/100 for 50. There is no interpolation or post-hoc smoothing.
+
+| SOURCE-relative quantity | Trailing 25 epochs | Trailing 50 epochs |
+|---|---:|---:|
+| Equal-family coherence score | 0.878054 | 0.875601 |
+| A own-CDF/tail family | 0.883106 | 0.877200 |
+| B grouped32 family | 1.011334 | 1.006931 |
+| B pooled64 diagnostic | 0.985421 | 0.986461 |
+| C finite-primary family | 0.739721 | 0.742673 |
+| C normalized finite contribution | 0.756222 | 0.758364 |
+| C raw finite distance | 0.738469 | 0.741052 |
+| C normalized essential contribution | 0.519231 | 0.532989 |
+| Native TRAIN aggregate | 1.011731 | 1.007412 |
+| Native VALIDATION aggregate | **1.081831 — fails** | **1.080574 — fails** |
+| Total endpoint MSE | 1.024240 | 1.024110 |
+| CO endpoint MSE | 1.056939 | 1.059606 |
+
+A and C improve; grouped B's small regression remains visible rather than being replaced by its favorable pooled diagnostic. Finite persistence improves independently of essential gains. All endpoint fields satisfy the exploratory +10% corridor in both windows, while CO fails the separately reported stricter +5% standard. Native TRAIN settles close to SOURCE, but native VALIDATION does not meet +5%; local TRAIN descent cannot certify that generalization gap.
+
+Coherence slopes are −0.00069935 and −0.00004744 per epoch over 25/50 epochs; native VALIDATION ratio slopes are −0.00265667 and −0.00053032. Both window means remain below SOURCE for coherence, and there is no persistent rebound alarm. The 50-epoch coherence window retains 92.11% of the best declared 20-epoch rolling gain, or approximately 82.28% relative to the unsmoothed epoch-50 minimum. These are distinct denominators, not interchangeable retention claims.
+
+Current and endpoint-selected epoch100 have coherence 0.868025, A/B/C 0.894339/0.962536/0.747200, total endpoint 1.025582, and per-field ratios `[0.974102, 1.049547, 0.998297, 1.023635, 1.027996]` in the contracted order. All current endpoint fields pass +5%, but current matched native VALIDATION is 1.056360 and still fails. Earlier selected epoch20 and the favorable native epoch50 remain in the record; neither overrides the final windows.
+
+Final-save records repeat the epoch100 selector and eight typed metric identities. The read-only assessment reconciles these only after exact scientific/identity comparison, validating nine deterministic SOURCE-derived fields and excluding only `inference.seconds`. Raw rows and hashes remain preserved; conflicting observations remain unresolved. Nineteen focused reader fixtures verify identical and conflicting values, panels, SOURCE, normalizer and noise identities.
 
 ### Exact epoch-controller equation and calibration
 
