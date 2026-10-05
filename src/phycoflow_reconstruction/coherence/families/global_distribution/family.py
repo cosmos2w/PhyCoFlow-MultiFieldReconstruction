@@ -241,7 +241,12 @@ class GlobalDistributionFamily(nn.Module):
                     "weighted_scalar_contribution": None,
                 }
                 continue
-            result = component(generated, reference, point_mask=point_mask)
+            runtime = context if isinstance(context, Mapping) else {}
+            if isinstance(component, CrossJointCopulaCVaR) and runtime.get("execution_mode") == "r4_exact":
+                result = component(generated, reference, point_mask=point_mask,
+                                   batch_tail_roots=True, diagnostics=runtime.get("diagnostics", True))
+            else:
+                result = component(generated, reference, point_mask=point_mask)
             component_results[path] = result
             weighted_contribution = weight * result.scalar_loss
             component_diagnostics[path] = {

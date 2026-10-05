@@ -47,6 +47,90 @@ def _assign_flat_gradient(parameters: list[nn.Parameter], gradient: torch.Tensor
         raise ValueError("combined gradient length does not match trainable parameters")
 
 
+def _scalar_objective_update(parameters, optimizer, loss, grad_clip):
+    """Exact linearity shortcut; keep the oracle's unused-parameter semantics.
+
+    The oracle assigns zeros rather than None to unused parameters. This
+    matters for AdamW decay and moments, so the scalar path does the same.
+    Individual objective gradient telemetry belongs to diagnostic batches.
+    """
+    import math
+
+    if grad_clip and (not math.isfinite(float(grad_clip)) or float(grad_clip) < 0):
+        raise ValueError("max_norm must be finite and non-negative")
+    optimizer.zero_grad(set_to_none=True)
+    if not loss.requires_grad:
+        loss = loss + 0 * parameters[0].real.sum()
+    loss.backward()
+    for parameter in parameters:
+        if parameter.grad is None:
+            parameter.grad = torch.zeros_like(parameter)
+    squared = torch.stack([p.grad.detach().abs().double().square().sum() for p in parameters]).sum()
+    norm = squared.sqrt()
+    if not bool(torch.isfinite(norm)):
+        raise FloatingPointError("post-training objective gradient contains non-finite values")
+    if grad_clip:
+        coefficient = (float(grad_clip) / (norm + 1.0e-6)).clamp(max=1.0)
+        for parameter in parameters:
+            work_dtype = torch.complex128 if parameter.grad.is_complex() else torch.float64
+            clipped = parameter.grad.to(work_dtype) * coefficient.to(parameter.grad.device)
+            parameter.grad.copy_(clipped.to(parameter.grad.dtype))
+    else:
+        coefficient = norm.new_tensor(1.)
+    norm_value, coefficient_value = torch.stack([norm, coefficient]).detach().cpu().tolist()
+    optimizer.step()
+    return {
+        "combined_grad_norm": norm_value,
+        "gradient/preclip_norm": norm_value,
+        "gradient/clip_limit": float(grad_clip) if grad_clip else None,
+        "gradient/clip_coefficient": coefficient_value,
+        "gradient/clipping_applied": coefficient_value < 1.,
+        "gradient/component_diagnostics_sampled": False,
+    }
+
+
+def _config_gram_direction(matrix: torch.Tensor, *, use_least_square_oracle=False) -> tuple[torch.Tensor, str | None]:
+    """Installed ConFIG pinv + ProjectionLength through a small Gram solve.
+
+    For unit rows U, U+ 1 = U.T (U U.T)+ 1. Match the oracle's singular
+    cutoff, which depends on the full parameter width, not just task count.
+    Near the cutoff, defer to the wide SVD oracle rather than square its
+    conditioning. Units and final projection scaling keep the input dtype.
+    """
+    norms = matrix.norm(dim=1)
+    units = torch.nan_to_num(matrix / norms[:, None], 0)
+    wide_units = units.double()
+    gram = wide_units @ wide_units.T
+    eigenvalues, eigenvectors = torch.linalg.eigh((gram + gram.T) / 2)
+    relative_cutoff = max(matrix.shape) * torch.finfo(matrix.dtype).eps
+    cutoff = eigenvalues[-1].clamp_min(0) * relative_cutoff**2
+    # A materially ill-conditioned retained system is not a safe exact
+    # shortcut. Wide SVD remains the declared oracle for this case.
+    positive = eigenvalues > cutoff
+    near_cutoff = ((eigenvalues > cutoff / 4) & (eigenvalues < cutoff * 4)).any()
+    ill_conditioned = ((eigenvalues > cutoff) & (eigenvalues < eigenvalues[-1] * 1e-8)).any()
+    singular_lstsq = (positive.sum() < matrix.shape[0]) if use_least_square_oracle else False
+    if bool(near_cutoff | ill_conditioned | singular_lstsq):
+        return _config_oracle_direction(matrix, use_least_square=use_least_square_oracle), "gram_cutoff_oracle"
+    inverse = torch.where(positive, eigenvalues.clamp_min(torch.finfo(torch.float64).tiny).reciprocal(), 0)
+    weights = eigenvectors @ (inverse * (eigenvectors.T @ gram.new_ones(matrix.shape[0])))
+    target = (units.T @ weights.to(matrix.dtype))
+    unit_target = torch.nan_to_num(target / target.norm(), 0)
+    length = torch.stack([torch.dot(row, unit_target) for row in matrix]).sum()
+    return unit_target * length, None
+
+
+def _config_oracle_direction(matrix, *, use_least_square=False):
+    from conflictfree.grad_operator import ConFIG_update
+    from conflictfree.weight_model import EqualWeight
+
+    class DtypeEqualWeight(EqualWeight):
+        def get_weights(self, gradients, losses=None, device=None):
+            return gradients.new_ones(gradients.shape[0])
+
+    return ConFIG_update(matrix, weight_model=DtypeEqualWeight(), use_least_square=use_least_square)
+
+
 def data_only_update(
     model: nn.Module,
     optimizer: torch.optim.Optimizer,
@@ -88,11 +172,23 @@ def two_objective_update(
     coherence_weight: float,
     grad_clip: float | None,
     config_missing_behavior: str = "error",
+    execution: str = "legacy",
+    diagnostics: bool = True,
+    config_backend: str = "legacy",
 ) -> dict[str, Any]:
     """Update once while recording the relationship between both gradients."""
     parameters = _trainable_parameters(model)
     weighted_data = float(data_weight) * data_loss
     weighted_coherence = float(coherence_weight) * coherence_loss
+    if execution not in {"legacy", "exact", "scalar"}:
+        raise ValueError("gradient execution must be legacy, exact or scalar")
+    if config_backend not in {"legacy", "gram"}:
+        raise ValueError("ConFIG backend must be legacy or gram")
+    if execution != "legacy" and mode == "weighted_sum" and not diagnostics:
+        row = _scalar_objective_update(parameters, optimizer, weighted_data + weighted_coherence, grad_clip)
+        row.update(update_mode="weighted_sum", data_grad_norm=None, coherence_grad_norm=None,
+                   gradient_cosine=None, gradient_conflict=None, config_fallback_used=False)
+        return row
     data_gradient = _flat_gradient(weighted_data, parameters)
     coherence_gradient = _flat_gradient(weighted_coherence, parameters)
     if not torch.isfinite(data_gradient).all() or not torch.isfinite(coherence_gradient).all():
@@ -126,7 +222,12 @@ def two_objective_update(
             if float(cosine) >= 0:
                 update_mode = "weighted_sum_aligned"
             else:
-                candidate = ConFIG_update([data_gradient, coherence_gradient])
+                use_lstsq = data_gradient.dtype == torch.float32 or data_gradient.is_cuda
+                candidate = (_config_gram_direction(torch.stack([data_gradient, coherence_gradient]),
+                                                    use_least_square_oracle=use_lstsq)[0]
+                             if config_backend == "gram" else
+                             _config_oracle_direction(torch.stack([data_gradient, coherence_gradient]),
+                                                      use_least_square=use_lstsq))
                 descends_data = torch.dot(candidate, data_gradient) > 0
                 descends_coherence = torch.dot(candidate, coherence_gradient) > 0
                 if torch.isfinite(candidate).all() and descends_data and descends_coherence:
@@ -158,6 +259,7 @@ def combine_coherence_gradients(
     method: str = "config",
     cagrad_alpha: float = 0.5,
     cagrad_rescale: int = 1,
+    config_backend: str = "legacy",
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """Combine separately calibrated family gradients, keeping fidelity outside.
 
@@ -174,45 +276,46 @@ def combine_coherence_gradients(
 
     if method not in {"weighted_sum", "config", "cagrad"}:
         raise ValueError("unknown coherence gradient method")
+    if config_backend not in {"legacy", "gram"}:
+        raise ValueError("ConFIG backend must be legacy or gram")
     if not gradients_by_family:
         raise ValueError("at least one coherence gradient is required")
     names = list(gradients_by_family)
     matrix = torch.stack([gradients_by_family[name].detach() for name in names])
     if matrix.ndim != 2 or not torch.isfinite(matrix).all():
         raise FloatingPointError("coherence gradients must be finite flat real vectors")
-    norms = torch.linalg.vector_norm(matrix.double(), dim=1)
+    wide_matrix = matrix.double()
+    norms = torch.linalg.vector_norm(wide_matrix, dim=1)
     active = norms > 0
+    active_flags = active.detach().cpu().tolist()
+    active_count = sum(active_flags)
     selected = matrix.sum(dim=0)
     fallback = None
-    rank = int(torch.linalg.matrix_rank(matrix.double() @ matrix.double().T).item())
+    rank = int(torch.linalg.matrix_rank(wide_matrix @ wide_matrix.T).item())
     diagnostics: dict[str, Any] = {"method": method, "families": names,
-                                  "rank": rank, "active_count": int(active.sum()),
-                                  "zero_gradient_families": [n for n, a in zip(names, active) if not a]}
-    if method == "config" and int(active.sum()) > 1:
-        from conflictfree.grad_operator import ConFIG_update
-        from conflictfree.weight_model import EqualWeight
-
-        class DtypeEqualWeight(EqualWeight):
-            def get_weights(self, gradients, losses=None, device=None):
-                # conflictfree 0.1.8's default hard-codes float32 weights.
-                return gradients.new_ones(gradients.shape[0])
-
+                                  "rank": rank, "active_count": active_count,
+                                  "zero_gradient_families": [n for n, a in zip(names, active_flags) if not a]}
+    if method == "config" and active_count > 1:
         active_matrix = matrix[active]
         # CUDA lstsq assumes full row rank. The audited pseudoinverse route
         # remains defined for duplicate/opposing family gradients.
-        candidate = ConFIG_update(active_matrix, weight_model=DtypeEqualWeight(), use_least_square=False)
-        products = active_matrix.double() @ candidate.double()
+        if config_backend == "gram":
+            candidate, backend_fallback = _config_gram_direction(active_matrix)
+            diagnostics["backend_fallback"] = backend_fallback
+        else:
+            candidate = _config_oracle_direction(active_matrix)
+        products = wide_matrix[active] @ candidate.double()
         if torch.isfinite(candidate).all() and bool((products > 0).all()):
             selected = candidate
         else:
             fallback = "config_no_strict_common_descent_weighted_sum"
-    elif method == "cagrad" and bool(active.any()):
+    elif method == "cagrad" and active_count:
         alpha = float(cagrad_alpha)
         if not math.isfinite(alpha) or alpha < 0 or cagrad_rescale not in {0, 1, 2}:
             raise ValueError("invalid CAGrad alpha/rescale")
         # Upstream simplex formulation. Keeping zero objectives in the
         # ensemble preserves the declared arithmetic-mean objective.
-        gram = (matrix.double() @ matrix.double().T).cpu().numpy()
+        gram = (wide_matrix @ wide_matrix.T).cpu().numpy()
         count = len(names)
         uniform = np.full(count, 1.0 / count)
         coefficient = alpha * np.sqrt(max(float(gram.mean()), 0.0) + 1e-8) + 1e-8
@@ -240,11 +343,12 @@ def combine_coherence_gradients(
     if not torch.isfinite(selected).all():
         raise FloatingPointError("coherence combiner produced a non-finite direction")
     diagnostics["fallback_reason"] = fallback
-    diagnostics["combined_dot"] = {n: float(torch.dot(g.double(), selected.double()))
-                                   for n, g in gradients_by_family.items()}
+    selected_wide = selected.double()
+    products = torch.stack([torch.dot(g, selected_wide) for g in wide_matrix]).detach().cpu().tolist()
+    diagnostics["combined_dot"] = dict(zip(names, products))
     diagnostics["strict_common_descent"] = all(
-        diagnostics["combined_dot"][n] > 0 for n, a in zip(names, active) if a
-    ) and bool(active.any())
+        diagnostics["combined_dot"][n] > 0 for n, a in zip(names, active_flags) if a
+    ) and bool(active_count)
     return selected, diagnostics
 
 
@@ -262,6 +366,8 @@ def coherence_primal_dual_update(
     cagrad_rescale: int = 1,
     native_loss: torch.Tensor | None = None,
     coherence_direction_scale: float = 1.0,
+    execution: str = "legacy",
+    config_backend: str = "legacy",
 ) -> dict[str, Any]:
     """Assign/clip once, then apply exactly one optimizer step.
 
@@ -269,6 +375,22 @@ def coherence_primal_dual_update(
     The final fidelity pressure is never normalized by the coherence combiner.
     """
     parameters = _trainable_parameters(model)
+    if execution not in {"legacy", "exact", "scalar"}:
+        raise ValueError("gradient execution must be legacy, exact or scalar")
+    import math
+    if not math.isfinite(coherence_direction_scale) or coherence_direction_scale <= 0:
+        raise ValueError("fixed coherence direction scale must be finite and positive")
+    if execution != "legacy" and method == "weighted_sum" and not diagnostics:
+        if not family_losses:
+            raise ValueError("at least one coherence gradient is required")
+        scalar = sum(family_losses.values()) * coherence_direction_scale + fidelity_loss
+        row = _scalar_objective_update(parameters, optimizer, scalar, grad_clip)
+        row.update(update_mode="coherence_primal_dual/weighted_sum", update_accepted=True,
+                   **{"update/fallback_reason": None,
+                      "gradient/coherence_direction_scale": coherence_direction_scale,
+                      "coherence_combiner": {"method": method, "families": list(family_losses),
+                                             "fallback_reason": None, "diagnostics_sampled": False}})
+        return row
 
     def objective_gradient(loss):
         # A disabled scalar objective can be detached. Retain the established
@@ -283,7 +405,8 @@ def coherence_primal_dual_update(
     if not torch.isfinite(fidelity).all():
         raise FloatingPointError("fidelity gradient is non-finite")
     coherence, report = combine_coherence_gradients(
-        families, method=method, cagrad_alpha=cagrad_alpha, cagrad_rescale=cagrad_rescale
+        families, method=method, cagrad_alpha=cagrad_alpha, cagrad_rescale=cagrad_rescale,
+        config_backend=config_backend,
     )
     import math
 

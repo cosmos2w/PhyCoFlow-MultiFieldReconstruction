@@ -483,22 +483,22 @@ class TrainingReconstructionPreview:
         global_step: int,
     ) -> dict[str, Any]:
         assert self.batch is not None
-        was_training = model.training
+        training_modes = {module: module.training for module in model.modules()}
         model.eval()
         seed = int(self.settings.get("seed", 2027))
         device_indices = [self.device.index or 0] if self.device.type == "cuda" else []
-        with (
-            torch.random.fork_rng(devices=device_indices),
-            evaluation_weight_context(model),
-            # Physics-informed losses may require coordinate derivatives even
-            # during evaluation. No backward pass is performed, so parameter
-            # gradients remain untouched while the temporary graph is freed.
-            torch.enable_grad(),
-        ):
-            torch.manual_seed(seed)
-            losses = model.training_loss(self.batch)
-        if was_training:
-            model.train()
+        try:
+            with (
+                torch.random.fork_rng(devices=device_indices),
+                evaluation_weight_context(model),
+                # Coordinate derivatives may be required during evaluation.
+                torch.enable_grad(),
+            ):
+                torch.manual_seed(seed)
+                losses = model.training_loss(self.batch)
+        finally:
+            for module, training in training_modes.items():
+                module.training = training
         total = float(losses.total.detach().cpu())
         components = {
             name: float(value.detach().cpu())
@@ -509,6 +509,12 @@ class TrainingReconstructionPreview:
             "training_epoch": global_step / self.steps_per_epoch,
             "sample_id": self.batch.sample_ids[0],
             "seed": seed,
+            "metric_name": "validation/native_preview_single_sample",
+            "scope": "single_fixed_sample",
+            "normalization": "dataset_train_normalizer_native_objective",
+            "generation_convention": "native_training_loss_no_endpoint_rollout",
+            "native_noise_convention": "fixed_seed_native_training_loss",
+            "value": total,
             "loss": total,
             "components": components,
         }
@@ -526,18 +532,22 @@ class TrainingReconstructionPreview:
         global_step: int,
     ) -> dict[str, Any]:
         assert self.dataset is not None and self.batch is not None
-        was_training = model.training
+        training_modes = {module: module.training for module in model.modules()}
         model.eval()
         seed = int(self.settings.get("seed", 2027))
-        with evaluation_weight_context(model), torch.no_grad():
-            generator = torch.Generator(device=self.device).manual_seed(seed)
-            reconstruction = model.reconstruct(
-                self.batch,
-                steps=self.generation_steps,
-                generator=generator,
-            )
-        if was_training:
-            model.train()
+        device_indices = [self.device.index or 0] if self.device.type == "cuda" else []
+        try:
+            with (torch.random.fork_rng(devices=device_indices),
+                  evaluation_weight_context(model), torch.no_grad()):
+                generator = torch.Generator(device=self.device).manual_seed(seed)
+                reconstruction = model.reconstruct(
+                    self.batch,
+                    steps=self.generation_steps,
+                    generator=generator,
+                )
+        finally:
+            for module, training in training_modes.items():
+                module.training = training
 
         target = self.batch.target_fields
         if target is None:

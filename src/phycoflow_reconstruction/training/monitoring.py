@@ -20,20 +20,37 @@ from .history_plotting import (
     style_history_axis,
 )
 
-_LOSS_KEYS = ("total", "data_loss", "coherence_loss", "physics_loss", "validation_loss")
+_VALIDATION_KEYS = (
+    "validation/native_preview_single_sample", "validation/native_fixed_panel",
+    "validation/coherence_selection_score", "validation/topology_selection_score",
+    "validation/endpoint_total", "validation/unknown_legacy",
+)
+_LOSS_KEYS = ("total", "data_loss", "coherence_loss", "physics_loss", "validation_loss",
+              "train/native_source_matched_ratio", "train/fidelity_penalty", *_VALIDATION_KEYS)
 _LOSS_LABELS = {
     "total": "total",
     "data_loss": "data",
     "coherence_loss": "coherence",
     "physics_loss": "physics",
-    "validation_loss": "validation",
+    "validation_loss": "legacy_validation_unknown",
+    "train/native_source_matched_ratio": "native_ratio",
+    "train/fidelity_penalty": "fidelity_penalty",
+    **{key: key.rsplit("/", 1)[-1] for key in _VALIDATION_KEYS},
 }
 _PLOT_LABELS = {
     "total": "Total objective",
     "data_loss": "Training data",
     "coherence_loss": "Coherence",
     "physics_loss": "Physics",
-    "validation_loss": "Fixed validation",
+    "validation_loss": "Legacy validation · unknown metric",
+    "train/native_source_matched_ratio": "Native risk · matched SOURCE ratio",
+    "train/fidelity_penalty": "Fidelity pressure · update ingredient",
+    "validation/native_preview_single_sample": "Native objective · fixed preview sample",
+    "validation/native_fixed_panel": "Native objective · fixed panel",
+    "validation/coherence_selection_score": "Coherence selector · SOURCE normalized",
+    "validation/topology_selection_score": "Topology selector score",
+    "validation/endpoint_total": "Endpoint risk · fixed validation panel",
+    "validation/unknown_legacy": "Legacy validation · unknown metric",
 }
 _LOSS_COLORS = {
     "total": "#2563A6",
@@ -41,6 +58,9 @@ _LOSS_COLORS = {
     "coherence_loss": "#16827C",
     "physics_loss": "#C2410C",
     "validation_loss": "#7C5AB8",
+    "train/native_source_matched_ratio": "#D97706",
+    "train/fidelity_penalty": "#C2410C",
+    **{key: "#7C5AB8" for key in _VALIDATION_KEYS},
 }
 _COHERENCE_FAMILY_PREFIX = "coherence_family/"
 _COHERENCE_FAMILY_SUFFIX = "/weighted_contribution"
@@ -91,6 +111,7 @@ class TrainingMonitor:
         description: str,
         enabled: bool = True,
         plot_every_steps: int = 10,
+        plot_every_epochs: int | None = None,
         plot_format: str = "png",
         epoch_only: bool = False,
     ) -> None:
@@ -109,10 +130,13 @@ class TrainingMonitor:
         self.epoch_only = bool(epoch_only)
         if self.epoch_only:
             self.total_epochs = max(1, math.ceil(self.final_step / self.steps_per_epoch))
-        # Keep the established config key for compatibility, but interpret its
-        # value as an epoch interval.  History and plots should scale with the
-        # number of epochs, not with potentially millions of optimizer steps.
-        self.plot_every_epochs = max(1, int(plot_every_steps))
+        # Preserve the established route while making the new epoch contract
+        # explicit. Renderer work is deferred until validation has finished.
+        self.plot_every_epochs = max(1, int(
+            plot_every_steps if plot_every_epochs is None else plot_every_epochs))
+        self._render_due = False
+        self._plot_dirty = False
+        self._total_metric_name: str | None = None
         self.description = str(description)
         self.enabled = bool(enabled)
         self._steps: dict[str, list[int]] = defaultdict(list)
@@ -176,7 +200,18 @@ class TrainingMonitor:
                     self._capture(json.loads(line))
 
     def _capture(self, row: Mapping[str, Any]) -> None:
+        self._plot_dirty = True
         step = int(row.get("step", 0))
+        if isinstance(row.get("total_metric_name"), str):
+            self._total_metric_name = row["total_metric_name"]
+        metric_name = row.get("metric_name")
+        if metric_name is not None:
+            metric_key = str(metric_name)
+            value = row.get("value")
+            if isinstance(value, (int, float)) and math.isfinite(float(value)):
+                self._steps[metric_key].append(step)
+                self._values[metric_key].append(float(value))
+            return
         family_keys = (
             key
             for key in row
@@ -347,7 +382,7 @@ class TrainingMonitor:
             train_seconds = perf_counter() - self._epoch_started
             summary = self._flush_epoch(epoch=epoch, step=step)
             if epoch == 1 or epoch % self.plot_every_epochs == 0 or step == self.final_step:
-                self._plot()
+                self._render_due = True
             self._pending_epoch_report = {
                 "epoch": epoch,
                 "step": step,
@@ -370,31 +405,38 @@ class TrainingMonitor:
             return
         self._pending_epoch_report["checkpoint_checked"] |= bool(checkpoint_checked)
         self._pending_epoch_report["best_checkpoint_saved"] |= bool(best_checkpoint_saved)
+        if self._render_due:
+            self._plot()
+            self._render_due = False
         if int(self._pending_epoch_report["step"]) < self.final_step:
             self._complete_pending_epoch()
 
     def record_validation(self, report: Mapping[str, Any] | None) -> None:
-        """Persist and plot a fixed validation loss without adding training-history rows."""
+        """Persist typed observations; render only at the epoch refresh cadence."""
         if report is None:
             return
-        step = int(report["global_step"])
-        row = {
-            "step": step,
-            "epoch": float(report["training_epoch"]),
-            "validation_loss": float(report["loss"]),
-            "components": dict(report.get("components", {})),
-        }
-        with self.validation_history_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(row, sort_keys=True) + "\n")
-        self._capture(row)
-        if (
-            self._pending_epoch_report is not None
-            and int(self._pending_epoch_report["step"]) == step
-        ):
-            self._pending_epoch_report["summary"]["validation_loss"] = row[
-                "validation_loss"
-            ]
-        self._plot()
+        metrics = report.get("metrics", [report])
+        rows = []
+        for metric in metrics:
+            step = int(metric.get("global_step", report["global_step"]))
+            row = {**metric, "step": step,
+                "epoch": float(metric.get("training_epoch", step / self.steps_per_epoch)),
+                "metric_name": metric.get("metric_name", "validation/unknown_legacy"),
+                "value": float(metric.get("value", metric.get("loss", math.nan))),
+                "scope": metric.get("scope", "unknown_legacy"),
+                "normalization": metric.get("normalization", "unknown_legacy"),
+                "generation_convention": metric.get("generation_convention", "unknown_legacy"),
+                "native_noise_convention": metric.get("native_noise_convention", "unknown_legacy")}
+            if not math.isfinite(row["value"]):
+                continue
+            rows.append(row)
+            self._capture(row)
+            if (self._pending_epoch_report is not None
+                    and int(self._pending_epoch_report["step"]) == step):
+                self._pending_epoch_report["summary"][row["metric_name"]] = row["value"]
+        if rows:
+            with self.validation_history_path.open("a", encoding="utf-8") as handle:
+                handle.writelines(json.dumps(row, sort_keys=True) + "\n" for row in rows)
 
     def _plot(self) -> None:
         if not self._plot_available or not self._values:
@@ -440,6 +482,7 @@ class TrainingMonitor:
             self.run_dir, pyplot=plt,
             output_path=self.run_dir / f"checkpoint_fidelity.{self.plot_format}",
         )
+        self._plot_dirty = False
 
     def _shown_loss_series(self, key: str) -> tuple[list[float], list[float]]:
         values = self._values[key]
@@ -462,6 +505,8 @@ class TrainingMonitor:
     def _build_loss_figure(self, plt):
         """Build a non-redundant small-multiples view of scalar objectives."""
         available = [key for key in _LOSS_KEYS if self._values.get(key)]
+        if self._total_metric_name == "train/coherence_weighted_score" and "coherence_loss" in available:
+            available = [key for key in available if key != "total"]
         if not available:
             return None
         individual_rows = math.ceil(len(available) / 2)
@@ -525,21 +570,21 @@ class TrainingMonitor:
                 shown_values,
                 color=_LOSS_COLORS[key],
                 linewidth=1.7,
-                marker="o" if key == "validation_loss" else None,
-                markersize=4.3 if key == "validation_loss" else None,
-                markerfacecolor="white" if key == "validation_loss" else None,
-                markeredgewidth=1.1 if key == "validation_loss" else None,
+                marker="o" if key.startswith("validation") else None,
+                markersize=4.3 if key.startswith("validation") else None,
+                markerfacecolor="white" if key.startswith("validation") else None,
+                markeredgewidth=1.1 if key.startswith("validation") else None,
             )
             axis.set_xlabel("Training epoch", labelpad=3)
             axis.set_ylabel("Objective value", labelpad=3)
             if key == "validation_loss":
-                title = "Fixed validation objective"
+                title = _PLOT_LABELS[key]
             elif post_training and key == "total":
-                title = "Weighted combined objective"
+                title = "Reported weighted score · update ingredient"
             elif post_training and key == "data_loss":
                 title = "Data objective · pre-update weight"
             elif post_training and key == "coherence_loss":
-                title = "Coherence objective · family-weighted"
+                title = "Coherence score · family-weighted"
             else:
                 title = _PLOT_LABELS[key]
             axis.set_title(
@@ -555,7 +600,7 @@ class TrainingMonitor:
                 axis.text(
                     1.0,
                     1.015,
-                    "Native model objective · one fixed validation sample",
+                    "Origin unavailable · excluded from typed native/selector histories",
                     transform=axis.transAxes,
                     ha="right",
                     va="bottom",
@@ -605,8 +650,8 @@ class TrainingMonitor:
                 linewidth=1.6,
                 label=labels[key],
             )
-        norm_axis.set_title("Gradient norms · epoch means", loc="left", color=_TEXT_COLOR, fontsize=11.2)
-        norm_axis.set_ylabel("Gradient norm")
+        norm_axis.set_title("Parameter gradients · pre-clipping epoch means", loc="left", color=_TEXT_COLOR, fontsize=11.2)
+        norm_axis.set_ylabel("Parameter gradient norm")
         norm_axis.set_xlabel("Training epoch")
         style_history_axis(norm_axis, norm_values, x_max=epoch_max)
         if norm_axis.lines:
@@ -674,7 +719,8 @@ class TrainingMonitor:
         if self._pending_epoch_report is not None:
             self._pending_epoch_report["checkpoint_checked"] |= bool(checkpoint_checked)
             self._pending_epoch_report["best_checkpoint_saved"] |= bool(best_checkpoint_saved)
-        self._plot()
+        if self._plot_dirty:
+            self._plot()
         if self._pending_epoch_report is not None:
             self._complete_pending_epoch(start_next=False)
         else:

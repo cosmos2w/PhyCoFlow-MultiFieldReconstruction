@@ -499,6 +499,12 @@ class CrossSpectrumFamily(nn.Module):
                 ),
                 calibration_ensemble_size=self.calibration_ensemble_size,
                 ddof=1,
+                execution=("exact" if isinstance(context, Mapping)
+                           and context.get("execution_mode") == "r4_exact" else "legacy"),
+                defer_diagnostics=(isinstance(context, Mapping)
+                                   and context.get("execution_mode") == "r4_exact"
+                                   and not context.get("diagnostics", True)
+                                   and not block_values_requested),
             )
             block_diagnostics = block_losses.diagnostics
             for key, scalar_loss, path in (

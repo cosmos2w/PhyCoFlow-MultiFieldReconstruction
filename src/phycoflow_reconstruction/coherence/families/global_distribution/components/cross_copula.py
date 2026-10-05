@@ -14,7 +14,7 @@ from .....contracts import CoherenceComponentSpec, TermResult
 from ....base import empirical_w2_columns, projection_bank
 from .copula import exact_midrank_uniform, quantile_landmark_smooth_cdf
 from .point_masks import point_mask_for_batch, select_valid_points
-from .tail_risk import identity_calibrated_smooth_cvar
+from .tail_risk import identity_calibrated_smooth_cvar, batched_identity_calibrated_smooth_cvar
 
 
 class CrossJointCopulaCVaR(nn.Module):
@@ -240,6 +240,8 @@ class CrossJointCopulaCVaR(nn.Module):
         reference: torch.Tensor,
         *,
         point_mask: torch.Tensor | None = None,
+        batch_tail_roots: bool = False,
+        diagnostics: bool = True,
     ) -> TermResult:
         if generated.shape != reference.shape or generated.ndim != 3:
             raise ValueError("cross joint copula inputs must share shape [B,N,C]")
@@ -285,36 +287,57 @@ class CrossJointCopulaCVaR(nn.Module):
             generated_projection = generated_copula @ directions.T
             reference_projection = reference_copula @ directions.T
             costs = empirical_w2_columns(generated_projection, reference_projection)
-            tail = identity_calibrated_smooth_cvar(
-                costs,
-                rho=self.rho,
-                temperature=temperature,
-                tolerance=self.eta_tolerance,
-                max_iterations=self.eta_max_iterations,
-            )
-            raw_mean = costs.mean()
-            score = (1.0 - self.alpha) * raw_mean + self.alpha * tail.value
-            per_sample.append(score)
             direction_costs.append(costs)
-            raw_means.append(raw_mean)
-            smooth_tails.append(tail.value)
-            hard_tails.append(self._hard_tail(costs.detach(), self.rho))
-            eta_values.append(tail.eta)
-            eta_residuals.append(tail.eta_residual)
-            effective_weights.append(
-                (1.0 - self.alpha) / costs.numel()
-                + self.alpha * tail.direction_weights
-            )
-            with torch.no_grad():
-                exact_generated = exact_midrank_uniform(generated_item)
-                exact_reference = exact_midrank_uniform(reference_item)
-                exact_costs = empirical_w2_columns(
-                    exact_generated @ directions.T,
-                    exact_reference @ directions.T,
+            if batch_tail_roots:
+                if diagnostics:
+                    hard_tails.append(self._hard_tail(costs.detach(), self.rho))
+            else:
+                tail = identity_calibrated_smooth_cvar(
+                    costs,
+                    rho=self.rho,
+                    temperature=temperature,
+                    tolerance=self.eta_tolerance,
+                    max_iterations=self.eta_max_iterations,
                 )
-                exact_means.append(exact_costs.mean())
+                raw_mean = costs.mean()
+                score = (1.0 - self.alpha) * raw_mean + self.alpha * tail.value
+                per_sample.append(score)
+                raw_means.append(raw_mean)
+                smooth_tails.append(tail.value)
+                if diagnostics:
+                    hard_tails.append(self._hard_tail(costs.detach(), self.rho))
+                eta_values.append(tail.eta)
+                eta_residuals.append(tail.eta_residual)
+                effective_weights.append(
+                    (1.0 - self.alpha) / costs.numel()
+                    + self.alpha * tail.direction_weights
+                )
+            if diagnostics:
+                with torch.no_grad():
+                    exact_generated = exact_midrank_uniform(generated_item)
+                    exact_reference = exact_midrank_uniform(reference_item)
+                    exact_costs = empirical_w2_columns(
+                        exact_generated @ directions.T,
+                        exact_reference @ directions.T,
+                    )
+                    exact_means.append(exact_costs.mean())
 
-        per_sample_tensor = torch.stack(per_sample)
+        if batch_tail_roots:
+            packed_costs = torch.stack(direction_costs)
+            tails = batched_identity_calibrated_smooth_cvar(
+                packed_costs, rho=self.rho, temperature=temperature,
+                tolerance=self.eta_tolerance, max_iterations=self.eta_max_iterations)
+            raw_mean_tensor = packed_costs.mean(-1)
+            per_sample_tensor = (1. - self.alpha) * raw_mean_tensor + self.alpha * tails.value
+            raw_means = list(raw_mean_tensor.unbind())
+            smooth_tails = list(tails.value.unbind())
+            eta_values = list(tails.eta.unbind())
+            eta_residuals = list(tails.eta_residual.unbind())
+            effective_weights = list(((1. - self.alpha) / packed_costs.shape[-1]
+                                       + self.alpha * tails.direction_weights).unbind())
+        else:
+            per_sample_tensor = torch.stack(per_sample)
+        include_diagnostics = diagnostics
         diagnostics: dict[str, Any] = {
             "definition": "marginal_copula_v2",
             "canonicalizer": "quantile_landmark_smooth_cdf",
@@ -328,14 +351,16 @@ class CrossJointCopulaCVaR(nn.Module):
             "tail_temperature_policy": "fixed_configured_value",
             "per_direction_w2": torch.stack(direction_costs),
             "mean_directional_w2": torch.stack(raw_means),
-            "hard_cvar_diagnostic": torch.stack(hard_tails),
             "identity_calibrated_smooth_cvar": torch.stack(smooth_tails),
             "eta": torch.stack(eta_values),
             "eta_residual": torch.stack(eta_residuals),
             "effective_direction_weights": torch.stack(effective_weights),
-            "exact_midranks_projected_w2_diagnostic": torch.stack(exact_means),
+            "diagnostics_deferred": not include_diagnostics,
         }
-        if self.pairwise_diagnostics_enabled:
+        if include_diagnostics:
+            diagnostics["hard_cvar_diagnostic"] = torch.stack(hard_tails)
+            diagnostics["exact_midranks_projected_w2_diagnostic"] = torch.stack(exact_means)
+        if include_diagnostics and self.pairwise_diagnostics_enabled:
             diagnostics.update(
                 self.pairwise_diagnostics(
                     generated.detach(),

@@ -16,6 +16,63 @@ class SmoothCVaRResult(NamedTuple):
     direction_weights: torch.Tensor
 
 
+def batched_identity_calibrated_smooth_cvar(
+    values: torch.Tensor, *, rho: float, temperature: float,
+    tolerance: float = 1e-6, max_iterations: int = 80,
+) -> SmoothCVaRResult:
+    """The scalar oracle's independent roots with one packed CPU transfer.
+
+    Each row stops at its own first tolerance crossing, retaining the oracle
+    bracket, identity correction and envelope derivative. No eta state or
+    generated transform is cached. Temporary storage is only B by R.
+    """
+    import numpy as np
+    from scipy.special import expit
+
+    if values.ndim != 2 or min(values.shape) < 1:
+        raise ValueError("batched smooth CVaR requires non-empty [B,R] costs")
+    if not torch.isfinite(values).all():
+        raise FloatingPointError("smooth CVaR costs must be finite")
+    if not 0. < float(rho) <= 1.:
+        raise ValueError("smooth CVaR rho must lie in (0,1]")
+    if temperature <= 0 or tolerance <= 0 or max_iterations < 1:
+        raise ValueError("smooth CVaR temperature, tolerance and iterations must be positive")
+    count = values.shape[-1]
+    if rho == 1.:
+        zero = values.new_zeros(values.shape[0], dtype=torch.float64)
+        return SmoothCVaRResult(values.mean(-1), zero, zero,
+                                torch.full_like(values, 1. / count))
+    tau = float(temperature)
+    host = values.detach().to(device="cpu", dtype=torch.float64).numpy()
+    minimum, maximum = host.min(-1), host.max(-1)
+    margin = maximum - minimum + max(32. * tau, tau * abs(math.log((1. - rho) / rho)))
+    low, high = minimum - margin, maximum + margin
+    active = np.ones(values.shape[0], dtype=bool)
+    eta = np.zeros(values.shape[0], dtype=np.float64)
+    residual = np.zeros_like(eta)
+    for _ in range(max_iterations):
+        indices = np.flatnonzero(active)
+        if not indices.size:
+            break
+        current = (low[indices] + high[indices]) / 2.
+        mass = expit((host[indices] - current[:, None]) / tau).mean(-1)
+        eta[indices] = current
+        residual[indices] = np.abs(mass - rho)
+        unfinished = residual[indices] > tolerance
+        move_low = indices[unfinished & (mass > rho)]
+        move_high = indices[unfinished & (mass <= rho)]
+        low[move_low], high[move_high] = eta[move_low], eta[move_high]
+        active[indices[~unfinished]] = False
+    roots = torch.as_tensor(np.stack([eta, residual]), dtype=torch.float64, device=values.device)
+    eta_tensor, residual_tensor = roots.unbind(0)
+    logits = (values.double() - eta_tensor[:, None]) / tau
+    baseline = -tau * math.log(rho) - tau * (1. - rho) / rho * math.log1p(-rho)
+    result = eta_tensor + tau * F.softplus(logits).sum(-1) / (float(rho) * count) - baseline
+    weights = torch.sigmoid(logits) / (float(rho) * count)
+    return SmoothCVaRResult(result.to(values.dtype), eta_tensor, residual_tensor,
+                            weights.to(values.dtype))
+
+
 def identity_calibrated_smooth_cvar(
     values: torch.Tensor,
     *,

@@ -38,6 +38,7 @@ class CoherenceComponentHistory:
     raw: tuple[float, ...]
     weighted: tuple[float, ...]
     partial_epochs: tuple[float, ...]
+    role: str = "legacy_unspecified"
 
 
 @dataclass(frozen=True)
@@ -77,6 +78,45 @@ def _finite_number(value: Any) -> float | None:
         return None
     numeric = float(value)
     return numeric if math.isfinite(numeric) else None
+
+
+def recover_validation_metric_identity(
+    rows: list[dict[str, Any]], *,
+    native_reports: list[dict[str, Any]] = (),
+    selector_reports: list[dict[str, Any]] = (),
+) -> list[dict[str, Any]]:
+    """Annotate legacy observations only when saved origin and value agree.
+
+    Cadence alone is insufficient: coincident or forced events can occur.
+    Missing and ambiguous provenance stays unknown, without interpolation.
+    Historical files are never modified by this reader.
+    """
+    origins: dict[int, list[tuple[str, float]]] = {}
+    for reports, name, value_key in (
+        (native_reports, "validation/native_preview_single_sample", "loss"),
+        (selector_reports, "validation/coherence_selection_score", "metric"),
+    ):
+        for report in reports:
+            step = int(report.get("global_step", report.get("step", 0)))
+            value = _finite_number(report.get("value", report.get(value_key)))
+            if value is not None:
+                origins.setdefault(step, []).append((name, value))
+    recovered = []
+    for row in rows:
+        if row.get("metric_name"):
+            recovered.append(dict(row))
+            continue
+        step = int(row.get("step", row.get("global_step", 0)))
+        value = _finite_number(row.get("validation_loss", row.get("loss")))
+        matches = {name for name, origin_value in origins.get(step, [])
+                   if value is not None and math.isclose(value, origin_value, rel_tol=1e-12,
+                                                        abs_tol=1e-15)}
+        recovered.append({**row, "value": value,
+            "metric_name": next(iter(matches)) if len(matches) == 1
+                           else "validation/unknown_legacy",
+            "metric_identity_evidence": "saved_origin_value_match" if len(matches) == 1
+                                        else "unavailable_or_ambiguous"})
+    return recovered
 
 
 def _epoch(row: dict[str, Any]) -> float:
@@ -121,6 +161,7 @@ def extract_coherence_history(
     weighted_points: dict[tuple[str, str], dict[float, float]] = {}
     standardized: set[tuple[str, str, float]] = set()
     partial: dict[tuple[str, str], set[float]] = {}
+    roles: dict[tuple[str, str], str] = {}
 
     for row in rows:
         epoch = _epoch(row)
@@ -129,6 +170,10 @@ def extract_coherence_history(
             if not key.startswith(_COMPONENT_PREFIX):
                 continue
             parts = key.split("/", 3)
+            if len(parts) == 4 and parts[3] == "role" and value in {
+                "training_component", "evaluation_only"}:
+                roles[(parts[1], parts[2])] = value
+                continue
             if len(parts) != 4 or parts[3] not in {"raw", "weighted_contribution"}:
                 continue
             numeric = _finite_number(value)
@@ -200,6 +245,7 @@ def extract_coherence_history(
                 raw=raw,
                 weighted=weighted,
                 partial_epochs=tuple(sorted(partial.get(identity, set()))),
+                role=roles.get(identity, "legacy_unspecified"),
             )
         )
 
@@ -242,13 +288,10 @@ def _component_label(component: str) -> str:
 
 
 def _rolling_median(values: tuple[float, ...]) -> tuple[float, ...]:
-    """Return a centered, two-percent-window median for visual trend context."""
+    """Fixed 25-observation median; unsmoothed observations remain visible."""
     if len(values) < 8:
         return values
-    window = max(3, round(len(values) * 0.02))
-    if window % 2 == 0:
-        window += 1
-    radius = window // 2
+    radius = 12
     return tuple(
         statistics.median(values[max(0, index - radius) : index + radius + 1])
         for index in range(len(values))
@@ -1240,7 +1283,9 @@ def build_coherence_history_figure(data: CoherenceHistoryData, plt, *, descripti
             axis.text(
                 1.0,
                 0.97,
-                f"raw {component.raw[-1]:.2e} · weighted {component.weighted[-1]:.2e}",
+                f"raw {component.raw[-1]:.2e} · weighted {component.weighted[-1]:.2e}"
+                + ("\nevaluation-only diagnostic" if component.role == "evaluation_only"
+                   else "\ntraining component" if component.role == "training_component" else ""),
                 transform=axis.transAxes,
                 ha="right",
                 va="top",

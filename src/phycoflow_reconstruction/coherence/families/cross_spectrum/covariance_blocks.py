@@ -112,6 +112,8 @@ def second_order_covariance_block_losses(
     ddof: int = 1,
     generated_covariance: torch.Tensor | None = None,
     reference_covariance: torch.Tensor | None = None,
+    execution: str = "legacy",
+    defer_diagnostics: bool = False,
 ) -> BlockLosses:
     """Compare signed/complex normalized covariance blocks by Frobenius loss.
 
@@ -158,6 +160,10 @@ def second_order_covariance_block_losses(
         raise ValueError("field pairs must contain distinct valid indices")
     if not pairs:
         raise ValueError("at least one cross-field pair is required")
+    if execution not in {"legacy", "exact"}:
+        raise ValueError("covariance execution must be legacy or exact")
+    if defer_diagnostics and include_block_values:
+        raise ValueError("block values cannot be requested while diagnostics are deferred")
 
     if (generated_covariance is None) != (reference_covariance is None):
         raise ValueError("generated and reference precomputed covariances must be provided together")
@@ -219,15 +225,21 @@ def second_order_covariance_block_losses(
     cross_records: list[dict[str, object]] = []
     skipped_same = 0
     skipped_cross = 0
+    if execution == "exact":
+        eligibility = (fractions_calibration >= minimum_reference_band_fraction).cpu().tolist()
+        band_modes = [torch.nonzero(band_ids == band, as_tuple=False).flatten().to(covariance_generated.device)
+                      for band in range(band_count)]
+        denominators = []
 
     for left_field, right_field in pairs:
         for left_band in range(band_count):
             for right_band in range(band_count):
                 is_same = left_band == right_band
-                eligible = bool(
+                eligible = ((eligibility[left_band][left_field] and eligibility[right_band][right_field])
+                            if execution == "exact" else bool(
                     (fractions_calibration[left_band, left_field] >= minimum_reference_band_fraction)
                     and (fractions_calibration[right_band, right_field] >= minimum_reference_band_fraction)
-                )
+                ))
                 if not eligible:
                     if is_same:
                         skipped_same += 1
@@ -280,28 +292,37 @@ def second_order_covariance_block_losses(
                     left_reference_energy * right_reference_energy
                 ) + floor
                 gen_denominator = gen_scale + floor
-                if bool(ref_denominator <= 0) or bool(gen_denominator <= 0):
+                if execution == "exact":
+                    denominators.extend((ref_denominator, gen_denominator))
+                elif bool(ref_denominator <= 0) or bool(gen_denominator <= 0):
                     raise FloatingPointError("covariance block denominator is not positive")
 
-                gen_block = covariance_band_block(
-                    covariance_generated,
-                    band_ids,
-                    left_band,
-                    right_band,
-                    left_field,
-                    right_field,
-                ) / gen_denominator
-                ref_block = covariance_band_block(
-                    covariance_reference,
-                    band_ids,
-                    left_band,
-                    right_band,
-                    left_field,
-                    right_field,
-                ) / ref_denominator
+                if execution == "exact":
+                    left_modes, right_modes = band_modes[left_band], band_modes[right_band]
+                    gen_block = covariance_generated[:, :, left_field, right_field].index_select(
+                        0, left_modes).index_select(1, right_modes) / gen_denominator
+                    ref_block = covariance_reference[:, :, left_field, right_field].index_select(
+                        0, left_modes).index_select(1, right_modes) / ref_denominator
+                else:
+                    gen_block = covariance_band_block(
+                        covariance_generated,
+                        band_ids,
+                        left_band,
+                        right_band,
+                        left_field,
+                        right_field,
+                    ) / gen_denominator
+                    ref_block = covariance_band_block(
+                        covariance_reference,
+                        band_ids,
+                        left_band,
+                        right_band,
+                        left_field,
+                        right_field,
+                    ) / ref_denominator
                 difference = gen_block - ref_block
                 loss = difference.abs().square().sum()
-                record = {
+                record = {} if defer_diagnostics else {
                     "fields": (left_field, right_field),
                     "bands": (left_band, right_band),
                     "frobenius_squared": float(loss.detach()),
@@ -326,10 +347,15 @@ def second_order_covariance_block_losses(
                     record["reference_normalized_block"] = payload(ref_block)
                 if is_same:
                     same_values.append(loss)
-                    same_records.append(record)
+                    if not defer_diagnostics:
+                        same_records.append(record)
                 else:
                     cross_values.append(loss)
-                    cross_records.append(record)
+                    if not defer_diagnostics:
+                        cross_records.append(record)
+
+    if execution == "exact" and denominators and bool((torch.stack(denominators) <= 0).any()):
+        raise FloatingPointError("covariance block denominator is not positive")
 
     zero = generated_coefficients.real.sum() * 0.0
     same_loss = torch.stack(same_values).mean() if same_values else zero
@@ -353,6 +379,7 @@ def second_order_covariance_block_losses(
             "cross_frequency_skipped_blocks": skipped_cross,
             "same_frequency_blocks": same_records,
             "cross_frequency_blocks": cross_records,
+            "diagnostics_deferred": defer_diagnostics,
         },
     )
 

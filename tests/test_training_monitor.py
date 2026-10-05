@@ -69,12 +69,13 @@ def test_monitor_loads_history_and_updates_loss_figure(tmp_path):
     assert monitor.last_epoch_report is not None
     assert monitor.last_epoch_report["total"] == 2.0
     assert monitor.last_epoch_report["coherence_loss"] == 4.0
-    assert monitor.last_epoch_report["validation_loss"] == 2.5
+    assert monitor.last_epoch_report["validation/unknown_legacy"] == 2.5
     assert monitor.last_epoch_report["best"] == "saved"
     assert monitor.last_epoch_report["train_seconds"] >= 0.0
     assert monitor.last_epoch_report["wall_seconds"] >= monitor.last_epoch_report["train_seconds"]
     validation_history = json.loads((metrics / "validation_history.jsonl").read_text())
-    assert validation_history["validation_loss"] == 2.5
+    assert validation_history["value"] == 2.5
+    assert validation_history["metric_name"] == "validation/unknown_legacy"
 
 
 def test_loss_figure_uses_independent_panels_without_duplicate_overview(tmp_path):
@@ -119,14 +120,14 @@ def test_loss_figure_uses_independent_panels_without_duplicate_overview(tmp_path
     ]
     assert [axis.get_title(loc="left") for axis in figure.axes[1:]] == [
         "Data objective · pre-update weight",
-        "Coherence objective · family-weighted",
-        "Fixed validation objective",
+        "Coherence score · family-weighted",
+        "Legacy validation · unknown metric",
     ]
     assert all(len(axis.lines) == 1 for axis in figure.axes[1:])
     assert all(axis.get_yscale() == "log" for axis in figure.axes[1:])
     assert validation_axis.lines[0].get_marker() == "o"
     assert [text.get_text() for text in validation_axis.texts] == [
-        "Native model objective · one fixed validation sample"
+        "Origin unavailable · excluded from typed native/selector histories"
     ]
     figure.canvas.draw()
     assert validation_axis.get_position().width > 1.5 * data_axis.get_position().width
@@ -206,7 +207,7 @@ def test_optimization_figure_separates_gradient_norms_alignment_and_conflict(tmp
     assert figure is not None
     assert len(figure.axes) == 3
     norm_axis, cosine_axis, conflict_axis = figure.axes
-    assert norm_axis.get_title(loc="left") == "Gradient norms · epoch means"
+    assert norm_axis.get_title(loc="left") == "Parameter gradients · pre-clipping epoch means"
     assert len(norm_axis.lines) == 3
     assert cosine_axis.get_ylim() == (-1.0, 1.0)
     assert cosine_axis.get_ylabel() == "Mean cosine"

@@ -58,7 +58,7 @@ class PeriodicCheckpointManager:
         self.retain_mature = bool(config.get("evaluation", {}).get("r2_protocol", {}).get("enabled", False))
 
     def _exploratory_report(self, report: Mapping[str, Any], epoch: int | None) -> dict[str, Any]:
-        """R3 endpoint screening is separate from strict and native adoption gates."""
+        """Endpoint screening is separate from strict and native adoption gates."""
         policy = self.exploratory_policy
         increases = report.get("relative_mse_increase", {})
         total = increases.get("total")
@@ -310,9 +310,39 @@ class PeriodicCheckpointManager:
             fidelity_improved = math.isfinite(mse) and mse < self.best_fidelity_value
             if fidelity_improved:
                 self.best_fidelity_value = mse
-            self.last_validation_report = {"global_step": global_step, "loss": metric_value,
+            panel_metrics = panel_report.get("metrics", {})
+            common = {"global_step": global_step,
                 "training_epoch": global_step / self.steps_per_epoch,
-                "topology_selection_eligible": eligible_for_best}
+                "scope": "fixed_validation_panel",
+                "sample_ids": list(panel_metrics.get("sample_ids", [])),
+                "panel_id": panel_metrics.get("sensor_manifest_sha256", "unavailable"),
+                "generation_convention": {
+                    "steps": panel_metrics.get("generation_steps"),
+                    "seed": panel_metrics.get("generation_seed"),
+                    "weight_source": panel_metrics.get("evaluation_weight_source", "unavailable")},
+                "native_noise_convention": "not_applicable_endpoint_rollout"}
+            selection = {**common,
+                "metric_name": ("validation/coherence_selection_score"
+                    if self.selection_metric == "coherence_with_fidelity"
+                    else "validation/topology_selection_score"),
+                "normalization": ("source_normalized_family_selection_score"
+                    if self.selection_metric == "coherence_with_fidelity"
+                    else "configured_topology_selection_score"),
+                "value": metric_value,
+                "selection_eligible": eligible_for_best}
+            typed_metrics = [validation_report] if validation_report is not None else []
+            typed_metrics.extend([selection, {**common,
+                "metric_name": "validation/endpoint_total",
+                "normalization": "dataset_train_normalized_mse",
+                "value": mse}])
+            typed_metrics.extend({**common,
+                "metric_name": f"validation/endpoint/{name}",
+                "normalization": "dataset_train_normalized_mse",
+                "value": float(value)} for name, value in
+                panel_metrics.get("per_field_mse_normalized", {}).items())
+            # Coincident preview and selector events keep both origins. The
+            # selector never overwrites a native objective under a generic loss.
+            self.last_validation_report = {**common, "metrics": typed_metrics}
             history_name = ("coherence_validation" if self.selection_metric == "coherence_with_fidelity"
                             else "topology_validation")
             with (self.store.run_dir / "metrics" / f"{history_name}.jsonl").open("a") as handle:

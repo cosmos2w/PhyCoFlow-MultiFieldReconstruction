@@ -50,6 +50,7 @@ from .common import (
 )
 from .fidelity_controller import (
     NATIVE_VERSION,
+    EPOCH_NATIVE_VERSION,
     FidelityController,
     coherence_selection_report,
     endpoint_risks,
@@ -246,7 +247,11 @@ def _coherence_objective(
     step_context: dict | None = None,
     phase: str = "train",
     committed_step: int | None = None,
+    require_source_prediction: bool = True,
 ) -> tuple[FamilyResult, tuple[str, ...]]:
+    execution_mode = config.get("runtime", {}).get("execution_mode", "legacy")
+    profile_timings = (execution_mode == "legacy"
+                       or config.get("runtime", {}).get("profile_timings", False))
     compute = config["coherence"]["compute_budget"]
     selected = _slice_batch(batch, int(compute["batch_size"]))
     complete = selected
@@ -270,7 +275,7 @@ def _coherence_objective(
     if model.capabilities.structured_grid_required:
         prediction = _gather_prediction(prediction, complete, selected)
     if step_context is not None:
-        if prediction.device.type == "cuda":
+        if profile_timings and prediction.device.type == "cuda":
             torch.cuda.synchronize(prediction.device)
         rollout_seconds = perf_counter() - rollout_started
 
@@ -292,9 +297,13 @@ def _coherence_objective(
             )
 
         source_started = perf_counter()
-        with torch.no_grad():
-            source_prediction = reconstruct(source_anchor_model)
-        if prediction.device.type == "cuda":
+        source_prediction = None
+        if require_source_prediction:
+            if source_anchor_model is None:
+                raise ValueError("matched endpoint requires a frozen source model")
+            with torch.no_grad():
+                source_prediction = reconstruct(source_anchor_model)
+        if profile_timings and prediction.device.type == "cuda":
             torch.cuda.synchronize(prediction.device)
         step_context.update(
             prediction=prediction,
@@ -306,6 +315,7 @@ def _coherence_objective(
             batch=selected,
             rollout_seconds=rollout_seconds,
             source_forward_seconds=perf_counter() - source_started,
+            timing_scope="synchronized" if profile_timings else "host_enqueue_includes_required_transfers",
         )
     if retention_losses is not None:
         settings = config.get("objectives", {})
@@ -386,6 +396,8 @@ def _coherence_objective(
             "reference_ids": reference_ids,
             "global_step": step if committed_step is None else committed_step,
             "phase": phase,
+            "execution_mode": execution_mode,
+            "diagnostics": phase != "train" or (step_context or {}).get("diagnostics", True),
             **({"persistence_cache": step_context["persistence_cache"]}
                if step_context is not None else {}),
         }
@@ -398,7 +410,7 @@ def _coherence_objective(
             context=family_context,
         )
         if step_context is not None:
-            if prediction.device.type == "cuda":
+            if profile_timings and prediction.device.type == "cuda":
                 torch.cuda.synchronize(prediction.device)
             step_context.setdefault("family_seconds", {})[family_name] = perf_counter() - family_started
         family_results[family_name] = result
@@ -448,7 +460,7 @@ def _calibrate_endpoint_fidelity(model, train_dataset, config, device, source_ha
     cuda_rng = torch.cuda.get_rng_state_all() if device.type == "cuda" else []
     batches = None
     risks, records, native_losses = [], [], []
-    native_constrained = settings.get("version") == NATIVE_VERSION
+    native_constrained = settings.get("version") in {NATIVE_VERSION, EPOCH_NATIVE_VERSION}
     try:
         indices = iter_unique_batch_indices(
             len(train_dataset), count, int(config["optimization"]["batch_size"]),
@@ -792,6 +804,8 @@ def _component_history_report(
         component = str(path).removeprefix(f"{family_name}.")
         raw = float(raw_value)
         prefix = f"coherence_component/{family_name}/{component}"
+        payload[f"{prefix}/role"] = ("evaluation_only" if term is not None and
+            term.diagnostics.get("evaluation_only", False) else "training_component")
         payload[f"{prefix}/raw"] = raw
         payload[f"{prefix}/weighted_contribution"] = raw * inner * outer * calibration
         payload[f"{prefix}/inner_weight"] = inner
@@ -1698,7 +1712,7 @@ def run_post_training(
         torch.set_rng_state(checkpoint["rng_state"]["torch_cpu"])
         if device.type == "cuda" and checkpoint["rng_state"].get("torch_cuda"):
             torch.cuda.set_rng_state_all(checkpoint["rng_state"]["torch_cuda"])
-        if adaptive and fidelity_settings(config).get("version") == NATIVE_VERSION:
+        if adaptive and fidelity_settings(config).get("version") in {NATIVE_VERSION, EPOCH_NATIVE_VERSION}:
             if not {"python", "numpy"} <= checkpoint["rng_state"].keys():
                 raise ValueError("native v2 resume is missing Python/NumPy RNG state")
             random.setstate(checkpoint["rng_state"]["python"])
@@ -1839,6 +1853,7 @@ def run_post_training(
         controller = FidelityController(
             train_dataset.field_names, fidelity_settings(config), calibration["endpoint_fidelity"],
             state=checkpoint["fidelity_controller"] if resume is not None else None,
+            steps_per_epoch=post_training_steps_per_epoch(config, len(train_dataset)),
         )
         if controller.updates != start_step:
             raise ValueError("fidelity controller accepted-update count differs from recovery step")
@@ -1999,7 +2014,7 @@ def run_post_training(
         comparison_batch, evaluation_dataset.path, evaluation_split
     )
     evaluation_manifest.save(store.run_dir / "artifacts" / "evaluation_sensor_manifest.json")
-    if config.get("checkpointing", {}).get("exploratory_policy") is not None:
+    if config.get("checkpointing", {}).get("exploratory_policy", {}).get("version") == "r3_endpoint_corridor_v1":
         from ..data.manifest import SensorManifest
 
         campaign = Path(case_dir) / "runs/Test_1002/_audit/R3_campaign"
@@ -2265,6 +2280,7 @@ def run_post_training(
         enabled=bool(config["runtime"].get("progress", True)),
         plot_every_steps=int(config["runtime"].get("plot_every_steps", 10)),
         plot_format=str(config["runtime"].get("plot_format", "png")),
+        plot_every_epochs=config["runtime"].get("plot_every_epochs"),
         **({"epoch_only": True} if r3_reporting else {}),
     )
     preview = TrainingReconstructionPreview(
@@ -2281,6 +2297,26 @@ def run_post_training(
     if resume is not None and adaptive:
         checkpoint_manager.restore_coherence_selector(checkpoint)
     panel_metrics_cache = {}
+    r4_exact = config["runtime"].get("execution_mode", "legacy") == "r4_exact"
+    rebound_monitor = None
+    if r4_exact:
+        from .rebound_monitor import ReboundMonitor
+
+        rebound_monitor = ReboundMonitor(source_denominators={
+            name: max(float(report["total"]), 1e-12)
+            for name, report in source_metrics["coherence"]["families"].items()
+        })
+        rebound_path = store.run_dir / "metrics/rebound_monitor.json"
+        if resume is not None and rebound_path.is_file():
+            recovered = json.loads(rebound_path.read_text())
+            observations = recovered["observations"]
+            if not observations or observations[-1]["epoch"] <= start_step / steps_per_epoch:
+                rebound_monitor.load_state_dict(recovered)
+            else:
+                # Discard report-only observations newer than recovery weights.
+                for observation in observations:
+                    if observation["epoch"] <= start_step / steps_per_epoch:
+                        rebound_monitor.observe(observation["epoch"], observation["score"])
     if checkpoint_manager.selection_metric in {"topology_with_fidelity", "coherence_with_fidelity"}:
         selection_report = ((r3_coherence_selection_report
                              if checkpoint_manager.exploratory_policy is not None
@@ -2379,6 +2415,10 @@ def run_post_training(
             torch.randperm(len(train_dataset), generator=index_generator)
         epoch = global_step // steps_per_epoch + 1
         post_training_mode(model, config)
+        r4_diagnose_batch = (r4_exact and (
+            (global_step % steps_per_epoch == 0 and epoch % int(
+                config["runtime"].get("diagnostics_every_epochs", 10)) == 0)
+            or rebound_monitor.consume_diagnostic_request()))
         step_started = perf_counter()
         native_started = perf_counter()
         if adaptive:
@@ -2416,7 +2456,9 @@ def run_post_training(
             "coherence_weight": coherence_weight,
         }
         if coherence_active or retention_active:
-            step_context = {} if (adaptive or constrained) else None
+            step_context = {} if (adaptive or constrained or r4_exact) else None
+            if r4_exact:
+                step_context["diagnostics"] = r4_diagnose_batch
             retention_losses: dict[str, torch.Tensor] = {}
             rollout_generator = torch.Generator(device=device).manual_seed(
                 seed + 1_000_003 + global_step
@@ -2434,6 +2476,7 @@ def run_post_training(
                 source_anchor_model=source_anchor_model,
                 step_context=step_context,
                 committed_step=controller.counts["accepted"] if constrained else global_step,
+                require_source_prediction=adaptive or constrained,
             )
             for name, loss in retention_losses.items():
                 # Retention has the same sparse cadence as the shared rollout.
@@ -2454,9 +2497,9 @@ def run_post_training(
                 .get("gradient_diagnostics_every_epochs", 0)
             )
             if (
-                not adaptive and diagnostic_every > 0
+                not adaptive and ((diagnostic_every > 0
                 and global_step % steps_per_epoch == 0
-                and epoch % diagnostic_every == 0
+                and epoch % diagnostic_every == 0) or r4_diagnose_batch)
             ):
                 row["family_gradient_diagnostics"] = _sparse_family_gradient_diagnostics(
                     model,
@@ -2505,7 +2548,8 @@ def run_post_training(
                     )
                     component_diagnosis.update(epoch=epoch, panel_role="one_stochastic_TRAIN_batch_sparse_diagnostic")
                     store.write_json(f"evaluation/R3_component_gradients_epoch_{epoch:03d}.json", component_diagnosis)
-                diagnose = global_step % int(controller.settings["diagnostics_every_steps"]) == 0
+                diagnose = (r4_diagnose_batch if r4_exact
+                    else global_step % int(controller.settings["diagnostics_every_steps"]) == 0)
                 backward_started = perf_counter()
                 gradient = coherence_primal_dual_update(
                     model, optimizer, family_losses, fidelity_loss,
@@ -2516,13 +2560,15 @@ def run_post_training(
                     cagrad_rescale=int(config["optimization"].get("cagrad_rescale", 1)),
                     native_loss=data_loss if controller.native_constrained else None,
                     coherence_direction_scale=coherence_direction_scale,
+                    execution="scalar" if r4_exact else "legacy",
+                    config_backend="legacy",
                 )
-                if device.type == "cuda":
+                if device.type == "cuda" and (not r4_exact or config["runtime"].get("profile_timings", False)):
                     torch.cuda.synchronize(device)
                 controller.advance(violations)
                 row.update(controller.telemetry(violations, live_risks, source_risks, pressure))
                 row.update({"data_update_weight": 0.0, "coherence_update_weight": coherence_weight,
-                            "data_retention_objective": ("endpoint_native_primal_dual_v2" if controller.native_constrained
+                            "data_retention_objective": (controller.version if controller.native_constrained
                                                          else "endpoint_primal_dual_native_monitor"),
                             "native_loss_role": controller.settings["native_loss_role"],
                             "loss/native": float(data_loss.detach()), "loss/endpoint_total": float(live_risks[0].detach()),
@@ -2595,6 +2641,9 @@ def run_post_training(
                     config_missing_behavior=config["optimization"].get(
                         "config_missing_behavior", "error"
                     ),
+                    execution="scalar" if r4_exact else "legacy",
+                    diagnostics=r4_diagnose_batch if r4_exact else True,
+                    config_backend="legacy",
                 )
             row.update(
                 coherence_loss=float(result.scalar_loss.detach().cpu()),
@@ -2622,6 +2671,10 @@ def run_post_training(
             )
         if row.get("update_accepted", True):
             after_optimizer_step(model)
+        if r4_exact and device.type == "cuda" and (global_step + 1) % steps_per_epoch == 0:
+            # One historical-epoch timing boundary includes the last optimizer
+            # kernels. Ordinary per-family timers never synchronize for telemetry.
+            torch.cuda.synchronize(device)
         row["update_seconds"] = perf_counter() - step_started
         if adaptive:
             row["runtime/step_seconds"] = row["update_seconds"]
@@ -2631,6 +2684,13 @@ def run_post_training(
         ] * row.get("coherence_loss", 0.0) * (
             every if config["coherence"]["schedule"].get("interval_rescale", False) else 1
         )
+        row["train/native_raw"] = row["native_data_loss"]
+        row["train/coherence_weighted_score"] = row.get("coherence_loss")
+        if adaptive:
+            row["total_metric_name"] = "train/coherence_weighted_score"
+            row["train/fidelity_penalty"] = row.get("loss/fidelity_augmented")
+        else:
+            row["total_metric_name"] = "weighted_update_ingredients"
         if constrained:
             row["total"] = row.get("regularized_loss_before", row["balanced_topology_before"])
         if r2_enabled and (global_step + 1) % steps_per_epoch == 0 and epoch % int(
@@ -2641,6 +2701,23 @@ def run_post_training(
             for role, report in native_reports.items():
                 for key in ("candidate", "source", "ratio"):
                     row[f"native_monitor/{role}/{key}"] = report[key]
+            row["train/native_source_matched_ratio"] = native_reports["train"]["ratio"]
+            native_panel = native_reports["validation"]
+            monitor.record_validation({
+                "global_step": global_step + 1,
+                "training_epoch": epoch,
+                "metric_name": "validation/native_fixed_panel",
+                "value": native_panel["candidate"],
+                "source_value": native_panel["source"],
+                "source_matched_ratio": native_panel["ratio"],
+                "scope": "fixed_multi_snapshot_native_noise_panel",
+                "panel_id": "native_validation",
+                "sample_ids": list(native_monitor_batches["validation"].sample_ids),
+                "normalization": "TRAIN_mean_std_model_native_objective",
+                "generation_convention": "model.training_loss_not_endpoint_generation",
+                "native_noise_convention": "fixed_matched_live_source_draws_restore_public_rng",
+                "native_seeds": list(r2_settings.get("native_seeds", [2027, 3027])),
+            })
             row["runtime/native_monitor_seconds"] = perf_counter() - monitor_started
             store.write_json(f"evaluation/native_epoch_{epoch:03d}.json", native_reports)
         monitor.record(row, lr=optimizer.param_groups[0]["lr"])
@@ -2678,6 +2755,16 @@ def run_post_training(
             )
         if checkpoint_result is not None:
             monitor.record_validation(checkpoint_manager.last_validation_report)
+            if rebound_monitor is not None and epoch % 10 == 0:
+                validation = checkpoint_manager.last_validation_report or {}
+                for metric in validation.get("metrics", [validation]):
+                    if metric.get("metric_name") == "validation/coherence_selection_score":
+                        if (not rebound_monitor.observations or
+                                rebound_monitor.observations[-1]["epoch"] < epoch):
+                            alarm = rebound_monitor.observe(epoch, float(metric["value"]))
+                            if alarm["diagnostic_triggered"]:
+                                print(f"rebound alarm at epoch {epoch}: sparse TRAIN diagnostic requested")
+                store.write_json("metrics/rebound_monitor.json", rebound_monitor.state_dict())
             store.write_json(
                 "progress.json",
                 {

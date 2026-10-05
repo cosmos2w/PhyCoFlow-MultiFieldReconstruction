@@ -17,6 +17,7 @@ import torch
 
 ENDPOINT_VERSION = "endpoint_primal_dual_v1"
 NATIVE_VERSION = "endpoint_native_primal_dual_v2"
+EPOCH_NATIVE_VERSION = "endpoint_native_epoch_pi_v3"
 
 FIDELITY_DEFAULTS = {
     "enabled": True,
@@ -44,17 +45,32 @@ FIDELITY_V2_DEFAULTS = {
     "calibration_seed": 700_103,
 }
 
+FIDELITY_EPOCH_DEFAULTS = {
+    "version": EPOCH_NATIVE_VERSION,
+    "epoch_ema_decay": 0.8,
+    "epoch_integral_gain": 0.01,
+    "epoch_proportional_gain": 0.02,
+    "native_min_weight": 0.1,
+    "native_max_weight": 0.5,
+    "coefficient_caps": None,
+    # v3 has no per-update dual or instantaneous augmented pressure.
+    "dual_lr": 0.0,
+    "augmented_rho": 0.0,
+    "multiplier_max": 0.05,
+}
+
 
 def fidelity_settings(config: Mapping[str, Any]) -> dict[str, Any]:
     supplied = dict(config.get("fidelity_controller", {}))
     version = supplied.get("version", ENDPOINT_VERSION)
-    if version not in {ENDPOINT_VERSION, NATIVE_VERSION}:
+    if version not in {ENDPOINT_VERSION, NATIVE_VERSION, EPOCH_NATIVE_VERSION}:
         raise ValueError("unknown fidelity controller version")
     if version == ENDPOINT_VERSION:
         # Omitted version and explicit v1 have the historical serialized keys.
         supplied.pop("version", None)
         return {**FIDELITY_DEFAULTS, **supplied}
-    return {**FIDELITY_DEFAULTS, **FIDELITY_V2_DEFAULTS, **supplied}
+    epoch_defaults = FIDELITY_EPOCH_DEFAULTS if version == EPOCH_NATIVE_VERSION else {}
+    return {**FIDELITY_DEFAULTS, **FIDELITY_V2_DEFAULTS, **epoch_defaults, **supplied}
 
 
 def _native_rng_state(model):
@@ -136,11 +152,13 @@ class FidelityController:
     start at zero. Only accepted updates advance either accumulator.
     """
 
-    def __init__(self, field_names, settings: Mapping, calibration: Mapping, *, state=None):
+    def __init__(self, field_names, settings: Mapping, calibration: Mapping, *, state=None,
+                 steps_per_epoch: int | None = None):
         self.field_names = tuple(field_names)
         self.settings = fidelity_settings({"fidelity_controller": settings})
         self.version = self.settings.get("version", ENDPOINT_VERSION)
-        self.native_constrained = self.version == NATIVE_VERSION
+        self.native_constrained = self.version in {NATIVE_VERSION, EPOCH_NATIVE_VERSION}
+        self.epoch_controlled = self.version == EPOCH_NATIVE_VERSION
         expected_role = "constraint" if self.native_constrained else "monitor"
         if self.settings["native_loss_role"] != expected_role:
             raise ValueError("fidelity controller version/native_loss_role mismatch")
@@ -172,6 +190,29 @@ class FidelityController:
         self.multipliers = torch.zeros_like(self.normalizers)
         self.ema = torch.zeros_like(self.normalizers)
         self.updates = 0
+        if self.epoch_controlled:
+            if not isinstance(steps_per_epoch, int) or steps_per_epoch < 1:
+                raise ValueError("epoch controller requires the historical epoch exposure")
+            if float(self.settings["dual_lr"]) != 0 or float(self.settings["augmented_rho"]) != 0:
+                raise ValueError("epoch PI cannot combine with per-update dual/rho pressure")
+            self.steps_per_epoch = steps_per_epoch
+            self.completed_epochs = 0
+            self.partial_count = 0
+            self.partial_sum = torch.zeros_like(self.normalizers)
+            self.minimum = torch.zeros_like(self.normalizers)
+            self.minimum[-1] = float(self.settings["native_min_weight"]) * self.normalizers[-1]
+            self.maximum = torch.full_like(self.normalizers, float(self.settings["multiplier_max"]))
+            self.maximum[-1] = float(self.settings["native_max_weight"]) * self.normalizers[-1]
+            caps = self.settings.get("coefficient_caps")
+            if caps is not None:
+                if not isinstance(caps, Mapping) or set(caps) != set(self.names):
+                    raise ValueError("epoch coefficient caps must cover every retained risk")
+                self.maximum = torch.tensor([float(caps[name]) for name in self.names], dtype=torch.float64)
+                if not bool(torch.isfinite(self.maximum).all() and (self.maximum > 0).all()):
+                    raise ValueError("epoch coefficient caps must be finite and positive")
+            if not bool((self.maximum >= self.minimum).all()):
+                raise ValueError("epoch coefficient cap is below its retention floor")
+            self.multipliers.copy_(self.minimum)
         if state is not None:
             if state.get("version") != self.version:
                 raise ValueError("fidelity resume controller version mismatch")
@@ -182,9 +223,23 @@ class FidelityController:
             self.multipliers.copy_(state["multipliers"].cpu())
             self.ema.copy_(state["ema"].cpu())
             self.updates = int(state["updates"])
+            if self.epoch_controlled:
+                saved = state.get("epoch_pi")
+                if not isinstance(saved, Mapping) or saved.get("steps_per_epoch") != self.steps_per_epoch:
+                    raise ValueError("epoch PI recovery is missing or epoch exposure changed")
+                self.completed_epochs = int(saved["completed_epochs"])
+                self.partial_count = int(saved["partial_count"])
+                self.partial_sum.copy_(saved["partial_sum"].cpu())
+                if (self.completed_epochs < 0 or not 0 <= self.partial_count < self.steps_per_epoch
+                        or self.updates != self.completed_epochs * self.steps_per_epoch + self.partial_count
+                        or not bool(torch.isfinite(self.partial_sum).all())
+                        or not bool(((self.multipliers >= self.minimum) &
+                                     (self.multipliers <= self.maximum)).all())):
+                    raise ValueError("invalid epoch PI partial-epoch recovery")
             if self.updates < 0 or not torch.isfinite(self.ema).all() or not bool(
                 (self.multipliers >= 0).all()
-                and (self.multipliers <= float(self.settings["multiplier_max"])).all()
+                and (self.multipliers <= (self.maximum if self.epoch_controlled else
+                                         float(self.settings["multiplier_max"]))).all()
                 and torch.isfinite(self.multipliers).all()
             ):
                 raise ValueError("invalid recovered fidelity controller state")
@@ -221,13 +276,37 @@ class FidelityController:
     def primal(self, violations: torch.Tensor):
         if violations.shape != self.normalizers.shape:
             raise ValueError("fidelity primal constraint layout mismatch")
-        rho = float(self.settings["augmented_rho"])
         multipliers = self.multipliers.to(device=violations.device, dtype=violations.dtype)
+        if self.epoch_controlled:
+            # Fixed throughout this epoch; risk constants have no model gradient.
+            terms = multipliers * violations
+            return terms.sum(), dict(zip(self.names, terms)), multipliers
+        rho = float(self.settings["augmented_rho"])
         pressure = (multipliers + rho * violations).clamp_min(0)
         terms = (pressure.square() - multipliers.square()) / (2 * rho)
         return terms.sum(), {name: term for name, term in zip(self.names, terms)}, pressure
 
     def advance(self, violations: torch.Tensor) -> None:
+        if self.epoch_controlled:
+            values = violations.detach().to(dtype=torch.float64)
+            if values.shape != self.partial_sum.shape or not bool(torch.isfinite(values).all()):
+                raise FloatingPointError("invalid epoch PI violation observation")
+            self.partial_sum = self.partial_sum.to(values.device) + values
+            self.partial_count += 1
+            self.updates += 1
+            if self.partial_count == self.steps_per_epoch:
+                mean = (self.partial_sum / self.partial_count).cpu()
+                previous = self.ema.clone()
+                beta = float(self.settings["epoch_ema_decay"])
+                self.ema.mul_(beta).add_(mean, alpha=1 - beta)
+                proposal = (self.multipliers + float(self.settings["epoch_integral_gain"]) * self.ema
+                            + float(self.settings["epoch_proportional_gain"]) * (self.ema - previous))
+                # Project the actual integrator state: no hidden windup reservoir.
+                self.multipliers.copy_(torch.maximum(self.minimum, torch.minimum(self.maximum, proposal)))
+                self.completed_epochs += 1
+                self.partial_count = 0
+                self.partial_sum.zero_()
+            return
         values = violations.detach().to(device="cpu", dtype=torch.float64)
         if values.shape != self.ema.shape or not torch.isfinite(values).all():
             raise FloatingPointError("invalid detached fidelity controller update")
@@ -239,7 +318,8 @@ class FidelityController:
         self.multipliers.clamp_(0, float(self.settings["multiplier_max"]))
 
     def telemetry(self, violations, live, source, pressure):
-        corrected = self.ema / (1 - float(self.settings["ema_decay"])**self.updates) if self.updates else self.ema
+        corrected = (self.ema if self.epoch_controlled else
+                     self.ema / (1 - float(self.settings["ema_decay"])**self.updates) if self.updates else self.ema)
         row = {}
         # Risks/pressure are pre-step; EMA and multipliers below are post-step.
         for i, name in enumerate(self.names):
@@ -250,7 +330,8 @@ class FidelityController:
                         f"{prefix}/ema_violation": float(corrected[i]),
                         f"{prefix}/multiplier": float(self.multipliers[i]),
                         f"{prefix}/effective_primal_coefficient": float(pressure[i].detach()),
-                        f"{prefix}/cap_saturated": bool(self.multipliers[i] >= float(self.settings["multiplier_max"]))})
+                        f"{prefix}/cap_saturated": bool(self.multipliers[i] >=
+                            (self.maximum[i] if self.epoch_controlled else float(self.settings["multiplier_max"])))})
         if self.native_constrained:
             row["gradient/native/constraint_active"] = bool(pressure[-1].detach() > 0)
             row["fidelity/native/frozen_scale"] = float(self.normalizers[-1])
@@ -258,10 +339,16 @@ class FidelityController:
         return row
 
     def state_dict(self):
-        return {"version": self.version, "names": list(self.names),
+        result = {"version": self.version, "names": list(self.names),
                 "settings": self.settings, "calibration": self.calibration,
                 "multipliers": self.multipliers.clone(), "ema": self.ema.clone(),
                 "updates": self.updates}
+        if self.epoch_controlled:
+            result["epoch_pi"] = {"steps_per_epoch": self.steps_per_epoch,
+                                  "completed_epochs": self.completed_epochs,
+                                  "partial_count": self.partial_count,
+                                  "partial_sum": self.partial_sum.detach().cpu().clone()}
+        return result
 
 
 def coherence_selection_report(source: Mapping, candidate: Mapping, settings: Mapping):

@@ -135,6 +135,8 @@ def _validate_covariance_block_settings(family, compute, evaluation):
 def _validate_adaptive_mode(config):
     from ..training.fidelity_controller import (
         ENDPOINT_VERSION,
+        EPOCH_NATIVE_VERSION,
+        FIDELITY_EPOCH_DEFAULTS,
         FIDELITY_DEFAULTS,
         FIDELITY_V2_DEFAULTS,
         NATIVE_VERSION,
@@ -162,7 +164,8 @@ def _validate_adaptive_mode(config):
         if term.get("enabled", name == "data_retention") or float(term.get("weight", 0)) != 0:
             raise ValueError("adaptive fidelity prohibits native/manual endpoint/source-anchor retention weights")
     settings = fidelity_settings(config)
-    _reject_unknown(config.get("fidelity_controller", {}), set(FIDELITY_DEFAULTS) | set(FIDELITY_V2_DEFAULTS), "fidelity_controller")
+    _reject_unknown(config.get("fidelity_controller", {}), set(FIDELITY_DEFAULTS) | set(FIDELITY_V2_DEFAULTS) |
+                    (set(FIDELITY_EPOCH_DEFAULTS) if settings.get("version") == EPOCH_NATIVE_VERSION else set()), "fidelity_controller")
     if settings["enabled"] is not True or settings["risk"] != "endpoint_model_mse":
         raise ValueError("adaptive fidelity requires enabled endpoint_model_mse risk")
     if settings["source_weight_selection"] != "live" or settings["same_noise_source"] is not True:
@@ -170,9 +173,9 @@ def _validate_adaptive_mode(config):
     if config["model"].get("model_ema_eval", False):
         raise ValueError("adaptive fidelity rejects configured EMA/live mixing")
     version = settings.get("version", ENDPOINT_VERSION)
-    if settings["native_loss_role"] != ("constraint" if version == NATIVE_VERSION else "monitor"):
+    if settings["native_loss_role"] != ("constraint" if version in {NATIVE_VERSION, EPOCH_NATIVE_VERSION} else "monitor"):
         raise ValueError("fidelity controller version/native_loss_role mismatch")
-    if version == NATIVE_VERSION:
+    if version in {NATIVE_VERSION, EPOCH_NATIVE_VERSION}:
         _positive_number(settings["native_budget"], "fidelity_controller.native_budget", allow_zero=True)
         if optimization.get("model_mode", "eval") != "eval":
             raise ValueError("native constraints require matched LIVE/source inference mode")
@@ -187,7 +190,24 @@ def _validate_adaptive_mode(config):
     if settings["anchor"].get("enabled", False):
         raise ValueError("adaptive anchor is not implemented; legacy source-anchor remains available")
     for key in ("absolute_floor", "dual_lr", "augmented_rho", "multiplier_max"):
-        _positive_number(settings[key], f"fidelity_controller.{key}")
+        _positive_number(settings[key], f"fidelity_controller.{key}",
+                         allow_zero=version == EPOCH_NATIVE_VERSION and key in {"dual_lr", "augmented_rho"})
+    if version == EPOCH_NATIVE_VERSION:
+        if float(settings["dual_lr"]) != 0 or float(settings["augmented_rho"]) != 0:
+            raise ValueError("epoch PI excludes per-update dual and rho pressure")
+        for key in ("epoch_integral_gain", "epoch_proportional_gain", "native_min_weight", "native_max_weight"):
+            _positive_number(settings[key], f"fidelity_controller.{key}", allow_zero=key == "epoch_proportional_gain")
+        if not 0 <= float(settings["epoch_ema_decay"]) < 1:
+            raise ValueError("epoch PI EMA decay must be in [0,1)")
+        if float(settings["native_max_weight"]) < float(settings["native_min_weight"]):
+            raise ValueError("epoch PI native cap is below floor")
+        caps = settings.get("coefficient_caps")
+        if caps is not None:
+            names = {"total", "native", *config["dataset"]["field_names"]}
+            if not isinstance(caps, Mapping) or set(caps) != names:
+                raise ValueError("epoch coefficient caps must cover every retained risk")
+            for name, cap in caps.items():
+                _positive_number(cap, f"fidelity_controller.coefficient_caps.{name}")
     for key in ("relative_budget_total", "relative_budget_per_field", "absolute_allowance"):
         _positive_number(settings[key], f"fidelity_controller.{key}", allow_zero=True)
     decay = float(settings["ema_decay"])
@@ -326,11 +346,20 @@ def _validate_common_sections(config: Mapping[str, Any]) -> None:
         "num_workers",
         "progress",
         "plot_every_steps",
+        "plot_every_epochs", "execution_mode", "profile_timings", "diagnostics_every_epochs",
         "plot_format",
         "data_strategy",
         "vram_dataset_threshold_gb",
     }
     _reject_unknown(runtime, runtime_keys, "runtime")
+    if runtime.get("execution_mode", "legacy") not in {"legacy", "r4_exact"}:
+        raise ValueError("runtime.execution_mode must be legacy or r4_exact")
+    if "plot_every_epochs" in runtime:
+        _positive_integer(runtime["plot_every_epochs"], "runtime.plot_every_epochs")
+    if "diagnostics_every_epochs" in runtime:
+        _positive_integer(runtime["diagnostics_every_epochs"], "runtime.diagnostics_every_epochs")
+    if "profile_timings" in runtime and not isinstance(runtime["profile_timings"], bool):
+        raise TypeError("runtime.profile_timings must be boolean")
     if runtime.get("plot_format", "png") not in {"png", "pdf"}:
         raise ValueError("runtime.plot_format must be png or pdf")
     if int(runtime.get("num_workers", 0)) < 0:
@@ -474,7 +503,7 @@ def _validate_common_sections(config: Mapping[str, Any]) -> None:
         _reject_unknown(exploratory, {"version", "max_relative_mse_increase",
                         "max_relative_field_mse_increase", "minimum_epoch"},
                         "checkpointing.exploratory_policy")
-        if exploratory.get("version") != "r3_endpoint_corridor_v1":
+        if exploratory.get("version") not in {"r3_endpoint_corridor_v1", "r4_endpoint_corridor_v1"}:
             raise ValueError("unsupported exploratory checkpoint policy")
         if checkpointing.get("selection_metric") != "coherence_with_fidelity":
             raise ValueError("exploratory policy requires coherence_with_fidelity")
@@ -660,6 +689,7 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
                 "num_workers",
                 "progress",
                 "plot_every_steps",
+        "plot_every_epochs", "execution_mode", "profile_timings", "diagnostics_every_epochs",
                 "plot_format",
                 "data_strategy",
                 "vram_dataset_threshold_gb",
@@ -1289,6 +1319,7 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
             "num_workers",
             "progress",
             "plot_every_steps",
+        "plot_every_epochs", "execution_mode", "profile_timings", "diagnostics_every_epochs",
             "plot_format",
             "data_strategy",
             "vram_dataset_threshold_gb",
@@ -1471,6 +1502,7 @@ def _validate_direct_physics(config: Mapping[str, Any]) -> None:
             "num_workers",
             "progress",
             "plot_every_steps",
+        "plot_every_epochs", "execution_mode", "profile_timings", "diagnostics_every_epochs",
             "data_strategy",
             "vram_dataset_threshold_gb",
         },
