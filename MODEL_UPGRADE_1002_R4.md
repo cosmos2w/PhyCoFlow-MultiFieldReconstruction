@@ -8,6 +8,8 @@ The repository started at `c70010d636601857427b0d27ee0c900cc4f42c14` on `codex/p
 
 The stopped formal child is `cases/turbulent_combustion/runs/abc_upgrade_1002_r3_candidate_5000ep_gpu0/20261005T120002Z_f5e4939d`. Its status file still says running, but live process/GPU inspection confirmed it stopped. Its journal contains 145 complete epochs; its recovery checkpoint is epoch 140 (5,320 updates). Retained states are epochs 1, 50, 60, 110, 130 and 140; no checkpoint near the early minimum at epochs 30–35 exists. The missing early state is not reconstructed or substituted.
 
+The [explicit stopped/pilot comparison](cases/turbulent_combustion/runs/Test_1002/_audit/R4_campaign/stopped_first100_identity_comparison.json) verifies the same immutable LIVE SOURCE, identical TRAIN calibration draws/query identities, and exact retained epoch-1 descriptor tensor and non-tensor states. Their calibration objects differ slightly; actual epoch-1 learned model tensors differ by up to 2.30307e−4 despite equal retained CPU/CUDA/index RNG states. First-100 trajectories are compared as observations, not assumed identical from YAML. Neither dirty historical startup retains a complete source-file snapshot; the stopped metadata names c70010d, but its exact dirty startup bytes cannot be independently reconstructed. The replay therefore reproduces the stopped resolved workload on the pinned oracle, rather than claiming an exact historical source snapshot.
+
 SOURCE remains original LIVE `tc_gl_rbf_cq_cached_kv_5000ep/20260826T212231Z_7b68c461/checkpoints/last.pt`, SHA256 `03f2f45b966a00850cc45c011b4cf1cd644b9408de355324fec8dc434a84a810`. Fields remain `[CH4, CO, T, U_1, p]`, sparse T sensors, TRAIN mean/std, 100×403 domain, 4,096 shared coherence queries, optimizer batch 32, TRAIN fraction 0.15, and 38 updates per historical epoch. Two Euler stages, observation correction, model architecture, source prior and cached-KV semantics are preserved. TEST remains locked.
 
 ### Reporting bugs: source-confirmed and recovered from the stopped arrays
@@ -25,7 +27,7 @@ All full-workload timings below used physical GPU0, RTX 6000 Ada UUID `GPU-233fc
 | Path | Warm training seconds/epoch | Short all-inclusive loop seconds/epoch | Interpretation |
 |---|---:|---:|---|
 | Historical descriptors and retention | 60.098 | 67.080 | Same-GPU speed floor; original historical record is about 52 seconds on its former device |
-| R3 exactly as stopped | 97.242 | 104.178 | Reproduced regression |
+| Stopped R3 resolved workload on pinned c70010d oracle | 97.242 | 104.178 | Reproduced regression; historical dirty source snapshot unavailable |
 | R3 with optional reporting/diagnostics disabled | 96.919 (one epoch) | 107.684 | Ordinary training machinery dominates; this is not a warmed speed pass |
 | Modern ABC, historical native0.1/aggregate-ConFIG route, repaired execution | 64.270 | 72.155 | 33.91% lower training cost than R3; 1.0694× historical control |
 | Epoch-controlled scalar adaptive route, fully matched teacher | 71.224 | 78.416 | 26.76% lower training cost than R3; `partial_speed_recovery` because it misses the absolute target |
