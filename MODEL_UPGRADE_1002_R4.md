@@ -38,6 +38,8 @@ Training code is frozen at `a4981db`. The simple reference completed its 100-epo
 
 The reference fixes execution and retains useful coherence gains through 100 epochs, but fails the unchanged native VALIDATION corridor. Its favorable current endpoint checkpoint does not qualify a formal recipe. The required adaptive150, finalist200 and independent-seed150 comparisons remain pending.
 
+The adaptive arm started from the original LIVE SOURCE in `R4_20_fast_adaptive/20261005T190116Z_279c9107`, with its unchanged 200-epoch configuration bounded to the planned 150-epoch stage. At the first scheduled epoch10 assessment, coherence is 0.913382×SOURCE (A/B/C 0.931107/1.017776/0.791263), native TRAIN/VALIDATION are 1.046889/1.079998, and CO/p endpoint ratios are 1.059841/1.054102. These early observations include fidelity failures and do not establish mature stability. All 380 logged updates have explicit clipping flags: zero clipped updates and no coefficient-cap saturation. Native pressure rises from 0.0137093 to 0.0164125; full matched teacher calls remain enabled. The stage continues unchanged under the existing emergency boundaries.
+
 R3's synchronized warm timers attribute approximately 38.93 seconds/epoch to C forward and 37.94 to backward/optimizer, versus 5.57 A, 0.98 B, 5.51 live rollout, 4.92 source rollout and 2.28 matched native work. Those components describe the original synchronized path; asynchronous repaired host-enqueue timers are not mislabeled device timings. A/B operation microbenchmarks are supporting attribution, not epoch-speed claims.
 
 ### Retention diagnosis: measured local evidence, not a universal causal claim
@@ -126,7 +128,16 @@ The rebound alarm averages scheduled fixed-panel observations in `(epoch−20,ep
 - [Fixed TRAIN controller design](cases/turbulent_combustion/runs/Test_1002/_audit/R4_campaign/controller_design.json)
 - [GPU operation parity](cases/turbulent_combustion/runs/Test_1002/R4_00_exact_math/gpu_math_parity.json)
 
-Code maps: `training/{checkpointing,preview,monitoring,coherence_history,post_training,fidelity_controller,gradient_balance,rebound_monitor}.py`, A `components/{tail_risk,cross_copula}.py`, B `covariance_blocks.py`, and `config/validate.py`. New temporary/profiling/analysis outputs remain under `Test_1002/R4_*` or `_audit/R4_campaign`; meaningful SOURCE/HIST/stopped-formal/R1–R3 artifacts are preserved. Main figures will be PDF-only under `Test_1002/R4_reports`, with a short deletion manifest only for disposable new intermediates.
+Code maps: `training/{checkpointing,preview,monitoring,coherence_history,post_training,fidelity_controller,gradient_balance,rebound_monitor}.py`, A `components/{tail_risk,cross_copula}.py`, B `covariance_blocks.py`, and `config/validate.py`. New temporary/profiling/analysis outputs remain under `Test_1002/R4_*` or `_audit/R4_campaign`; meaningful SOURCE/HIST/stopped-formal/R1–R3 artifacts are preserved.
+
+The current figure index contains four PDF masters, 11 pages in total:
+
+- [Runtime comparison, two pages](cases/turbulent_combustion/runs/Test_1002/R4_reports/runtime_comparison.pdf): identical-workload GPU0 profiles and reference100 ordinary/diagnostic/amortized timing. Process residual combines several non-step costs; it is not an isolated monitoring fraction.
+- [Corrected losses and controller, three pages](cases/turbulent_combustion/runs/Test_1002/R4_reports/corrected_losses_and_controller.pdf): distinct native/selector series, retained-state local pressure evidence and sparse actual-displacement diagnostics.
+- [Coherence and fidelity, three pages](cases/turbulent_combustion/runs/Test_1002/R4_reports/coherence_and_fidelity.pdf): reference100 raw and SOURCE-relative families, grouped/pooled B, finite/essential C, native fidelity failures and endpoint corridors.
+- [Field contours, three pages](cases/turbulent_combustion/runs/Test_1002/R4_reports/fields.pdf): actual SOURCE/epoch50/epoch100 GT, SOURCE and child fields with fixed scales and signed errors for all five fields. Values use the physical normalizer; units are undeclared. Epoch100 is a comparison stage, not the pending mature200 finalist.
+
+All 11 pages were visually reviewed. Exact canonical CSV/window cross-checks, PDF hashes and removal of the disposable QA rasters are recorded in the [stage100 figure receipt](cases/turbulent_combustion/runs/Test_1002/R4_reports/_qa/stage100_review.json). The masters and numerical field arrays are retained; mature and second-seed evidence will replace the pending final assessment without adding extra main figures.
 
 The final full CPU regression passed **726 tests with nine expected GPU/opt-in skips and no failures**, in 773.09 seconds, after source stabilization. All 250 implementation/test Python hashes matched before and after the run. The earlier run's 711 passes, nine skips and one concurrent-source-digest resume failure remain in the evidence; the guard was preserved. Relevant full-workload GPU checks are reported separately. Evidence is [CPU validation summary](cases/turbulent_combustion/runs/Test_1002/R4_tests/cpu_validation_summary.json) and the [frozen regression receipt](cases/turbulent_combustion/runs/Test_1002/R4_tests/frozen_cpu_regression_receipt.json).
 
