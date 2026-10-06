@@ -483,6 +483,79 @@ python cases/turbulent_combustion/run.py post-train \
 
 The launched formal run used source `last.pt`, 5,000 epochs, and GPU 1; the portable profile keeps the same objective and budgets but uses source `best.pt` and an experiment name without a device suffix. Override `source_checkpoint` deliberately if the source's final state is the intended starting point. A different architecture needs its own model and rollout settings: the [Senseiver A+B+C profile](cases/turbulent_combustion/configs/readiness/ABC_sliced_persistence_senseiver_formal_5000ep_gpu0.yaml) shows the deterministic-model adaptations. For another case or field set, copy the portable profile and adapt the field lists and pairs, fixed-query geometry and raster, observation protocol, and validation limits before running `validate`; a field-name substitution alone does not transfer the topology contract. GUDHI pairing remains CPU work. Set `PHYCOFLOW_TOPOLOGY_WORKERS` to the CPUs allocated for pairing and optionally raise `PHYCOFLOW_TOPOLOGY_REFERENCE_CACHE` above its 4,096-entry default when repeated references and host RAM justify it. Neither setting changes the persistence objective.
 
+#### R5 SOURCE parameter retention
+
+See [MODEL_UPGRADE_1002_R5.md](MODEL_UPGRADE_1002_R5.md) for the actual seven readiness fields, mature windows and native-fidelity limitations.
+
+The selected R5 S profile is a SOURCE-initialized experimental configuration, not a recommended default. It preserves the tested scalar objective `0.1 D + C + lambda_SP Omega`, where `Omega = 0.5 sum |theta - theta_SOURCE|^2` over 145 trainable LIVE parameter tensors and `lambda_SP = 0.026697108274509104`. The completed 200-epoch lineage and fresh SOURCE seed43_100 retain A/finite-C gains, but both mature native-validation windows exceed the declared1.05 SOURCE limit. One SOURCE-initialized two-epoch sibling and its own full-state recovery have returned normally; this tests bounded execution, not 5,000-epoch stability. No formal 5,000-epoch run has been launched or queued.
+
+The profile is [abc_upgrade_1002_r5_5000ep.yaml](cases/turbulent_combustion/configs/posttrain/abc_upgrade_1002_r5_5000ep.yaml); its sole frozen TRAIN calibration is [r5_source_parameter_l2_v1.json](cases/turbulent_combustion/configs/posttrain/calibration/r5_source_parameter_l2_v1.json). It initializes original LIVE SOURCE, retains seed42 and all tested first 200 optimizer/rollout/stream/diagnostic/checkpoint settings, and writes a new child. SOURCE, its dataset and normalizer must be available at their recorded identities. Relative paths in this profile do not rewrite protected SOURCE metadata that contains absolute dependency paths.
+
+The following commands are for a later user-authorized formal experiment on physicalGPU1, exposed as logical `cuda:0`. Run from the repository root in a managed persistent shell. The existing segmented module initially completes epoch1, then recovers its own full model/optimizer/sampler/RNG state in segments ending at multiples of25. Its module default is100, so `--segment-epochs25` is explicit. The exact config and single output component remain unchanged across stop/resume. A stop marker is checked after the current recovery segment; a request can take up to25 epochs to return normally.
+
+```bash
+source /home/wanglz/miniconda3/etc/profile.d/conda.sh
+conda activate phycoflow_env
+R5_REPO="$PWD"
+R5_CASE="$R5_REPO/cases/turbulent_combustion"
+R5_CFG="$R5_CASE/configs/posttrain/abc_upgrade_1002_r5_5000ep.yaml"
+R5_STOP="$R5_CASE/runs/long_jobs/coherence_ABC_R5_S_source_regularized_5000ep_gpu1.stop"
+export PYTHONPATH="$R5_REPO/src${PYTHONPATH:+:$PYTHONPATH}"
+export CUDA_VISIBLE_DEVICES=1 OMP_NUM_THREADS=4 MKL_NUM_THREADS=4
+export OPENBLAS_NUM_THREADS=4 NUMEXPR_NUM_THREADS=4
+export PHYCOFLOW_TOPOLOGY_WORKERS=4 PHYCOFLOW_TOPOLOGY_REFERENCE_CACHE=4096
+export R5_FORMAL_CACHE="$R5_CASE/runs/.runtime_cache/r5_source_parameter_l2_v1"
+export KEOPS_CACHE_FOLDER="$R5_FORMAL_CACHE/keops" MPLCONFIGDIR="$R5_FORMAL_CACHE/mpl"
+export XDG_CACHE_HOME="$R5_FORMAL_CACHE/xdg" PYTHONPYCACHEPREFIX="$R5_FORMAL_CACHE/pycache"
+export CUDA_CACHE_PATH="$R5_FORMAL_CACHE/cuda" TMPDIR=/tmp/phycoflow_r5_formal_ipc
+rtk proxy mkdir -p "$R5_FORMAL_CACHE/keops" "$R5_FORMAL_CACHE/mpl" "$R5_FORMAL_CACHE/xdg" \
+  "$R5_FORMAL_CACHE/pycache" "$R5_FORMAL_CACHE/cuda" "$R5_FORMAL_CACHE/tmp"
+# Prepare installed KeOps and short multiprocessing socket paths before imports.
+rtk proxy python - <<'PY_SETUP'
+import os, platform, sys
+from pathlib import Path
+cache = Path(os.environ["R5_FORMAL_CACHE"]).resolve()
+alias = Path(os.environ["TMPDIR"])
+if not alias.exists() and not alias.is_symlink():
+    alias.symlink_to(cache / "tmp", target_is_directory=True)
+if alias.resolve() != cache / "tmp":
+    raise RuntimeError("formal TMPDIR alias belongs to a different target")
+name = "_".join(platform.uname()[:3]) + "_p" + sys.version.split()[0]
+name += "_CUDA_VISIBLE_DEVICES_" + os.environ["CUDA_VISIBLE_DEVICES"]
+(Path(os.environ["KEOPS_CACHE_FOLDER"]) / name).mkdir(parents=True, exist_ok=True)
+PY_SETUP
+
+# Metadata/config validation, then the later user-authorized formal launch.
+rtk proxy python "$R5_CASE/run.py" validate --config "$R5_CFG"
+rtk proxy python -u -m phycoflow_reconstruction.training.segmented \
+  --case-dir "$R5_CASE" --config "$R5_CFG" --segment-epochs 25 --allocation-hours 24 \
+  --stop-file "$R5_STOP"
+
+# Request a clean stop from a SECOND shell at the repository root.
+rtk proxy touch cases/turbulent_combustion/runs/long_jobs/coherence_ABC_R5_S_source_regularized_5000ep_gpu1.stop
+
+# After the managed launcher returns, resume in that shell with the same environment.
+rtk proxy rm -f -- "$R5_STOP"
+rtk proxy python -u -m phycoflow_reconstruction.training.segmented \
+  --case-dir "$R5_CASE" --config "$R5_CFG" --segment-epochs 25 --allocation-hours 24 \
+  --stop-file "$R5_STOP"
+
+# Validation reconstruction metrics for an explicit saved child/archive.
+R5_FORMAL_RUN="$R5_CASE/runs/coherence_ABC_R5_S_source_regularized_5000ep_gpu1/<run-id>"
+rtk proxy python "$R5_CASE/run.py" evaluate-run --run "$R5_FORMAL_RUN" \
+  --checkpoint epoch_200 --split validation --max-samples 64 --query-points 4096 \
+  --generation-steps 2 --weight-selection live --device cuda:0 --report-name r5_epoch200_validation
+
+# Separate inference-only alpha0.75 export evaluation using its tested deployment contract directory.
+R5_EXPORT="$R5_CASE/runs/Test_1002/R5_reports/deployment_candidate/interpolated.pt"
+R5_EXPORT_CONTRACT="$R5_CASE/runs/Test_1002/R5_reports/deployment_candidate"
+rtk proxy python "$R5_CASE/run.py" evaluate-run --run "$R5_EXPORT_CONTRACT" \
+  --checkpoint "$R5_EXPORT" --split validation --sample-index 0 --max-samples 1 --query-points 40300 \
+  --generation-steps 2 --weight-selection live --device cuda:0 --report-name R5_interpolated_inference
+```
+
+The alpha0.75 SOURCE/Simple100 export is inference-only. Its alternate native-risk confirmation exceeded the declared limit, so it carries no native-fidelity endorsement. Use its separate evaluation command; both training initialization and training resume reject this deploy-only checkpoint. Validation reconstruction metrics and executable startup/recovery evidence remain distinct from the mature native/coherence recommendation.
+
 ### 6.4 Physics post-training and direct training
 
 For a physics post-training route, use a case that exposes a differentiable `PhysicsProvider` (currently Brusselator):
