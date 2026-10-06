@@ -43,6 +43,7 @@ def _load_case_config(
     overrides: list[str],
     *,
     validate_stage: bool = True,
+    invocation_until_epoch: int | None = None,
 ) -> dict[str, Any]:
     config = load_config(path, overrides)
     config.setdefault("case", case_name)
@@ -115,7 +116,7 @@ def _load_case_config(
     ):
         config["dataset"]["include_temporal_derivative"] = True
     if validate_stage:
-        validate_config(config)
+        validate_config(config, invocation_until_epoch=invocation_until_epoch)
     config["dataset"]["path"] = str(_resolve_dataset_path(config, case_dir))
     statistics_path = config["dataset"].get("normalization_stats_path")
     if statistics_path:
@@ -380,6 +381,7 @@ def run_case_cli(case_name: str, case_dir: str | Path) -> int:
         case_name,
         args.override,
         validate_stage=args.command != "validate",
+        invocation_until_epoch=(args.until_epoch if args.command == "post-train" else None),
     )
 
     if args.command == "validate":

@@ -1627,6 +1627,8 @@ def run_post_training(
     additional_epochs: int | None = None,
 ) -> Path:
     """Create or resume one immutable child post-training run."""
+    if sum(value is not None for value in (max_steps, until_epoch, additional_epochs)) > 1:
+        raise ValueError("choose only one of max_steps, until_epoch, additional_epochs")
     evaluation_settings = config.get("evaluation", {})
     native_audit_settings = (
         evaluation_settings.get("native_topology_audit", {})
@@ -1658,14 +1660,15 @@ def run_post_training(
     parameter_enabled = bool(parameter_settings.get("enabled", False))
     r2_settings = config.get("evaluation", {}).get("r2_protocol", {})
     r2_enabled = bool(r2_settings.get("enabled", False))
-    if matched_streams or parameter_enabled or native_audit is not None or adaptive or r2_enabled or config["optimization"].get("gradient_balance") in {
+    test_lineage = (Path(str(config.get("output", {}).get("experiment_name", ""))).parts or ("",))[0] == "Test_1002"
+    if test_lineage or matched_streams or parameter_enabled or native_audit is not None or adaptive or r2_enabled or config["optimization"].get("gradient_balance") in {
         "component_constrained",
         "topology_regularized",
     }:
         # Direct Python callers must not bypass the every-update/geometry guards.
         from ..config.validate import validate_config
 
-        validate_config(config)
+        validate_config(config, invocation_until_epoch=until_epoch)
     if config["stage"] != "post_training":
         raise ValueError("run_post_training accepts only stage=post_training")
     if max_steps is not None and max_steps < 0:

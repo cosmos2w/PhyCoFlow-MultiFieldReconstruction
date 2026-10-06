@@ -233,7 +233,9 @@ def _validate_adaptive_mode(config):
         raise ValueError("adaptive endpoint constraints require paired_supervised references")
 
 
-def _validate_common_sections(config: Mapping[str, Any]) -> None:
+def _validate_common_sections(
+    config: Mapping[str, Any], *, invocation_until_epoch: int | None = None,
+) -> None:
     dataset = _require_mapping(config, "dataset")
     _reject_unknown(
         dataset,
@@ -383,7 +385,21 @@ def _validate_common_sections(config: Mapping[str, Any]) -> None:
         raise ValueError("output.experiment_name must be relative without '..'")
     if experiment.parts and experiment.parts[0] == "Test_1002":
         epochs = config.get("optimization", {}).get("epochs", 1)
-        if isinstance(epochs, bool) or int(epochs) != epochs or not 0 < int(epochs) < 250:
+        valid_horizon = not isinstance(epochs, bool) and int(epochs) == epochs and int(epochs) > 0
+        if invocation_until_epoch is None:
+            bounded = valid_horizon and int(epochs) < 250
+        else:
+            # Runtime invocation context never changes the saved recipe horizon.
+            bounded = (
+                valid_horizon
+                and config.get("stage") == "post_training"
+                and "coherence" in config
+                and isinstance(invocation_until_epoch, int)
+                and not isinstance(invocation_until_epoch, bool)
+                and 1 <= invocation_until_epoch < 250
+                and invocation_until_epoch <= int(epochs)
+            )
+        if not bounded:
             raise ValueError("every Test_1002 pilot lineage requires strictly fewer than 250 epochs")
     evaluation = config.get("evaluation", {})
     if not isinstance(evaluation, Mapping):
@@ -1547,7 +1563,9 @@ def _validate_direct_physics(config: Mapping[str, Any]) -> None:
     _reject_unknown(config["output"], {"experiment_name"}, "output")
 
 
-def validate_config(config: Mapping[str, Any]) -> None:
+def validate_config(
+    config: Mapping[str, Any], *, invocation_until_epoch: int | None = None,
+) -> None:
     stage = config.get("stage")
     if stage not in STAGE_SCHEMAS:
         raise ValueError(f"stage must be one of {sorted(STAGE_SCHEMAS)}, got {stage!r}")
@@ -1564,7 +1582,7 @@ def validate_config(config: Mapping[str, Any]) -> None:
     if schema.requires_one_of and not (schema.requires_one_of & config.keys()):
         raise ValueError(f"{stage} requires one of {sorted(schema.requires_one_of)}")
 
-    _validate_common_sections(config)
+    _validate_common_sections(config, invocation_until_epoch=invocation_until_epoch)
 
     model = config["model"]
     if not isinstance(model, Mapping) or not model.get("name"):
