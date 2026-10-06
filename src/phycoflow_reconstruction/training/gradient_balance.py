@@ -29,6 +29,82 @@ def _flat_gradient(loss: torch.Tensor, parameters: list[nn.Parameter]) -> torch.
     return torch.cat(flattened)
 
 
+def _packed_diagnostic_gram(vectors):
+    """One small float64 host transfer; aliases/explicit zeros share no work."""
+    import math
+    names = list(vectors)
+    unique, positions, lookup = [], {}, {}
+    for name, vector in vectors.items():
+        if vector is None:
+            positions[name] = None
+            continue
+        if vector.ndim != 1 or vector.is_complex():
+            raise ValueError("diagnostic vectors require the existing flat real layout")
+        key = id(vector)
+        if key not in lookup:
+            lookup[key] = len(unique)
+            unique.append(vector)
+        positions[name] = lookup[key]
+    if not unique:
+        raise ValueError("at least one diagnostic vector is required")
+    matrix = torch.stack([vector.to(torch.float64) for vector in unique])
+    small = (matrix @ matrix.T).detach().cpu()
+    if not bool(torch.isfinite(small).all()):
+        raise FloatingPointError("non-finite diagnostic Gram")
+    values = small.tolist()
+    def dot(left, right):
+        i, j = positions[left], positions[right]
+        return 0.0 if i is None or j is None else values[i][j]
+    norms = {name: math.sqrt(max(0.0, dot(name, name))) for name in names}
+    cosines = {}
+    for left in names:
+        for right in names:
+            denominator = norms[left] * norms[right]
+            cosines[(left, right)] = dot(left, right) / denominator if denominator > 0 else None
+    return {"names": names, "positions": positions, "matrix": matrix,
+            "norms": norms, "cosines": cosines, "dot": dot,
+            "unique_vectors": len(unique), "gram_host_transfers": 1}
+
+
+def _packed_actual_displacement_products(packed, displacement):
+    unique_dots = (packed["matrix"] @ displacement.to(torch.float64)).detach().cpu().tolist()
+    return {name: 0.0 if index is None else unique_dots[index]
+            for name, index in packed["positions"].items()}
+
+
+def make_shared_family_diagnostic_callback(parameters, raw_family_losses, *, data_weight, coherence_weight):
+    """Diagnostics only; no model forwards or SOURCE calibration changes."""
+    import math
+    if not (math.isfinite(data_weight) and data_weight > 0 and
+            math.isfinite(coherence_weight) and coherence_weight > 0):
+        raise ValueError("reconstructed diagnostic gradients require declared positive finite weights")
+    parameters = list(parameters)
+    def callback(weighted_native, weighted_coherence):
+        family_gradients = {name: _flat_gradient(loss, parameters) for name, loss in raw_family_losses.items()}
+        native = weighted_native / data_weight
+        combined = weighted_coherence / coherence_weight
+        vectors = {"native": native, "combined": combined,
+                   **{f"family/{name}": gradient for name, gradient in family_gradients.items()}}
+        packed = _packed_diagnostic_gram(vectors)
+        names = list(family_gradients)
+        norms = packed["norms"]
+        return {
+            "family_losses": dict(zip(names, torch.stack([raw_family_losses[n].detach() for n in names]).cpu().tolist())),
+            "native_data_gradient_norm": norms["native"],
+            "family_gradient_norms": {name: norms[f"family/{name}"] for name in names},
+            "family_family_cosines": {left: {right: packed["cosines"][(f"family/{left}", f"family/{right}")]
+                                             for right in names} for left in names},
+            "data_family_cosines": {name: packed["cosines"][("native", f"family/{name}")] for name in names},
+            "total_coherence_gradient_norm": norms["combined"],
+            "diagnostic_gradient_identity": "native/combined reconstructed from cached positive-weight flat gradients; complex view_as_real Euclidean layout",
+            "diagnostic_native_weight": data_weight, "diagnostic_coherence_weight": coherence_weight,
+            "diagnostic_forwards": 0, "diagnostic_family_backward_requests": len(family_gradients),
+            "diagnostic_gram_host_transfers": packed["gram_host_transfers"],
+            "SOURCE_calibration_changed": False,
+        }
+    return callback
+
+
 def _assign_flat_gradient(parameters: list[nn.Parameter], gradient: torch.Tensor) -> None:
     offset = 0
     for parameter in parameters:
@@ -175,9 +251,12 @@ def two_objective_update(
     execution: str = "legacy",
     diagnostics: bool = True,
     config_backend: str = "legacy",
+    diagnostic_callback=None,
 ) -> dict[str, Any]:
     """Update once while recording the relationship between both gradients."""
     parameters = _trainable_parameters(model)
+    if diagnostic_callback is not None and not diagnostics:
+        raise ValueError("diagnostic callback requires a diagnostic batch")
     weighted_data = float(data_weight) * data_loss
     weighted_coherence = float(coherence_weight) * coherence_loss
     if execution not in {"legacy", "exact", "scalar"}:
@@ -237,6 +316,8 @@ def two_objective_update(
                     fallback = True
                     update_mode = "weighted_sum_nondescent_config"
 
+    callback_report = (diagnostic_callback(data_gradient.detach(), coherence_gradient.detach())
+                       if diagnostic_callback is not None else None)
     optimizer.zero_grad(set_to_none=True)
     _assign_flat_gradient(parameters, selected)
     if grad_clip:
@@ -250,6 +331,7 @@ def two_objective_update(
         "gradient_conflict": bool(float(cosine.detach().cpu()) < 0),
         "combined_grad_norm": float(torch.linalg.vector_norm(selected).detach().cpu()),
         "config_fallback_used": fallback,
+        **({"family_gradient_diagnostics": callback_report} if callback_report is not None else {}),
     }
 
 
@@ -368,6 +450,8 @@ def coherence_primal_dual_update(
     coherence_direction_scale: float = 1.0,
     execution: str = "legacy",
     config_backend: str = "legacy",
+    diagnostic_active_constraints: tuple[str, ...] | None = None,
+    diagnostic_endpoint_loss: torch.Tensor | None = None,
 ) -> dict[str, Any]:
     """Assign/clip once, then apply exactly one optimizer step.
 
@@ -423,28 +507,70 @@ def coherence_primal_dual_update(
                           "gradient/coherence_raw_norm": raw_coherence_norm,
                           "gradient/coherence_direction_scale": coherence_direction_scale,
                           "gradient/coherence_calibrated_norm": float(torch.linalg.vector_norm(coherence.double()))}
-    for name, gradient in families.items():
-        row[f"gradient/{name}/norm"] = float(torch.linalg.vector_norm(gradient.double()))
-        row[f"gradient/raw_combined_coherence_dot/{name}"] = report["combined_dot"][name]
-        row[f"gradient/combined_coherence_dot/{name}"] = coherence_direction_scale * report["combined_dot"][name]
-        row[f"gradient/final_direction_dot/{name}"] = float(torch.dot(gradient.double(), final.double()))
-    if diagnostics:
+    packed = None
+    if diagnostics and diagnostic_active_constraints is not None:
+        # Caller guarantees fidelity_loss is exactly the fixed linear sum of
+        # constraint_losses (epoch PI v3). Single-active alias is valid only
+        # under this identity, not for nonlinear/projection-based objectives.
+        # Caller supplies fixed-coefficient activity; NEVER infer it from a
+        # loss value, because an active zero-valued risk can have a gradient.
+        terms = constraint_losses or {}
+        active = tuple(diagnostic_active_constraints)
+        if len(set(active)) != len(active) or not set(active) <= set(terms):
+            raise ValueError("active diagnostic constraints must be unique declared term names")
         vectors = {**families, "fidelity": fidelity}
         if native_loss is not None:
             vectors["native"] = objective_gradient(native_loss)
-            row["gradient/native/norm"] = float(torch.linalg.vector_norm(vectors["native"].double()))
-            row["gradient/final_direction_dot/native"] = float(torch.dot(vectors["native"].double(), final.double()))
-        vectors.update({f"fidelity/{n}": _flat_gradient(v, parameters)
-                        for n, v in (constraint_losses or {}).items()})
+        if diagnostic_endpoint_loss is not None:
+            vectors["endpoint.raw"] = objective_gradient(diagnostic_endpoint_loss)
+        for name, value in terms.items():
+            vectors[f"fidelity/{name}"] = (None if name not in active else
+                fidelity if len(active) == 1 else objective_gradient(value))
+        vectors.update(combined_coherence=coherence, final=final)
+        packed = _packed_diagnostic_gram(vectors)
+        for name, gradient in families.items():
+            row[f"gradient/{name}/norm"] = packed["norms"][name]
+            row[f"gradient/raw_combined_coherence_dot/{name}"] = report["combined_dot"][name]
+            row[f"gradient/combined_coherence_dot/{name}"] = coherence_direction_scale * report["combined_dot"][name]
+            row[f"gradient/final_direction_dot/{name}"] = packed["dot"](name, "final")
+        for name in vectors:
+            row[f"gradient/{name}/norm"] = packed["norms"][name]
+            row[f"gradient/final_direction_dot/{name}"] = packed["dot"](name, "final")
+            for other in vectors:
+                key = f"gradient/{name}/{other}/cosine"
+                row[key] = packed["cosines"][(name, other)]
+                if row[key] is None:
+                    row[key + "/undefined_reason"] = "zero_gradient"
+        row["diagnostic/active_constraints"] = list(active)
+        row["diagnostic/skipped_zero_coefficient_constraints"] = [name for name in terms if name not in active]
+        row["diagnostic/reused_fidelity_constraint"] = active[0] if len(active) == 1 else None
+        row["diagnostic/gram_host_transfers"] = 1
+        row["diagnostic/unique_gram_vectors"] = packed["unique_vectors"]
         before = torch.cat([(torch.view_as_real(p.detach()) if p.is_complex() else p.detach())
                             .reshape(-1).clone() for p in parameters])
-        for left, g_left in vectors.items():
-            for right, g_right in vectors.items():
-                norm = torch.linalg.vector_norm(g_left.double()) * torch.linalg.vector_norm(g_right.double())
-                key = f"gradient/{left}/{right}/cosine"
-                row[key] = float(torch.dot(g_left.double(), g_right.double()) / norm) if norm > 0 else None
-                if norm == 0:
-                    row[key + "/undefined_reason"] = "zero_gradient"
+    else:
+        for name, gradient in families.items():
+            row[f"gradient/{name}/norm"] = float(torch.linalg.vector_norm(gradient.double()))
+            row[f"gradient/raw_combined_coherence_dot/{name}"] = report["combined_dot"][name]
+            row[f"gradient/combined_coherence_dot/{name}"] = coherence_direction_scale * report["combined_dot"][name]
+            row[f"gradient/final_direction_dot/{name}"] = float(torch.dot(gradient.double(), final.double()))
+        if diagnostics:
+            vectors = {**families, "fidelity": fidelity}
+            if native_loss is not None:
+                vectors["native"] = objective_gradient(native_loss)
+                row["gradient/native/norm"] = float(torch.linalg.vector_norm(vectors["native"].double()))
+                row["gradient/final_direction_dot/native"] = float(torch.dot(vectors["native"].double(), final.double()))
+            vectors.update({f"fidelity/{n}": _flat_gradient(v, parameters)
+                            for n, v in (constraint_losses or {}).items()})
+            before = torch.cat([(torch.view_as_real(p.detach()) if p.is_complex() else p.detach())
+                                .reshape(-1).clone() for p in parameters])
+            for left, g_left in vectors.items():
+                for right, g_right in vectors.items():
+                    norm = torch.linalg.vector_norm(g_left.double()) * torch.linalg.vector_norm(g_right.double())
+                    key = f"gradient/{left}/{right}/cosine"
+                    row[key] = float(torch.dot(g_left.double(), g_right.double()) / norm) if norm > 0 else None
+                    if norm == 0:
+                        row[key + "/undefined_reason"] = "zero_gradient"
     optimizer.zero_grad(set_to_none=True)
     _assign_flat_gradient(parameters, final)
     clip_coefficient = 1.0
@@ -466,8 +592,13 @@ def coherence_primal_dual_update(
         displacement = after - before
         vectors.update(combined_coherence=coherence, final=final)
         row["update/actual_displacement_norm"] = float(torch.linalg.vector_norm(displacement.double()))
-        for name, gradient in vectors.items():
-            row[f"update/actual_dot/{name}"] = float(torch.dot(gradient.double(), displacement.double()))
+        if packed is not None:
+            products = _packed_actual_displacement_products(packed, displacement)
+            row.update({f"update/actual_dot/{name}": value for name, value in products.items()})
+            row["diagnostic/displacement_host_transfers"] = 1
+        else:
+            for name, gradient in vectors.items():
+                row[f"update/actual_dot/{name}"] = float(torch.dot(gradient.double(), displacement.double()))
     return row
 
 

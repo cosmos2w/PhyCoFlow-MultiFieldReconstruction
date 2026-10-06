@@ -2496,28 +2496,28 @@ def run_post_training(
                 .get("family_balance", {})
                 .get("gradient_diagnostics_every_epochs", 0)
             )
-            if (
-                not adaptive and ((diagnostic_every > 0
-                and global_step % steps_per_epoch == 0
-                and epoch % diagnostic_every == 0) or r4_diagnose_batch)
-            ):
+            simple_diagnostic_callback = None
+            simple_diagnostic_event = (not adaptive and ((diagnostic_every > 0
+                and global_step % steps_per_epoch == 0 and epoch % diagnostic_every == 0)
+                or r4_diagnose_batch))
+            data_update_weight, coherence_update_weight = _balanced_weights(config, coherence_weight)
+            reuse_simple_diagnostics = (r4_exact and math.isfinite(data_update_weight)
+                and math.isfinite(coherence_update_weight)
+                and data_update_weight > 0 and coherence_update_weight > 0)
+            if simple_diagnostic_event and not reuse_simple_diagnostics:
                 row["family_gradient_diagnostics"] = _sparse_family_gradient_diagnostics(
-                    model,
-                    batch,
-                    data_loss,
-                    coherence_loss,
-                    families,
-                    banks,
-                    config,
-                    step=global_step,
-                    rollout_seed=seed + 1_000_003 + global_step,
-                    device=device,
-                )
-            data_update_weight, coherence_update_weight = _balanced_weights(
-                config, coherence_weight
-            )
+                    model, batch, data_loss, coherence_loss, families, banks, config,
+                    step=global_step, rollout_seed=seed + 1_000_003 + global_step, device=device)
             row["data_update_weight"] = data_update_weight
             row["coherence_update_weight"] = coherence_update_weight
+            if simple_diagnostic_event and reuse_simple_diagnostics:
+                from .gradient_balance import make_shared_family_diagnostic_callback
+                raw_family_losses = {name: value.scalar_loss
+                                     for name, value in step_context["family_results"].items()}
+                simple_diagnostic_callback = make_shared_family_diagnostic_callback(
+                    tuple(parameter for parameter in model.parameters() if parameter.requires_grad),
+                    raw_family_losses, data_weight=data_update_weight,
+                    coherence_weight=coherence_update_weight)
             if adaptive:
                 violations, live_risks, source_risks = controller.violations(
                     step_context["prediction"], step_context["source_prediction"],
@@ -2531,7 +2531,7 @@ def run_post_training(
                     * family_result.scalar_loss
                     for name, family_result in step_context["family_results"].items()
                 }
-                if (checkpoint_manager.exploratory_policy is not None
+                if (not r4_exact and checkpoint_manager.exploratory_policy is not None
                         and global_step % steps_per_epoch == 0 and epoch % 25 == 0):
                     from .coherence_diagnostics import component_gradient_diagnostics
 
@@ -2562,6 +2562,10 @@ def run_post_training(
                     coherence_direction_scale=coherence_direction_scale,
                     execution="scalar" if r4_exact else "legacy",
                     config_backend="legacy",
+                    **({"diagnostic_active_constraints": tuple(name for name, coefficient in
+                            zip(controller.names, pressure.detach().cpu().tolist()) if coefficient != 0.0),
+                        "diagnostic_endpoint_loss": live_risks[0]}
+                       if r4_exact and diagnose and controller.epoch_controlled else {}),
                 )
                 if device.type == "cuda" and (not r4_exact or config["runtime"].get("profile_timings", False)):
                     torch.cuda.synchronize(device)
@@ -2642,8 +2646,10 @@ def run_post_training(
                         "config_missing_behavior", "error"
                     ),
                     execution="scalar" if r4_exact else "legacy",
-                    diagnostics=r4_diagnose_batch if r4_exact else True,
+                    diagnostics=(r4_diagnose_batch or simple_diagnostic_event) if r4_exact else True,
                     config_backend="legacy",
+                    **({"diagnostic_callback": simple_diagnostic_callback}
+                       if simple_diagnostic_callback is not None else {}),
                 )
             row.update(
                 coherence_loss=float(result.scalar_loss.detach().cpu()),
