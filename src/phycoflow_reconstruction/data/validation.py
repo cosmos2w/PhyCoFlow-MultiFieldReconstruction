@@ -126,13 +126,12 @@ def validate_h5_dataset(
             ):
                 report["errors"].append("explicit field_names disagree with stored channel order")
 
-        # Read one scalar from each end without scanning the full payload.
-        if all(size > 0 for size in shape):
-            first = float(handle["fields"][0, 0, 0, 0, 0, 0])
-            last = float(handle["fields"][-1, -1, -1, -1, -1, -1])
-            if not np.isfinite([first, last]).all():
-                report["errors"].append("sampled endpoint values are non-finite")
-            report["sampled_endpoints"] = [first, last]
+        # Structural validation must not inspect a held-out field value. In
+        # particular, the final frame belongs to TEST for chronological data.
+        # Numeric payload checks are separate from shape/metadata validation.
+        report["validation_scope"] = "structural_metadata_only"
+        report["field_payload_read"] = False
+        report["warnings"].append("field payload finiteness was not evaluated")
 
     report["valid"] = not report["errors"]
     return report

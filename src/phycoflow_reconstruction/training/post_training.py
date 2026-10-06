@@ -75,6 +75,11 @@ from .model_lifecycle import (
 from .monitoring import TrainingMonitor
 from .preview import TrainingReconstructionPreview
 from .retention import endpoint_retention, post_training_mode
+from .parameter_retention import (
+    RANDOM_POLICY, SourceParameterRetention, private_call, scalar_update,
+    trainable_parameter_identity,
+)
+from .parameter_interpolation import require_training_checkpoint
 from .rollout import differentiable_reconstruction, subset_query_batch
 from .rollout_contract import verify_rollout_contract
 from .run_store import (
@@ -105,7 +110,7 @@ from .topology_constraints import (
     topology_constraint_components,
 )
 from .topology_selection import fidelity_eligibility, topology_selection_report
-from .update_budget import post_training_steps_per_epoch, sample_exposure
+from .update_budget import post_training_final_step, post_training_steps_per_epoch, sample_exposure
 
 
 def _configure_persistence_workers(config: Mapping[str, Any]) -> None:
@@ -1198,6 +1203,27 @@ def _coherence_weight(config: Mapping[str, Any], epoch: int) -> float:
     return weight if warmup <= 0 else weight * min(1.0, (epoch - start + 1) / warmup)
 
 
+def _shared_scalar_family_diagnostics(model, data_loss, coherence_loss, family_results, config):
+    """Sparse R5 diagnostics reuse the one ordinary live rollout graph."""
+    parameters = tuple(parameter for parameter in model.parameters() if parameter.requires_grad)
+
+    def gradients(loss):
+        values = loss_gradients(loss, parameters, retain_graph=True)
+        return tuple(torch.view_as_real(value.resolve_conj()) if value is not None and value.is_complex()
+                     else value for value in values)
+
+    data_gradients = gradients(data_loss)
+    coherence_gradients = gradients(coherence_loss)
+    family_gradients = {name: gradients(result.scalar_loss)
+                        for name, result in family_results.items()}
+    return {"family_losses": {name: float(result.scalar_loss.detach())
+                              for name, result in family_results.items()},
+            **gradient_diagnostics(data_gradients, family_gradients,
+                epsilon=float(config["coherence"].get("family_balance", {}).get("epsilon", 1e-12))),
+            "total_coherence_gradient_norm": gradient_norm(coherence_gradients),
+            "reused_training_rollout": True}
+
+
 def _data_weight(config: Mapping[str, Any]) -> float:
     settings = config["objectives"]["data_retention"]
     return float(settings["weight"]) if bool(settings.get("enabled", True)) else 0.0
@@ -1597,6 +1623,8 @@ def run_post_training(
     case_dir: str | Path,
     max_steps: int | None = None,
     resume: str | Path | None = None,
+    until_epoch: int | None = None,
+    additional_epochs: int | None = None,
 ) -> Path:
     """Create or resume one immutable child post-training run."""
     evaluation_settings = config.get("evaluation", {})
@@ -1625,9 +1653,12 @@ def run_post_training(
         from .native_topology_audit import contract_payload as native_audit_contract_payload
 
     adaptive = config["optimization"].get("update_policy", "legacy") == "coherence_primal_dual"
+    matched_streams = config["runtime"].get("random_stream_policy") == RANDOM_POLICY
+    parameter_settings = config.get("objectives", {}).get("parameter_retention", {})
+    parameter_enabled = bool(parameter_settings.get("enabled", False))
     r2_settings = config.get("evaluation", {}).get("r2_protocol", {})
     r2_enabled = bool(r2_settings.get("enabled", False))
-    if native_audit is not None or adaptive or r2_enabled or config["optimization"].get("gradient_balance") in {
+    if matched_streams or parameter_enabled or native_audit is not None or adaptive or r2_enabled or config["optimization"].get("gradient_balance") in {
         "component_constrained",
         "topology_regularized",
     }:
@@ -1682,6 +1713,21 @@ def run_post_training(
     if not model.capabilities.differentiable_rollout:
         raise ValueError("source model does not support differentiable rollout post-training")
     trainable_names = set_trainable_scope(model, config["trainable"])
+    parameter_retention = None
+    if parameter_enabled:
+        # Bind original LIVE SOURCE before a resumed child is loaded. No buffer,
+        # prior, optimizer or family tensor is retained by this helper.
+        requested_parameter_artifact = json.loads(
+            Path(parameter_settings["calibration_path"]).read_text(encoding="utf-8")
+        )
+        parameter_retention = SourceParameterRetention(
+            model, requested_parameter_artifact,
+            source_checkpoint_sha256=source_hashes_before["checkpoint"],
+        )
+    if matched_streams:
+        source_metadata["initial_trainable_parameter_identity"] = (
+            parameter_retention.identity if parameter_retention is not None
+            else trainable_parameter_identity(model))
     parameter_count = sum(parameter.numel() for parameter in model.parameters())
     trainable_parameter_count = sum(
         parameter.numel() for parameter in model.parameters() if parameter.requires_grad
@@ -1704,6 +1750,7 @@ def run_post_training(
     else:
         store = RunStore.resume(resume, config)
         checkpoint = store.load_checkpoint("last")
+        require_training_checkpoint(checkpoint)
         load_model_state_strict(model, checkpoint["model"])
         load_training_aux_state(model, checkpoint)
         optimizer.load_state_dict(checkpoint["optimizer"])
@@ -1712,13 +1759,33 @@ def run_post_training(
         torch.set_rng_state(checkpoint["rng_state"]["torch_cpu"])
         if device.type == "cuda" and checkpoint["rng_state"].get("torch_cuda"):
             torch.cuda.set_rng_state_all(checkpoint["rng_state"]["torch_cuda"])
-        if adaptive and fidelity_settings(config).get("version") in {NATIVE_VERSION, EPOCH_NATIVE_VERSION}:
+        if matched_streams or (adaptive and fidelity_settings(config).get("version") in {NATIVE_VERSION, EPOCH_NATIVE_VERSION}):
             if not {"python", "numpy"} <= checkpoint["rng_state"].keys():
                 raise ValueError("native v2 resume is missing Python/NumPy RNG state")
             random.setstate(checkpoint["rng_state"]["python"])
             numpy_state = checkpoint["rng_state"]["numpy"]
             np.random.set_state((numpy_state[0], np.asarray(numpy_state[1], dtype=np.uint32),
                                  *numpy_state[2:]))
+
+    if parameter_retention is not None:
+        parameter_path = store.run_dir / "artifacts/parameter_retention.json"
+        if resume is not None:
+            if not parameter_path.is_file():
+                raise ValueError("resume is missing frozen parameter retention calibration")
+            if json.loads(parameter_path.read_text()) != requested_parameter_artifact:
+                raise ValueError("resume parameter retention calibration changed")
+            parameter_retention.verify_resume(checkpoint.get("parameter_retention"))
+        else:
+            store.write_json("artifacts/parameter_retention.json", requested_parameter_artifact)
+        store.update_manifest(parameter_retention=parameter_retention.state_dict())
+    elif resume is not None and checkpoint.get("parameter_retention") is not None:
+        raise ValueError("resume cannot disable saved parameter retention")
+    if matched_streams:
+        stream_identity = {"policy": RANDOM_POLICY, "seed": seed,
+                           "native_seed_offset": 3_000_017, "coherence_seed_offset": 1_000_003}
+        if resume is not None and checkpoint.get("random_stream_identity") != stream_identity:
+            raise ValueError("resume matched native random stream identity mismatch")
+        store.update_manifest(random_stream_identity=stream_identity)
 
     if subset_manifest is not None:
         subset_path = store.run_dir / "artifacts/training_subset.json"
@@ -1997,6 +2064,20 @@ def run_post_training(
 
         if resume is None:
             store.write_json("evaluation/native_before.json", frozen_native_monitor())
+    if matched_streams:
+        original_evaluate_fn = evaluate_fn
+
+        def evaluate_fn(*args, **kwargs):
+            return private_call(original_evaluate_fn, *args,
+                                seed=int(config.get("evaluation", {}).get("seed", 2027)),
+                                device=device, **kwargs)
+
+    def training_coherence_objective(*args, **kwargs):
+        if matched_streams:
+            return private_call(_coherence_objective, *args,
+                                seed=seed + 1_000_003 + int(kwargs["step"]),
+                                device=device, **kwargs)
+        return _coherence_objective(*args, **kwargs)
     if any(
         getattr(family, "strategy", None) == "cubical_persistence" for family in families.values()
     ):
@@ -2170,8 +2251,9 @@ def run_post_training(
         if native_audit["every_steps"] % int(checkpoint_interval):
             raise ValueError("native epoch audit cadence must coincide with recoverable checkpoints")
     configured_steps = epochs * steps_per_epoch
-    final_step = (
-        min(configured_steps, start_step + max_steps) if max_steps is not None else configured_steps
+    final_step = post_training_final_step(
+        configured_steps, start_step, steps_per_epoch,
+        max_steps=max_steps, until_epoch=until_epoch, additional_epochs=additional_epochs,
     )
     # A preemption can leave the terminal checkpoint intact but interrupt
     # reporting. Resuming that checkpoint must finish evaluation without
@@ -2294,7 +2376,7 @@ def run_post_training(
         store=store,
         steps_per_epoch=steps_per_epoch,
     )
-    if resume is not None and adaptive:
+    if resume is not None and (adaptive or matched_streams):
         checkpoint_manager.restore_coherence_selector(checkpoint)
     panel_metrics_cache = {}
     r4_exact = config["runtime"].get("execution_mode", "legacy") == "r4_exact"
@@ -2366,6 +2448,7 @@ def run_post_training(
                     coherence_calibration_sha256=calibration_hash,
                     family_scales=family_scales,
                     controller=controller,
+                    parameter_retention=parameter_retention,
                     coherence_direction_scale=coherence_direction_scale,
                 ),
                 model=model,
@@ -2417,8 +2500,8 @@ def run_post_training(
         post_training_mode(model, config)
         r4_diagnose_batch = (r4_exact and (
             (global_step % steps_per_epoch == 0 and epoch % int(
-                config["runtime"].get("diagnostics_every_epochs", 10)) == 0)
-            or rebound_monitor.consume_diagnostic_request()))
+                config["runtime"].get("diagnostics_every_epochs", 25 if matched_streams else 10)) == 0)
+            or (not matched_streams and rebound_monitor.consume_diagnostic_request())))
         step_started = perf_counter()
         native_started = perf_counter()
         if adaptive:
@@ -2430,7 +2513,10 @@ def run_post_training(
                 with torch.no_grad():
                     data_loss = model.training_loss(batch).total.detach()
         else:
-            data_loss = torch.zeros((), device=device) if constrained else model.training_loss(batch).total
+            data_loss = (torch.zeros((), device=device) if constrained else
+                         private_call(model.training_loss, batch,
+                                      seed=seed + 3_000_017 + global_step, device=device).total
+                         if matched_streams else model.training_loss(batch).total)
         every = int(config["coherence"]["schedule"].get("every_n_steps", 1))
         coherence_weight = _coherence_weight(config, epoch)
         coherence_active = coherence_weight > 0 and global_step % every == 0
@@ -2455,6 +2541,16 @@ def run_post_training(
             "coherence_applied": coherence_active,
             "coherence_weight": coherence_weight,
         }
+        if matched_streams:
+            row["random_stream_policy"] = RANDOM_POLICY
+            row["native_seed"] = seed + 3_000_017 + global_step
+            if global_step % steps_per_epoch == 0:
+                row["stream_identity"] = {
+                    "sample_ids": list(batch.sample_ids),
+                    "query_sha256": _query_digest(batch.metadata["query_indices"]),
+                    "observation_sha256": _query_digest(batch.obs_indices),
+                    "native_seed": row["native_seed"],
+                }
         if coherence_active or retention_active:
             step_context = {} if (adaptive or constrained or r4_exact) else None
             if r4_exact:
@@ -2463,7 +2559,7 @@ def run_post_training(
             rollout_generator = torch.Generator(device=device).manual_seed(
                 seed + 1_000_003 + global_step
             )
-            result, reference_ids = _coherence_objective(
+            result, reference_ids = training_coherence_objective(
                 model,
                 batch,
                 families,
@@ -2501,11 +2597,13 @@ def run_post_training(
                 and global_step % steps_per_epoch == 0 and epoch % diagnostic_every == 0)
                 or r4_diagnose_batch))
             data_update_weight, coherence_update_weight = _balanced_weights(config, coherence_weight)
-            reuse_simple_diagnostics = (r4_exact and math.isfinite(data_update_weight)
+            reuse_simple_diagnostics = (not matched_streams and r4_exact and math.isfinite(data_update_weight)
                 and math.isfinite(coherence_update_weight)
                 and data_update_weight > 0 and coherence_update_weight > 0)
             if simple_diagnostic_event and not reuse_simple_diagnostics:
-                row["family_gradient_diagnostics"] = _sparse_family_gradient_diagnostics(
+                row["family_gradient_diagnostics"] = _shared_scalar_family_diagnostics(
+                    model, data_loss, coherence_loss, step_context["family_results"], config
+                ) if matched_streams else _sparse_family_gradient_diagnostics(
                     model, batch, data_loss, coherence_loss, families, banks, config,
                     step=global_step, rollout_seed=seed + 1_000_003 + global_step, device=device)
             row["data_update_weight"] = data_update_weight
@@ -2632,6 +2730,13 @@ def run_post_training(
                         )
                         + "\n"
                     )
+            elif matched_streams:
+                gradient = scalar_update(
+                    model, optimizer, data_loss, coherence_loss,
+                    data_weight=data_update_weight, coherence_weight=coherence_update_weight,
+                    retention=parameter_retention,
+                    grad_clip=config["optimization"].get("grad_clip"),
+                )
             else:
                 gradient = two_objective_update(
                     model,
@@ -2667,7 +2772,11 @@ def run_post_training(
             row["data_update_weight"] = _data_weight(config)
             row["coherence_update_weight"] = 0.0
             row.update(
-                data_only_update(
+                scalar_update(
+                    model, optimizer, data_loss, data_weight=_data_weight(config),
+                    coherence_weight=0.0, retention=parameter_retention,
+                    grad_clip=config["optimization"].get("grad_clip"),
+                ) if matched_streams else data_only_update(
                     model,
                     optimizer,
                     data_loss,
@@ -2690,6 +2799,9 @@ def run_post_training(
         ] * row.get("coherence_loss", 0.0) * (
             every if config["coherence"]["schedule"].get("interval_rescale", False) else 1
         )
+        row["total"] += row.get("parameter_retention_loss", 0.0)
+        if parameter_retention is not None:
+            row["train/parameter_retention"] = row["parameter_retention_loss"]
         row["train/native_raw"] = row["native_data_loss"]
         row["train/coherence_weighted_score"] = row.get("coherence_loss")
         if adaptive:
@@ -2752,6 +2864,7 @@ def run_post_training(
                     coherence_calibration_sha256=calibration_hash,
                     family_scales=family_scales,
                     controller=controller,
+                    parameter_retention=parameter_retention,
                     coherence_direction_scale=coherence_direction_scale,
                 ),
                 model=model,
@@ -2884,6 +2997,7 @@ def run_post_training(
         coherence_calibration_sha256=calibration_hash,
         family_scales=family_scales,
         controller=controller,
+        parameter_retention=parameter_retention,
         coherence_direction_scale=coherence_direction_scale,
     )
     if checkpoint_manager.selection_metric in {"topology_with_fidelity", "coherence_with_fidelity"}:
@@ -3021,6 +3135,7 @@ def _post_checkpoint_payload(
     family_scales: Mapping[str, float],
     controller=None,
     coherence_direction_scale=1.0,
+    parameter_retention=None,
 ) -> dict[str, Any]:
     """Build an internally consistent post-training recovery checkpoint."""
     payload = {
@@ -3057,6 +3172,18 @@ def _post_checkpoint_payload(
                 python=random.getstate(),
                 numpy=(numpy_state[0], numpy_state[1].tolist(), *numpy_state[2:]),
             )
+    if parameter_retention is not None:
+        payload["parameter_retention"] = parameter_retention.state_dict()
+    if config["runtime"].get("random_stream_policy") == RANDOM_POLICY:
+        numpy_state = np.random.get_state()
+        payload["rng_state"].update(
+            python=random.getstate(),
+            numpy=(numpy_state[0], numpy_state[1].tolist(), *numpy_state[2:]),
+        )
+        payload["random_stream_identity"] = {
+            "policy": RANDOM_POLICY, "seed": int(config["runtime"].get("seed", 42)),
+            "native_seed_offset": 3_000_017, "coherence_seed_offset": 1_000_003,
+        }
     if config.get("evaluation", {}).get("r2_protocol", {}).get("enabled", False) or (
         isinstance(controller, FidelityController) and controller.native_constrained
     ):

@@ -15,7 +15,8 @@ from ..data.normalization import FieldNormalizer
 from ..models import build_model
 from ..models.compatibility import load_legacy_demo50
 from .model_lifecycle import load_training_aux_state
-from .run_store import file_sha256, load_model_state_strict, load_project_checkpoint
+from .parameter_interpolation import require_training_checkpoint
+from .run_store import checkpoint_model_state, file_sha256, load_model_state_strict, load_project_checkpoint
 
 
 def source_checkpoint_path(config: Mapping[str, Any]) -> Path:
@@ -97,6 +98,7 @@ def load_source_model(
     _validate_native_source_status(config)
     dataset = open_field_dataset(config["dataset"], split=config["dataset"].get("split", "train"))
     checkpoint = load_project_checkpoint(checkpoint_path)
+    require_training_checkpoint(checkpoint)
     if checkpoint.get("model_name") != config["model"]["name"]:
         raise ValueError("source checkpoint model identity disagrees with inherited model config")
     if tuple(checkpoint.get("data_spec", {}).get("field_names", ())) != tuple(
@@ -106,6 +108,15 @@ def load_source_model(
     model = build_model(config["model"], dataset.data_spec)
     load_model_state_strict(model, checkpoint["model"])
     load_training_aux_state(model, checkpoint)
+    live_state_exact_match = None
+    if config.get("runtime", {}).get("random_stream_policy") == "matched_native_v1":
+        state = checkpoint_model_state(model)
+        expected = {name: value for name, value in checkpoint["model"].items() if name != "_metadata"}
+        live_state_exact_match = state.keys() == expected.keys() and all(
+            torch.equal(value.detach().cpu(), expected[name].detach().cpu())
+            for name, value in state.items())
+        if not live_state_exact_match:
+            raise ValueError("R5 initialization does not exactly reproduce LIVE SOURCE tensors")
     checkpoint_normalizer = FieldNormalizer(
         checkpoint["normalization"]["offset"],
         checkpoint["normalization"]["scale"],
@@ -122,6 +133,8 @@ def load_source_model(
             "kind": source_kind,
             "checkpoint_model_name": checkpoint["model_name"],
             "checkpoint_config_sha256": checkpoint["config_sha256"],
+            **({"live_state_exact_match": True, "live_tensor_count": len(state)}
+               if live_state_exact_match else {}),
         },
     )
 

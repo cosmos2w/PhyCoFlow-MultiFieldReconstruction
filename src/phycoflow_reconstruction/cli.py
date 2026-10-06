@@ -102,6 +102,14 @@ def _load_case_config(
                     )
     if "dataset" not in config:
         raise ValueError("config must define a dataset section")
+    parameter_retention = config.get("objectives", {}).get("parameter_retention", {})
+    calibration_path = parameter_retention.get("calibration_path")
+    if calibration_path:
+        calibration_path = Path(calibration_path)
+        parameter_retention["calibration_path"] = str(
+            calibration_path.resolve() if calibration_path.is_absolute()
+            else (case_dir / calibration_path).resolve()
+        )
     if config.get("stage") == "direct_physics" or (
         config.get("stage") == "post_training" and "physics" in config
     ):
@@ -154,7 +162,11 @@ def run_case_cli(case_name: str, case_dir: str | Path) -> int:
                 "--split", choices=("train", "validation", "test"), default="validation"
             )
         if command in {"train-base", "post-train", "train-direct"}:
-            subparser.add_argument("--max-steps", type=int)
+            limits = subparser.add_mutually_exclusive_group()
+            limits.add_argument("--max-steps", type=int)
+            if command == "post-train":
+                limits.add_argument("--until-epoch", type=int, help="Stop normally at this absolute epoch without changing the recipe")
+                limits.add_argument("--additional-epochs", type=int, help="Run this many complete epochs from an epoch-boundary checkpoint")
             subparser.add_argument("--resume", type=Path)
 
     evaluator = subparsers.add_parser("evaluate-run")
@@ -422,6 +434,8 @@ def run_case_cli(case_name: str, case_dir: str | Path) -> int:
 
     if args.command == "post-train":
         if "physics" in config and "coherence" not in config:
+            if args.until_epoch is not None or args.additional_epochs is not None:
+                raise ValueError("epoch invocation limits currently require coherence post-training")
             from .training.physics_post_training import run_physics_post_training
 
             run_dir = run_physics_post_training(
@@ -438,6 +452,8 @@ def run_case_cli(case_name: str, case_dir: str | Path) -> int:
                 case_dir=case_dir,
                 max_steps=args.max_steps,
                 resume=args.resume,
+                until_epoch=args.until_epoch,
+                additional_epochs=args.additional_epochs,
             )
         print(run_dir)
         return 0

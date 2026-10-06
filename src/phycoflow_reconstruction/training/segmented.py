@@ -81,6 +81,10 @@ def main(argv=None):
     parser.add_argument("--allocation-hours", type=float, default=24.0)
     parser.add_argument("--segment-epochs", type=int, default=100)
     parser.add_argument(
+        "--stop-file", type=Path,
+        help="Return normally after the current recovery segment when this file exists",
+    )
+    parser.add_argument(
         "--case-dir",
         type=Path,
         required=True,
@@ -110,6 +114,9 @@ def main(argv=None):
         deadline = time.monotonic() + args.allocation_hours * 3600
         estimate = 10.0
         while True:
+            if args.stop_file is not None and args.stop_file.exists():
+                print(f"Stopped at a recovery boundary; remove {args.stop_file} and rerun to resume", flush=True)
+                return
             run, step, completed = select_run(case_dir / "runs" / experiment, config_digest(config))
             if completed:
                 print(f"Completed {run}", flush=True)
@@ -139,7 +146,7 @@ def main(argv=None):
             if run:
                 command += ["--resume", str(run)]
             print(
-                f"Training segment: steps {step}..{step + budget} of {total_steps}; epochs={config['optimization']['epochs']}, steps_per_epoch={per_epoch}",
+                f"Training segment: epochs {step / per_epoch:g}..{(step + budget) / per_epoch:g} of {config['optimization']['epochs']}",
                 flush=True,
             )
             segment_started = time.monotonic()

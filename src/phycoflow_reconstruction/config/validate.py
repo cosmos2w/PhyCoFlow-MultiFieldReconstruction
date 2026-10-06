@@ -346,7 +346,7 @@ def _validate_common_sections(config: Mapping[str, Any]) -> None:
         "num_workers",
         "progress",
         "plot_every_steps",
-        "plot_every_epochs", "execution_mode", "profile_timings", "diagnostics_every_epochs",
+        "plot_every_epochs", "execution_mode", "profile_timings", "diagnostics_every_epochs", "random_stream_policy",
         "plot_format",
         "data_strategy",
         "vram_dataset_threshold_gb",
@@ -354,6 +354,8 @@ def _validate_common_sections(config: Mapping[str, Any]) -> None:
     _reject_unknown(runtime, runtime_keys, "runtime")
     if runtime.get("execution_mode", "legacy") not in {"legacy", "r4_exact"}:
         raise ValueError("runtime.execution_mode must be legacy or r4_exact")
+    if runtime.get("random_stream_policy", "legacy") not in {"legacy", "matched_native_v1"}:
+        raise ValueError("runtime.random_stream_policy must be legacy or matched_native_v1")
     if "plot_every_epochs" in runtime:
         _positive_integer(runtime["plot_every_epochs"], "runtime.plot_every_epochs")
     if "diagnostics_every_epochs" in runtime:
@@ -689,7 +691,7 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
                 "num_workers",
                 "progress",
                 "plot_every_steps",
-        "plot_every_epochs", "execution_mode", "profile_timings", "diagnostics_every_epochs",
+        "plot_every_epochs", "execution_mode", "profile_timings", "diagnostics_every_epochs", "random_stream_policy",
                 "plot_format",
                 "data_strategy",
                 "vram_dataset_threshold_gb",
@@ -705,8 +707,42 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
 
     objectives = config["objectives"]
     _reject_unknown(
-        objectives, {"data_retention", "coherence", "endpoint", "source_anchor"}, "objectives"
+        objectives, {"data_retention", "coherence", "endpoint", "source_anchor", "parameter_retention"}, "objectives"
     )
+    parameter_retention = objectives.get("parameter_retention", {})
+    if not isinstance(parameter_retention, Mapping):
+        raise TypeError("objectives.parameter_retention must be a mapping")
+    _reject_unknown(parameter_retention,
+                    {"enabled", "definition", "calibration", "calibration_path"},
+                    "objectives.parameter_retention")
+    random_policy = config["runtime"].get("random_stream_policy", "legacy")
+    if random_policy not in {"legacy", "matched_native_v1"}:
+        raise ValueError("runtime.random_stream_policy must be legacy or matched_native_v1")
+    if parameter_retention.get("enabled", False):
+        if parameter_retention.get("definition") != "source_parameter_l2_v1":
+            raise ValueError("invalid parameter retention definition")
+        if parameter_retention.get("calibration") != "source_train_gradient_at_reference_displacement":
+            raise ValueError("invalid parameter retention calibration")
+        if not str(parameter_retention.get("calibration_path", "")).strip():
+            raise ValueError("parameter retention requires a frozen TRAIN calibration_path")
+        if random_policy != "matched_native_v1" or not objectives.get("coherence", {}).get("enabled", True):
+            raise ValueError("parameter retention requires matched scalar coherence training")
+    if random_policy == "matched_native_v1":
+        if (config["runtime"].get("execution_mode") != "r4_exact"
+                or config["optimization"].get("gradient_balance", "weighted_sum") != "weighted_sum"
+                or config["optimization"].get("update_policy", "legacy") != "legacy"):
+            raise ValueError("matched_native_v1 requires the existing fast weighted scalar path")
+        if (not objectives.get("data_retention", {}).get("enabled", True)
+                or float(objectives.get("data_retention", {}).get("weight", 0)) != 0.1
+                or float(objectives.get("coherence", {}).get("weight", 0)) != 1.0):
+            raise ValueError("matched_native_v1 requires J_N=.1D and J_F=.1D+C")
+        if any(objectives.get(name, {}).get("enabled", False) for name in ("endpoint", "source_anchor")):
+            raise ValueError("matched scalar training has no endpoint or source teacher objective")
+        schedule = config["coherence"].get("schedule", {})
+        if (int(schedule.get("start_epoch", 1)) != 1
+                or int(schedule.get("every_n_steps", 1)) != 1
+                or int(schedule.get("weight_warmup_epochs", 0)) != 0):
+            raise ValueError("matched scalar training requires fixed coherence weight/cadence")
     for name in ("endpoint", "source_anchor"):
         if name not in objectives:
             continue
@@ -1319,7 +1355,7 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
             "num_workers",
             "progress",
             "plot_every_steps",
-        "plot_every_epochs", "execution_mode", "profile_timings", "diagnostics_every_epochs",
+        "plot_every_epochs", "execution_mode", "profile_timings", "diagnostics_every_epochs", "random_stream_policy",
             "plot_format",
             "data_strategy",
             "vram_dataset_threshold_gb",
@@ -1502,7 +1538,7 @@ def _validate_direct_physics(config: Mapping[str, Any]) -> None:
             "num_workers",
             "progress",
             "plot_every_steps",
-        "plot_every_epochs", "execution_mode", "profile_timings", "diagnostics_every_epochs",
+        "plot_every_epochs", "execution_mode", "profile_timings", "diagnostics_every_epochs", "random_stream_policy",
             "data_strategy",
             "vram_dataset_threshold_gb",
         },

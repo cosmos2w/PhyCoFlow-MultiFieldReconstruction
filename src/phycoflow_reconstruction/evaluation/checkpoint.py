@@ -55,6 +55,43 @@ def _checkpoint_path(run_dir: Path, checkpoint: str) -> Path:
     return run_dir / "checkpoints" / name
 
 
+def _load_evaluation_checkpoint_state(model, payload, config, dataset) -> None:
+    """Load recovery checkpoints or an explicitly identified LIVE-only export."""
+    inference_only = bool(payload.get("inference_only"))
+    if payload.get("checkpoint_kind") == "source_parameter_interpolation_v1" and not inference_only:
+        raise ValueError("interpolated checkpoint must be marked inference-only")
+    if inference_only:
+        if payload.get("checkpoint_kind") != "source_parameter_interpolation_v1":
+            raise ValueError("unsupported inference-only checkpoint kind")
+        forbidden = {"optimizer", "rng_state", "training_aux_state", "fidelity_controller",
+                     "family_states", "global_step"}
+        if forbidden.intersection(payload):
+            raise ValueError("inference-only checkpoint must not contain training recovery state")
+        provenance = payload.get("interpolation", {})
+        semantics = provenance.get("semantics", {})
+        if tuple(semantics.get("fields", ())) != tuple(dataset.field_names):
+            raise ValueError("inference checkpoint field identities disagree")
+        if semantics.get("normalizer_digest") != dataset.normalizer.digest():
+            raise ValueError("inference checkpoint normalizer identity disagrees")
+        if semantics.get("model_config") != config["model"]:
+            raise ValueError("inference checkpoint model configuration disagrees")
+        if semantics.get("rollout") != config.get("rollout"):
+            raise ValueError("inference checkpoint rollout configuration disagrees")
+        if config["model"].get("model_ema_eval", False):
+            raise ValueError("interpolated inference checkpoints require LIVE evaluation")
+        alpha = float(provenance.get("alpha", float("nan")))
+        if not 0 < alpha <= 1:
+            raise ValueError("inference checkpoint requires a nonzero finite alpha")
+        required = {"source_checkpoint_sha256", "child_checkpoint_sha256",
+                    "source_parameter_sha256", "child_parameter_sha256"}
+        if any(not isinstance(provenance.get(key), str) or len(provenance[key]) != 64
+               for key in required):
+            raise ValueError("inference checkpoint requires immutable source/child identities")
+    load_model_state_strict(model, payload["model"])
+    if not inference_only:
+        load_training_aux_state(model, payload)
+
+
 def _physical_metrics(
     prediction: torch.Tensor,
     target: torch.Tensor,
@@ -127,8 +164,7 @@ def load_evaluation_runtime(
     if checkpoint_normalizer.digest() != dataset.normalizer.digest():
         dataset.close()
         raise ValueError("checkpoint normalization disagrees with the configured dataset")
-    load_model_state_strict(model, payload["model"])
-    load_training_aux_state(model, payload)
+    _load_evaluation_checkpoint_state(model, payload, config, dataset)
     model.eval()
     steps = int(
         generation_steps
