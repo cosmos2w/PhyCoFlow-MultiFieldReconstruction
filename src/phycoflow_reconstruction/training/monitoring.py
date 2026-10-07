@@ -98,7 +98,11 @@ def _format_duration(seconds: float) -> str:
 
 
 class TrainingMonitor:
-    """Report batch progress and persist compact epoch-level loss diagnostics."""
+    """Report batch progress and persist compact epoch-level loss diagnostics.
+
+    PHYCOFLOW_PROGRESS=batch|epoch|off overrides terminal display only, so an
+    immutable run can resume with a different display without changing config.
+    """
 
     def __init__(
         self,
@@ -115,6 +119,12 @@ class TrainingMonitor:
         plot_format: str = "png",
         epoch_only: bool = False,
     ) -> None:
+        progress_mode = os.environ.get("PHYCOFLOW_PROGRESS")
+        if progress_mode is not None:
+            if progress_mode not in {"batch", "epoch", "off"}:
+                raise ValueError("PHYCOFLOW_PROGRESS must be batch, epoch, or off")
+            enabled = progress_mode != "off"
+            epoch_only = progress_mode == "epoch"
         self.run_dir = Path(run_dir)
         self.history_path = self.run_dir / "metrics" / "history.jsonl"
         self.validation_history_path = self.run_dir / "metrics" / "validation_history.jsonl"

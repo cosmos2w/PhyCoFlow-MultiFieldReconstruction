@@ -7,6 +7,51 @@ import pytest
 from phycoflow_reconstruction.training.monitoring import TrainingMonitor
 
 
+def test_batch_display_override_preserves_history_and_configured_horizon(tmp_path, monkeypatch, capsys):
+    histories = []
+    for mode in ("off", "batch"):
+        monkeypatch.setenv("PHYCOFLOW_PROGRESS", mode)
+        run = tmp_path / mode
+        (run / "metrics").mkdir(parents=True)
+        monitor = TrainingMonitor(
+            run, start_step=0, final_step=4, configured_steps=6,
+            steps_per_epoch=2, description="test", enabled=False, epoch_only=True,
+        )
+        monitor._plot = lambda: None
+        assert monitor.enabled == (mode == "batch")
+        assert monitor.epoch_only is False
+        assert monitor.total_epochs == 3
+        for step in range(1, 5):
+            monitor.record({"step": step, "total": float(step), "data_loss": 0.1}, lr=5e-5)
+            # tqdm throttles rendering; force a refresh to inspect each batch.
+            monitor.progress.refresh()
+            monitor.finish_step()
+        monitor.close()
+        histories.append((run / "metrics/history.jsonl").read_text())
+    assert histories[0] == histories[1]
+    output = capsys.readouterr().err
+    assert "epoch 1/3" in output and "epoch 2/3" in output
+    assert "1/2" in output and "2/2" in output
+    assert "total_avg=" in output and "data=" in output and "lr=" in output
+
+
+def test_epoch_display_override_enables_epoch_style(tmp_path, monkeypatch):
+    monkeypatch.setenv("PHYCOFLOW_PROGRESS", "epoch")
+    (tmp_path / "metrics").mkdir()
+    monitor = TrainingMonitor(tmp_path, start_step=0, final_step=2, configured_steps=6,
+                              steps_per_epoch=2, description="test", enabled=False)
+    assert monitor.enabled is True
+    assert monitor.epoch_only is True
+    monitor.close()
+
+
+def test_invalid_progress_override_fails_explicitly(tmp_path, monkeypatch):
+    monkeypatch.setenv("PHYCOFLOW_PROGRESS", "yes")
+    with pytest.raises(ValueError, match="PHYCOFLOW_PROGRESS must be"):
+        TrainingMonitor(tmp_path, start_step=0, final_step=2, configured_steps=2,
+                        steps_per_epoch=2, description="test")
+
+
 def test_sparse_coherence_epochs_ignore_missing_gradients_and_count_updates(tmp_path):
     (tmp_path / "metrics").mkdir()
     monitor = TrainingMonitor(tmp_path, start_step=0, final_step=3, configured_steps=3,

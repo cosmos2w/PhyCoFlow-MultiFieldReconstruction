@@ -16,6 +16,8 @@ The objective is a fixed scalar weighted sum: `0.1 * native_RF_loss + 0.10 * cal
 
 ## Environment setup
 
+Terminal display can be enabled for a new launch or an own-state resume with `export PHYCOFLOW_PROGRESS=batch`. This reporting-only environment override retains the immutable YAML and resume hash: tqdm shows the current batch out of 38, live losses, learning rate and timing, then leaves an average-loss summary at every epoch boundary. `PHYCOFLOW_PROGRESS=epoch` selects the compact epoch display; `PHYCOFLOW_PROGRESS=off` suppresses terminal progress. Unsetting the variable restores the profile's display settings. Segment size, plots, validation, checkpoints, optimizer, RNG and sampling are unchanged. The override must be exported before launching the public segmented module so its trainer subprocess inherits it.
+
 Use the reviewed GPU 1 environment only when the user elects a future bounded check or formal launch. This setup writes runtime caches under `Test_1002/R6_runtime_cache` and the short temporary-directory symlink; it does not create a training output. It does not source an ignored local helper.
 
 ~~~bash
