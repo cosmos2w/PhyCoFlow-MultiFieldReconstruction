@@ -1,8 +1,10 @@
 # Test_1002 evidence index
 
+**Updated retention recommendation:** see the [checkpoint retention review](./CHECKPOINT_RETENTION_REVIEW.md). The first-pass boundaries below describe what the initial fixture cleanup protected; they do not establish that every retained checkpoint is worth keeping. The review recommends 32 model files (2.61 GiB) and identifies 352 removal candidates (26.52 GiB), with no checkpoint deletion performed yet.
+
 This directory retains the R1–R5 experiment lineage, including unsuccessful fidelity checks, controls, confirmations, profiling runs and bounded sibling recoveries. Start with the [R5 report](../../../../MODEL_UPGRADE_1002_R5.md) and [R4 report](../../../../MODEL_UPGRADE_1002_R4.md). These reports distinguish completed bounded experiments from formal-run preparation; cleanup does not change their scientific conclusions.
 
-## What to retain
+## First-pass retention boundaries
 
 | Location | Purpose and retention decision |
 | --- | --- |
