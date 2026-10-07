@@ -748,10 +748,11 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
                 or config["optimization"].get("gradient_balance", "weighted_sum") != "weighted_sum"
                 or config["optimization"].get("update_policy", "legacy") != "legacy"):
             raise ValueError("matched_native_v1 requires the existing fast weighted scalar path")
+        coherence_weight = float(objectives.get("coherence", {}).get("weight", 0.0))
         if (not objectives.get("data_retention", {}).get("enabled", True)
                 or float(objectives.get("data_retention", {}).get("weight", 0)) != 0.1
-                or float(objectives.get("coherence", {}).get("weight", 0)) != 1.0):
-            raise ValueError("matched_native_v1 requires J_N=.1D and J_F=.1D+C")
+                or not math.isfinite(coherence_weight) or coherence_weight < 0):
+            raise ValueError("matched_native_v1 requires J_N=.1D and a finite nonnegative fixed coherence weight")
         if any(objectives.get(name, {}).get("enabled", False) for name in ("endpoint", "source_anchor")):
             raise ValueError("matched scalar training has no endpoint or source teacher objective")
         schedule = config["coherence"].get("schedule", {})
@@ -781,7 +782,10 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
             raise TypeError(f"objectives.{name} must be a mapping")
         _reject_unknown(settings, {"enabled", "weight"}, f"objectives.{name}")
         weight = float(settings.get("weight", 0.0))
-        if weight < 0 or (bool(settings.get("enabled", True)) and weight <= 0):
+        zero_strength_scalar = (
+            name == "coherence" and random_policy == "matched_native_v1" and weight == 0
+        )
+        if weight < 0 or (bool(settings.get("enabled", True)) and weight <= 0 and not zero_strength_scalar):
             raise ValueError(f"enabled objectives.{name}.weight must be positive")
     if not any(
         bool(objectives[name].get("enabled", True))

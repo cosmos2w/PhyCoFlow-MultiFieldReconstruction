@@ -81,6 +81,10 @@ def main(argv=None):
     parser.add_argument("--allocation-hours", type=float, default=24.0)
     parser.add_argument("--segment-epochs", type=int, default=100)
     parser.add_argument(
+        "--until-epoch", type=int,
+        help="Stop at this absolute scientific epoch without changing the configured horizon",
+    )
+    parser.add_argument(
         "--stop-file", type=Path,
         help="Return normally after the current recovery segment when this file exists",
     )
@@ -97,20 +101,35 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.segment_epochs < 1 or args.allocation_hours <= 0:
         parser.error("segment-epochs and allocation-hours must be positive")
+    if args.until_epoch is not None and args.until_epoch < 1:
+        parser.error("until-epoch must be positive")
     case_dir = args.case_dir.resolve()
     if not (case_dir / "run.py").is_file():
         parser.error("case-dir must contain a run.py entrypoint")
     case_name = load_config(args.config, args.override).get("case", case_dir.name)
-    config = _load_case_config(args.config.resolve(), case_dir, case_name, args.override)
+    invocation = ({"invocation_until_epoch": args.until_epoch}
+                  if args.until_epoch is not None else {})
+    config = _load_case_config(args.config.resolve(), case_dir, case_name, args.override, **invocation)
     if config.get("stage") != "post_training":
         parser.error("segmented training requires a post_training config")
+    if args.until_epoch is not None and args.until_epoch > config["optimization"]["epochs"]:
+        parser.error("until-epoch exceeds the immutable configured horizon")
     experiment = config["output"]["experiment_name"]
-    job_root = case_dir / "runs/long_jobs"
+    # Bounded Test_1002 siblings keep their launcher artifacts inside the
+    # authorized experiment tree. Ordinary long-job locations stay unchanged.
+    bounded_test = args.until_epoch is not None and Path(experiment).parts[0] == "Test_1002"
+    job_root = (case_dir / "runs" / experiment / "_launcher"
+                if bounded_test else case_dir / "runs/long_jobs")
     job_root.mkdir(parents=True, exist_ok=True)
-    with (job_root / f"{experiment}.lock").open("a") as lock:
+    job_name = "segmented" if bounded_test else experiment
+    lock_path = job_root / f"{job_name}.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         per_epoch = configured_epoch_steps(config)
         total_steps = per_epoch * config["optimization"]["epochs"]
+        execution_steps = (per_epoch * args.until_epoch
+                           if args.until_epoch is not None else total_steps)
         deadline = time.monotonic() + args.allocation_hours * 3600
         estimate = 10.0
         while True:
@@ -118,10 +137,15 @@ def main(argv=None):
                 print(f"Stopped at a recovery boundary; remove {args.stop_file} and rerun to resume", flush=True)
                 return
             run, step, completed = select_run(case_dir / "runs" / experiment, config_digest(config))
+            if step > execution_steps:
+                raise ValueError("checkpoint is beyond the requested absolute execution limit")
             if completed:
                 print(f"Completed {run}", flush=True)
                 return
-            budget = segment_budget(step, total_steps, per_epoch, args.segment_epochs)
+            if args.until_epoch is not None and step == execution_steps:
+                print(f"Reached execution limit at epoch {args.until_epoch} of {config['optimization']['epochs']}; configured horizon unchanged", flush=True)
+                return
+            budget = segment_budget(step, execution_steps, per_epoch, args.segment_epochs)
             if time.monotonic() + budget * estimate * 1.25 + 600 > deadline:
                 job_id = os.environ.get("SLURM_JOB_ID")
                 if not args.requeue or not job_id:
@@ -138,9 +162,11 @@ def main(argv=None):
                 "post-train",
                 "--config",
                 str(args.config.resolve()),
-                "--max-steps",
-                str(budget),
             ]
+            if args.until_epoch is None:
+                command += ["--max-steps", str(budget)]
+            else:
+                command += ["--until-epoch", str((step + budget) // per_epoch)]
             for override in args.override:
                 command += ["--override", override]
             if run:
@@ -182,9 +208,11 @@ def main(argv=None):
                 "peak_cuda_memory_bytes": status["peak_cuda_memory_bytes"],
                 "completed": completed,
             }
-            temporary = job_root / f"{experiment}.json.tmp"
+            if args.until_epoch is not None:
+                summary["execution_limit_epoch"] = args.until_epoch
+            temporary = job_root / f"{job_name}.json.tmp"
             temporary.write_text(json.dumps(summary, indent=2) + "\n")
-            temporary.replace(job_root / f"{experiment}.json")
+            temporary.replace(job_root / f"{job_name}.json")
             print(json.dumps(summary, indent=2), flush=True)
 
 

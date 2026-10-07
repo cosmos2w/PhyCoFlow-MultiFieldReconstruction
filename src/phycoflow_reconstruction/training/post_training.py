@@ -49,8 +49,8 @@ from .common import (
     sensor_protocol_from_config,
 )
 from .fidelity_controller import (
-    NATIVE_VERSION,
     EPOCH_NATIVE_VERSION,
+    NATIVE_VERSION,
     FidelityController,
     coherence_selection_report,
     endpoint_risks,
@@ -73,13 +73,16 @@ from .model_lifecycle import (
     load_training_aux_state,
 )
 from .monitoring import TrainingMonitor
-from .preview import TrainingReconstructionPreview
-from .retention import endpoint_retention, post_training_mode
+from .parameter_interpolation import require_training_checkpoint
 from .parameter_retention import (
-    RANDOM_POLICY, SourceParameterRetention, private_call, scalar_update,
+    RANDOM_POLICY,
+    SourceParameterRetention,
+    private_call,
+    scalar_update,
     trainable_parameter_identity,
 )
-from .parameter_interpolation import require_training_checkpoint
+from .preview import TrainingReconstructionPreview
+from .retention import endpoint_retention, post_training_mode
 from .rollout import differentiable_reconstruction, subset_query_batch
 from .rollout_contract import verify_rollout_contract
 from .run_store import (
@@ -110,6 +113,7 @@ from .topology_constraints import (
     topology_constraint_components,
 )
 from .topology_selection import fidelity_eligibility, topology_selection_report
+from .training_policy import persist_training_policy, resolve_training_policy
 from .update_budget import post_training_final_step, post_training_steps_per_epoch, sample_exposure
 
 
@@ -2006,6 +2010,28 @@ def run_post_training(
         coherence_family_scales=family_scales,
         coherence_family_balance_mode=calibration["mode"],
     )
+    if matched_streams:
+        policy = resolve_training_policy(
+            config,
+            model=model,
+            families=families,
+            family_scales=family_scales,
+            calibration=calibration,
+            calibration_sha256=calibration_hash,
+            source_hashes=source_hashes_before,
+            source_metadata=source_metadata,
+            normalizer_digest=train_dataset.normalizer.digest(),
+            parameter_retention=parameter_retention,
+        )
+        persist_training_policy(
+            store,
+            policy,
+            is_resume=resume is not None,
+            start_step=start_step,
+            resume_checkpoint_sha256=(
+                file_sha256(store.run_dir / "checkpoints/last.pt") if resume is not None else None
+            ),
+        )
 
     evaluation_split = config.get("evaluation", {}).get("split", "validation")
     evaluation_dataset = open_field_dataset(
