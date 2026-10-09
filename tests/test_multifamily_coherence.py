@@ -17,6 +17,7 @@ from phycoflow_reconstruction.config import load_config
 from phycoflow_reconstruction.config.validate import validate_config
 from phycoflow_reconstruction.contracts import DataSpec, ModelCapabilities, ObservationBatch
 from phycoflow_reconstruction.data.normalization import FieldNormalizer
+from phycoflow_reconstruction.training.multitask import FamilyScalarizer
 from phycoflow_reconstruction.training.post_training import _coherence_objective
 
 
@@ -246,6 +247,7 @@ def test_one_rollout_composes_all_three_families_and_backpropagates(topology_str
         metadata={"query_indices": torch.arange(36).expand(4, -1)},
     )
     model = ToyFlow()
+    differentiable_losses = {}
     result, reference_ids = _coherence_objective(
         model,
         batch,
@@ -258,6 +260,7 @@ def test_one_rollout_composes_all_three_families_and_backpropagates(topology_str
         },
         step=0,
         generator=torch.Generator().manual_seed(2),
+        family_losses=differentiable_losses,
     )
     assert reference_ids == ("a", "b", "c", "d")
     assert model.rollout_calls == 1
@@ -273,6 +276,17 @@ def test_one_rollout_composes_all_three_families_and_backpropagates(topology_str
     assert set(family_losses) == {"global_distribution", "cross_spectrum", "topology"}
     assert all(torch.isfinite(loss) and loss.item() > 0 for loss in family_losses.values())
     torch.testing.assert_close(result.scalar_loss.detach(), sum(family_losses.values()))
+    # The modular scalarizer reuses the same rollout and differentiable family tensors.
+    scalarized, _ = FamilyScalarizer({"method": "fixed_sum"})(
+        differentiable_losses,
+        scales={name: 1.0 for name in families},
+        weights={name: 1.0 for name in families},
+    )
+    torch.testing.assert_close(scalarized, result.scalar_loss)
+    original_gradient, = torch.autograd.grad(result.scalar_loss, model.scale, retain_graph=True)
+    modular_gradient, = torch.autograd.grad(scalarized, model.scale, retain_graph=True)
+    torch.testing.assert_close(modular_gradient, original_gradient)
+    assert model.rollout_calls == 1
     if topology_strategy == "spatial_self_mutual":
         assert {path for path in result.component_results if path.startswith("topology.")} == {
             "topology.self.region",

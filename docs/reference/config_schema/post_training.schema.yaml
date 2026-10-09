@@ -35,6 +35,10 @@ notes:
   - checkpointing.validation_every_epochs decouples topology panel selection from recovery saves; source and terminal saves always evaluate.
   - The current topology recipe is cases/active_emulsion/configs/posttrain/topology.yaml with persistence.distance=sliced_wasserstein.
   - optimization.gradient_balance=topology_regularized uses one batch-average topology/fidelity gradient per Adam update; validation gates select the best checkpoint.
+  - Data-driven coherence post-training may set optimization.multitask.family_scalarization to fixed_sum, stch, or dwa and outer_aggregation to sum, torchjd_config, upgrad, or cagrad; missing or empty interface blocks default to fixed_sum and sum.
+  - STCH settings use only the selected nested stch.mu key (default 0.1), DWA uses dwa.temperature (default 2.0), and CAGrad uses cagrad.c (default 0.5); inactive keys and redundant multitask weights are invalid.
+  - When optimization.multitask is present, it takes precedence over inherited legacy optimization.gradient_balance=config and its config_* settings; configs without multitask retain historical conditional ConFIG and fallback semantics.
+  - optimization.multitask is limited to coherence post-training and cannot be combined with component_constrained, topology_regularized, or component_constraints policies.
   - optimization.rollout_execution selects context_cache (none, condition, geometry, static_features) and activation checkpointing for physical CQ models; shared context requires eval mode.
   - optimization.sampling=full_pass and training_subset select continuous shuffled coverage; steps_per_epoch changes reporting intervals without resetting sampling.
   - Shared topology optimizer/runtime defaults are in configs/defaults/topology_post_training.yaml; source_run must be explicitly supplied.

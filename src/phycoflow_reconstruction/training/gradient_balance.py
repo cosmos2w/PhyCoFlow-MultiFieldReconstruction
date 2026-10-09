@@ -1,4 +1,7 @@
-"""Two-objective weighted-sum and optional ConFIG optimizer updates."""
+"""Historical weighted-sum and conditional ConFIG optimizer updates.
+
+Configurations with optimization.multitask use the separate modular adapter.
+"""
 
 from __future__ import annotations
 
@@ -89,7 +92,7 @@ def two_objective_update(
     grad_clip: float | None,
     config_missing_behavior: str = "error",
 ) -> dict[str, Any]:
-    """Update once while recording the relationship between both gradients."""
+    """Legacy update preserving conditional ConFIG dispatch and fallback for replay."""
     parameters = _trainable_parameters(model)
     weighted_data = float(data_weight) * data_loss
     weighted_coherence = float(coherence_weight) * coherence_loss

@@ -333,6 +333,99 @@ def _validate_optimization_values(settings: Mapping[str, Any]) -> None:
         raise TypeError("optimization.adaptive_backward_scaling must be boolean")
 
 
+def _method_parameter(value: Any, path: str, *, allow_zero: bool = False) -> float:
+    """Validate one numeric multitask method parameter without accepting bools or NaNs."""
+    message = f"{path} must be a finite {'nonnegative' if allow_zero else 'positive'} number"
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(message)  # noqa: TRY004
+    try:
+        number = float(value)
+    except OverflowError as error:
+        raise ValueError(message) from error
+    if not math.isfinite(number) or (number < 0 if allow_zero else number <= 0):
+        raise ValueError(
+            f"{path} must be a finite {'nonnegative' if allow_zero else 'positive'} number"
+        )
+    return number
+
+
+def _validate_multitask_interface(
+    multitask: Mapping[str, Any],
+    name: str,
+    methods: frozenset[str],
+    default_method: str,
+    parameter_defaults: Mapping[str, Mapping[str, float]],
+) -> None:
+    if name not in multitask:
+        return
+    interface = multitask[name]
+    if not isinstance(interface, Mapping):
+        raise TypeError(f"optimization.multitask.{name} must be a mapping")
+
+    method = interface.get("method", default_method)
+    if not isinstance(method, str) or method not in methods:
+        raise ValueError(
+            f"optimization.multitask.{name}.method must be one of {sorted(methods)}"
+        )
+    method_parameters = parameter_defaults.get(method)
+    allowed = {"method", method} if method_parameters is not None else {"method"}
+    _reject_unknown(interface, allowed, f"optimization.multitask.{name}")
+    if method_parameters is None:
+        return
+
+    parameter_key = method
+    parameters = interface.get(parameter_key, {})
+    if not isinstance(parameters, Mapping):
+        raise TypeError(f"optimization.multitask.{name}.{parameter_key} must be a mapping")
+    _reject_unknown(
+        parameters,
+        set(method_parameters),
+        f"optimization.multitask.{name}.{parameter_key}",
+    )
+    for key, default in method_parameters.items():
+        value = parameters.get(key, default)
+        _method_parameter(
+            value,
+            f"optimization.multitask.{name}.{parameter_key}.{key}",
+            allow_zero=(name == "outer_aggregation" and key == "c"),
+        )
+
+
+def _validate_multitask(optimization: Mapping[str, Any]) -> None:
+    if "multitask" not in optimization:
+        return
+    multitask = optimization["multitask"]
+    if not isinstance(multitask, Mapping):
+        raise TypeError("optimization.multitask must be a mapping")
+    _reject_unknown(
+        multitask,
+        {"family_scalarization", "outer_aggregation"},
+        "optimization.multitask",
+    )
+    if optimization.get("gradient_balance", "weighted_sum") in {
+        "component_constrained",
+        "topology_regularized",
+    }:
+        raise ValueError(
+            "optimization.multitask cannot be combined with constrained topology optimization"
+        )
+
+    _validate_multitask_interface(
+        multitask,
+        "family_scalarization",
+        frozenset({"fixed_sum", "stch", "dwa"}),
+        "fixed_sum",
+        {"stch": {"mu": 0.1}, "dwa": {"temperature": 2.0}},
+    )
+    _validate_multitask_interface(
+        multitask,
+        "outer_aggregation",
+        frozenset({"sum", "torchjd_config", "upgrad", "cagrad"}),
+        "sum",
+        {"cagrad": {"c": 0.5}},
+    )
+
+
 def _validate_base_training(config: Mapping[str, Any]) -> None:
     optimization = _require_mapping(config, "optimization")
     _reject_unknown(
@@ -374,6 +467,8 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
     if source_kind == "legacy_demo50" and config["model"].get("name") != "legacy_demo50":
         raise ValueError("legacy_demo50 source requires model.name=legacy_demo50")
     if "coherence" not in config:
+        if "multitask" in config["optimization"]:
+            raise ValueError("optimization.multitask requires coherence post-training")
         _validate_physics_settings(config["physics"])
         required = {"objectives", "rollout", "observation_consistency", "trainable"}
         missing = sorted(required - config.keys())
@@ -813,6 +908,7 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
             "lr",
             "weight_decay",
             "grad_clip",
+            "multitask",
             "gradient_balance",
             "config_missing_behavior",
             "config_data_grad_scale",
@@ -827,6 +923,7 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
         "optimization",
     )
     _validate_optimization_values(optimization)
+    _validate_multitask(optimization)
     if "steps_per_epoch" in optimization:
         from ..training.update_budget import post_training_steps_per_epoch
 
