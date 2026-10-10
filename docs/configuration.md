@@ -83,7 +83,7 @@ python cases/turbulent_combustion/run.py validate \
   --override optimization.multitask.outer_aggregation.cagrad.c=0.5
 ```
 
-When `optimization.multitask` is present, it selects the new unconditional outer aggregator. Historical `optimization.gradient_balance: config`, `config_missing_behavior`, and `config_*_grad_scale` fields may arrive from inherited profiles and are ignored by this route; they retain their old behavior when `multitask` is absent. In particular, the legacy conditional ConFIG path is not the same algorithm as `torchjd_config`. Do not combine `multitask` with `component_constrained`, `topology_regularized`, or `component_constraints`; physics-only post-training does not accept this namespace.
+When `optimization.multitask` is present, it selects the named outer aggregator on every update with two nonzero objective coefficients. A zero coefficient disables that objective: the sole active gradient is applied directly and telemetry records `modular_single_objective`. This handles disabled objectives without treating their zero row as a stationary task; invalid two-task directions still fail without fallback. Historical `optimization.gradient_balance: config`, `config_missing_behavior`, and `config_*_grad_scale` fields may arrive from inherited profiles and are ignored by this route; they retain their old behavior when `multitask` is absent. In particular, the legacy conditional ConFIG path is not the same algorithm as `torchjd_config`. Do not combine `multitask` with `component_constrained`, `topology_regularized`, or `component_constraints`; physics-only post-training does not accept this namespace.
 
 ## Training validation and checkpoints
 

@@ -6,7 +6,7 @@ Coherence post-training now has two independent choices under `optimization.mult
 
 The coherence families are A (global distribution), B (cross-spectrum), and T (topology). Family scalarization produces one coherence surrogate from their SOURCE-calibrated losses; outer aggregation combines its gradient with the data-retention gradient. Continue reporting raw A/B/T and reconstruction fidelity separately because different scalarizers produce different surrogate values.
 
-Existing configurations without `optimization.multitask` retain historical behavior. In the new path, `torchjd_config` invokes TorchJD ConFIG on every active update; invalid directions stop the update without a weighted-sum fallback.
+Existing configurations without `optimization.multitask` retain historical behavior. In the new path, `torchjd_config` invokes TorchJD ConFIG whenever both objectives have nonzero coefficients; invalid directions stop the update without a weighted-sum fallback. An explicitly zero objective coefficient selects the sole active gradient, recorded as `modular_single_objective`.
 
 ## Install
 

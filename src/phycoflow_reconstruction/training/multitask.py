@@ -340,7 +340,7 @@ def modular_objective_update(
     coherence_weight: float,
     grad_clip: float | None,
 ) -> dict[str, Any]:
-    """Aggregate D and C' gradients, assign one direction, clip, and update once."""
+    """Combine active D and C' gradients, assign one direction, clip, and update once."""
     data_coefficient = _finite_number(data_weight, name="data_weight")
     coherence_coefficient = _finite_number(coherence_weight, name="coherence_weight")
     for name, loss in (("data_loss", data_loss), ("coherence_loss", coherence_loss)):
@@ -359,7 +359,26 @@ def modular_objective_update(
     if not bool(torch.isfinite(gradients).all()):
         raise FloatingPointError("post-training objective gradient contains non-finite values")
 
-    direction, aggregation_diagnostics = aggregator(gradients)
+    single_objective = data_coefficient == 0 or coherence_coefficient == 0
+    if single_objective:
+        # A disabled objective is not a stationary task in a multi-objective problem.
+        # Use the sole active gradient; do not ask a two-task solver to optimize a zero row.
+        direction = coherence_gradient if data_coefficient == 0 else data_gradient
+        measured = gradients.detach().to(dtype=torch.float64)
+        direction64 = direction.detach().to(dtype=torch.float64)
+        aggregation_diagnostics = {
+            "method": "single_objective",
+            "gradient_norms": [
+                float(value.cpu()) for value in torch.linalg.vector_norm(measured, dim=1)
+            ],
+            "gradient_cosine": 0.0,
+            "direction_norm": float(torch.linalg.vector_norm(direction64).cpu()),
+            "directional_products": [
+                float(torch.dot(direction64, row).cpu()) for row in measured
+            ],
+        }
+    else:
+        direction, aggregation_diagnostics = aggregator(gradients)
     if direction.shape != (gradients.shape[1],) or not bool(torch.isfinite(direction).all()):
         raise FloatingPointError("outer aggregator returned an invalid direction; refusing update")
 
@@ -381,7 +400,7 @@ def modular_objective_update(
     norms = torch.linalg.vector_norm(measured, dim=1)
     data_norm, coherence_norm = (float(value.cpu()) for value in norms)
     return {
-        "update_mode": "multitask_modular",
+        "update_mode": "modular_single_objective" if single_objective else "multitask_modular",
         "optimization_route": "modular",
         "outer_method": aggregator.method,
         "data_grad_norm": data_norm,

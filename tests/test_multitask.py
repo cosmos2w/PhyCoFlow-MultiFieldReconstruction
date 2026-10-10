@@ -231,6 +231,39 @@ def test_modular_update_preserves_unused_and_complex_parameters(device: torch.de
     json.dumps(diagnostics)
 
 
+@pytest.mark.parametrize("method", ["sum", "torchjd_config", "upgrad", "cagrad"])
+@pytest.mark.parametrize("data_weight,coherence_weight", [(0.0, 1.0), (1.0, 0.0)])
+def test_disabled_objective_uses_the_active_gradient_without_two_task_aggregation(
+    device: torch.device, method: str, data_weight: float, coherence_weight: float,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unexpected_aggregation(self, gradients):
+        raise AssertionError("disabled objectives must not be passed to a two-task solver")
+
+    monkeypatch.setattr(OuterAggregator, "__call__", unexpected_aggregation)
+    model = nn.Linear(1, 1, bias=False, device=device)
+    with torch.no_grad():
+        model.weight.fill_(1.0)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+    data_loss = model.weight.square().sum()
+    coherence_loss = (model.weight - 2.0).square().sum()
+    active_loss = coherence_loss if data_weight == 0 else data_loss
+    expected_gradient = torch.autograd.grad(active_loss, model.weight, retain_graph=True)[0]
+    expected_weight = model.weight.detach() - 0.1 * expected_gradient
+
+    diagnostics = modular_objective_update(
+        model, optimizer, data_loss, coherence_loss,
+        aggregator=OuterAggregator({"method": method}),
+        data_weight=data_weight, coherence_weight=coherence_weight, grad_clip=None,
+    )
+
+    torch.testing.assert_close(model.weight, expected_weight)
+    assert diagnostics["update_mode"] == "modular_single_objective"
+    assert diagnostics["outer_method"] == method
+    assert diagnostics["outer_aggregation"]["method"] == "single_objective"
+    assert diagnostics["config_fallback_used"] is False
+
+
 def test_modular_update_rejects_nonfinite_direction_before_step(device: torch.device) -> None:
     class CountingSGD(torch.optim.SGD):
         steps = 0
