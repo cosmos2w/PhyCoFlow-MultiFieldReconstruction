@@ -21,3 +21,9 @@ The repository revisions below were reviewed on 2026-08-16. A future upgrade mus
 The `global_distribution` estimators and endpoint-consistency behavior are focused, typed refactors of the optional local historical source `0_demo_TurbulentCombustion/src/{coherence_dist.py,direct_coherence_loss.py,obs_consistency.py}`. They have no runtime import from the demo. A compatibility test compares every refactored component numerically when that local source is available; clean checkouts skip this optional historical comparison explicitly.
 
 `conflictfree==0.1.8` is an optional post-training dependency used only when `optimization.gradient_balance: config` is selected. Weighted-sum training does not import it.
+
+## Optional multitask dependency
+
+[TorchJD](https://github.com/SimplexLab/TorchJD), package `0.17.1` (reviewed 2026-10-10), is an optional MIT-licensed library dependency for STCH and the ConFIG, UPGrad, and CAGrad aggregators. The `multitask` and `all` extras include its CAGrad and quadprog-projector solver support; no upstream code is vendored. The installed package retains its upstream LICENSE and third-party NOTICES.
+
+The local DWA adapter follows [Dynamic Weight Average](https://openaccess.thecvf.com/content_CVPR_2019/html/Liu_End-To-End_Multi-Task_Learning_With_Attention_CVPR_2019_paper.html) and the TorchJD public scalarization interface. It stores the completed-epoch means and partial-epoch accumulation required by the existing checkpoint lifecycle; its weights and outputs are checked numerically against TorchJD.

@@ -21,6 +21,7 @@ operator = ["neuraloperator==2.0.0", "wrapt>=1.16,<2"]
 keops = ["pykeops==2.3"]
 legacy = ["pykeops==2.3"]
 posttrain = ["conflictfree==0.1.8"]
+multitask = ["torchjd[cagrad,quadprog-projector]==0.17.1"]
 topology = ["gudhi>=3.13,<4"]
 plot = ["matplotlib>=3.7"]
 dev = ["pytest>=8", "ruff>=0.5"]
@@ -28,6 +29,7 @@ all = [
   "gudhi>=3.13,<4",
   "matplotlib>=3.7",
   "conflictfree==0.1.8",
+  "torchjd[cagrad,quadprog-projector]==0.17.1",
   "neuraloperator==2.0.0",
   "pykeops==2.3",
   "pytest>=8",

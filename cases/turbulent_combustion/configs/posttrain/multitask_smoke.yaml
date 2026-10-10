@@ -1,0 +1,139 @@
+# Bounded A+B+T topology-lite profile for genuine optimizer/interface smoke runs.
+# The source_run stays portable and is supplied on the command line.
+defaults:
+  - ../dataset.yaml
+  - ../sensors/T_only_random.yaml
+  - ../../../../configs/models/gl_rbf_cq.yaml
+
+stage: post_training
+case: turbulent_combustion
+
+source_run: null
+source_checkpoint: best.pt
+inherit_base_config: true
+source: {kind: native_run, allow_integration_source: false}
+model: {model_ema_eval: false}
+
+objectives:
+  data_retention: {enabled: true, weight: 0.1}
+  coherence: {enabled: true, weight: 1.0}
+
+rollout: {steps: 2, solver: euler}
+observation_consistency: {mode: endpoint_smooth, strength: 1.0, sigma: 0.05, schedule_power: 2.0, final_clamp: true, chunk_size: 4096}
+trainable: {scope: full_model}
+
+optimization:
+  epochs: 3
+  batch_size: 4
+  train_fraction: 1.0
+  sampling: full_pass
+  steps_per_epoch: 1
+  lr: 1.0e-6
+  weight_decay: 1.0e-6
+  grad_clip: 1.0
+  model_mode: eval
+  multitask:
+    family_scalarization:
+      method: fixed_sum
+    outer_aggregation:
+      method: sum
+
+runtime:
+  seed: 42
+  device: cuda:0
+  deterministic: true
+  num_workers: 0
+  data_strategy: async_cpu
+  progress: true
+  plot_every_steps: 1
+
+evaluation:
+  split: validation
+  max_samples: 4
+  query_points: 4096
+  generation_steps: 2
+  seed: 2027
+  preview: {enabled: false}
+
+checkpointing:
+  enabled: true
+  every_epochs: 1
+  save_epoch_one: true
+  validation_every_epochs: 1
+  selection_metric: topology_with_fidelity
+
+posttrain_fidelity:
+  max_relative_mse_increase: 0.05
+  max_relative_field_mse_increase: 0.05
+  behavior: report
+
+coherence:
+  schedule: {start_epoch: 1, every_n_steps: 1, weight_warmup_epochs: 0, interval_rescale: false}
+  compute_budget: {batch_size: 4, point_count: 4096, query_policy: fixed_shared, query_seed: 100045}
+  family_balance:
+    mode: initial_grad_norm
+    calibration_batches: 2
+    reference: median
+    epsilon: 1.0e-12
+    scale_min: 1.0e-5
+    scale_max: 100.0
+    max_batch_ratio: 100.0
+    gradient_diagnostics_every_epochs: 1
+    seed: 700043
+  families:
+    global_distribution:
+      enabled: true
+      weight: 1.0
+      target_use: paired_supervised
+      units: model_units
+      fields: [CH4, CO, T, U_1, p]
+      reference_bank: {enabled: false}
+      components:
+        self: {enabled: true, weight: 1.0}
+        mutual: {enabled: true, weight: 1.0, directions: 8, seed: 1234}
+        cross: {enabled: true, weight: 1.0, directions: 16, top_fraction: 0.1, seed: 1234, include_axes: true, qmc: true}
+    cross_spectrum:
+      enabled: true
+      weight: 1.0
+      target_use: paired_supervised
+      units: model_units
+      fields: [CH4, CO, T, U_1, p]
+      pairs: [[CO, T], [T, CH4], [T, U_1], [CH4, U_1]]
+      reference_bank: {enabled: false}
+      graph: {k_neighbors: 16, sigma: null, num_modes: 48, exclude_zero: true, bands: [low, mid, high]}
+      eps: 1.0e-8
+      components:
+        self_spectrum: {enabled: false, weight: 1.0}
+        same_frequency: {enabled: true, weight: 1.0}
+        cross_frequency: {enabled: true, weight: 1.0}
+        band_energy: {enabled: false, weight: 0.0}
+    topology:
+      enabled: true
+      strategy: cubical_persistence
+      weight: 1.0
+      target_use: paired_supervised
+      units: model_units
+      fields: [CO]
+      reference_bank: {enabled: false}
+      geometry:
+        grid_shape: [16, 32]
+        axes: [0, 1]
+        neighbors: 4
+        power: 2.0
+        periodic: false
+        allow_projected_collisions: false
+        antialias_downsample: true
+      filtration:
+        dimensions: [0]
+        directions: [sublevel]
+        smoothing_sigma: 0.0
+      persistence:
+        projections: 2
+        essential_weight: 0.1
+        scale_floor: 0.0001
+        distance: sliced_wasserstein
+      components:
+        self: {enabled: true, weight: 1.0, fields: [CO]}
+        mutual: {enabled: false, weight: 0.0}
+
+output: {experiment_name: multitask_topology_lite_smoke}

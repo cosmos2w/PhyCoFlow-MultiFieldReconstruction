@@ -48,7 +48,8 @@ from .common import (
     iter_unique_batch_indices,
     sensor_protocol_from_config,
 )
-from .gradient_balance import data_only_update, two_objective_update
+from .gradient_balance import data_only_update
+from .gradient_balance import two_objective_update as legacy_two_objective_update
 from .model_lifecycle import (
     add_training_aux_state,
     after_optimizer_step,
@@ -56,6 +57,7 @@ from .model_lifecycle import (
     load_training_aux_state,
 )
 from .monitoring import TrainingMonitor
+from .multitask import FamilyScalarizer, OuterAggregator, modular_objective_update
 from .preview import TrainingReconstructionPreview
 from .retention import endpoint_retention, post_training_mode
 from .rollout import differentiable_reconstruction, subset_query_batch
@@ -228,6 +230,7 @@ def _coherence_objective(
     retention_losses: dict[str, torch.Tensor] | None = None,
     source_anchor_model=None,
     step_context: dict | None = None,
+    family_losses: dict[str, torch.Tensor] | None = None,
 ) -> tuple[FamilyResult, tuple[str, ...]]:
     compute = config["coherence"]["compute_budget"]
     selected = _slice_batch(batch, int(compute["batch_size"]))
@@ -367,6 +370,8 @@ def _coherence_objective(
             },
         )
         family_results[family_name] = result
+        if family_losses is not None:
+            family_losses[family_name] = result.scalar_loss
         component_results.update(result.component_results)
         weight = float(getattr(family_module, "family_weight", 1.0))
         calibration_scale = float((family_scales or {}).get(family_name, 1.0))
@@ -878,6 +883,8 @@ def _sparse_family_gradient_diagnostics(
     step: int,
     rollout_seed: int,
     device: torch.device,
+    raw_family_losses: Mapping[str, torch.Tensor] | None = None,
+    scalarized: bool = False,
 ) -> dict[str, Any]:
     parameters = tuple(parameter for parameter in model.parameters() if parameter.requires_grad)
     epsilon = float(config["coherence"].get("family_balance", {}).get("epsilon", 1.0e-12))
@@ -886,22 +893,30 @@ def _sparse_family_gradient_diagnostics(
     family_gradients = {}
     family_losses = {}
     for name, family in families.items():
-        result, _ = _coherence_objective(
-            model,
-            batch,
-            {name: family},
-            {name: banks[name]},
-            config,
-            step=step,
-            generator=torch.Generator(device=device).manual_seed(rollout_seed),
-        )
-        raw_loss = result.scalar_loss / float(getattr(family, "family_weight", 1.0))
+        if raw_family_losses is None:
+            result, _ = _coherence_objective(
+                model,
+                batch,
+                {name: family},
+                {name: banks[name]},
+                config,
+                step=step,
+                generator=torch.Generator(device=device).manual_seed(rollout_seed),
+            )
+            raw_loss = result.scalar_loss / float(getattr(family, "family_weight", 1.0))
+        else:
+            raw_loss = raw_family_losses[name]
         family_losses[name] = float(raw_loss.detach())
-        family_gradients[name] = loss_gradients(raw_loss, parameters)
+        family_gradients[name] = loss_gradients(
+            raw_loss, parameters, retain_graph=raw_family_losses is not None
+        )
     return {
         "family_losses": family_losses,
         **gradient_diagnostics(data_gradients, family_gradients, epsilon=epsilon),
-        "total_coherence_gradient_norm": gradient_norm(combined_gradients),
+        (
+            "total_scalarized_coherence_gradient_norm"
+            if scalarized else "total_coherence_gradient_norm"
+        ): gradient_norm(combined_gradients),
     }
 
 
@@ -924,7 +939,10 @@ def _data_weight(config: Mapping[str, Any]) -> float:
 
 def _balanced_weights(config: Mapping[str, Any], coherence_weight: float) -> tuple[float, float]:
     data_weight = _data_weight(config)
-    if config["optimization"].get("gradient_balance", "weighted_sum") == "config":
+    if (
+        "multitask" not in config["optimization"]
+        and config["optimization"].get("gradient_balance", "weighted_sum") == "config"
+    ):
         data_weight *= float(config["optimization"].get("config_data_grad_scale", 1.0))
         coherence_weight *= float(config["optimization"].get("config_coherence_grad_scale", 1.0))
     return data_weight, coherence_weight
@@ -1308,11 +1326,11 @@ def run_post_training(
     resume: str | Path | None = None,
 ) -> Path:
     """Create or resume one immutable child post-training run."""
-    if config["optimization"].get("gradient_balance") in {
+    if "multitask" in config["optimization"] or config["optimization"].get("gradient_balance") in {
         "component_constrained",
         "topology_regularized",
     }:
-        # Direct Python callers must not bypass the every-update/geometry guards.
+        # Direct Python callers use the same method and geometry validation as the CLI.
         from ..config.validate import validate_config
 
         validate_config(config)
@@ -1366,6 +1384,15 @@ def run_post_training(
         lr=float(config["optimization"].get("lr", 5e-5)),
         weight_decay=float(config["optimization"].get("weight_decay", 0.0)),
     )
+    multitask = config["optimization"].get("multitask")
+    scalarizer = (
+        FamilyScalarizer(multitask.get("family_scalarization", {}))
+        if multitask is not None else None
+    )
+    aggregator = (
+        OuterAggregator(multitask.get("outer_aggregation", {}))
+        if multitask is not None else None
+    )
 
     if resume is None:
         store = RunStore.create(
@@ -1387,6 +1414,10 @@ def run_post_training(
         torch.set_rng_state(checkpoint["rng_state"]["torch_cpu"])
         if device.type == "cuda" and checkpoint["rng_state"].get("torch_cuda"):
             torch.cuda.set_rng_state_all(checkpoint["rng_state"]["torch_cuda"])
+        if scalarizer is not None and scalarizer.method == "dwa":
+            if "family_scalarizer" not in checkpoint:
+                raise ValueError("DWA recovery checkpoint is missing family scalarization state")
+            scalarizer.load_state_dict(checkpoint["family_scalarizer"])
 
     if subset_manifest is not None:
         subset_path = store.run_dir / "artifacts/training_subset.json"
@@ -1761,6 +1792,7 @@ def run_post_training(
                     coherence_calibration_sha256=calibration_hash,
                     family_scales=family_scales,
                     controller=controller,
+                    scalarizer=scalarizer,
                 ),
                 model=model,
                 preview=preview,
@@ -1805,6 +1837,7 @@ def run_post_training(
         if coherence_active or retention_active:
             step_context = {} if constrained else None
             retention_losses: dict[str, torch.Tensor] = {}
+            raw_family_losses = {} if scalarizer is not None else None
             rollout_generator = torch.Generator(device=device).manual_seed(
                 seed + 1_000_003 + global_step
             )
@@ -1820,6 +1853,7 @@ def run_post_training(
                 retention_losses=retention_losses,
                 source_anchor_model=source_anchor_model,
                 step_context=step_context,
+                family_losses=raw_family_losses,
             )
             for name, loss in retention_losses.items():
                 # Retention has the same sparse cadence as the shared rollout.
@@ -1832,6 +1866,17 @@ def run_post_training(
                 del loss
             row["data_loss"] = float(data_loss.detach().cpu())
             coherence_loss = result.scalar_loss
+            if scalarizer is not None and coherence_active:
+                coherence_loss, scalarization = scalarizer(
+                    raw_family_losses,
+                    scales=family_scales,
+                    weights={
+                        name: float(getattr(family, "family_weight", 1.0))
+                        for name, family in families.items()
+                    },
+                )
+                row["family_scalarization"] = scalarization
+                row["scalarized_coherence_loss"] = float(coherence_loss.detach().cpu())
             if bool(config["coherence"]["schedule"].get("interval_rescale", False)):
                 coherence_loss = coherence_loss * every
             diagnostic_every = int(
@@ -1855,6 +1900,8 @@ def run_post_training(
                     step=global_step,
                     rollout_seed=seed + 1_000_003 + global_step,
                     device=device,
+                    raw_family_losses=raw_family_losses,
+                    scalarized=scalarizer is not None and coherence_active,
                 )
             data_update_weight, coherence_update_weight = _balanced_weights(
                 config, coherence_weight
@@ -1890,8 +1937,19 @@ def run_post_training(
                         )
                         + "\n"
                     )
+            elif aggregator is not None:
+                gradient = modular_objective_update(
+                    model,
+                    optimizer,
+                    data_loss,
+                    coherence_loss,
+                    aggregator=aggregator,
+                    data_weight=data_update_weight,
+                    coherence_weight=coherence_update_weight,
+                    grad_clip=config["optimization"].get("grad_clip"),
+                )
             else:
-                gradient = two_objective_update(
+                gradient = legacy_two_objective_update(
                     model,
                     optimizer,
                     data_loss,
@@ -1904,6 +1962,7 @@ def run_post_training(
                         "config_missing_behavior", "error"
                     ),
                 )
+                gradient["optimization_route"] = "legacy"
             row.update(
                 coherence_loss=float(result.scalar_loss.detach().cpu()),
                 coherence_reference_ids=list(reference_ids),
@@ -1915,7 +1974,7 @@ def run_post_training(
             last_coherence_loss = row["coherence_loss"]
             # The final report needs a scalar, not a retained rollout graph.
             # Release it before the next rollout or large validation panel.
-            del result, coherence_loss, retention_losses, step_context
+            del result, coherence_loss, retention_losses, step_context, raw_family_losses
         else:
             row["data_update_weight"] = _data_weight(config)
             row["coherence_update_weight"] = 0.0
@@ -1930,6 +1989,8 @@ def run_post_training(
             )
         if row.get("update_accepted", True):
             after_optimizer_step(model)
+        if scalarizer is not None and (global_step + 1) % steps_per_epoch == 0:
+            scalarizer.step()
         row["update_seconds"] = perf_counter() - step_started
         del data_loss
         row["total"] = row["data_update_weight"] * row["data_loss"] + row[
@@ -1939,6 +2000,12 @@ def run_post_training(
         )
         if constrained:
             row["total"] = row.get("regularized_loss_before", row["balanced_topology_before"])
+        elif scalarizer is not None:
+            row["total"] = row["data_update_weight"] * row["data_loss"] + row[
+                "coherence_update_weight"
+            ] * row.get("scalarized_coherence_loss", row.get("coherence_loss", 0.0)) * (
+                every if config["coherence"]["schedule"].get("interval_rescale", False) else 1
+            )
         monitor.record(row, lr=optimizer.param_groups[0]["lr"])
         checkpoint_result = None
         if checkpoint_manager.due_for_preview_or_checkpoint(global_step + 1, preview):
@@ -1963,6 +2030,7 @@ def run_post_training(
                     coherence_calibration_sha256=calibration_hash,
                     family_scales=family_scales,
                     controller=controller,
+                    scalarizer=scalarizer,
                 ),
                 model=model,
                 preview=preview,
@@ -2038,6 +2106,7 @@ def run_post_training(
         coherence_calibration_sha256=calibration_hash,
         family_scales=family_scales,
         controller=controller,
+        scalarizer=scalarizer,
     )
     if checkpoint_manager.selection_metric == "topology_with_fidelity":
         checkpoint_manager.panel_evaluator = lambda step: topology_selection_report(
@@ -2143,6 +2212,7 @@ def _post_checkpoint_payload(
     coherence_calibration_sha256: str,
     family_scales: Mapping[str, float],
     controller=None,
+    scalarizer: FamilyScalarizer | None = None,
 ) -> dict[str, Any]:
     """Build an internally consistent post-training recovery checkpoint."""
     payload = {
@@ -2170,6 +2240,8 @@ def _post_checkpoint_payload(
     }
     if controller is not None:
         payload["component_controller"] = controller.state_dict()
+    if scalarizer is not None and scalarizer.method == "dwa":
+        payload["family_scalarizer"] = scalarizer.state_dict()
     if hasattr(train_dataset, "training_subset_manifest"):
         payload["training_subset_sha256"] = train_dataset.training_subset_manifest["sha256"]
     return add_training_aux_state(payload, model)
