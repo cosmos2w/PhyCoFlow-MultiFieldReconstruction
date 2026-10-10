@@ -250,6 +250,10 @@ def test_disabled_objective_uses_the_active_gradient_without_two_task_aggregatio
     active_loss = coherence_loss if data_weight == 0 else data_loss
     expected_gradient = torch.autograd.grad(active_loss, model.weight, retain_graph=True)[0]
     expected_weight = model.weight.detach() - 0.1 * expected_gradient
+    if data_weight == 0:
+        data_loss = data_loss.detach()
+    else:
+        coherence_loss = coherence_loss.detach()
 
     diagnostics = modular_objective_update(
         model, optimizer, data_loss, coherence_loss,

@@ -353,8 +353,15 @@ def modular_objective_update(
     optimizer.zero_grad(set_to_none=True)
     weighted_data = data_coefficient * data_loss
     weighted_coherence = coherence_coefficient * coherence_loss
-    data_gradient = _flat_gradient(weighted_data, parameters)
-    coherence_gradient = _flat_gradient(weighted_coherence, parameters)
+    if data_coefficient == 0 and coherence_coefficient != 0:
+        coherence_gradient = _flat_gradient(weighted_coherence, parameters)
+        data_gradient = torch.zeros_like(coherence_gradient)
+    elif coherence_coefficient == 0 and data_coefficient != 0:
+        data_gradient = _flat_gradient(weighted_data, parameters)
+        coherence_gradient = torch.zeros_like(data_gradient)
+    else:
+        data_gradient = _flat_gradient(weighted_data, parameters)
+        coherence_gradient = _flat_gradient(weighted_coherence, parameters)
     gradients = torch.stack((data_gradient, coherence_gradient))
     if not bool(torch.isfinite(gradients).all()):
         raise FloatingPointError("post-training objective gradient contains non-finite values")
