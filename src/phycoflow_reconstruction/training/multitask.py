@@ -311,8 +311,12 @@ class OuterAggregator:
         measured = gradients.detach().to(dtype=torch.float64)
         direction64 = direction.detach().to(dtype=torch.float64)
         norms = torch.linalg.vector_norm(measured, dim=1)
-        denominator = (norms[0] * norms[1]).clamp_min(1e-12)
-        cosine = torch.dot(measured[0], measured[1]) / denominator
+        denominator = norms[0] * norms[1]
+        # Preserve cosine's scale invariance; report zero when either task has no gradient.
+        cosine = (
+            torch.dot(measured[0], measured[1]) / denominator
+            if bool(denominator > 0) else denominator.new_zeros(())
+        )
         diagnostics = {
             "method": self.method,
             "gradient_norms": [float(value.cpu()) for value in norms],

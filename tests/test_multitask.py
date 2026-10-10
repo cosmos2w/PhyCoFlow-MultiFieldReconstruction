@@ -15,10 +15,8 @@ from phycoflow_reconstruction.training.multitask import (
 
 
 @pytest.fixture(scope="module")
-def cuda_device() -> torch.device:
-    if not torch.cuda.is_available():
-        pytest.skip("multitask algorithm tests require the assigned CUDA device")
-    return torch.device("cuda:0")
+def device() -> torch.device:
+    return torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 
 def _family_inputs(values: torch.Tensor) -> OrderedDict[str, torch.Tensor]:
@@ -32,11 +30,11 @@ def _scale_kwargs(names: tuple[str, ...]) -> tuple[dict[str, float], dict[str, f
     return ({name: 1.0 for name in names}, {name: 1.0 for name in names})
 
 
-def test_fixed_sum_matches_calibrated_value_and_gradient(cuda_device: torch.device) -> None:
+def test_fixed_sum_matches_calibrated_value_and_gradient(device: torch.device) -> None:
     losses = OrderedDict(
-        A=torch.tensor(2.0, device=cuda_device, requires_grad=True),
-        B=torch.tensor(3.0, device=cuda_device, requires_grad=True),
-        T=torch.tensor(4.0, device=cuda_device, requires_grad=True),
+        A=torch.tensor(2.0, device=device, requires_grad=True),
+        B=torch.tensor(3.0, device=device, requires_grad=True),
+        T=torch.tensor(4.0, device=device, requires_grad=True),
     )
     scales = {"A": 0.5, "B": 2.0, "T": 1.5}
     weights = {"A": 2.0, "B": 0.25, "T": 1.0}
@@ -53,18 +51,18 @@ def test_fixed_sum_matches_calibrated_value_and_gradient(cuda_device: torch.devi
     json.dumps(diagnostics)
 
 
-def test_stch_is_differentiable_and_tracks_input_changes(cuda_device: torch.device) -> None:
+def test_stch_is_differentiable_and_tracks_input_changes(device: torch.device) -> None:
     pytest.importorskip("torchjd")
     scalarizer = FamilyScalarizer({"method": "stch", "stch": {"mu": 0.1}})
     scales, weights = _scale_kwargs(("A", "B", "T"))
-    first = _family_inputs(torch.tensor([1.0, 2.0, 3.0], device=cuda_device))
-    second = _family_inputs(torch.tensor([1.0, 2.0, 6.0], device=cuda_device))
+    first = _family_inputs(torch.tensor([1.0, 2.0, 3.0], device=device))
+    second = _family_inputs(torch.tensor([1.0, 2.0, 6.0], device=device))
 
     first_scalar, first_diagnostics = scalarizer(first, scales=scales, weights=weights)
     second_scalar, _ = scalarizer(second, scales=scales, weights=weights)
     gradients = torch.autograd.grad(first_scalar, tuple(first.values()))
     reported_derivative = torch.tensor(
-        list(first_diagnostics["effective_weights"].values()), device=cuda_device
+        list(first_diagnostics["effective_weights"].values()), device=device
     )
 
     assert torch.isfinite(first_scalar)
@@ -76,7 +74,7 @@ def test_stch_is_differentiable_and_tracks_input_changes(cuda_device: torch.devi
     assert sum(first_diagnostics["effective_weights"].values()) == pytest.approx(1.0 / 3.0)
 
 
-def test_dwa_matches_torchjd_and_restores_partial_epoch_state(cuda_device: torch.device) -> None:
+def test_dwa_matches_torchjd_and_restores_partial_epoch_state(device: torch.device) -> None:
     torchjd = pytest.importorskip("torchjd")
     from torchjd.scalarization import DWA
 
@@ -96,7 +94,7 @@ def test_dwa_matches_torchjd_and_restores_partial_epoch_state(cuda_device: torch
     restored: FamilyScalarizer | None = None
     for epoch_index, batches in enumerate(epochs):
         for batch_index, batch in enumerate(batches):
-            values = torch.tensor(batch, device=cuda_device)
+            values = torch.tensor(batch, device=device)
             adapter_value, diagnostics = adapter(
                 _family_inputs(values), scales=scales, weights=weights
             )
@@ -122,10 +120,10 @@ def test_dwa_matches_torchjd_and_restores_partial_epoch_state(cuda_device: torch
         FamilyScalarizer({"method": "dwa"}).load_state_dict(None)
 
 
-def test_fixed_sum_rejects_nonfinite_scalarized_output(cuda_device: torch.device) -> None:
+def test_fixed_sum_rejects_nonfinite_scalarized_output(device: torch.device) -> None:
     losses = OrderedDict(
-        A=torch.tensor(3.0e38, device=cuda_device, requires_grad=True),
-        B=torch.tensor(3.0e38, device=cuda_device, requires_grad=True),
+        A=torch.tensor(3.0e38, device=device, requires_grad=True),
+        B=torch.tensor(3.0e38, device=device, requires_grad=True),
     )
     with pytest.raises(FloatingPointError, match="returned non-finite loss"):
         FamilyScalarizer({"method": "fixed_sum"})(
@@ -149,11 +147,11 @@ def test_fixed_sum_rejects_nonfinite_scalarized_output(cuda_device: torch.device
 )
 @pytest.mark.parametrize("method", ["sum", "torchjd_config", "upgrad", "cagrad"])
 def test_outer_aggregators_return_finite_directions(
-    cuda_device: torch.device, method: str, gradients: list[list[float]]
+    device: torch.device, method: str, gradients: list[list[float]]
 ) -> None:
     if method != "sum":
         pytest.importorskip("torchjd")
-    matrix = torch.tensor(gradients, device=cuda_device)
+    matrix = torch.tensor(gradients, device=device)
     settings = {"method": method}
     if method == "cagrad":
         settings["cagrad"] = {"c": 0.5}
@@ -162,16 +160,26 @@ def test_outer_aggregators_return_finite_directions(
     direction, diagnostics = aggregator(matrix)
 
     assert direction.shape == (matrix.shape[1],)
-    assert direction.device == cuda_device
+    assert direction.device == device
     assert torch.isfinite(direction).all()
     assert len(diagnostics["directional_products"]) == 2
     assert diagnostics["method"] == method
     json.dumps(diagnostics)
 
 
-def test_torchjd_config_is_unconditional_on_positive_cosine(cuda_device: torch.device) -> None:
+@pytest.mark.parametrize("scale", [1.0, 1.0e-8])
+@pytest.mark.parametrize("orientation", [1.0, -1.0, 0.0])
+def test_outer_cosine_preserves_scale_and_handles_zero_gradients(
+    device: torch.device, scale: float, orientation: float
+) -> None:
+    gradients = scale * torch.tensor([[1.0, 0.0], [orientation, 0.0]], device=device)
+    _, diagnostics = OuterAggregator({"method": "sum"})(gradients)
+    assert diagnostics["gradient_cosine"] == pytest.approx(orientation)
+
+
+def test_torchjd_config_is_unconditional_on_positive_cosine(device: torch.device) -> None:
     pytest.importorskip("torchjd")
-    gradients = torch.tensor([[1.0, 0.0], [0.1, 1.0]], device=cuda_device)
+    gradients = torch.tensor([[1.0, 0.0], [0.1, 1.0]], device=device)
     direction, diagnostics = OuterAggregator({"method": "torchjd_config"})(gradients)
     legacy_aligned_sum = gradients.sum(dim=0)
 
@@ -180,9 +188,9 @@ def test_torchjd_config_is_unconditional_on_positive_cosine(cuda_device: torch.d
     assert diagnostics["method"] == "torchjd_config"
 
 
-def test_cagrad_accepts_zero_scale_boundary(cuda_device: torch.device) -> None:
+def test_cagrad_accepts_zero_scale_boundary(device: torch.device) -> None:
     pytest.importorskip("torchjd")
-    gradients = torch.tensor([[1.0, 0.0], [0.0, 1.0]], device=cuda_device)
+    gradients = torch.tensor([[1.0, 0.0], [0.0, 1.0]], device=device)
     direction, diagnostics = OuterAggregator(
         {"method": "cagrad", "cagrad": {"c": 0.0}}
     )(gradients)
@@ -191,13 +199,13 @@ def test_cagrad_accepts_zero_scale_boundary(cuda_device: torch.device) -> None:
     assert diagnostics["method"] == "cagrad"
 
 
-def test_modular_update_preserves_unused_and_complex_parameters(cuda_device: torch.device) -> None:
+def test_modular_update_preserves_unused_and_complex_parameters(device: torch.device) -> None:
     class MixedParameters(nn.Module):
         def __init__(self) -> None:
             super().__init__()
-            self.real = nn.Parameter(torch.tensor([1.0], device=cuda_device))
-            self.unused = nn.Parameter(torch.tensor([2.0], device=cuda_device))
-            self.complex = nn.Parameter(torch.tensor([1.0 + 2.0j], device=cuda_device))
+            self.real = nn.Parameter(torch.tensor([1.0], device=device))
+            self.unused = nn.Parameter(torch.tensor([2.0], device=device))
+            self.complex = nn.Parameter(torch.tensor([1.0 + 2.0j], device=device))
 
     model = MixedParameters()
     optimizer = torch.optim.SGD(model.parameters(), lr=0.05)
@@ -223,7 +231,7 @@ def test_modular_update_preserves_unused_and_complex_parameters(cuda_device: tor
     json.dumps(diagnostics)
 
 
-def test_modular_update_rejects_nonfinite_direction_before_step(cuda_device: torch.device) -> None:
+def test_modular_update_rejects_nonfinite_direction_before_step(device: torch.device) -> None:
     class CountingSGD(torch.optim.SGD):
         steps = 0
 
@@ -237,7 +245,7 @@ def test_modular_update_rejects_nonfinite_direction_before_step(cuda_device: tor
         def __call__(self, gradients: torch.Tensor):
             return torch.full_like(gradients[0], float("nan")), {"method": self.method}
 
-    model = nn.Linear(1, 1, bias=False, device=cuda_device)
+    model = nn.Linear(1, 1, bias=False, device=device)
     with torch.no_grad():
         model.weight.fill_(1.0)
     optimizer = CountingSGD(model.parameters(), lr=0.1)
