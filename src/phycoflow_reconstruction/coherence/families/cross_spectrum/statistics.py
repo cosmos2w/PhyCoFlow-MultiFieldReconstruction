@@ -40,6 +40,65 @@ def auto_spectrum_mean_square_values(
     return (auto_spectrum(generated) - auto_spectrum(reference)).square().mean(dim=0)
 
 
+def auto_spectrum_mean_square(
+    generated: torch.Tensor,
+    reference: torch.Tensor,
+) -> torch.Tensor:
+    """Return mean auto-spectrum discrepancy across fields."""
+    return auto_spectrum_mean_square_values(
+        generated,
+        reference,
+    ).mean()
+
+
+def self_spectrum_coherence_scores(
+    generated: torch.Tensor,
+    reference: torch.Tensor,
+    eps: float,
+) -> torch.Tensor:
+    """Return one bounded self-spectrum agreement score per field.
+
+    The score compares generated and reference auto-spectra across
+    graph frequencies. One represents exact spectral agreement.
+
+    This is an auto-spectrum agreement metric, rather than the
+    diagonal of magnitude-squared cross-spectral coherence.
+    """
+    if generated.ndim != 3 or reference.shape != generated.shape:
+        raise ValueError(
+            "self-spectrum coefficients must align as [B,K,C]"
+        )
+
+    generated_spectrum = auto_spectrum(generated)
+    reference_spectrum = auto_spectrum(reference)
+
+    difference = torch.linalg.vector_norm(
+        generated_spectrum - reference_spectrum,
+        dim=0,
+    )
+    scale = (
+        torch.linalg.vector_norm(generated_spectrum, dim=0)
+        + torch.linalg.vector_norm(reference_spectrum, dim=0)
+    )
+
+    return (
+        1.0 - difference / scale.clamp_min(eps)
+    ).clamp(0.0, 1.0)
+
+
+def self_spectrum_coherence(
+    generated: torch.Tensor,
+    reference: torch.Tensor,
+    eps: float,
+) -> torch.Tensor:
+    """Return mean bounded self-spectrum agreement across fields."""
+    return self_spectrum_coherence_scores(
+        generated,
+        reference,
+        eps,
+    ).mean()
+
+
 def band_energies(coefficients: torch.Tensor, band_ids: torch.Tensor) -> torch.Tensor:
     count = int(band_ids.max().item()) + 1
     energies = []
