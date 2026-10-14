@@ -1866,8 +1866,9 @@ def run_post_training(
                 del loss
             row["data_loss"] = float(data_loss.detach().cpu())
             coherence_loss = result.scalar_loss
+            coherence_objectives = None
             if scalarizer is not None and coherence_active:
-                coherence_loss, scalarization = scalarizer(
+                family_objective, scalarization = scalarizer(
                     raw_family_losses,
                     scales=family_scales,
                     weights={
@@ -1876,9 +1877,18 @@ def run_post_training(
                     },
                 )
                 row["family_scalarization"] = scalarization
-                row["scalarized_coherence_loss"] = float(coherence_loss.detach().cpu())
+                if isinstance(family_objective, Mapping):
+                    coherence_objectives = family_objective
+                else:
+                    coherence_loss = family_objective
+                    row["scalarized_coherence_loss"] = float(coherence_loss.detach().cpu())
+                del family_objective
             if bool(config["coherence"]["schedule"].get("interval_rescale", False)):
                 coherence_loss = coherence_loss * every
+                if coherence_objectives is not None:
+                    coherence_objectives = {
+                        name: loss * every for name, loss in coherence_objectives.items()
+                    }
             diagnostic_every = int(
                 config["coherence"]
                 .get("family_balance", {})
@@ -1901,7 +1911,9 @@ def run_post_training(
                     rollout_seed=seed + 1_000_003 + global_step,
                     device=device,
                     raw_family_losses=raw_family_losses,
-                    scalarized=scalarizer is not None and coherence_active,
+                    scalarized=(
+                        scalarizer is not None and scalarizer.method != "none" and coherence_active
+                    ),
                 )
             data_update_weight, coherence_update_weight = _balanced_weights(
                 config, coherence_weight
@@ -1942,7 +1954,7 @@ def run_post_training(
                     model,
                     optimizer,
                     data_loss,
-                    coherence_loss,
+                    coherence_loss if coherence_objectives is None else coherence_objectives,
                     aggregator=aggregator,
                     data_weight=data_update_weight,
                     coherence_weight=coherence_update_weight,
@@ -1974,7 +1986,8 @@ def run_post_training(
             last_coherence_loss = row["coherence_loss"]
             # The final report needs a scalar, not a retained rollout graph.
             # Release it before the next rollout or large validation panel.
-            del result, coherence_loss, retention_losses, step_context, raw_family_losses
+            del result, coherence_loss, coherence_objectives
+            del retention_losses, step_context, raw_family_losses
         else:
             row["data_update_weight"] = _data_weight(config)
             row["coherence_update_weight"] = 0.0

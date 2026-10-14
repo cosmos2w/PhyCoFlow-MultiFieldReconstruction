@@ -2,11 +2,11 @@
 
 ## What changed
 
-Coherence post-training now has two independent choices under `optimization.multitask`: how to combine coherence families, and how to combine the coherence gradient with the native reconstruction gradient. The existing rectified-flow loss, descriptors, SOURCE calibration, AdamW, evaluation, checkpointing, and SOURCE protection remain in the shared training pipeline.
+Coherence post-training has two choices under `optimization.multitask`: how to group coherence families, and how to aggregate the active task gradients. The existing rectified-flow loss, descriptors, SOURCE calibration, AdamW, evaluation, checkpointing, and SOURCE protection remain in the shared training pipeline.
 
-The coherence families are A (global distribution), B (cross-spectrum), and T (topology). Family scalarization produces one coherence surrogate from their SOURCE-calibrated losses; outer aggregation combines its gradient with the data-retention gradient. Continue reporting raw A/B/T and reconstruction fidelity separately because different scalarizers produce different surrogate values.
+The coherence families are A (global distribution), B (cross-spectrum), and T (topology). `fixed_sum`, STCH, and DWA combine their calibrated losses into one coherence task; `none` keeps the ordered calibrated A/B/T losses as separate tasks. The outer aggregator combines the active tasks, so `none` can pass RF, A, B, and T together to ConFIG, UPGrad, CAGrad, or Sum. Continue reporting raw A/B/T and reconstruction fidelity separately because scalarized surrogate values differ across methods.
 
-Existing configurations without `optimization.multitask` retain historical behavior. In the new path, `torchjd_config` invokes TorchJD ConFIG whenever both objectives have nonzero coefficients; invalid directions stop the update without a weighted-sum fallback. An explicitly zero objective coefficient selects the sole active gradient, recorded as `modular_single_objective`.
+Existing configurations without `optimization.multitask` retain historical behavior. In the new path, `torchjd_config`, `upgrad`, and `cagrad` receive all active task gradients; invalid multi-task directions stop the update without a weighted-sum fallback. If only one task is active, its gradient is applied directly and telemetry records `modular_single_objective`.
 
 ## Install
 
@@ -36,16 +36,30 @@ Choose one method from each table. Put optional parameters under the selected me
 
 | Family method | Behavior | Optional settings |
 | --- | --- | --- |
+| `none` | Keep calibrated A/B/T losses as separate ordered tasks | None |
 | `fixed_sum` | Preserve the original calibrated family sum | None |
 | `stch` | Smooth Tchebycheff scalarization | `stch: {mu: 0.1}` |
 | `dwa` | Adapt weights from two completed reporting epochs | `dwa: {temperature: 2.0}` |
 
 | Outer method | Behavior | Optional settings |
 | --- | --- | --- |
-| `sum` | Sum the two objective gradients | None |
-| `torchjd_config` | Always-on TorchJD ConFIG | None |
+| `sum` | Sum all active task gradients | None |
+| `torchjd_config` | Always-on TorchJD ConFIG over active tasks | None |
 | `upgrad` | TorchJD dual-cone projection aggregation | None |
 | `cagrad` | TorchJD conflict-averse aggregation | `cagrad: {c: 0.5}` |
+
+For a four-task ConFIG run, select `family_scalarization.method: none` and `outer_aggregation.method: torchjd_config`. For raw unit-scaled RF/A/B/T, set both objective coefficients and all three family weights to 1.0, with `coherence.family_balance.mode: none`. This leaves descriptor normalization and topology `essential_weight` in place. `fixed_sum` + `sum` with those same unit coefficients computes RF+A+B+T.
+
+The portable [Run 00 recipe](../cases/turbulent_combustion/configs/posttrain/multitask_unit_sum.yaml) and [Run 06 recipe](../cases/turbulent_combustion/configs/posttrain/multitask_joint_config.yaml) use 1,000 reporting epochs and the 32×128 CO/T topology with one mutual line. Supply the original SOURCE path when validating either recipe:
+
+```bash
+SOURCE_RUN_PATH="$PWD/cases/turbulent_combustion/runs/tc_gl_rbf_cq_cached_kv_5000ep/20260826T212231Z_7b68c461"
+CUDA_VISIBLE_DEVICES=0 python cases/turbulent_combustion/run.py validate \
+  --config configs/posttrain/multitask_joint_config.yaml \
+  --override "source_run=$SOURCE_RUN_PATH"
+```
+
+For joint methods, telemetry records the ordered task names, per-task norms, directional products, and pairwise cosines under `outer_aggregation`; the top-level gradient cosine compares RF with the sum of the family gradients. The logged `total` is a diagnostic sum, not a scalar objective whose gradient equals the ConFIG update.
 
 The parameter values above are defaults, not tuned scientific choices. DWA uses unit weights in its first two reporting epochs and can adapt in epoch three; its history is saved in checkpoints. Remove a method's parameter block when switching to another method: inactive settings are rejected.
 
@@ -84,12 +98,12 @@ To resume, reuse the same source, config, and method parameters and add `--resum
 
 ## Pending experiments and ownership
 
-The existing Fixed Sum + TorchJD ConFIG ABC run is stopped, with checkpoints retained. Its coherence trend is broadly comparable to the historical run, with a modest lag; cross-spectrum validation and CO fidelity still need attention. This establishes an initial reference, not a preferred method.
+The local `_MultiTask` comparison has completed Runs 00–05. Its report retains coherence, fidelity, and cost results. The new plain-sum Run 00 replay and joint ConFIG Run 06 are prepared for review and require a separate launch instruction. Historical Run 00 already implements the same unit-sum objective; its results remain intact. Run 01 remains the matched baseline for the calibrated 01–05 cohort, while Run 06 should be compared with unit-sum Run 00.
 
 | Owner | Next task |
 | --- | --- |
-| Family-scalarization lead | Use Fixed Sum + TorchJD ConFIG as the reference; study STCH sensitivity on the calibrated scale, then DWA weight evolution and recovery under the same outer method. |
-| Outer-aggregation lead | Compare legacy conditional ConFIG with always-on TorchJD ConFIG as distinct conditions; then evaluate UPGrad and CAGrad under Fixed Sum. Reuse existing reference runs where appropriate. |
+| Family-scalarization lead | Review completed STCH and DWA results against Run 02, including DWA epoch weights; agree on any follow-up before starting a sweep. |
+| Outer-aggregation lead | Review the Run 00/06 recipes, then compare plain Sum with joint RF/A/B/T ConFIG after launch is authorized. Keep the existing calibrated 01–05 comparisons separate. |
 | Evaluation lead | Inspect A/B/T separately, including same-/cross-frequency B components and CO near the fidelity limit. Agree on checkpoint selection and the validation/TEST protocol. |
 | All collaborators | Agree on short exposure budgets and seeds; retain resolved configs, SOURCE identity, sampling manifests, and checkpoint lineage. Review individual method effects before combining non-default choices. |
 

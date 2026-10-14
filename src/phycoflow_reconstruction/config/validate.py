@@ -413,7 +413,7 @@ def _validate_multitask(optimization: Mapping[str, Any]) -> None:
     _validate_multitask_interface(
         multitask,
         "family_scalarization",
-        frozenset({"fixed_sum", "stch", "dwa"}),
+        frozenset({"none", "fixed_sum", "stch", "dwa"}),
         "fixed_sum",
         {"stch": {"mu": 0.1}, "dwa": {"temperature": 2.0}},
     )

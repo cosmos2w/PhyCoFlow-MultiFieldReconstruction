@@ -51,9 +51,9 @@ Post-training configs should inherit the source run's dataset/model/ observation
 
 ## Coherence post-training multitask methods
 
-Data-driven coherence post-training can opt into the explicit `optimization.multitask` namespace. It composes family losses into one differentiable coherence surrogate, then aggregates that gradient with the data-retention gradient; the existing `objectives.data_retention.weight` and `objectives.coherence.weight` remain the only objective coefficients. Family calibration and scientific descriptor definitions stay under `coherence`, and the reported original family losses remain separate from the scalarized surrogate.
+Data-driven coherence post-training can opt into the explicit `optimization.multitask` namespace. Its family selector either composes A/B/T into one coherence surrogate or keeps the calibrated family losses as separate tasks; the outer aggregator combines those active tasks with the native data-retention loss. The existing `objectives.data_retention.weight` and `objectives.coherence.weight` remain the top-level objective coefficients, while family weights and descriptor definitions stay under `coherence`.
 
-Both interface blocks may be omitted or left empty; their defaults are `fixed_sum` and `sum`. Each block has a `method` selector and may include only the selected method's nested settings. Parameters default to STCH `mu: 0.1`, DWA `temperature: 2.0`, and CAGrad `c: 0.5`; those are implementation defaults, not selected scientific optima. The validator rejects inactive method maps and extra keys, including redundant `weights` declarations.
+Both interface blocks may be omitted or left empty; their defaults are `fixed_sum` and `sum`. Each block has a `method` selector and may include only the selected method's nested settings. `family_scalarization.method: none` passes calibrated A/B/T losses as separate ordered tasks, enabling the outer aggregator to process RF, A, B, and T individually. It changes task grouping only: descriptor normalization and topology `essential_weight` remain part of the scientific definition. Parameters default to STCH `mu: 0.1`, DWA `temperature: 2.0`, and CAGrad `c: 0.5`; those are implementation defaults, not selected scientific optima. The validator rejects inactive method maps and extra keys, including redundant `weights` declarations.
 
 ```yaml
 objectives:
@@ -69,7 +69,7 @@ optimization:
       method: torchjd_config
 ```
 
-The exact method forms are `family_scalarization: {method: fixed_sum}`, `family_scalarization: {method: stch, stch: {mu: 0.1}}`, or `family_scalarization: {method: dwa, dwa: {temperature: 2.0}}`; pair one with `outer_aggregation: {method: sum}`, `{method: torchjd_config}`, `{method: upgrad}`, or `{method: cagrad, cagrad: {c: 0.5}}`. STCH, DWA, and CAGrad parameter maps are optional when their method is selected and use the defaults above. Do not add objective or family weights under `optimization.multitask`.
+The family method forms are `{method: none}`, `{method: fixed_sum}`, `{method: stch, stch: {mu: 0.1}}`, or `{method: dwa, dwa: {temperature: 2.0}}`; pair one with `outer_aggregation: {method: sum}`, `{method: torchjd_config}`, `{method: upgrad}`, or `{method: cagrad, cagrad: {c: 0.5}}`. STCH, DWA, and CAGrad parameter maps are optional when their method is selected and use the defaults above. Do not add objective or family weights under `optimization.multitask`.
 
 For example, select DWA and CAGrad from a composed config with dotted overrides:
 
@@ -83,7 +83,7 @@ python cases/turbulent_combustion/run.py validate \
   --override optimization.multitask.outer_aggregation.cagrad.c=0.5
 ```
 
-When `optimization.multitask` is present, it selects the named outer aggregator on every update with two nonzero objective coefficients. A zero coefficient disables that objective: the sole active gradient is applied directly and telemetry records `modular_single_objective`. This handles disabled objectives without treating their zero row as a stationary task; invalid two-task directions still fail without fallback. Historical `optimization.gradient_balance: config`, `config_missing_behavior`, and `config_*_grad_scale` fields may arrive from inherited profiles and are ignored by this route; they retain their old behavior when `multitask` is absent. In particular, the legacy conditional ConFIG path is not the same algorithm as `torchjd_config`. Do not combine `multitask` with `component_constrained`, `topology_regularized`, or `component_constraints`; physics-only post-training does not accept this namespace.
+When `optimization.multitask` is present, the named outer aggregator receives the active task gradients. A zero top-level coefficient disables its objective tasks; if one task remains, its gradient is applied directly and telemetry records `modular_single_objective`. An active task with a genuinely zero gradient stays in the matrix. Invalid multi-task directions fail without fallback. Historical `optimization.gradient_balance: config`, `config_missing_behavior`, and `config_*_grad_scale` fields may arrive from inherited profiles and are ignored by this route; they retain their old behavior when `multitask` is absent. In particular, the legacy conditional ConFIG path is not the same algorithm as `torchjd_config`. Do not combine `multitask` with `component_constrained`, `topology_regularized`, or `component_constraints`; physics-only post-training does not accept this namespace.
 
 ## Training validation and checkpoints
 

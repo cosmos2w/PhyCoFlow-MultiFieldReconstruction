@@ -21,6 +21,7 @@ def _config() -> dict:
     ("family_scalarization", "outer_aggregation"),
     [
         ({}, {}),
+        ({"method": "none"}, {"method": "sum"}),
         ({"method": "fixed_sum"}, {"method": "sum"}),
         ({"method": "stch", "stch": {"mu": 0.1}}, {"method": "torchjd_config"}),
         ({"method": "dwa", "dwa": {"temperature": 2.0}}, {"method": "upgrad"}),
@@ -34,6 +35,54 @@ def test_multitask_methods_and_defaults_validate(family_scalarization, outer_agg
         "outer_aggregation": outer_aggregation,
     }
     validate_config(config)
+
+
+@pytest.mark.parametrize("outer_method", ["sum", "torchjd_config", "upgrad", "cagrad"])
+def test_multitask_none_family_scalarization_accepts_each_outer_method(outer_method):
+    config = _config()
+    config["optimization"]["multitask"] = {
+        "family_scalarization": {"method": "none"},
+        "outer_aggregation": {"method": outer_method},
+    }
+    validate_config(config)
+
+
+@pytest.mark.parametrize(
+    "recipe,family_method,outer_method",
+    [
+        ("multitask_unit_sum", "fixed_sum", "sum"),
+        ("multitask_joint_config", "none", "torchjd_config"),
+    ],
+)
+def test_portable_unit_task_recipes_preserve_shared_science(recipe, family_method, outer_method):
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "cases/turbulent_combustion/configs/posttrain"
+        / f"{recipe}.yaml"
+    )
+    config = load_config(path, overrides=["source_run=/tmp/original-completed-source"])
+    validate_config(config)
+    assert config["source_checkpoint"] == "last.pt"
+    assert config["source"]["allow_integration_source"] is False
+    optimization = config["optimization"]
+    assert optimization["multitask"] == {
+        "family_scalarization": {"method": family_method},
+        "outer_aggregation": {"method": outer_method},
+    }
+    assert optimization["epochs"] == 1000
+    assert optimization["batch_size"] == 32
+    assert optimization["train_fraction"] == 0.15
+    assert optimization["lr"] == 5e-5
+    assert config["rollout"] == {"steps": 2, "solver": "euler"}
+    assert config["model"]["model_ema_eval"] is False
+    assert config["coherence"]["family_balance"]["mode"] == "none"
+    for name in ("data_retention", "coherence"):
+        assert config["objectives"][name] == {"enabled": True, "weight": 1.0}
+    families = config["coherence"]["families"]
+    assert all(family["weight"] == 1.0 for family in families.values())
+    assert families["topology"]["geometry"]["grid_shape"] == [32, 128]
+    assert families["topology"]["components"]["mutual"]["lines"] == 1
+    assert config["evaluation"]["preview"]["keep_history"] is False
 
 
 def test_multitask_defaults_validate_with_inherited_legacy_config_fields():
@@ -86,6 +135,7 @@ def test_multitask_defaults_compose_and_accept_dotted_cli_overrides(tmp_path):
     [
         ("family_scalarization", {"method": "bad"}, "family_scalarization.method"),
         ("family_scalarization", {"method": "fixed_sum", "stch": {"mu": 0.1}}, "unknown"),
+        ("family_scalarization", {"method": "none", "weights": [1.0]}, "unknown"),
         ("family_scalarization", {"method": "stch", "weights": [1.0]}, "unknown"),
         ("outer_aggregation", {"method": "sum", "cagrad": {"c": 0.5}}, "unknown"),
         ("outer_aggregation", {"method": "cagrad", "cagrad": {"c": True}}, "cagrad.c"),
