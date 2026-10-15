@@ -1,0 +1,5 @@
+# Portable flow-source entrypoint; source_run is supplied on the CLI.
+defaults: [_common.yaml]
+
+model: {model_ema_eval: false}
+output: {experiment_name: fidelity_budget_smoke_flow}

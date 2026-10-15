@@ -299,8 +299,16 @@ def _validate_common_sections(config: Mapping[str, Any]) -> None:
         raise ValueError(
             "checkpointing.selection_metric must be native_validation_loss or reconstruction_mse"
         )
-    if checkpointing.get("selection_metric") == "reconstruction_mse" and not bool(
-        preview.get("enabled", True)
+    external_policy = (
+        config.get("optimization", {}).get("multitask", {}).get("external_policy")
+        if isinstance(config.get("optimization", {}), Mapping)
+        and isinstance(config.get("optimization", {}).get("multitask", {}), Mapping)
+        else None
+    )
+    if (
+        checkpointing.get("selection_metric") == "reconstruction_mse"
+        and not bool(preview.get("enabled", True))
+        and external_policy is None
     ):
         raise ValueError("reconstruction_mse checkpoint selection requires preview.enabled=true")
 
@@ -391,6 +399,135 @@ def _validate_multitask_interface(
         )
 
 
+def _validate_external_policy(multitask: Mapping[str, Any]) -> None:
+    """Validate the opt-in external fidelity-policy selector and its defaults."""
+    external = multitask.get("external_policy")
+    if not isinstance(external, Mapping):
+        raise TypeError("optimization.multitask.external_policy must be a mapping")
+
+    method = external.get("method")
+    methods = {"lagrangian", "rectify", "extended_log_barrier"}
+    if not isinstance(method, str) or method not in methods:
+        raise ValueError(
+            "optimization.multitask.external_policy.method must be one of "
+            f"{sorted(methods)}"
+        )
+    allowed = {"method", "vector_reduction", "objective_scale"}
+    if method == "lagrangian":
+        allowed.add("lagrangian")
+    elif method == "extended_log_barrier":
+        allowed.add("extended_log_barrier")
+    _reject_unknown(external, allowed, "optimization.multitask.external_policy")
+    if external.get("vector_reduction") != "sum":
+        raise ValueError(
+            "optimization.multitask.external_policy.vector_reduction must be sum"
+        )
+    if external.get("objective_scale", "source_mean") != "source_mean":
+        raise ValueError(
+            "optimization.multitask.external_policy.objective_scale must be source_mean"
+        )
+
+    parameter_defaults: dict[str, tuple[dict[str, float], set[str]]] = {
+        "lagrangian": ({"dual_lr": 0.01}, set()),
+        "extended_log_barrier": (
+            {
+                "t_initial": 1.0,
+                "growth_factor": 1.1,
+                "update_interval": 100,
+                "t_max": 100.0,
+            },
+            {"update_interval"},
+        ),
+    }
+    if method not in parameter_defaults:
+        return
+    parameter_key = method
+    parameters = external.get(parameter_key, {})
+    if not isinstance(parameters, Mapping):
+        raise TypeError(
+            f"optimization.multitask.external_policy.{parameter_key} must be a mapping"
+        )
+    defaults, integer_keys = parameter_defaults[method]
+    _reject_unknown(
+        parameters,
+        set(defaults),
+        f"optimization.multitask.external_policy.{parameter_key}",
+    )
+    values: dict[str, float] = {}
+    for key, default in defaults.items():
+        value = parameters.get(key, default)
+        values[key] = _method_parameter(
+            value,
+            f"optimization.multitask.external_policy.{parameter_key}.{key}",
+        )
+        if key in integer_keys and int(values[key]) != values[key]:
+            raise ValueError(
+                f"optimization.multitask.external_policy.{parameter_key}.{key} "
+                "must be a positive integer"
+            )
+    if method == "extended_log_barrier":
+        if values["growth_factor"] < 1:
+            raise ValueError(
+                "optimization.multitask.external_policy.extended_log_barrier.growth_factor "
+                "must be at least 1"
+            )
+        if values["t_max"] < values["t_initial"]:
+            raise ValueError(
+                "optimization.multitask.external_policy.extended_log_barrier.t_max "
+                "must be >= t_initial"
+            )
+
+
+def _validate_fidelity_budget(multitask: Mapping[str, Any]) -> None:
+    budget = multitask.get("fidelity_budget", {})
+    if not isinstance(budget, Mapping):
+        raise TypeError("optimization.multitask.fidelity_budget must be a mapping")
+    _reject_unknown(
+        budget,
+        {
+            "metric",
+            "relative_increase",
+            "absolute_allowance",
+            "denominator_floor",
+            "calibration_batches",
+            "calibration_draws",
+            "calibration_seed",
+        },
+        "optimization.multitask.fidelity_budget",
+    )
+    if budget.get("metric", "endpoint_mse_model_units") != "endpoint_mse_model_units":
+        raise ValueError(
+            "optimization.multitask.fidelity_budget.metric must be "
+            "endpoint_mse_model_units"
+        )
+    _method_parameter(
+        budget.get("relative_increase", 0.05),
+        "optimization.multitask.fidelity_budget.relative_increase",
+        allow_zero=True,
+    )
+    _method_parameter(
+        budget.get("absolute_allowance", 0.0),
+        "optimization.multitask.fidelity_budget.absolute_allowance",
+        allow_zero=True,
+    )
+    _method_parameter(
+        budget.get("denominator_floor", 1.0e-8),
+        "optimization.multitask.fidelity_budget.denominator_floor",
+    )
+    for key, default in (("calibration_batches", 4), ("calibration_draws", 2)):
+        value = budget.get(key, default)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError(
+                f"optimization.multitask.fidelity_budget.{key} must be a positive integer"
+            )
+    seed = budget.get("calibration_seed", 700103)
+    if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
+        raise ValueError(
+            "optimization.multitask.fidelity_budget.calibration_seed must be "
+            "a nonnegative integer"
+        )
+
+
 def _validate_multitask(optimization: Mapping[str, Any]) -> None:
     if "multitask" not in optimization:
         return
@@ -399,7 +536,7 @@ def _validate_multitask(optimization: Mapping[str, Any]) -> None:
         raise TypeError("optimization.multitask must be a mapping")
     _reject_unknown(
         multitask,
-        {"family_scalarization", "outer_aggregation"},
+        {"family_scalarization", "outer_aggregation", "external_policy", "fidelity_budget"},
         "optimization.multitask",
     )
     if optimization.get("gradient_balance", "weighted_sum") in {
@@ -410,6 +547,13 @@ def _validate_multitask(optimization: Mapping[str, Any]) -> None:
             "optimization.multitask cannot be combined with constrained topology optimization"
         )
 
+    has_external_policy = "external_policy" in multitask
+    has_fidelity_budget = "fidelity_budget" in multitask
+    if has_fidelity_budget and not has_external_policy:
+        raise ValueError(
+            "optimization.multitask.fidelity_budget requires external_policy"
+        )
+
     _validate_multitask_interface(
         multitask,
         "family_scalarization",
@@ -417,13 +561,26 @@ def _validate_multitask(optimization: Mapping[str, Any]) -> None:
         "fixed_sum",
         {"stch": {"mu": 0.1}, "dwa": {"temperature": 2.0}},
     )
-    _validate_multitask_interface(
-        multitask,
-        "outer_aggregation",
-        frozenset({"sum", "torchjd_config", "upgrad", "cagrad"}),
-        "sum",
-        {"cagrad": {"c": 0.5}},
-    )
+    if has_external_policy:
+        if multitask.get("outer_aggregation") is not None:
+            raise ValueError(
+                "optimization.multitask.outer_aggregation must be null or omitted "
+                "with external_policy"
+            )
+        if optimization.get("gradient_balance", "weighted_sum") != "weighted_sum":
+            raise ValueError(
+                "external_policy cannot be combined with legacy gradient_balance"
+            )
+        _validate_external_policy(multitask)
+        _validate_fidelity_budget(multitask)
+    else:
+        _validate_multitask_interface(
+            multitask,
+            "outer_aggregation",
+            frozenset({"sum", "torchjd_config", "upgrad", "cagrad"}),
+            "sum",
+            {"cagrad": {"c": 0.5}},
+        )
 
 
 def _validate_base_training(config: Mapping[str, Any]) -> None:
@@ -1222,6 +1379,7 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
             raise ValueError("native topology guard requires evaluation.native_topology")
         if not math.isfinite(float(native_budget)) or float(native_budget) < 0:
             raise ValueError("native topology budget must be finite and nonnegative")
+    _validate_external_policy_contract(config)
 
 
 def _validate_physics_settings(settings: Mapping[str, Any]) -> None:
@@ -1237,6 +1395,71 @@ def _validate_physics_settings(settings: Mapping[str, Any]) -> None:
     weights = settings.get("weights", {})
     if not isinstance(weights, Mapping) or any(float(value) < 0 for value in weights.values()):
         raise ValueError("physics.weights must be a non-negative mapping")
+
+
+def _validate_external_policy_contract(config: Mapping[str, Any]) -> None:
+    optimization = config["optimization"]
+    multitask = optimization.get("multitask", {})
+    if not isinstance(multitask, Mapping) or "external_policy" not in multitask:
+        return
+
+    objectives = config["objectives"]
+    for name in ("endpoint", "source_anchor"):
+        if objectives.get(name, {}).get("enabled", False):
+            raise ValueError(f"external_policy cannot combine with objectives.{name}")
+    retention = objectives["data_retention"]
+    if retention.get("enabled", True) is not False or float(retention.get("weight", 0.0)) != 0:
+        raise ValueError(
+            "external_policy requires objectives.data_retention disabled with weight 0"
+        )
+    coherence_objective = objectives["coherence"]
+    coherence_weight = float(coherence_objective.get("weight", 0.0))
+    if (
+        coherence_objective.get("enabled", True) is not True
+        or not math.isfinite(coherence_weight)
+        or coherence_weight != 1.0
+    ):
+        raise ValueError(
+            "external_policy requires objectives.coherence enabled with weight 1"
+        )
+
+    trainable = config["trainable"]
+    if trainable.get("scope", "full_model") != "full_model":
+        raise ValueError("external_policy requires trainable.scope=full_model")
+    if "component_constraints" in optimization:
+        raise ValueError("external_policy cannot combine with component_constraints")
+
+    schedule = config["coherence"].get("schedule", {})
+    if (
+        int(schedule.get("start_epoch", 1)) != 1
+        or int(schedule.get("every_n_steps", 1)) != 1
+        or int(schedule.get("weight_warmup_epochs", 0)) != 0
+        or schedule.get("interval_rescale", False) is not False
+    ):
+        raise ValueError(
+            "external_policy requires coherence every step from epoch one, with no warmup or interval rescaling"
+        )
+
+    family_balance = config["coherence"].get("family_balance", {})
+    diagnostics_interval = family_balance.get("gradient_diagnostics_every_epochs", 0)
+    if (
+        isinstance(diagnostics_interval, bool)
+        or not isinstance(diagnostics_interval, (int, float))
+        or not math.isfinite(float(diagnostics_interval))
+        or float(diagnostics_interval) != 0
+    ):
+        raise ValueError(
+            "external_policy requires coherence.family_balance.gradient_diagnostics_every_epochs=0"
+        )
+
+    selection_metric = config.get("checkpointing", {}).get(
+        "selection_metric", "native_validation_loss"
+    )
+    if selection_metric not in {"reconstruction_mse", "topology_with_fidelity"}:
+        raise ValueError(
+            "external_policy requires checkpointing.selection_metric=reconstruction_mse "
+            "or topology_with_fidelity"
+        )
 
 
 def _validate_direct_physics(config: Mapping[str, Any]) -> None:

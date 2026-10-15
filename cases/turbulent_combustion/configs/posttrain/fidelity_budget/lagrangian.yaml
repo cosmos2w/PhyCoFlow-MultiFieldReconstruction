@@ -1,0 +1,11 @@
+defaults: [_common.yaml]
+
+optimization:
+  multitask:
+    external_policy:
+      method: lagrangian
+      vector_reduction: sum
+      objective_scale: source_mean
+      lagrangian: {dual_lr: 0.01}
+
+output: {experiment_name: fidelity_budget_smoke_lagrangian}

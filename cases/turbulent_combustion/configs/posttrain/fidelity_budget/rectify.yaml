@@ -1,0 +1,10 @@
+defaults: [_common.yaml]
+
+optimization:
+  multitask:
+    external_policy:
+      method: rectify
+      vector_reduction: sum
+      objective_scale: source_mean
+
+output: {experiment_name: fidelity_budget_smoke_rectify}

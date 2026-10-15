@@ -74,9 +74,19 @@ def verify_rollout_contract(model, batch, config):
             observation_config=dict(config["observation_consistency"]),
         )
         with evaluation_weight_context(model), torch.no_grad():
-            inference = model.reconstruct(
-                batch, steps=steps, generator=torch.Generator(device=device).manual_seed(seed)
-            ).prediction
+            if config.get("optimization", {}).get("multitask", {}).get("external_policy"):
+                # External fidelity evaluation uses the same declared endpoint
+                # processing, including for direct models whose native inference
+                # hook returns an unclamped prediction.
+                inference = differentiable_reconstruction(
+                    model, batch, steps=steps, solver=config["rollout"]["solver"],
+                    generator=torch.Generator(device=device).manual_seed(seed),
+                    observation_config=dict(config["observation_consistency"]),
+                )
+            else:
+                inference = model.reconstruct(
+                    batch, steps=steps, generator=torch.Generator(device=device).manual_seed(seed)
+                ).prediction
         report = {
             **_endpoint_agreement(training, inference),
             "seed": seed,

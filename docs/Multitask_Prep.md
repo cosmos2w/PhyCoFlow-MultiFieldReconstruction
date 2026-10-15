@@ -1,5 +1,7 @@
 # Multitask optimization: collaborator quick start
 
+For the opt-in SOURCE-relative endpoint policies (`lagrangian`, `rectify`, `extended_log_barrier`), see [Fidelity-budget post-training](Fidelity_Budget_Posttraining.md). The existing gradient-aggregation interface described below remains available.
+
 ## What changed
 
 Coherence post-training has two choices under `optimization.multitask`: how to group coherence families, and how to aggregate the active task gradients. The existing rectified-flow loss, descriptors, SOURCE calibration, AdamW, evaluation, checkpointing, and SOURCE protection remain in the shared training pipeline.
