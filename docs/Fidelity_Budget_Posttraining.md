@@ -1,5 +1,7 @@
 # SOURCE-relative fidelity-budget post-training
 
+This guide describes the scalar external-policy route and its original smoke evidence. For the separate internal A/B/T TorchJD ConFIG composition and the authorized 1,000-epoch Runs 11–13, see [Formal Runs 11–13](Fidelity_Budget_Formal_Runs_11_13.md); that direction-based route uses multiple gradient traversals while retaining one shared reconstruction.
+
 This opt-in extension provides framework readiness for deterministic and generative reconstruction models. It does not establish improved coherence, guaranteed fidelity, preservation of a generative distribution, or a preferred policy. The research branch `codex/fidelity-budget-posttraining` inherits the exact remote feature tip `096237ffb7c4a5c0ad90d869bdd9831cf0de105d` of `cosmos2w/flexible-loss-balancing`, fetched before branching. Historical joint RF/A/B/T, hierarchical scalarization, TorchJD, and legacy modes remain available when `external_policy` is absent.
 
 ## Meaning of the budget

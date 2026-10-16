@@ -1510,6 +1510,10 @@ def run_post_training(
         OuterAggregator(multitask.get("outer_aggregation", {}))
         if multitask is not None and external_settings is None else None
     )
+    coherence_aggregator = (
+        OuterAggregator(multitask["coherence_aggregation"])
+        if multitask is not None and "coherence_aggregation" in multitask else None
+    )
 
     if resume is None:
         store = RunStore.create(
@@ -2072,11 +2076,25 @@ def run_post_training(
                     endpoint_context["prediction"], endpoint_context["target"],
                     endpoint_context["mask"],
                 )
-                gradient = policy.update(
-                    model, optimizer,
-                    coherence_loss if coherence_objectives is None else coherence_objectives,
-                    risks, config["optimization"].get("grad_clip"),
-                )
+                if coherence_aggregator is not None:
+                    # This mapping defines three separate parameter gradients.
+                    # Keep A/B/T order explicit rather than the alphabetical
+                    # construction order of the coherence family modules.
+                    families_abt = {
+                        name: coherence_objectives[name]
+                        for name in ("global_distribution", "cross_spectrum", "topology")
+                    }
+                    gradient = policy.update_with_coherence_aggregation(
+                        model, optimizer, families_abt, risks,
+                        config["optimization"].get("grad_clip"), coherence_aggregator,
+                    )
+                    del families_abt
+                else:
+                    gradient = policy.update(
+                        model, optimizer,
+                        coherence_loss if coherence_objectives is None else coherence_objectives,
+                        risks, config["optimization"].get("grad_clip"),
+                    )
                 row["data_loss"] = float(risks.detach().mean())
                 row["native_data_loss"] = None
                 row["data_retention_objective"] = "paired_endpoint_field_budget"
@@ -2173,7 +2191,12 @@ def run_post_training(
             every if config["coherence"]["schedule"].get("interval_rescale", False) else 1
         )
         if policy is not None:
-            row["total"] = row["optimized_scalar"]
+            # ConFIG supplies a parameter direction, not a scalar surrogate
+            # whose derivative equals that direction. Retain scientific A/B/T
+            # metrics and leave the scalar-objective history empty for it.
+            row["total"] = row.get("optimized_scalar")
+            if coherence_aggregator is not None:
+                row["total_semantics"] = "parameter_direction_without_scalar_objective"
         elif constrained:
             row["total"] = row.get("regularized_loss_before", row["balanced_topology_before"])
         elif scalarizer is not None:

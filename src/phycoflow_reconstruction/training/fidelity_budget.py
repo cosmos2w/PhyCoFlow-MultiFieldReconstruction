@@ -10,7 +10,9 @@ from typing import Any
 import torch
 from torch import Tensor, nn
 
+from .gradient_balance import _assign_flat_gradient, _flat_gradient
 from .gradients import stable_clip_grad_norm_
+from .multitask import OuterAggregator
 
 
 def field_error_sums(prediction: Tensor, target: Tensor, mask: Tensor) -> tuple[Tensor, Tensor]:
@@ -343,6 +345,243 @@ class ExternalPolicy:
             completed_updates=self.completed_updates,
             update_accepted=True,
         )
+        return diagnostics
+
+    def update_with_coherence_aggregation(
+        self,
+        model: nn.Module,
+        optimizer: torch.optim.Optimizer,
+        family_losses: Mapping[str, Tensor],
+        risks: Tensor,
+        grad_clip: float | None,
+        aggregator: OuterAggregator,
+    ) -> dict[str, Any]:
+        """Apply internal ConFIG over ordered families with one external budget policy.
+
+        ``family_losses`` contains the already calibrated A/B/T scalar objectives from
+        one shared reconstruction graph. Their sum is reported as scientific coherence,
+        while the optimizer receives the ConFIG parameter direction and constraint
+        gradients. This path intentionally has no optimized scalar.
+        """
+        if not isinstance(family_losses, Mapping) or len(family_losses) != 3:
+            raise ValueError("internal ConFIG requires exactly three ordered family losses")
+        family_names = tuple(family_losses)
+        if any(not isinstance(name, str) or not name for name in family_names):
+            raise ValueError("coherence family names must be non-empty strings")
+        if not isinstance(aggregator, OuterAggregator) or aggregator.method != "torchjd_config":
+            raise ValueError("coherence aggregation requires OuterAggregator(method='torchjd_config')")
+
+        ordered_losses = {name: family_losses[name] for name in family_names}
+        coherence_value = reduce_primary(ordered_losses)
+        if not bool(torch.isfinite(coherence_value.detach()).all()):
+            raise FloatingPointError("scientific coherence sum is non-finite")
+        violations = self.reference.violations(risks)
+        parameters = _model_optimizer_parameters(model, optimizer)
+        model_device = parameters[0].device
+        if any(parameter.device != model_device for parameter in parameters):
+            raise ValueError("internal ConFIG requires trainable parameters on one device")
+        if coherence_value.device != model_device or risks.device != model_device:
+            raise ValueError("coherence losses, risks, and model parameters must share a device")
+
+        optimizer.zero_grad(set_to_none=True)
+        phase = "improve"
+        constraint_gradient_evaluations = 0
+        family_gradient_evaluations = 0
+        policy_diagnostics: dict[str, Any] = {}
+        constraint_gradient: Tensor | None = None
+        barrier_t: float | None = None
+
+        if self.method == "rectify":
+            maximum, maximum_index = torch.max(violations.detach(), dim=0)
+            if float(maximum) > 0.0:
+                phase = "repair"
+                repair_index = int(maximum_index)
+                if not violations[repair_index].requires_grad:
+                    raise FloatingPointError("selected CRPO constraint has no model gradient")
+                constraint_gradient = _flat_gradient(violations[repair_index], parameters)
+                constraint_gradient_evaluations = 1
+                policy_diagnostics = {
+                    "phase": phase,
+                    "repair_field": self.reference.field_names[repair_index],
+                }
+
+        config_direction: Tensor | None = None
+        aggregation_diagnostics: dict[str, Any] | None = None
+        if phase != "repair":
+            missing = [
+                name for name, value in ordered_losses.items()
+                if not isinstance(value, Tensor) or value.numel() != 1 or not value.is_floating_point()
+            ]
+            if missing:
+                raise TypeError(f"coherence family losses must be real scalars: {missing}")
+            gradients = []
+            for name, loss in ordered_losses.items():
+                if not bool(torch.isfinite(loss.detach()).all()):
+                    raise FloatingPointError(f"coherence family {name!r} is non-finite")
+                if not loss.requires_grad:
+                    raise FloatingPointError(f"ConFIG family {name!r} has no model gradient")
+                gradients.append(_flat_gradient(loss.reshape(()), parameters))
+            family_gradient_evaluations = len(gradients)
+            gradient_matrix = torch.stack(gradients)
+            if not bool(torch.isfinite(gradient_matrix).all()):
+                raise FloatingPointError("ConFIG family gradient matrix is non-finite")
+            matrix64 = gradient_matrix.detach().to(torch.float64)
+            family_norms = torch.linalg.vector_norm(matrix64, dim=1)
+            zero_flags = family_norms == 0
+            if bool(zero_flags.any()):
+                zero_names = [name for name, zero in zip(family_names, zero_flags.tolist()) if zero]
+                raise FloatingPointError(f"ConFIG family gradient is zero for {zero_names}; refusing update")
+            gram = matrix64 @ matrix64.T
+            matrix_rank = int(torch.linalg.matrix_rank(gram).detach().cpu())
+            # TorchJD ConFIG computes pinv(units) with PyTorch's default
+            # rtol=max(m,n)*eps. At the full model width, FP32 can truncate
+            # valid task modes, so keep this tiny-row linear algebra in FP64.
+            config_direction, aggregation_diagnostics = aggregator(matrix64)
+            config_norm = torch.linalg.vector_norm(config_direction.detach().to(torch.float64))
+            if not bool(torch.isfinite(config_norm)) or float(config_norm) == 0.0:
+                raise FloatingPointError("TorchJD ConFIG returned a zero or non-finite direction")
+            aggregation_diagnostics.update(
+                method=aggregator.method,
+                family_order=list(family_names),
+                gradient_matrix_shape=list(gradient_matrix.shape),
+                source_gradient_dtype=str(gradient_matrix.dtype),
+                aggregation_dtype=str(matrix64.dtype),
+                matrix_rank=matrix_rank,
+                matrix_rank_deficient=matrix_rank < len(family_names),
+                zero_gradient_flags=dict(zip(family_names, (bool(value) for value in zero_flags.cpu()))),
+                gradient_norms_by_family=dict(zip(family_names, aggregation_diagnostics["gradient_norms"])),
+                directional_products_by_family=dict(
+                    zip(family_names, aggregation_diagnostics["directional_products"])
+                ),
+            )
+            pairwise = aggregation_diagnostics["pairwise_gradient_cosines"]
+            aggregation_diagnostics["pairwise_gradient_cosines_by_family"] = {
+                name: dict(zip(family_names, row)) for name, row in zip(family_names, pairwise)
+            }
+            config_direction = config_direction / self.reference.objective_scale
+
+            if self.method == "lagrangian":
+                policy_diagnostics["multipliers_before"] = self._multipliers()
+                if any(value != 0.0 for value in (self._multipliers() or [])):
+                    contribution, _ = self._lagrangian_objective(
+                        coherence_value.new_zeros(()), violations
+                    )
+                    constraint_gradient = _flat_gradient(contribution, parameters)
+                    constraint_gradient_evaluations = 1
+            elif self.method == "extended_log_barrier":
+                barrier_t = barrier_schedule(self.completed_updates, **self._barrier_settings)
+                barrier_values = extended_log_barrier(violations, barrier_t)
+                constraint_gradient = _flat_gradient(barrier_values.sum(), parameters)
+                constraint_gradient_evaluations = 1
+                barrier_weights = extended_log_barrier_derivative(violations.detach(), barrier_t)
+                policy_diagnostics.update(
+                    barrier_t=barrier_t,
+                    barrier_derivative_weights=dict(
+                        zip(self.reference.field_names, (float(value) for value in barrier_weights.cpu()))
+                    ),
+                )
+            else:
+                policy_diagnostics["phase"] = "improve"
+
+        if config_direction is None:
+            if constraint_gradient is None:
+                raise RuntimeError("external policy failed to construct an update direction")
+            direction = constraint_gradient
+            constraint_norm = torch.linalg.vector_norm(direction.detach().to(torch.float64))
+            config_direction_norm = 0.0
+        else:
+            config_direction_norm = float(
+                torch.linalg.vector_norm(config_direction.detach().to(torch.float64)).cpu()
+            )
+            if constraint_gradient is None:
+                constraint_gradient = torch.zeros_like(config_direction)
+            if not bool(torch.isfinite(constraint_gradient).all()):
+                raise FloatingPointError("external constraint gradient is non-finite")
+            constraint_norm = torch.linalg.vector_norm(constraint_gradient.detach().to(torch.float64))
+            direction = config_direction + constraint_gradient
+
+        if not bool(torch.isfinite(direction).all()):
+            raise FloatingPointError("composed model direction is non-finite; refusing update")
+        direction_norm = torch.linalg.vector_norm(direction.detach().to(torch.float64))
+        if not bool(torch.isfinite(direction_norm)) or float(direction_norm) == 0.0:
+            raise FloatingPointError("composed model direction is zero or non-finite; refusing update")
+
+        _assign_flat_gradient(parameters, direction)
+        if any(not bool(torch.isfinite(parameter.grad).all()) for parameter in parameters):
+            optimizer.zero_grad(set_to_none=True)
+            raise FloatingPointError("model gradient is non-finite; refusing update")
+        clip = None if grad_clip is None or float(grad_clip) == 0 else float(grad_clip)
+        if clip is not None and (not math.isfinite(clip) or clip < 0):
+            raise ValueError("grad_clip must be finite and non-negative")
+        norm = stable_clip_grad_norm_(parameters, clip) if clip is not None else _grad_norm(parameters)
+        if not bool(torch.isfinite(norm)):
+            optimizer.zero_grad(set_to_none=True)
+            raise FloatingPointError("model gradient norm is non-finite; refusing update")
+        clip_coefficient = min(1.0, clip / (float(norm) + 1.0e-6)) if clip else 1.0
+
+        optimizer.step()
+        if any(not bool(torch.isfinite(parameter.detach()).all()) for parameter in parameters):
+            raise FloatingPointError("model optimizer produced non-finite parameters")
+        if self.method == "lagrangian":
+            # Cooper's dual term detaches violations; prepare it only after the model
+            # update has succeeded so dual state cannot advance on a rejected step.
+            self._prepare_dual_gradient(violations.detach())
+            self._dual_optimizer.step()
+            self._multiplier.post_step_()
+            policy_diagnostics["multipliers_after"] = self._multipliers()
+
+        self.completed_updates += 1
+        field_risk = dict(
+            zip(self.reference.field_names, (float(value) for value in risks.detach().cpu().reshape(-1)))
+        )
+        field_violation = dict(
+            zip(self.reference.field_names, (float(value) for value in violations.detach().cpu()))
+        )
+        diagnostics: dict[str, Any] = {
+            "optimization_route": "external_policy",
+            "policy": self.method,
+            "phase": phase,
+            "update_mode": f"coherence_config_{self.method}_{phase}",
+            "coherence_value": float(coherence_value.detach().cpu()),
+            "scientific_coherence": float(coherence_value.detach().cpu()),
+            "coherence_scale": self.reference.objective_scale,
+            "coherence_aggregation": aggregation_diagnostics,
+            "coherence_direction_norm": config_direction_norm,
+            "constraint_gradient_norm": float(constraint_norm.detach().cpu()),
+            "combined_direction_norm": float(direction_norm.detach().cpu()),
+            "family_gradient_evaluations": family_gradient_evaluations,
+            "constraint_gradient_evaluations": constraint_gradient_evaluations,
+            "gradient_traversal_counts": {
+                "family": family_gradient_evaluations,
+                "constraint": constraint_gradient_evaluations,
+            },
+            "family_order": list(family_names),
+            "field_risk": field_risk,
+            "field_reference_risk": dict(zip(self.reference.field_names, self.reference.reference_risks)),
+            "field_upper_bound": dict(zip(self.reference.field_names, self.reference.upper_bounds)),
+            "field_violation": field_violation,
+            "denominator_floor_activated": dict(
+                zip(self.reference.field_names, self.reference.denominator_floor_activated)
+            ),
+            "objective_floor_activated": self.reference.objective_floor_activated,
+            "model_grad_norm": float(norm.detach().cpu()),
+            "gradient_clip_coefficient": clip_coefficient,
+            "completed_updates": self.completed_updates,
+            "policy_state": {
+                "completed_updates": self.completed_updates,
+                "multipliers": self._multipliers(),
+                "barrier_t": barrier_t,
+            },
+            "update_accepted": True,
+            "rectify_repair": self.method == "rectify" and phase == "repair",
+            "repair_field": policy_diagnostics.get("repair_field"),
+        }
+        if self.method == "rectify":
+            repair_field = policy_diagnostics.get("repair_field")
+            diagnostics.update(
+                {f"rectify_repair_field/{name}": name == repair_field for name in self.reference.field_names}
+            )
+        diagnostics.update(policy_diagnostics)
         return diagnostics
 
     def _lagrangian_objective(self, primary: Tensor, violations: Tensor) -> tuple[Tensor, dict[str, Any]]:

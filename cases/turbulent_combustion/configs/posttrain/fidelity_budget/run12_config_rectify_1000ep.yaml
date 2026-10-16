@@ -1,0 +1,7 @@
+defaults: [_formal_1000ep_common.yaml]
+
+optimization:
+  multitask:
+    external_policy: {method: rectify}
+
+output: {experiment_name: _MultiTask/12_config_rectify_1000ep}

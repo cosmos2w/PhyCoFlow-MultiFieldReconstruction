@@ -238,8 +238,17 @@ def _validate_common_sections(config: Mapping[str, Any]) -> None:
     ):
         if int(preview.get(key, default)) < 1:
             raise ValueError(f"evaluation.preview.{key} must be positive")
-    if {"loss_every_epochs", "reconstruct_every_epochs"} & set(preview) and not bool(
-        preview.get("enabled", True)
+    optimization = config.get("optimization", {})
+    multitask = (
+        optimization.get("multitask", {}) if isinstance(optimization, Mapping) else {}
+    )
+    has_coherence_aggregation = isinstance(multitask, Mapping) and (
+        "coherence_aggregation" in multitask
+    )
+    if (
+        {"loss_every_epochs", "reconstruct_every_epochs"} & set(preview)
+        and not bool(preview.get("enabled", True))
+        and not has_coherence_aggregation
     ):
         raise ValueError("modern evaluation.preview validation monitoring must be enabled")
     if int(preview.get("sample_index", 0)) < 0:
@@ -478,6 +487,24 @@ def _validate_external_policy(multitask: Mapping[str, Any]) -> None:
             )
 
 
+def _validate_coherence_aggregation(multitask: Mapping[str, Any]) -> None:
+    """Validate the explicit family-gradient aggregation used inside external policies."""
+    aggregation = multitask["coherence_aggregation"]
+    if not isinstance(aggregation, Mapping):
+        raise TypeError(
+            "optimization.multitask.coherence_aggregation must be a mapping"
+        )
+    _reject_unknown(
+        aggregation,
+        {"method"},
+        "optimization.multitask.coherence_aggregation",
+    )
+    if aggregation.get("method") != "torchjd_config":
+        raise ValueError(
+            "optimization.multitask.coherence_aggregation.method must be torchjd_config"
+        )
+
+
 def _validate_fidelity_budget(multitask: Mapping[str, Any]) -> None:
     budget = multitask.get("fidelity_budget", {})
     if not isinstance(budget, Mapping):
@@ -536,7 +563,13 @@ def _validate_multitask(optimization: Mapping[str, Any]) -> None:
         raise TypeError("optimization.multitask must be a mapping")
     _reject_unknown(
         multitask,
-        {"family_scalarization", "outer_aggregation", "external_policy", "fidelity_budget"},
+        {
+            "family_scalarization",
+            "outer_aggregation",
+            "external_policy",
+            "fidelity_budget",
+            "coherence_aggregation",
+        },
         "optimization.multitask",
     )
     if optimization.get("gradient_balance", "weighted_sum") in {
@@ -549,9 +582,14 @@ def _validate_multitask(optimization: Mapping[str, Any]) -> None:
 
     has_external_policy = "external_policy" in multitask
     has_fidelity_budget = "fidelity_budget" in multitask
+    has_coherence_aggregation = "coherence_aggregation" in multitask
     if has_fidelity_budget and not has_external_policy:
         raise ValueError(
             "optimization.multitask.fidelity_budget requires external_policy"
+        )
+    if has_coherence_aggregation and not has_external_policy:
+        raise ValueError(
+            "optimization.multitask.coherence_aggregation requires external_policy"
         )
 
     _validate_multitask_interface(
@@ -561,6 +599,17 @@ def _validate_multitask(optimization: Mapping[str, Any]) -> None:
         "fixed_sum",
         {"stch": {"mu": 0.1}, "dwa": {"temperature": 2.0}},
     )
+    if has_coherence_aggregation:
+        _validate_coherence_aggregation(multitask)
+        family_scalarization = multitask.get("family_scalarization", {})
+        if (
+            not isinstance(family_scalarization, Mapping)
+            or family_scalarization.get("method") != "none"
+        ):
+            raise ValueError(
+                "coherence_aggregation requires explicit "
+                "family_scalarization.method=none"
+            )
     if has_external_policy:
         if multitask.get("outer_aggregation") is not None:
             raise ValueError(
@@ -1402,6 +1451,16 @@ def _validate_external_policy_contract(config: Mapping[str, Any]) -> None:
     multitask = optimization.get("multitask", {})
     if not isinstance(multitask, Mapping) or "external_policy" not in multitask:
         return
+
+    if "coherence_aggregation" in multitask:
+        families = config.get("coherence", {}).get("families", {})
+        for family_name in ("global_distribution", "cross_spectrum", "topology"):
+            family = families.get(family_name) if isinstance(families, Mapping) else None
+            if not isinstance(family, Mapping) or family.get("enabled", True) is not True:
+                raise ValueError(
+                    "coherence_aggregation requires enabled coherence families "
+                    "global_distribution, cross_spectrum, and topology"
+                )
 
     objectives = config["objectives"]
     for name in ("endpoint", "source_anchor"):
