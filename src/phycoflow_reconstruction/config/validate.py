@@ -350,6 +350,42 @@ def _validate_optimization_values(settings: Mapping[str, Any]) -> None:
         raise TypeError("optimization.adaptive_backward_scaling must be boolean")
 
 
+def _validate_lr_warmup(settings: Mapping[str, Any]) -> None:
+    """Validate the optional post-training schedule for the model optimizer."""
+    if "lr_warmup" not in settings:
+        return
+    warmup = settings["lr_warmup"]
+    if not isinstance(warmup, Mapping):
+        raise TypeError("optimization.lr_warmup must be a mapping")
+    _reject_unknown(warmup, {"enabled", "start_lr", "updates"}, "optimization.lr_warmup")
+    if "enabled" not in warmup or not isinstance(warmup["enabled"], bool):
+        raise TypeError("optimization.lr_warmup.enabled must be boolean")
+
+    enabled = warmup["enabled"]
+    if enabled and "start_lr" not in warmup:
+        raise ValueError("optimization.lr_warmup.start_lr is required when enabled")
+    if enabled and "updates" not in warmup:
+        raise ValueError("optimization.lr_warmup.updates is required when enabled")
+
+    start_lr = None
+    if "start_lr" in warmup:
+        start_lr = _method_parameter(warmup["start_lr"], "optimization.lr_warmup.start_lr")
+
+    if "updates" in warmup:
+        updates = warmup["updates"]
+        if isinstance(updates, bool) or not isinstance(updates, int):
+            raise ValueError("optimization.lr_warmup.updates must be an integer")
+        if enabled and updates < 2:
+            raise ValueError("optimization.lr_warmup.updates must be >= 2 when enabled")
+
+    if enabled:
+        if "lr" not in settings:
+            raise ValueError("optimization.lr is required when optimization.lr_warmup is enabled")
+        base_lr = _method_parameter(settings["lr"], "optimization.lr")
+        if start_lr is None or start_lr > base_lr:
+            raise ValueError("optimization.lr_warmup.start_lr must be <= optimization.lr")
+
+
 def _method_parameter(value: Any, path: str, *, allow_zero: bool = False) -> float:
     """Validate one numeric multitask method parameter without accepting bools or NaNs."""
     message = f"{path} must be a finite {'nonnegative' if allow_zero else 'positive'} number"
@@ -1121,6 +1157,7 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
             "config_coherence_grad_scale",
             "model_mode",
             "rollout_execution",
+            "lr_warmup",
             "component_constraints",
             "training_subset",
             "sampling",
@@ -1129,6 +1166,7 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
         "optimization",
     )
     _validate_optimization_values(optimization)
+    _validate_lr_warmup(optimization)
     _validate_multitask(optimization)
     if "steps_per_epoch" in optimization:
         from ..training.update_budget import post_training_steps_per_epoch

@@ -95,6 +95,19 @@ from .topology_selection import fidelity_eligibility, topology_selection_report
 from .update_budget import post_training_steps_per_epoch, sample_exposure
 
 
+def _scheduled_model_lr(optimization: Mapping[str, Any], completed_updates: int) -> float | None:
+    """Return the opt-in model LR for the next update, using restored global count."""
+    warmup = optimization.get("lr_warmup", {})
+    if not warmup.get("enabled", False):
+        return None
+    base_lr = float(optimization.get("lr", 5e-5))
+    last_warmup_index = int(warmup["updates"]) - 1
+    if completed_updates >= last_warmup_index:
+        return base_lr
+    start_lr = float(warmup["start_lr"])
+    return start_lr + (base_lr - start_lr) * completed_updates / last_warmup_index
+
+
 def _configure_persistence_workers(config: Mapping[str, Any]) -> None:
     """Parallelize independent GUDHI pairings without changing their results.
 
@@ -1956,6 +1969,10 @@ def run_post_training(
         epoch = global_step // steps_per_epoch + 1
         post_training_mode(model, config)
         step_started = perf_counter()
+        scheduled_lr = _scheduled_model_lr(config["optimization"], global_step)
+        if scheduled_lr is not None:
+            for group in optimizer.param_groups:
+                group["lr"] = scheduled_lr
         data_loss = (
             torch.zeros((), device=device)
             if constrained or policy is not None else model.training_loss(batch).total
@@ -2205,7 +2222,27 @@ def run_post_training(
             ] * row.get("scalarized_coherence_loss", row.get("coherence_loss", 0.0)) * (
                 every if config["coherence"]["schedule"].get("interval_rescale", False) else 1
             )
-        monitor.record(row, lr=optimizer.param_groups[0]["lr"])
+        row["optimizer_lr"] = float(optimizer.param_groups[0]["lr"])
+        if scheduled_lr is not None and global_step < int(
+            config["optimization"]["lr_warmup"]["updates"]
+        ):
+            # Endpoint risks and coherence are measured on the shared prediction
+            # before this model step; the LR is the value actually used by AdamW.
+            keys = (
+                "step", "optimizer_lr", "field_risk", "field_violation",
+                "multipliers_before", "multipliers_after", "scientific_coherence",
+                "model_grad_norm", "gradient_clip_coefficient", "coherence_direction_norm",
+                "constraint_gradient_norm", "combined_direction_norm", "update_accepted",
+            )
+            detail = {key: row.get(key) for key in keys}
+            detail["measurement_position"] = "pre_model_step"
+            detail["coherence_by_family"] = {
+                name: row.get(f"coherence_family/{name}/weighted_contribution")
+                for name in ("global_distribution", "cross_spectrum", "topology")
+            }
+            with (store.run_dir / "metrics/lr_warmup_updates.jsonl").open("a") as handle:
+                handle.write(json.dumps(detail, allow_nan=False) + "\n")
+        monitor.record(row, lr=row["optimizer_lr"])
         checkpoint_result = None
         if checkpoint_manager.due_for_preview_or_checkpoint(global_step + 1, preview):
             # Keep the case artifacts and checkpoint family state at the same
@@ -2246,6 +2283,7 @@ def run_post_training(
                     "reporting_epoch": (global_step + 1) / steps_per_epoch,
                     **sample_exposure(global_step + 1, len(train_dataset), batch_size),
                     "last_update_seconds": row["update_seconds"],
+                    "optimizer_lr": row["optimizer_lr"],
                     "update_mode": row.get("update_mode"),
                 },
             )
@@ -2394,6 +2432,7 @@ def run_post_training(
         ),
         coherence_target_uses={name: family.target_use for name, family in families.items()},
         final_coherence_loss=last_coherence_loss,
+        optimizer_lr=float(optimizer.param_groups[0]["lr"]),
         post_training_seconds=post_training_seconds,
         seconds_per_step=post_training_seconds / max(final_step - start_step, 1),
         peak_cuda_memory_bytes=(

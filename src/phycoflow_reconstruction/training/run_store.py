@@ -208,7 +208,7 @@ class RunStore:
         therefore leave metrics for updates that recovery will replay. Repeated
         validation of the same checkpoint is reduced to its last complete row.
         """
-        for name in ("history", "validation_history", "topology_validation"):
+        for name in ("history", "validation_history", "topology_validation", "lr_warmup_updates"):
             path = self.run_dir / "metrics" / f"{name}.jsonl"
             if not path.exists():
                 continue
