@@ -245,6 +245,7 @@ class ExternalPolicy:
         self._multiplier = self._constraint = self._dual_optimizer = None
         self._constraint_state_type = None
         self._barrier_settings = None
+        self._penalty_interval_updates = 1
         if self.method == "lagrangian":
             self._init_lagrangian()
         elif self.method == "extended_log_barrier":
@@ -267,6 +268,11 @@ class ExternalPolicy:
         dual_lr = float(self.settings.get("lagrangian", {}).get("dual_lr", 0.01))
         if not math.isfinite(dual_lr) or dual_lr <= 0:
             raise ValueError("lagrangian dual_lr must be finite and positive")
+        settings = self.settings.get("lagrangian", {})
+        interval = settings.get("penalty_interval_updates", 1)
+        if isinstance(interval, bool) or not isinstance(interval, int) or interval < 1:
+            raise ValueError("lagrangian penalty_interval_updates must be a positive integer")
+        self._penalty_interval_updates = interval
         zeros = torch.zeros(len(self.reference.field_names), dtype=torch.float64, device=self.device)
         self._multiplier = DenseMultiplier(
             num_constraints=len(self.reference.field_names), init=zeros, device=self.device, dtype=torch.float64
@@ -293,7 +299,11 @@ class ExternalPolicy:
         scaled_primary = primary_value / self.reference.objective_scale
         diagnostics: dict[str, Any] = {}
         if self.method == "lagrangian":
-            objective, diagnostics = self._lagrangian_objective(scaled_primary, violations)
+            diagnostics = self._penalty_diagnostics()
+            diagnostics["multipliers_before"] = self._multipliers()
+            objective = scaled_primary
+            if diagnostics["fidelity_penalty_active"]:
+                objective, _ = self._lagrangian_objective(scaled_primary, violations)
         elif self.method == "rectify":
             objective, diagnostics = self._rectify_objective(scaled_primary, violations)
         else:
@@ -461,8 +471,11 @@ class ExternalPolicy:
             config_direction = config_direction / self.reference.objective_scale
 
             if self.method == "lagrangian":
+                policy_diagnostics.update(self._penalty_diagnostics())
                 policy_diagnostics["multipliers_before"] = self._multipliers()
-                if any(value != 0.0 for value in (self._multipliers() or [])):
+                if policy_diagnostics["fidelity_penalty_active"] and any(
+                    value != 0.0 for value in (self._multipliers() or [])
+                ):
                     contribution, _ = self._lagrangian_objective(
                         coherence_value.new_zeros(()), violations
                     )
@@ -583,6 +596,15 @@ class ExternalPolicy:
             )
         diagnostics.update(policy_diagnostics)
         return diagnostics
+
+    def _penalty_diagnostics(self) -> dict[str, Any]:
+        # Default 1 retains every-update penalties. Deriving the next position
+        # from the restored count avoids restarting the cadence after resume.
+        active = (self.completed_updates + 1) % self._penalty_interval_updates == 0
+        return {
+            "fidelity_penalty_active": active,
+            "fidelity_penalty_interval_updates": self._penalty_interval_updates,
+        }
 
     def _lagrangian_objective(self, primary: Tensor, violations: Tensor) -> tuple[Tensor, dict[str, Any]]:
         state = self._constraint_state_type(violation=violations, strict_violation=violations.detach())

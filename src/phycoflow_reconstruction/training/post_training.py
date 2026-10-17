@@ -2233,6 +2233,7 @@ def run_post_training(
                 "multipliers_before", "multipliers_after", "scientific_coherence",
                 "model_grad_norm", "gradient_clip_coefficient", "coherence_direction_norm",
                 "constraint_gradient_norm", "combined_direction_norm", "update_accepted",
+                "fidelity_penalty_active",
             )
             detail = {key: row.get(key) for key in keys}
             detail["measurement_position"] = "pre_model_step"

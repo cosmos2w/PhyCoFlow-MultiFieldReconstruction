@@ -473,7 +473,10 @@ def _validate_external_policy(multitask: Mapping[str, Any]) -> None:
         )
 
     parameter_defaults: dict[str, tuple[dict[str, float], set[str]]] = {
-        "lagrangian": ({"dual_lr": 0.01}, set()),
+        "lagrangian": (
+            {"dual_lr": 0.01, "penalty_interval_updates": 1},
+            {"penalty_interval_updates"},
+        ),
         "extended_log_barrier": (
             {
                 "t_initial": 1.0,
@@ -505,7 +508,10 @@ def _validate_external_policy(multitask: Mapping[str, Any]) -> None:
             value,
             f"optimization.multitask.external_policy.{parameter_key}.{key}",
         )
-        if key in integer_keys and int(values[key]) != values[key]:
+        if key in integer_keys and (
+            int(values[key]) != values[key]
+            or (method == "lagrangian" and not isinstance(value, int))
+        ):
             raise ValueError(
                 f"optimization.multitask.external_policy.{parameter_key}.{key} "
                 "must be a positive integer"

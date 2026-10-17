@@ -12,8 +12,11 @@ from phycoflow_reconstruction.training.post_training import run_post_training
 from phycoflow_reconstruction.training.run_store import load_project_checkpoint
 
 
-@pytest.mark.parametrize("method", ["lagrangian", "rectify", "extended_log_barrier"])
-def test_composition_shared_rollout_counts_and_recovery(tmp_path, monkeypatch, method):
+@pytest.mark.parametrize(
+    ("method", "penalty_interval"),
+    [("lagrangian", 1), ("lagrangian", 2), ("rectify", 1), ("extended_log_barrier", 1)],
+)
+def test_composition_shared_rollout_counts_and_recovery(tmp_path, monkeypatch, method, penalty_interval):
     pytest.importorskip("torchjd")
     if method == "lagrangian":
         pytest.importorskip("cooper")
@@ -37,6 +40,10 @@ def test_composition_shared_rollout_counts_and_recovery(tmp_path, monkeypatch, m
             "fidelity_budget": {"calibration_batches": 2, "calibration_draws": 2},
         },
     )
+    if method == "lagrangian":
+        config["optimization"]["multitask"]["external_policy"]["lagrangian"] = {
+            "penalty_interval_updates": penalty_interval,
+        }
     cross = _cross_config()
     cross["components"]["cross_frequency"]["enabled"] = False  # Two TRAIN snapshots.
     config["coherence"].update(
@@ -118,6 +125,8 @@ def test_composition_shared_rollout_counts_and_recovery(tmp_path, monkeypatch, m
         assert row["total_semantics"] == "parameter_direction_without_scalar_objective"
         assert row["family_scalarization"]["method"] == "none"
         assert record["reconstructions"] == 1
+        if method == "lagrangian":
+            assert row["fidelity_penalty_active"] == (row["step"] % penalty_interval == 0)
         if row.get("phase") == "repair":
             assert record["traversals"] == 1
         else:
