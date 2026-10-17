@@ -1,0 +1,16 @@
+# Full portable GL_rbf_ENH with the requested asymmetric feature widths.
+# Keep the previous B64 protocol while giving this architecture a fresh identity.
+defaults:
+  - gl_rbf_enh_w296_range_b64.yaml
+
+model:
+  hidden_dim: 256
+  cond_dim: 128
+  field_embed_dim: 128
+  latent_dim: 256
+  num_latents: 128
+  num_latent_blocks: 3
+  num_heads: 8
+
+output:
+  experiment_name: kolm_shu_gl_rbf_enh_w256_c128_range_b64
