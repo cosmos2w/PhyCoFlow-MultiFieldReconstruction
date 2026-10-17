@@ -6,6 +6,7 @@ import json
 import math
 import shutil
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,17 @@ from ..evaluation import reconstruction_metrics
 from .common import sensor_protocol_from_config
 from .model_lifecycle import evaluation_weight_context
 from .run_store import RunStore
+
+
+def _preview_sensor_protocol(config: Mapping[str, Any]):
+    """Optionally fix validation counts without mutating training observations."""
+    settings = config.get("evaluation", {}).get("preview", {})
+    protocol = sensor_protocol_from_config(config, seed_offset=int(settings.get("seed", 2027)))
+    if "sensor_counts" in settings:
+        protocol = replace(
+            protocol, field_counts=dict(settings["sensor_counts"]), field_count_ranges=None
+        )
+    return protocol
 
 
 def _physical_observations(batch: ObservationBatch, normalizer) -> torch.Tensor:
@@ -395,6 +407,7 @@ class TrainingReconstructionPreview:
         self.settings = settings
         self.dataset = None
         self.batch = None
+        self.sensor_counts: dict[str, int] = {}
         self.field_units: tuple[str, ...] = ()
         self.query_coords_physical: np.ndarray | None = None
         self.obs_coords_physical: np.ndarray | None = None
@@ -426,11 +439,13 @@ class TrainingReconstructionPreview:
         sample = self.dataset[sample_index]
         self.batch = build_observation_batch(
             [sample],
-            sensor_protocol_from_config(
-                config, seed_offset=int(settings.get("seed", 2027))
-            ),
+            _preview_sensor_protocol(config),
             query_points=None if query_points is None else int(query_points),
         ).to(device)
+        self.sensor_counts = {
+            name: int((self.batch.obs_valid_mask[0] & (self.batch.obs_field_ids[0] == index)).sum())
+            for index, name in enumerate(self.dataset.field_names)
+        }
         self.field_units = tuple(self.dataset.data_spec.field_units)
         normalized_reference = sample.coordinates.detach().cpu().numpy()
         physical_reference = sample.coordinates_raw.detach().cpu().numpy()
@@ -503,6 +518,7 @@ class TrainingReconstructionPreview:
             "seed": seed,
             "loss": total,
             "components": components,
+            "sensor_counts": dict(self.sensor_counts),
         }
         self.store.write_json(
             "evaluation/training_preview/latest_validation.json",
@@ -590,6 +606,7 @@ class TrainingReconstructionPreview:
             "weight_source": "configured_evaluation_weights",
             "generation_steps": self.generation_steps,
             "seed": seed,
+            "sensor_counts": dict(self.sensor_counts),
             "metrics": metrics,
             "figures": {
                 path.suffix.removeprefix("."): str(path.relative_to(self.store.run_dir))

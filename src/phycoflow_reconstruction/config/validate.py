@@ -225,9 +225,18 @@ def _validate_common_sections(config: Mapping[str, Any]) -> None:
             "generation_steps",
             "seed",
             "keep_history",
+            "sensor_counts",
         },
         "evaluation.preview",
     )
+    if "sensor_counts" in preview:
+        counts = preview["sensor_counts"]
+        if not isinstance(counts, Mapping) or not counts:
+            raise ValueError("evaluation.preview.sensor_counts must be a non-empty mapping")
+        if set(counts) != set(observations["fields"]):
+            raise ValueError("evaluation.preview.sensor_counts must match the training observed fields")
+        if any(isinstance(value, bool) or not isinstance(value, int) or value < 1 for value in counts.values()):
+            raise ValueError("evaluation.preview.sensor_counts must contain positive integer counts")
     for key in ("enabled", "keep_history"):
         if key in preview and not isinstance(preview[key], bool):
             raise TypeError(f"evaluation.preview.{key} must be boolean")

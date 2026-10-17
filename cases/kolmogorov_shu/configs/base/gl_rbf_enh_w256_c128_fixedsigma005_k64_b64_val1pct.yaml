@@ -1,0 +1,16 @@
+# Fresh fixed-bandwidth, larger-neighborhood run. Training keeps ranged sensing.
+defaults:
+  - gl_rbf_enh_w256_c128_range_b64.yaml
+
+model:
+  learnable_rbf_sigma: false
+  rbf_sigma: 0.05
+  gather_topk: 64
+
+evaluation:
+  preview:
+    sensor_counts:
+      vorticity: 655  # nearest integer to 1% of 65,536 grid points
+
+output:
+  experiment_name: kolm_shu_gl_rbf_enh_w256_c128_fixedsigma005_k64_b64_val1pct

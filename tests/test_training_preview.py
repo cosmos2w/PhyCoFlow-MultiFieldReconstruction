@@ -167,6 +167,7 @@ def test_validation_loss_is_seeded_and_does_not_advance_training_rng(tmp_path):
     preview.batch = SimpleNamespace(sample_ids=("validation:0",))
     preview.device = torch.device("cpu")
     preview.settings = {"seed": 123}
+    preview.sensor_counts = {"vorticity": 655}
     preview.steps_per_epoch = 4
     preview.store = RunStore.create(tmp_path, "validation", config)
     model = RandomLossModel()
@@ -180,4 +181,5 @@ def test_validation_loss_is_seeded_and_does_not_advance_training_rng(tmp_path):
 
     assert first["loss"] == second["loss"]
     assert first["components"] == second["components"]
+    assert first["sensor_counts"] == second["sensor_counts"] == {"vorticity": 655}
     assert torch.equal(actual_next, expected_next)
