@@ -2361,7 +2361,10 @@ class ConditionalPointHybridLocalGlobalRBFCQ(ConditionalPointHybridLocalGlobalRB
         if self.cq_measurement_support_enabled:
             if raw_features is None:
                 raise RuntimeError("CQ measurement/support features were not constructed.")
-            if self.cq_measurement_support_normalize:
+            # With one field, support is one and LayerNorm([value, 1])
+            # nearly removes value amplitude. Keep the already-normalized
+            # measurement intact; retain the module for checkpoint compatibility.
+            if self.cq_measurement_support_normalize and self.n_fields > 1:
                 raw_features = self.cq_measurement_support_norm(raw_features)
             head_input = torch.cat([head_input, raw_features], dim=-1)
         residual = self.cq_head(self.cq_fusion_norm(head_input))

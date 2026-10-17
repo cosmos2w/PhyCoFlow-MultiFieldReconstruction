@@ -1,0 +1,7 @@
+# A uniform random count of 65-6,554 vorticity sensors per training frame (0.1-10 %
+# of 65,536 points), the training range of the other FlowReconBench Kolmogorov methods.
+observations:
+  protocol: random_uniform
+  seed: 42
+  fields:
+    vorticity: {count_min: 65, count_max: 6554}

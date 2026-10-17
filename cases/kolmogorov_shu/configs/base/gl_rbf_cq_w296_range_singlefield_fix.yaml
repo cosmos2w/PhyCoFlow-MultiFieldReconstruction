@@ -1,0 +1,7 @@
+# Same scientific configuration as the coworker's B recipe. The code fix is
+# active in this checkout; give fresh training a distinct experiment identity.
+defaults:
+  - gl_rbf_cq_w296_range.yaml
+
+output:
+  experiment_name: kolm_shu_gl_rbf_cq_w296_range_singlefield_fix
