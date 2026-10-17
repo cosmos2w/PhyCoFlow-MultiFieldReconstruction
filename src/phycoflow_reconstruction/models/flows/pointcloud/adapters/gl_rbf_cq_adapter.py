@@ -46,7 +46,9 @@ _ALIAS_KEYS = {
 }
 
 
-def _portable_config(config: Mapping[str, Any], *, coordinate_dim: int) -> dict[str, Any]:
+def _portable_config(
+    config: Mapping[str, Any], *, coordinate_dim: int, model_name: str = "GL_rbf_CQ"
+) -> dict[str, Any]:
     """Map downstream spelling to the frozen portable public configuration."""
 
     resolved = {
@@ -112,7 +114,9 @@ def _portable_config(config: Mapping[str, Any], *, coordinate_dim: int) -> dict[
     }
     for key, value in defaults.items():
         resolved.setdefault(key, value)
-    resolved["model_name"] = "GL_rbf_CQ"
+    if model_name == "GL_rbf_ENH":
+        resolved = {key: value for key, value in resolved.items() if not key.startswith("cq_")}
+    resolved["model_name"] = model_name
     resolved["coord_dim"] = int(coordinate_dim)
     return resolved
 
@@ -163,6 +167,7 @@ class GLRbfCQ(PortablePointCloudFFM):
     capabilities = ModelCapabilities(
         "point", True, True, False, True, ("base_training", "post_training")
     )
+    portable_model_name = "GL_rbf_CQ"
 
     def __init__(
         self,
@@ -172,7 +177,9 @@ class GLRbfCQ(PortablePointCloudFFM):
         **config: Any,
     ) -> None:
         del logical_shape  # The portable point model is query-coordinate based.
-        resolved = _portable_config(config, coordinate_dim=coordinate_dim)
+        resolved = _portable_config(
+            config, coordinate_dim=coordinate_dim, model_name=self.portable_model_name
+        )
         portable = build_pointcloud_model(
             resolved,
             n_fields=int(num_fields),
@@ -183,7 +190,9 @@ class GLRbfCQ(PortablePointCloudFFM):
         super().__init__(portable.model, portable.prior, sigma_min=portable.sigma_min)
         self.num_fields = int(num_fields)
         self.coordinate_dim = int(coordinate_dim)
-        self.backbone_name = "GL_rbf_ENH_CQ"
+        self.backbone_name = (
+            "GL_rbf_ENH_CQ" if self.portable_model_name == "GL_rbf_CQ" else "GL_rbf_ENH"
+        )
         self.portable_config = dict(resolved)
 
         self.train_query_microbatch_size = max(

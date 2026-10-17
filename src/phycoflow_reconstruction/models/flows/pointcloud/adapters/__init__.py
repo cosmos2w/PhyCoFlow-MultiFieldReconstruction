@@ -7,6 +7,7 @@ schema.
 
 from .fno_backbone import FNOFlowBackbone
 from .gl_rbf_cq_adapter import GL_rbf_CQ, GLRbfCQ
+from .gl_rbf_enh_adapter import GLRbfENH
 from .gl_rbf_enh_topk import EnhancedGLRBFTopK
 from .pointcloud_ffm_adapter import PointCloudFFM
 
@@ -14,6 +15,7 @@ __all__ = [
     "EnhancedGLRBFTopK",
     "FNOFlowBackbone",
     "GLRbfCQ",
+    "GLRbfENH",
     "GL_rbf_CQ",
     "PointCloudFFM",
 ]

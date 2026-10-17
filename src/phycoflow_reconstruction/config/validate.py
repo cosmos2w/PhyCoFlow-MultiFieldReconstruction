@@ -1358,19 +1358,22 @@ def validate_config(config: Mapping[str, Any]) -> None:
                 raise ValueError(
                     "model attention level channels must be divisible by attention_heads"
                 )
-    elif model_name == "gl_rbf_cq":
-        backbone = str(model.get("backbone", "GL_rbf_ENH_CQ")).lower()
-        if backbone != "gl_rbf_enh_cq":
-            raise ValueError("gl_rbf_cq requires backbone=GL_rbf_ENH_CQ")
+    elif model_name in {"gl_rbf_cq", "gl_rbf_enh"}:
+        expected_backbone = "GL_rbf_ENH_CQ" if model_name == "gl_rbf_cq" else "GL_rbf_ENH"
+        backbone = str(model.get("backbone", expected_backbone)).lower()
+        if backbone != expected_backbone.lower():
+            raise ValueError(f"{model_name} requires backbone={expected_backbone}")
+        if model_name == "gl_rbf_enh" and any(key.startswith("cq_") for key in model):
+            raise ValueError("gl_rbf_enh does not accept CQ-only model settings")
         execution = str(model.get("condition_attention_execution", "cached_kv"))
         if execution not in {"legacy_mha", "cached_kv"}:
             raise ValueError(
-                "gl_rbf_cq condition_attention_execution must be legacy_mha or cached_kv"
+                f"{model_name} condition_attention_execution must be legacy_mha or cached_kv"
             )
         if model.get("sensor_attention_padding_mode", "full") != "full":
-            raise ValueError("gl_rbf_cq requires sensor_attention_padding_mode=full")
+            raise ValueError(f"{model_name} requires sensor_attention_padding_mode=full")
         if str(model.get("gather_mode", "topk_rbf_glres")) != "topk_rbf_glres":
-            raise ValueError("gl_rbf_cq requires gather_mode=topk_rbf_glres")
+            raise ValueError(f"{model_name} requires gather_mode=topk_rbf_glres")
         for key in (
             "gather_topk",
             "gather_query_chunk_size",

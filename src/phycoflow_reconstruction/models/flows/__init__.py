@@ -1,5 +1,5 @@
 """Flow models, with point-cloud implementations under the canonical namespace."""
 
-from .pointcloud.adapters import GL_rbf_CQ, GLRbfCQ, PointCloudFFM
+from .pointcloud.adapters import GL_rbf_CQ, GLRbfCQ, GLRbfENH, PointCloudFFM
 
-__all__ = ["GLRbfCQ", "GL_rbf_CQ", "PointCloudFFM"]
+__all__ = ["GLRbfCQ", "GLRbfENH", "GL_rbf_CQ", "PointCloudFFM"]

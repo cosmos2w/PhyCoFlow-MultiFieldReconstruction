@@ -38,3 +38,11 @@ CUDA_VISIBLE_DEVICES=0 /home/wanglz/miniconda3/envs/phycoflow_env/bin/python run
 ```
 
 The upstream trainer writes beneath `cases/kolmogorov_shu/runs/kolm_shu_gl_rbf_cq_w296_range_singlefield_fix/`. The original DMF-Gen run is not resumed or modified. Unit forward/backward checks establish that the shortcut keeps amplitude and that cached/microbatched execution agrees; they do not establish a lower trained reconstruction error or verify GPU memory fit for the full B recipe.
+
+## Full GL_rbf_ENH replacement
+
+`configs/base/gl_rbf_enh_w296_range_b64.yaml` selects the original portable `ConditionalPointHybridLocalGlobalRBF` with its enhanced, full-width decoder through the separate model name `gl_rbf_enh`. It does not select the simplified `pointcloud_ffm/backbone=gl_rbf_enh` implementation. The adapter reuses the existing portable rectified-flow, query-microbatch, EMA, and reconstruction lifecycle, and rejects CQ-only settings. The CQ single-field measurement/support LayerNorm correction remains in this checkout, but the non-CQ decoder has no such shortcut or normalization. Its existing high-dimensional normalization layers are retained.
+
+The replacement retains the previous batch-64 run's width 296, 64 latents, 3 blocks, 4 heads, 4096 training queries, 2048-query microbatches, 65–6554 sensors, 4000 epochs, constant AdamW learning rate 0.0001, EMA 0.999, dataset view, seed, checkpoint schedule, and loss/reconstruction preview schedule. CQ-specific query width/rank, timestep FiLM, and measurement/support features are absent by architecture. The full enhanced model has 7,745,587 parameters, compared with CQ's 6,336,637, so this is a backbone comparison rather than a capacity-matched ablation. Start a fresh run; the CQ checkpoint is not compatible with this decoder.
+
+The local output alias `cases/kolmogorov_shu/runs/kolm_shu_gl_rbf_enh_w296_range_b64` targets the distinct family `/home/wanglz/Desktop/src/FlowReconBenchmark/outputs/runs/kolmogorov2d/upstream_gl_rbf_enh_w296_range_b64`. A one-update real-data GPU-0 probe at batch 64, 4096 queries, and the maximum 6554 sensors completed with finite loss, saved checkpoints, and generated previews. It allocated 40,253,124,608 peak CUDA bytes and reserved 43,440,406,528 bytes. Probe artifacts remain outside formal `runs/`, under `FlowReconBenchmark/outputs/probes/`.

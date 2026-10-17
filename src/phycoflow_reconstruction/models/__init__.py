@@ -14,7 +14,7 @@ from .deterministic import (
     SenseiverRegressor,
     SparseDeepONet,
 )
-from .flows import GLRbfCQ, PointCloudFFM
+from .flows import GLRbfCQ, GLRbfENH, PointCloudFFM
 from .generative import DiffusionPDEModel, LatentFlowModel
 from .operators import GeoFNORegressor, MIMONetOperator
 
@@ -132,6 +132,17 @@ def _register_defaults() -> None:
             "historical_backbone_name": "GL_rbf_ENH_CQ",
         },
     )
+    MODEL_REGISTRY.register(
+        "gl_rbf_enh",
+        GLRbfENH,
+        metadata={
+            "family": "point_rectified_flow",
+            "license": "project-local portable-core adapter",
+            "stages": ("base_training", "post_training"),
+            "public_model_name": "GL_rbf_ENH",
+            "historical_backbone_name": "GL_rbf_ENH",
+        },
+    )
 
 
 def build_model(config: Mapping[str, Any], data_spec: DataSpec, physics_provider: Any = None):
@@ -146,6 +157,7 @@ def build_model(config: Mapping[str, Any], data_spec: DataSpec, physics_provider
         "pinn",
         "pointcloud_ffm",
         "gl_rbf_cq",
+        "gl_rbf_enh",
         "mimonet",
     }:
         common["coordinate_dim"] = data_spec.coordinate_dim
@@ -157,6 +169,7 @@ def build_model(config: Mapping[str, Any], data_spec: DataSpec, physics_provider
         "latent_fm",
         "pointcloud_ffm",
         "gl_rbf_cq",
+        "gl_rbf_enh",
     }:
         common["logical_shape"] = data_spec.logical_shape
 
@@ -289,6 +302,13 @@ def build_model(config: Mapping[str, Any], data_spec: DataSpec, physics_provider
             "obs_consistency_chunk_size",
         },
     }
+    allowed_by_model["gl_rbf_enh"] = {
+        key for key in allowed_by_model["gl_rbf_cq"]
+        if not key.startswith("cq_") and key not in {
+            "physical_field_transform", "data_query_points", "rollout_checkpointing",
+            "rollout_context_cache",
+        }
+    }
     if name not in allowed_by_model:
         MODEL_REGISTRY.get(name)  # raise the registry's actionable available-name error
     control_keys = {"name", "query_points", "gather_mode"}
@@ -319,4 +339,4 @@ def build_model(config: Mapping[str, Any], data_spec: DataSpec, physics_provider
 
 _register_defaults()
 
-__all__ = ["GLRbfCQ", "build_model"]
+__all__ = ["GLRbfCQ", "GLRbfENH", "build_model"]

@@ -1,0 +1,127 @@
+# Full portable GL_rbf_ENH; CQ-only shortcut, normalization and time-FiLM do not exist.
+# Inherit the previous B64 scientific settings explicitly, without stale CQ keys.
+runtime:
+  seed: 42
+  device: cuda:0
+  deterministic: true
+  num_workers: 4
+  progress: false
+  plot_every_steps: 50
+  data_strategy: auto
+  vram_dataset_threshold_gb: 20
+evaluation:
+  split: validation
+  max_samples: 20
+  query_points: 4096
+  generation_steps: 4
+  seed: 2027
+  preview:
+    enabled: true
+    loss_every_epochs: 10
+    reconstruct_every_epochs: 500
+    split: validation
+    sample_index: 0
+    query_points: 4096
+    generation_steps: 4
+    seed: 2027
+    keep_history: true
+checkpointing:
+  enabled: true
+  every_epochs: 10
+  save_epoch_one: false
+  epochs:
+  - 500
+  - 1000
+  - 1500
+  - 2000
+  - 3000
+  - 4000
+  - 5000
+  - 7500
+  - 10000
+stage: base_training
+optimization:
+  epochs: 4000
+  batch_size: 64
+  lr: 0.0001
+  weight_decay: 1.0e-06
+  grad_clip: 1.0
+  backward_loss_scale: 1.0
+dataset:
+  path: /home/wanglz/Desktop/src/PhyCoFlow-MFR-kolm-cq-fix/datasets/kolmogorov_shu/kolmogorov_shu.h5
+  split: train
+  reconstruction_unit: snapshot
+  field_names:
+  - vorticity
+  field_units:
+  - dimensionless
+  normalization: mean_std
+  time_stride: 1
+  benchmark_eligible: true
+  grid_mapping_verified: true
+  coordinate_dim: 2
+  grid_shape:
+  - 256
+  - 256
+observations:
+  protocol: random_uniform
+  seed: 42
+  fields:
+    vorticity:
+      count_min: 65
+      count_max: 6554
+model:
+  name: gl_rbf_enh
+  backbone: GL_rbf_ENH
+  sigma_min: 0.0001
+  prior: rff
+  rff_features: 256
+  rff_lengthscale: 0.15
+  hidden_dim: 296
+  cond_dim: 296
+  field_embed_dim: 148
+  rbf_sigma: 0.05
+  USE_FOURIER_PE: true
+  fourier_pe_num_bands: 32
+  fourier_pe_max_freq: 64.0
+  latent_dim: 296
+  num_latents: 64
+  num_heads: 4
+  num_latent_blocks: 3
+  ff_mult: 4
+  attn_dropout: 0.0
+  mlp_dropout: 0.0
+  summary_type: mean
+  sensor_coord_encoding: fourier
+  latent_sensor_reinject: true
+  latent_reinject_every: 1
+  condition_attention_execution: cached_kv
+  sensor_attention_padding_mode: full
+  gather_mode: topk_rbf_glres
+  gather_topk: 32
+  gather_query_chunk_size: 2048
+  learnable_rbf_sigma: true
+  neighbor_backend: keops
+  sensor_local_topk: 16
+  sensor_local_dropout: 0.0
+  query_latent_readout: true
+  query_readout_type: coord
+  query_readout_scale_init: 0.01
+  enhanced_head_norm: true
+  glres_scale_init: 0.01
+  model_ema_enabled: true
+  model_ema_decay: 0.999
+  model_ema_eval: true
+  query_points: 4096
+  train_query_microbatch_size: 2048
+  reuse_condition_context_across_query_microbatches: true
+  reconstruction_execution_mode: cached_streamed
+  reconstruction_query_chunk_size: 8192
+  reconstruction_cache_level: static_features
+  ode_solver: euler
+case: kolmogorov_shu
+benchmark_telemetry:
+  enabled: true
+  sample_steps: 5
+output:
+  experiment_name: kolm_shu_gl_rbf_enh_w296_range_b64
