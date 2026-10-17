@@ -1,0 +1,41 @@
+# Run 11: accelerate the dense update rule while retaining LR warm-up
+
+The replacement preserves the original Run 11's per-update Lagrangian fidelity correction and the previously tested AdamW LR warm-up. It changes synchronization and diagnostic work, rather than the scientific update cadence. Work stays on `codex/fidelity-budget-posttraining`, inheriting **`aa51e85a4ae26206f14fc80ef5d24580a8ccd7b1`**. The original completed child `cases/turbulent_combustion/runs/_MultiTask/11_config_lagrangian_1000ep/20261016T010804Z_e5999942` remains unchanged. The sparse candidate was stopped at the user's request; its recovery checkpoint is preserved at epoch 10 / update 380.
+
+## Implementation and mathematical boundary
+
+The [PyTorch tuning guide](https://docs.pytorch.org/tutorials/recipes/recipes/tuning_guide.html#avoid-unnecessary-cpu-gpu-synchronization) identifies scalar extraction, host transfers and host decisions on CUDA results as synchronization costs. The change groups per-tensor finite flags by device, reducing each gradient/parameter validation phase to one host decision per device. Gradient validation still precedes clipping/AdamW; post-AdamW parameter validation still precedes Cooper's dual step. Pre-ConFIG finite/zero-row checks and the combined-direction checks also remain before the corresponding model optimizer action. No check is moved behind the action it protects.
+
+Family raw/calibrated loss diagnostics and their finite validation share one small host transfer. The adapter packs norms, cosines, directional products and direction norms into one transfer. It reuses the existing FP64 row norms and raw Gram matrix for pairwise cosine diagnostics, avoiding another normalized-row allocation/product. **The Gram matrix is not used to solve for the update direction:** TorchJD still receives the same full FP64 gradient matrix and runs its original wide pseudoinverse with its original tolerance. Pairwise diagnostic cosines can differ by FP64 rounding because division follows the Gram reduction; these diagnostics do not affect training.
+
+The external policy reuses the raw ConFIG norm only for its original pre-scale validation; the post-C0-scale direction norm, combined direction norm and norm of the assigned model-dtype gradients remain distinct. Global clipping retains its original FP64 accumulation, cast and coefficient rule. Multiplier-before snapshots, multiplier-after snapshots, coherence values and endpoint risk telemetry are reused rather than copied repeatedly. The shared public `OuterAggregator(gradients)` interface is unchanged; precomputed statistics enter through a private adapter method without persistent cache/state. Checkpoint/controller/RNG/EMA schemas are unchanged.
+
+Each ordinary update retains one differentiable reconstruction, three ordered A/B/T gradient traversals and at most one combined fidelity-gradient traversal, one AdamW step, then the detached projected dual update. Native `model.training_loss()` replay, teachers and extra ordinary rollouts remain absent. Multipliers still start at zero, so warm-up reduces the step size of the initial coherence-only direction; it does not eliminate the initial zero-correction property or guarantee held-out fidelity.
+
+## Exact candidate
+
+The profile `cases/turbulent_combustion/configs/posttrain/fidelity_budget/run11f_lagrangian_lr_warmup_dense_fast_100ep.yaml` inherits `run11w_config_lagrangian_lr_warmup_20ep.yaml`, changes `optimization.epochs` to 100, explicitly sets `optimization.multitask.external_policy.lagrangian.penalty_interval_updates: 1`, and sets output `_MultiTask/11f_lagrangian_lr_warmup_dense_fast_100ep`. AdamW starts at `5e-6` on update 1, increases linearly to `5e-5` on update 76, then holds. The restored update cursor determines position. Dual LR stays `0.01`, initial multipliers zero, and all fields retain their +5% original-SOURCE-relative budgets.
+
+All other original Run 11 science remains: full model, batch 32, 4,096 queries, two Euler steps, ordered internal A/B/T ConFIG, family scalarization `none`, unit family scales, full CO/T 32×128 H0/H1 self/mutual topology, original seeds, 8-batch ×2-draw TRAIN calibration and fixed validation panel. The original Flow SOURCE `cases/turbulent_combustion/runs/tc_gl_rbf_cq_cached_kv_5000ep/20260826T212231Z_7b68c461/checkpoints/last.pt`, physical dataset and normalization statistics are reused directly. The new child starts fresh AdamW/controller state from the pretrained SOURCE, not a post-trained child.
+
+The authorized horizon is **100 reporting epochs / 3,800 model updates**, on physical GPU 1. The same child runs in an initial 38-update inspection segment and a resume of at most 3,762 updates. A possible future 1,000-epoch extension requires the user's later decision; no extension is configured or queued. AdamW, controller, reference, EMA and RNG remain saved for continuation. The existing immutable-configuration check currently rejects changing the epoch horizon during ordinary `--resume`; a future authorized extension must explicitly handle continuation provenance rather than bypass that check or restart optimizer/controller state.
+
+```bash
+export CUDA_VISIBLE_DEVICES=1 OMP_NUM_THREADS=4 MKL_NUM_THREADS=4
+export PHYCOFLOW_TOPOLOGY_WORKERS=4
+export KEOPS_CACHE_FOLDER=/home/wanglz/.cache/phycoflow_formal_11_13/keops_gpu1
+/home/wanglz/miniconda3/envs/phycoflow_env/bin/python cases/turbulent_combustion/run.py post-train \
+  --config configs/posttrain/fidelity_budget/run11f_lagrangian_lr_warmup_dense_fast_100ep.yaml --max-steps 38
+# Set RUN11F to the exact emitted child, then resume that same child:
+/home/wanglz/miniconda3/envs/phycoflow_env/bin/python cases/turbulent_combustion/run.py post-train \
+  --config configs/posttrain/fidelity_budget/run11f_lagrangian_lr_warmup_dense_fast_100ep.yaml \
+  --resume "$RUN11F" --max-steps 3762
+```
+
+## Verification and measurements
+
+CPU regressions cover policy math, internal ConFIG directions, legacy scalarization/joint aggregation, sparse-mode compatibility, stable clipping, warm-up, checkpoints and genuine fixture reconstruction/topology. New tests compare multiple AdamW/dual updates to independent equations, cover complex/unused parameters, retain zero-row failure behavior, and inject a nonfinite late gradient or post-step parameter to verify refusal before the protected optimizer action. GPU tensor equivalence/profiling and short genuine Flow checks are recorded below before the campaign launch; diagnostic checks use one reporting epoch and three real updates per child. No scientific comparator is rerun.
+
+The full-width GPU equivalence check used 145 FP32 trainable tensors totaling **5,461,817 parameters**, three dense independent family-gradient rows, five quadratic risks and nonzero multipliers. Frozen inherited code from `aa51e85` and the working optimization performed one warm-up and two timed updates each. Model values, all AdamW moments/steps, multipliers, dual state and RNG matched exactly; the largest diagnostic-only difference was `1.78e-14`, from cosine reduction order. Profiler scalar-extraction events (`aten::item`/`aten::_local_scalar_dense`) fell from 653 to 319; these totals include CPU scalar events and are not literal counts of CUDA barriers. Explicit `cudaDeviceSynchronize` count was one in each profiled sample. Two policy-call timings were old `138.66/124.55 ms` and optimized `114.87/104.61 ms`; two samples of a synthetic graph do not establish end-to-end training speed. The script and full record are in local `11f_operations/benchmark_sync_equivalence.py` and `sync_equivalence_gpu1.json`.
+
+The first-five-epoch latency comparison will use existing original Run 11 records and the new child's epoch means. Original epoch 1's partial 1+37 rows must be weighted by their metric-specific finite counts; the other epochs contain 38 updates each. Scalar `update_seconds` means describe ordinary updates; whole-loop/setup/checkpoint/validation times are separate. Nested field risks and multiplier lists are last-batch snapshots, not epoch means. GPU placement, workstation load, LR warm-up and historical segmentation differ, so observed timing ratios are not a controlled hardware-independent speedup or evidence of improved scientific efficacy.

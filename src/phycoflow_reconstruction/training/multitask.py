@@ -104,22 +104,30 @@ class FamilyScalarizer:
         calibrated_values: list[Tensor] = []
         raw_diagnostics: dict[str, float] = {}
         calibrated_diagnostics: dict[str, float] = {}
+        diagnostic_values = []
         for name, loss in raw_losses.items():
             if not isinstance(loss, Tensor) or loss.numel() != 1 or not loss.is_floating_point():
                 raise TypeError(f"family loss {name!r} must be a real scalar tensor")
             if not loss.requires_grad:
                 raise ValueError(f"family loss {name!r} must retain its gradient graph")
-            if not bool(torch.isfinite(loss.detach()).all()):
-                raise FloatingPointError(f"family loss {name!r} is non-finite")
             scale = _finite_number(scales[name], name=f"scales[{name!r}]")
             weight = _finite_number(weights[name], name=f"weights[{name!r}]")
             raw = loss.reshape(())
             calibrated = raw * (scale * weight)
-            if not bool(torch.isfinite(calibrated.detach()).all()):
-                raise FloatingPointError(f"calibrated family loss {name!r} is non-finite")
             calibrated_values.append(calibrated)
-            raw_diagnostics[name] = float(raw.detach().cpu())
-            calibrated_diagnostics[name] = float(calibrated.detach().cpu())
+            diagnostic_values.extend((raw.detach(), calibrated.detach()))
+
+        # Transfer the tiny diagnostic vector once; validation still precedes
+        # scalarizer state changes and every model backward/optimizer action.
+        observed = torch.stack(diagnostic_values).to(torch.float64).cpu().tolist()
+        for index, name in enumerate(names):
+            raw_value, calibrated_value = observed[2 * index : 2 * index + 2]
+            if not math.isfinite(raw_value):
+                raise FloatingPointError(f"family loss {name!r} is non-finite")
+            if not math.isfinite(calibrated_value):
+                raise FloatingPointError(f"calibrated family loss {name!r} is non-finite")
+            raw_diagnostics[name] = raw_value
+            calibrated_diagnostics[name] = calibrated_value
 
         diagnostics = {
             "method": self.method,
@@ -147,15 +155,13 @@ class FamilyScalarizer:
         else:
             scalar = torch.dot(effective_weights, values)
             self._accumulate_epoch(values)
-        if not bool(torch.isfinite(scalar.detach()).all()):
+        observed = torch.cat((effective_weights.detach().to(torch.float64), scalar.detach().reshape(1).to(torch.float64))).cpu().tolist()
+        if not math.isfinite(observed[-1]):
             raise FloatingPointError(f"family scalarizer method {self.method!r} returned non-finite loss")
 
         diagnostics.update(
-            effective_weights={
-                name: float(value.detach().cpu())
-                for name, value in zip(names, effective_weights)
-            },
-            scalarized_loss=float(scalar.detach().cpu()),
+            effective_weights=dict(zip(names, observed[:-1])),
+            scalarized_loss=observed[-1],
         )
         return scalar, diagnostics
 
@@ -177,7 +183,7 @@ class FamilyScalarizer:
         return values.numel() * torch.softmax(rates / self._temperature, dim=0)
 
     def _accumulate_epoch(self, values: Tensor) -> None:
-        detached = [float(value) for value in values.detach().cpu().tolist()]
+        detached = values.detach().cpu().tolist()
         if self._epoch_sum is None:
             self._epoch_sum = detached
         else:
@@ -278,6 +284,11 @@ class OuterAggregator:
                 raise ValueError("cagrad.c must be non-negative")
 
     def __call__(self, gradients: Tensor) -> tuple[Tensor, dict[str, Any]]:
+        return self._aggregate(gradients)
+
+    def _aggregate(
+        self, gradients: Tensor, *, row_norms: Tensor | None = None, row_gram: Tensor | None = None
+    ) -> tuple[Tensor, dict[str, Any]]:
         if not isinstance(gradients, Tensor) or gradients.ndim != 2 or gradients.shape[0] == 0:
             raise ValueError("outer aggregation expects a tensor with shape [N, P], N >= 1")
         if gradients.shape[1] == 0 or not gradients.is_floating_point():
@@ -322,29 +333,53 @@ class OuterAggregator:
                 f"outer method {self.method!r} returned a non-finite direction; refusing update"
             )
 
-        return direction, _gradient_diagnostics(gradients, direction, method=self.method)
+        return direction, _gradient_diagnostics(
+            gradients, direction, method=self.method, row_norms=row_norms, row_gram=row_gram
+        )
 
 
-def _gradient_diagnostics(gradients: Tensor, direction: Tensor, *, method: str) -> dict[str, Any]:
+def _gradient_diagnostics(
+    gradients: Tensor, direction: Tensor, *, method: str,
+    row_norms: Tensor | None = None, row_gram: Tensor | None = None,
+) -> dict[str, Any]:
     measured = gradients.detach().to(dtype=torch.float64)
     direction64 = direction.detach().to(dtype=torch.float64)
-    norms = torch.linalg.vector_norm(measured, dim=1)
-    units = measured / torch.where(norms > 0, norms, torch.ones_like(norms))[:, None]
+    norms = torch.linalg.vector_norm(measured, dim=1) if row_norms is None else row_norms
+    safe_norms = torch.where(norms > 0, norms, torch.ones_like(norms))
+    if row_gram is None:
+        units = measured / safe_norms[:, None]
+        pairwise_products = units @ units.T
+    else:
+        # Only diagnostics use this identity. TorchJD still receives the
+        # original FP64 rows and performs its original wide pseudoinverse.
+        pairwise_products = row_gram / (safe_norms[:, None] * safe_norms[None, :])
     # For a joint update this summary compares the first task with the sum of the rest.
     # Individual conflicts are retained in the ordered pairwise matrix.
     remaining = measured[1:].sum(dim=0)
     denominator = norms[0] * torch.linalg.vector_norm(remaining)
-    cosine = (
-        torch.dot(measured[0], remaining) / denominator
-        if bool(denominator > 0) else denominator.new_zeros(())
+    positive = denominator > 0
+    cosine = torch.where(
+        positive,
+        torch.dot(measured[0], remaining) / torch.where(positive, denominator, torch.ones_like(denominator)),
+        torch.zeros_like(denominator),
     )
+    count = gradients.shape[0]
+    observed = torch.cat((
+        norms,
+        cosine.reshape(1),
+        pairwise_products.reshape(-1),
+        torch.linalg.vector_norm(direction64).reshape(1),
+        measured @ direction64,
+    )).cpu().tolist()
+    pairwise_end = count + 1 + count * count
+    pairwise = observed[count + 1 : pairwise_end]
     return {
         "method": method,
-        "gradient_norms": norms.cpu().tolist(),
-        "gradient_cosine": float(cosine.cpu()),
-        "pairwise_gradient_cosines": (units @ units.T).cpu().tolist(),
-        "direction_norm": float(torch.linalg.vector_norm(direction64).cpu()),
-        "directional_products": (measured @ direction64).cpu().tolist(),
+        "gradient_norms": observed[:count],
+        "gradient_cosine": observed[count],
+        "pairwise_gradient_cosines": [pairwise[i * count : (i + 1) * count] for i in range(count)],
+        "direction_norm": observed[pairwise_end],
+        "directional_products": observed[pairwise_end + 1 :],
     }
 
 

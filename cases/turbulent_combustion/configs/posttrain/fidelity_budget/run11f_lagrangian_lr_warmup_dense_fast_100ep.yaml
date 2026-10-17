@@ -1,0 +1,10 @@
+defaults: [run11w_config_lagrangian_lr_warmup_20ep.yaml]
+
+optimization:
+  epochs: 100
+  multitask:
+    external_policy:
+      lagrangian:
+        penalty_interval_updates: 1
+
+output: {experiment_name: _MultiTask/11f_lagrangian_lr_warmup_dense_fast_100ep}

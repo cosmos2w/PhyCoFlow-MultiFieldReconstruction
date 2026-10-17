@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -77,8 +77,8 @@ def reduce_primary(primary: Tensor | Mapping[str, Tensor]) -> Tensor:
     for value in values:
         if not isinstance(value, Tensor) or value.numel() != 1 or not value.is_floating_point():
             raise TypeError("primary objectives must be real scalar tensors")
-        if not bool(torch.isfinite(value.detach()).all()):
-            raise FloatingPointError("primary objective is non-finite")
+    if not _all_finite(values):
+        raise FloatingPointError("primary objective is non-finite")
     result = sum((value.reshape(()) for value in values), values[0].new_zeros(()))
     return result
 
@@ -303,7 +303,7 @@ class ExternalPolicy:
             diagnostics["multipliers_before"] = self._multipliers()
             objective = scaled_primary
             if diagnostics["fidelity_penalty_active"]:
-                objective, _ = self._lagrangian_objective(scaled_primary, violations)
+                objective = self._lagrangian_objective(scaled_primary, violations)
         elif self.method == "rectify":
             objective, diagnostics = self._rectify_objective(scaled_primary, violations)
         else:
@@ -317,22 +317,23 @@ class ExternalPolicy:
         for parameter in parameters:
             if parameter.grad is None:
                 parameter.grad = torch.zeros_like(parameter)
-        if any(not bool(torch.isfinite(parameter.grad).all()) for parameter in parameters):
+        if not _all_finite(parameter.grad for parameter in parameters):
             optimizer.zero_grad(set_to_none=True)
             raise FloatingPointError("model gradient is non-finite; refusing update")
         clip = None if grad_clip is None or float(grad_clip) == 0 else float(grad_clip)
         if clip is not None and (not math.isfinite(clip) or clip < 0):
             raise ValueError("grad_clip must be finite and non-negative")
         norm = stable_clip_grad_norm_(parameters, clip) if clip is not None else _grad_norm(parameters)
-        if not bool(torch.isfinite(norm)):
+        norm_value = float(norm.detach().cpu())
+        if not math.isfinite(norm_value):
             optimizer.zero_grad(set_to_none=True)
             raise FloatingPointError("model gradient norm is non-finite; refusing update")
-        clip_coefficient = min(1.0, clip / (float(norm) + 1.0e-6)) if clip else 1.0
+        clip_coefficient = min(1.0, clip / (norm_value + 1.0e-6)) if clip else 1.0
 
         if self.method == "lagrangian":
             self._prepare_dual_gradient(violations)
         optimizer.step()
-        if any(not bool(torch.isfinite(parameter.detach()).all()) for parameter in parameters):
+        if not _all_finite(parameters):
             raise FloatingPointError("model optimizer produced non-finite parameters")
         if self.method == "lagrangian":
             self._dual_optimizer.step()
@@ -350,7 +351,7 @@ class ExternalPolicy:
             field_violation=dict(zip(self.reference.field_names, (float(x) for x in violations.detach().cpu()))),
             denominator_floor_activated=dict(zip(self.reference.field_names, self.reference.denominator_floor_activated)),
             objective_floor_activated=self.reference.objective_floor_activated,
-            model_grad_norm=float(norm.detach().cpu()),
+            model_grad_norm=norm_value,
             gradient_clip_coefficient=clip_coefficient,
             completed_updates=self.completed_updates,
             update_accepted=True,
@@ -426,8 +427,7 @@ class ExternalPolicy:
                 raise TypeError(f"coherence family losses must be real scalars: {missing}")
             gradients = []
             for name, loss in ordered_losses.items():
-                if not bool(torch.isfinite(loss.detach()).all()):
-                    raise FloatingPointError(f"coherence family {name!r} is non-finite")
+                # reduce_primary already validated every family before backward.
                 if not loss.requires_grad:
                     raise FloatingPointError(f"ConFIG family {name!r} has no model gradient")
                 gradients.append(_flat_gradient(loss.reshape(()), parameters))
@@ -446,9 +446,11 @@ class ExternalPolicy:
             # TorchJD ConFIG computes pinv(units) with PyTorch's default
             # rtol=max(m,n)*eps. At the full model width, FP32 can truncate
             # valid task modes, so keep this tiny-row linear algebra in FP64.
-            config_direction, aggregation_diagnostics = aggregator(matrix64)
-            config_norm = torch.linalg.vector_norm(config_direction.detach().to(torch.float64))
-            if not bool(torch.isfinite(config_norm)) or float(config_norm) == 0.0:
+            config_direction, aggregation_diagnostics = aggregator._aggregate(
+                matrix64, row_norms=family_norms, row_gram=gram
+            )
+            config_norm = aggregation_diagnostics["direction_norm"]
+            if not math.isfinite(config_norm) or config_norm == 0.0:
                 raise FloatingPointError("TorchJD ConFIG returned a zero or non-finite direction")
             aggregation_diagnostics.update(
                 method=aggregator.method,
@@ -474,9 +476,9 @@ class ExternalPolicy:
                 policy_diagnostics.update(self._penalty_diagnostics())
                 policy_diagnostics["multipliers_before"] = self._multipliers()
                 if policy_diagnostics["fidelity_penalty_active"] and any(
-                    value != 0.0 for value in (self._multipliers() or [])
+                    value != 0.0 for value in policy_diagnostics["multipliers_before"]
                 ):
-                    contribution, _ = self._lagrangian_objective(
+                    contribution = self._lagrangian_objective(
                         coherence_value.new_zeros(()), violations
                     )
                     constraint_gradient = _flat_gradient(contribution, parameters)
@@ -501,39 +503,46 @@ class ExternalPolicy:
                 raise RuntimeError("external policy failed to construct an update direction")
             direction = constraint_gradient
             constraint_norm = torch.linalg.vector_norm(direction.detach().to(torch.float64))
-            config_direction_norm = 0.0
+            config_direction_norm = constraint_norm.new_zeros(())
         else:
-            config_direction_norm = float(
-                torch.linalg.vector_norm(config_direction.detach().to(torch.float64)).cpu()
-            )
+            config_direction_norm = torch.linalg.vector_norm(config_direction.detach().to(torch.float64))
             if constraint_gradient is None:
                 constraint_gradient = torch.zeros_like(config_direction)
-            if not bool(torch.isfinite(constraint_gradient).all()):
-                raise FloatingPointError("external constraint gradient is non-finite")
             constraint_norm = torch.linalg.vector_norm(constraint_gradient.detach().to(torch.float64))
             direction = config_direction + constraint_gradient
 
-        if not bool(torch.isfinite(direction).all()):
-            raise FloatingPointError("composed model direction is non-finite; refusing update")
         direction_norm = torch.linalg.vector_norm(direction.detach().to(torch.float64))
-        if not bool(torch.isfinite(direction_norm)) or float(direction_norm) == 0.0:
+        # Keep all direction checks before assignment/clipping/model action,
+        # while copying their flags and already-computed norms together.
+        observed = torch.stack((
+            config_direction_norm, constraint_norm, direction_norm,
+            torch.isfinite(constraint_gradient).all().to(torch.float64),
+            torch.isfinite(direction).all().to(torch.float64),
+        )).cpu().tolist()
+        config_norm_value, constraint_norm_value, direction_norm_value = observed[:3]
+        if not observed[3]:
+            raise FloatingPointError("external constraint gradient is non-finite")
+        if not observed[4]:
+            raise FloatingPointError("composed model direction is non-finite; refusing update")
+        if not math.isfinite(direction_norm_value) or direction_norm_value == 0.0:
             raise FloatingPointError("composed model direction is zero or non-finite; refusing update")
 
         _assign_flat_gradient(parameters, direction)
-        if any(not bool(torch.isfinite(parameter.grad).all()) for parameter in parameters):
+        if not _all_finite(parameter.grad for parameter in parameters):
             optimizer.zero_grad(set_to_none=True)
             raise FloatingPointError("model gradient is non-finite; refusing update")
         clip = None if grad_clip is None or float(grad_clip) == 0 else float(grad_clip)
         if clip is not None and (not math.isfinite(clip) or clip < 0):
             raise ValueError("grad_clip must be finite and non-negative")
         norm = stable_clip_grad_norm_(parameters, clip) if clip is not None else _grad_norm(parameters)
-        if not bool(torch.isfinite(norm)):
+        norm_value = float(norm.detach().cpu())
+        if not math.isfinite(norm_value):
             optimizer.zero_grad(set_to_none=True)
             raise FloatingPointError("model gradient norm is non-finite; refusing update")
-        clip_coefficient = min(1.0, clip / (float(norm) + 1.0e-6)) if clip else 1.0
+        clip_coefficient = min(1.0, clip / (norm_value + 1.0e-6)) if clip else 1.0
 
         optimizer.step()
-        if any(not bool(torch.isfinite(parameter.detach()).all()) for parameter in parameters):
+        if not _all_finite(parameters):
             raise FloatingPointError("model optimizer produced non-finite parameters")
         if self.method == "lagrangian":
             # Cooper's dual term detaches violations; prepare it only after the model
@@ -544,24 +553,27 @@ class ExternalPolicy:
             policy_diagnostics["multipliers_after"] = self._multipliers()
 
         self.completed_updates += 1
-        field_risk = dict(
-            zip(self.reference.field_names, (float(value) for value in risks.detach().cpu().reshape(-1)))
-        )
-        field_violation = dict(
-            zip(self.reference.field_names, (float(value) for value in violations.detach().cpu()))
-        )
+        observed = torch.cat((
+            risks.detach().reshape(-1).to(torch.float64), violations.detach(),
+            coherence_value.detach().reshape(1).to(torch.float64),
+            risks.detach().mean().reshape(1).to(torch.float64),
+        )).cpu().tolist()
+        fields = len(self.reference.field_names)
+        field_risk = dict(zip(self.reference.field_names, observed[:fields]))
+        field_violation = dict(zip(self.reference.field_names, observed[fields : 2 * fields]))
         diagnostics: dict[str, Any] = {
             "optimization_route": "external_policy",
             "policy": self.method,
             "phase": phase,
             "update_mode": f"coherence_config_{self.method}_{phase}",
-            "coherence_value": float(coherence_value.detach().cpu()),
-            "scientific_coherence": float(coherence_value.detach().cpu()),
+            "coherence_value": observed[-2],
+            "scientific_coherence": observed[-2],
+            "endpoint_data_loss": observed[-1],
             "coherence_scale": self.reference.objective_scale,
             "coherence_aggregation": aggregation_diagnostics,
-            "coherence_direction_norm": config_direction_norm,
-            "constraint_gradient_norm": float(constraint_norm.detach().cpu()),
-            "combined_direction_norm": float(direction_norm.detach().cpu()),
+            "coherence_direction_norm": config_norm_value,
+            "constraint_gradient_norm": constraint_norm_value,
+            "combined_direction_norm": direction_norm_value,
             "family_gradient_evaluations": family_gradient_evaluations,
             "constraint_gradient_evaluations": constraint_gradient_evaluations,
             "gradient_traversal_counts": {
@@ -577,12 +589,12 @@ class ExternalPolicy:
                 zip(self.reference.field_names, self.reference.denominator_floor_activated)
             ),
             "objective_floor_activated": self.reference.objective_floor_activated,
-            "model_grad_norm": float(norm.detach().cpu()),
+            "model_grad_norm": norm_value,
             "gradient_clip_coefficient": clip_coefficient,
             "completed_updates": self.completed_updates,
             "policy_state": {
                 "completed_updates": self.completed_updates,
-                "multipliers": self._multipliers(),
+                "multipliers": policy_diagnostics.get("multipliers_after"),
                 "barrier_t": barrier_t,
             },
             "update_accepted": True,
@@ -606,12 +618,12 @@ class ExternalPolicy:
             "fidelity_penalty_interval_updates": self._penalty_interval_updates,
         }
 
-    def _lagrangian_objective(self, primary: Tensor, violations: Tensor) -> tuple[Tensor, dict[str, Any]]:
+    def _lagrangian_objective(self, primary: Tensor, violations: Tensor) -> Tensor:
         state = self._constraint_state_type(violation=violations, strict_violation=violations.detach())
         # Cooper's primal contribution detaches multiplier state; the dual contribution
         # detaches violations, so neither graph crosses into the other variable set.
         contribution = self._constraint.compute_contribution_to_lagrangian(state, "primal")
-        return primary + contribution.lagrangian_contribution, {"multipliers_before": self._multipliers()}
+        return primary + contribution.lagrangian_contribution
 
     def _prepare_dual_gradient(self, violations: Tensor) -> None:
         self._dual_optimizer.zero_grad(set_to_none=True)
@@ -669,6 +681,14 @@ class ExternalPolicy:
             with torch.no_grad():
                 self._multiplier.weight.copy_(values.reshape(-1))
             self._dual_optimizer.load_state_dict(state["dual_optimizer"])
+
+
+def _all_finite(values: Iterable[Tensor]) -> bool:
+    """Check every tensor, with one host decision per device rather than tensor."""
+    flags_by_device: dict[torch.device, list[Tensor]] = {}
+    for value in values:
+        flags_by_device.setdefault(value.device, []).append(torch.isfinite(value.detach()).all())
+    return all(bool(torch.stack(flags).all()) for flags in flags_by_device.values())
 
 
 def _model_optimizer_parameters(model: nn.Module, optimizer: torch.optim.Optimizer) -> list[nn.Parameter]:

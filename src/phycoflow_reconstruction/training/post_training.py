@@ -1990,7 +1990,7 @@ def run_post_training(
         row: dict[str, Any] = {
             "step": global_step + 1,
             "epoch": epoch,
-            "data_loss": float(data_loss.detach().cpu()),
+            "data_loss": 0.0 if policy is not None else float(data_loss.detach().cpu()),
             "native_data_loss": None if policy is not None else float(data_loss.detach().cpu()),
             "data_retention_objective": (
                 "native_plus_endpoint_retention"
@@ -2032,7 +2032,8 @@ def run_post_training(
                 row[f"{name}_retention_loss"] = float(loss.detach().cpu())
             if retention_losses:
                 del loss
-            row["data_loss"] = float(data_loss.detach().cpu())
+            if policy is None:
+                row["data_loss"] = float(data_loss.detach().cpu())
             coherence_loss = result.scalar_loss
             coherence_objectives = None
             if scalarizer is not None and coherence_active:
@@ -2112,7 +2113,10 @@ def run_post_training(
                         coherence_loss if coherence_objectives is None else coherence_objectives,
                         risks, config["optimization"].get("grad_clip"),
                     )
-                row["data_loss"] = float(risks.detach().mean())
+                row["data_loss"] = (
+                    gradient["endpoint_data_loss"] if "endpoint_data_loss" in gradient
+                    else float(risks.detach().mean())
+                )
                 row["native_data_loss"] = None
                 row["data_retention_objective"] = "paired_endpoint_field_budget"
                 del risks
