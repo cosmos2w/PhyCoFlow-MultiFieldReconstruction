@@ -1,5 +1,7 @@
 # Run 11: accelerate the dense update rule while retaining LR warm-up
 
+**October 17 continuation:** The original 100-epoch phase described below has completed. The user subsequently authorized extending the same child to 1,000 epochs. See [the epoch-100 comparison and continuation record](Run11_Epoch100_Review_and_Continuation.md) for the result, preserved snapshots and verified resumed state; the original launch limits below describe the earlier phase.
+
 The replacement preserves the original Run 11's per-update Lagrangian fidelity correction and the previously tested AdamW LR warm-up. It changes synchronization and diagnostic work, rather than the scientific update cadence. Work stays on `codex/fidelity-budget-posttraining`, inheriting **`aa51e85a4ae26206f14fc80ef5d24580a8ccd7b1`**. The original completed child `cases/turbulent_combustion/runs/_MultiTask/11_config_lagrangian_1000ep/20261016T010804Z_e5999942` remains unchanged. The sparse candidate was stopped at the user's request; its recovery checkpoint is preserved at epoch 10 / update 380.
 
 ## Implementation and mathematical boundary
