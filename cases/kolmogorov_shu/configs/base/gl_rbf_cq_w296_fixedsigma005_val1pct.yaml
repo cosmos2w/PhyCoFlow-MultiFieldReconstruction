@@ -1,0 +1,15 @@
+# Original coworker B architecture and training; fixed single-field shortcut in code.
+defaults:
+  - gl_rbf_cq_w296_range_singlefield_fix.yaml
+
+model:
+  rbf_sigma: 0.05
+  learnable_rbf_sigma: false
+
+evaluation:
+  preview:
+    sensor_counts:
+      vorticity: 655
+
+output:
+  experiment_name: kolm_shu_gl_rbf_cq_w296_fixedsigma005_val1pct

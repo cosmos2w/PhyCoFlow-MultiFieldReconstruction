@@ -1,0 +1,9 @@
+# GPU-memory fallback for the original B recipe; query settings are unchanged.
+defaults:
+  - gl_rbf_cq_w296_fixedsigma005_val1pct.yaml
+
+optimization:
+  batch_size: 64
+
+output:
+  experiment_name: kolm_shu_gl_rbf_cq_w296_fixedsigma005_b64_val1pct
