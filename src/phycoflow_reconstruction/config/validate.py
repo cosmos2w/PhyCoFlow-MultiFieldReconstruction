@@ -447,10 +447,15 @@ def _validate_base_training(config: Mapping[str, Any]) -> None:
             "grad_clip",
             "backward_loss_scale",
             "adaptive_backward_scaling",
+            "rbf_sigma_lr",
         },
         "optimization",
     )
     _validate_optimization_values(optimization)
+    if "rbf_sigma_lr" in optimization:
+        _method_parameter(optimization["rbf_sigma_lr"], "optimization.rbf_sigma_lr")
+        if not config["model"].get("learnable_rbf_sigma", False):
+            raise ValueError("rbf_sigma_lr requires model.learnable_rbf_sigma=true")
 
 
 def _validate_post_training(config: Mapping[str, Any]) -> None:

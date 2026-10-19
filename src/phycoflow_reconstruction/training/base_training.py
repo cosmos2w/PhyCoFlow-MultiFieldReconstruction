@@ -8,6 +8,7 @@ only integration checks; normal configs run their declared epochs.
 
 from __future__ import annotations
 
+import json
 import math
 from collections.abc import Mapping
 from dataclasses import asdict
@@ -53,6 +54,45 @@ def _build_dataset(config: Mapping[str, Any]):
     return open_field_dataset(data)
 
 
+def _build_base_optimizer(model: torch.nn.Module, settings: Mapping[str, Any]):
+    """Keep legacy AdamW unchanged unless a separate RBF bandwidth LR is requested."""
+    kwargs = {
+        "lr": float(settings.get("lr", 1e-4)),
+        "weight_decay": float(settings.get("weight_decay", 0.0)),
+    }
+    if "rbf_sigma_lr" not in settings:
+        return torch.optim.AdamW(model.parameters(), **kwargs)
+    sigma_lr = settings["rbf_sigma_lr"]
+    if (isinstance(sigma_lr, bool) or not isinstance(sigma_lr, (int, float))
+            or not math.isfinite(float(sigma_lr)) or sigma_lr <= 0):
+        raise ValueError("optimization.rbf_sigma_lr must be finite and positive")
+    named = dict(model.named_parameters())
+    matches = [name for name in named if name.split(".")[-1] == "log_rbf_sigma"]
+    if len(matches) != 1 or not named[matches[0]].requires_grad:
+        raise ValueError("rbf_sigma_lr requires exactly one trainable log_rbf_sigma parameter")
+    name = matches[0]
+    return torch.optim.AdamW([
+        {"params": [value for key, value in named.items() if key != name], "name": "network"},
+        {"params": [named[name]], "lr": float(sigma_lr), "name": "rbf_sigma",
+         "parameter_name": name},
+    ], **kwargs)
+
+
+def _rbf_sigma_metrics(model: torch.nn.Module, optimizer) -> dict[str, float]:
+    groups = [group for group in optimizer.param_groups if group.get("name") == "rbf_sigma"]
+    if not groups:
+        return {}
+    group = groups[0]
+    result = {
+        "rbf_sigma": float(group["params"][0].detach().exp().cpu()),
+        "rbf_sigma_lr": float(group["lr"]),
+    }
+    ema = getattr(model, "_ema", None)
+    if ema is not None:
+        result["rbf_sigma_ema"] = float(ema.shadow[group["parameter_name"]].exp().cpu())
+    return result
+
+
 def run_base_training(
     config: Mapping[str, Any],
     *,
@@ -80,11 +120,7 @@ def run_base_training(
     telemetry_settings = config.get("benchmark_telemetry", {})
     if not isinstance(telemetry_settings, Mapping):
         raise TypeError("benchmark_telemetry must be a mapping")
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=float(config["optimization"].get("lr", 1e-4)),
-        weight_decay=float(config["optimization"].get("weight_decay", 0.0)),
-    )
+    optimizer = _build_base_optimizer(model, config["optimization"])
 
     if resume is None:
         experiment = config["output"].get("experiment_name", f"base_{config['model']['name']}")
@@ -224,6 +260,17 @@ def run_base_training(
         after_optimizer_step(model)
         telemetry.end_phase("optimizer")
         telemetry.finish_step()
+        sigma_metrics = _rbf_sigma_metrics(model, optimizer)
+        if sigma_metrics and (
+            step_offset == 0 or (global_step + 1) % steps_per_epoch == 0
+            or global_step + 1 == final_step
+        ):
+            with (store.run_dir / "metrics/rbf_sigma_history.jsonl").open("a") as handle:
+                handle.write(json.dumps({
+                    "step": global_step + 1,
+                    "epoch": (global_step + 1) / steps_per_epoch,
+                    **sigma_metrics,
+                }) + "\n")
         if (global_step + 1) % steps_per_epoch == 0:
             telemetry.finish_epoch((global_step + 1) // steps_per_epoch)
         row = {
@@ -232,6 +279,7 @@ def run_base_training(
             "gradient_norm": float(torch.as_tensor(gradient_norm).detach().cpu()),
             "backward_loss_scale": backward_loss_scale,
             "backward_retries": backward_retries,
+            **sigma_metrics,
             **{name: float(value.detach().cpu()) for name, value in losses.components.items()},
         }
         monitor.record(row, lr=optimizer.param_groups[0]["lr"])

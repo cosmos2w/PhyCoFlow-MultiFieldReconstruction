@@ -1,0 +1,19 @@
+# Original ranged-sensor CQ recipe with a tenfold slower bandwidth learning rate.
+defaults:
+  - gl_rbf_cq_w296_range_singlefield_fix.yaml
+
+model:
+  rbf_sigma: 0.05
+  learnable_rbf_sigma: true
+
+optimization:
+  batch_size: 64
+  rbf_sigma_lr: 1.0e-5
+
+evaluation:
+  preview:
+    sensor_counts:
+      vorticity: 655
+
+output:
+  experiment_name: kolm_shu_gl_rbf_cq_w296_range_singlefield_fix_b64
