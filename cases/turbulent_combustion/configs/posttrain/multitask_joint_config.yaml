@@ -1,0 +1,8 @@
+# Joint ConFIG over the same four unit-scaled RF/A/B/T losses as Run 00.
+defaults: [multitask_unit_sum.yaml]
+
+optimization:
+  multitask:
+    family_scalarization: {method: none}
+    outer_aggregation: {method: torchjd_config}
+output: {experiment_name: _MultiTask/06_joint_config_1000ep}

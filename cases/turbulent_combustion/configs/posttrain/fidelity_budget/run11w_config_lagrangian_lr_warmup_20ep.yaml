@@ -1,0 +1,7 @@
+defaults: [run11_config_lagrangian_1000ep.yaml]
+
+optimization:
+  epochs: 20
+  lr_warmup: {enabled: true, start_lr: 5.0e-6, updates: 76}
+
+output: {experiment_name: _MultiTask/11w_lagrangian_lr_warmup_20ep}

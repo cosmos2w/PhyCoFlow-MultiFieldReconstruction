@@ -14,6 +14,16 @@ New PointCloudFFM runs use `GL_rbf_ENH/topk_rbf`; Demo 50 uses the isolated lega
 
 The canonical loader verifies 403 unique x positions, 100 unique y positions, one constant z coordinate, and all 40,300 unique `(x,y)` pairs. It reorders the stored permutation to ascending y then x, giving logical shape `(100,403)`. New base and training-reference post-training templates live in `configs/base/` and `configs/posttrain/`; the compatibility configuration remains separate.
 
+## Primary post-training workflow
+
+Start with [the dense Lagrangian/ConFIG warm-up recipe](configs/posttrain/fidelity_budget/lagrangian_config_warmup.yaml) and the repository [quickstart](../../README.md#63-validate-launch-and-resume-on-your-data). It combines internal A/B/T TorchJD ConFIG with dense per-field SOURCE-relative Lagrangian feedback and a 76-update AdamW LR warm-up. The profile declares 1,000 epochs directly and requires your own completed SOURCE; it does not need another coworker's `_MultiTask` run directory.
+
+Install `multitask,posttrain_constraints,topology,keops` alongside the base package (and `plot` for figures). Supply a source with fields `CH4, CO, T, U_1, p`; the source model, dataset, normalization and sensor contracts are inherited. Source `last.pt` is explicit. Keep each experimental variant under a distinct output name, and resume the same child with its original configuration and SOURCE.
+
+The [strategy guide](../../docs/Posttraining_Strategies.md) explains other scalarization, aggregation and fidelity policies, selection versus final checkpoints, state-preserving continuation and how to extend the framework. The [completed comparison](../../docs/Posttraining_Results.md) records the evidence and limitations: Run 11f's selected epoch-595 checkpoint passed both pooled guards, while its final checkpoint exceeded CO's +5% allowance. The training feedback is not a guarantee on held-out samples.
+
+Run artifacts, payloads, local operations scripts and generated report figures stay local. Share maintained profiles, code and tests; record resolved configurations and checkpoint identities when exchanging numerical results.
+
 ## MIMONet baseline
 
 `configs/base/mimonet_5000ep.yaml` adapts the released MIMONet branch--trunk class as a five-field deterministic baseline. It uses exactly 256 random temperature sensors and sorts their slots by canonical point index before the value and location branches; the trunk receives query coordinates and predicts all five fields. The 256-dimensional basis, multiplicative fusion, ReLU activations, 512-wide branch layers, and 256-wide trunk layers are retained from the local combustion demo. Its configured training and preview query count is 4,096. The repository trainer uses AdamW at a fixed $10^{-4}$ learning rate with $10^{-6}$ weight decay; it does not use the demo wrapper's Adam plus cosine schedule. The corrected GPU 0 run is under `runs/tc_mimonet_point_index_256t_5000ep_gpu0/`. The earlier random-slot-order experiment was retired after diagnosis.

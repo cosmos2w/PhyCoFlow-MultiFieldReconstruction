@@ -1,0 +1,5 @@
+# Portable deterministic-source entrypoint; source_run is supplied on the CLI.
+defaults: [_common.yaml]
+
+model: {name: senseiver}
+output: {experiment_name: fidelity_budget_smoke_senseiver}

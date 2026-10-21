@@ -1,0 +1,13 @@
+defaults: [_formal_1000ep_common.yaml]
+
+optimization:
+  multitask:
+    external_policy:
+      method: extended_log_barrier
+      extended_log_barrier:
+        t_initial: 1.0
+        growth_factor: 1.1
+        update_interval: 100
+        t_max: 100.0
+
+output: {experiment_name: _MultiTask/13_config_log_barrier_1000ep}

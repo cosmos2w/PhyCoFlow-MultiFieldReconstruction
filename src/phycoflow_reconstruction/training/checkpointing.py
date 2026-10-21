@@ -161,6 +161,8 @@ class PeriodicCheckpointManager:
             with (self.store.run_dir / "metrics" / "topology_validation.jsonl").open("a") as handle:
                 handle.write(json.dumps({"step": global_step, **panel_report}) + "\n")
         elif self.selection_metric == "reconstruction_mse":
+            if self.panel_evaluator is not None and panel_due:
+                reconstruction_report = self.panel_evaluator(global_step)
             if reconstruction_report is not None:
                 metric_name = "fixed_validation_reconstruction_mse"
                 metric_value = float(reconstruction_report["metrics"]["mse_normalized"])

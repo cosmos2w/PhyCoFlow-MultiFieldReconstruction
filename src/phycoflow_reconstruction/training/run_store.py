@@ -7,9 +7,11 @@ import importlib.metadata
 import json
 import os
 import platform
+import shutil
 import subprocess
 import sys
 from collections.abc import Mapping
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -158,6 +160,162 @@ class RunStore:
             raise ValueError("resume config hash does not match the existing run")
         return store
 
+    @classmethod
+    def extend_epochs(cls, run_dir: str | Path, epochs: int) -> RunStore:
+        """Explicitly extend a saved run's epoch horizon without changing its identity.
+
+        This metadata-only operation is intended for an operator-approved resume
+        of the same child run. It archives the exact pre-extension metadata and
+        hard-links the current rolling/selected checkpoints before updating the
+        resolved config and its manifest digest.
+        """
+        if isinstance(epochs, bool) or not isinstance(epochs, int) or epochs <= 0:
+            raise ValueError("epochs must be a positive integer")
+
+        run_path = Path(run_dir).resolve()
+        if not run_path.is_dir():
+            raise FileNotFoundError(f"run directory does not exist: {run_path}")
+        config_path = run_path / "resolved_config.yaml"
+        manifest_path = run_path / "run_manifest.json"
+        if not config_path.is_file() or not manifest_path.is_file():
+            raise ValueError("run is missing its resolved config or manifest")
+
+        original_config_text = config_path.read_text(encoding="utf-8")
+        original_manifest_text = manifest_path.read_text(encoding="utf-8")
+        config = yaml.safe_load(original_config_text)
+        manifest = json.loads(original_manifest_text)
+        if not isinstance(config, Mapping) or not isinstance(manifest, dict):
+            raise TypeError("run config and manifest must be mappings")
+
+        original_digest = manifest.get("config_sha256")
+        if not isinstance(original_digest, str) or config_digest(config) != original_digest:
+            raise ValueError("resolved config digest does not match the existing manifest")
+        if manifest.get("run_id") != run_path.name:
+            raise ValueError("manifest run_id does not match the run directory")
+        for identity_key in ("stage", "case"):
+            if identity_key in manifest and manifest[identity_key] != config.get(identity_key):
+                raise ValueError(f"manifest {identity_key} does not match the resolved config")
+
+        optimization = config.get("optimization")
+        if not isinstance(optimization, Mapping):
+            raise TypeError("resolved config optimization must be a mapping")
+        old_epochs = optimization.get("epochs")
+        if isinstance(old_epochs, bool) or not isinstance(old_epochs, int) or old_epochs <= 0:
+            raise ValueError("resolved config optimization.epochs must be a positive integer")
+        if epochs <= old_epochs:
+            raise ValueError("new epoch horizon must exceed optimization.epochs")
+
+        extensions = manifest.get("epoch_extensions", [])
+        if not isinstance(extensions, list) or not all(
+            isinstance(path, str) for path in extensions
+        ):
+            raise ValueError("manifest epoch_extensions must be a list of relative paths")
+        extension_dir_relative = Path("artifacts") / "epoch_extensions" / f"{old_epochs}_to_{epochs}"
+        archive_dir = run_path / extension_dir_relative
+        receipt_relative = extension_dir_relative / "receipt.json"
+        receipt_relative_text = receipt_relative.as_posix()
+        if receipt_relative_text in extensions:
+            raise ValueError("manifest already records this epoch extension")
+        if archive_dir.exists():
+            raise FileExistsError(f"epoch-extension archive already exists: {archive_dir}")
+
+        checkpoint_dir = run_path / "checkpoints"
+        last_path = checkpoint_dir / "last.pt"
+        checkpoint: dict[str, Any] | None = None
+        checkpoint_cursor: dict[str, Any] | None = None
+        previous_checkpoint_binding: str | None = None
+        if last_path.is_file():
+            checkpoint = load_project_checkpoint(last_path)
+            global_step = checkpoint.get("global_step")
+            if isinstance(global_step, bool) or not isinstance(global_step, int) or global_step < 0:
+                raise ValueError("last checkpoint has an invalid global_step cursor")
+            checkpoint_cursor = {
+                "global_step": global_step,
+                "epoch": manifest.get("last_checkpoint_epoch"),
+            }
+            binding = checkpoint.get("config_sha256")
+            if binding is not None:
+                if not isinstance(binding, str):
+                    raise ValueError("last checkpoint config_sha256 must be a string")
+                if binding != original_digest:
+                    raise ValueError("last checkpoint config digest does not match the run manifest")
+                previous_checkpoint_binding = binding
+            manifest_step = manifest.get("last_checkpoint_step")
+            if manifest_step is not None and manifest_step != global_step:
+                raise ValueError("last checkpoint cursor does not match the run manifest")
+
+        updated_config = deepcopy(dict(config))
+        updated_config["optimization"]["epochs"] = epochs
+        new_digest = config_digest(updated_config)
+        updated_manifest = dict(manifest)
+        updated_manifest["config_sha256"] = new_digest
+        updated_manifest["epoch_extensions"] = [*extensions, receipt_relative_text]
+
+        archive_dir.parent.mkdir(parents=True, exist_ok=True)
+        archive_dir.mkdir(exist_ok=False)
+        metadata_update_started = False
+        try:
+            for name in (
+                "resolved_config.yaml",
+                "run_manifest.json",
+                "status.json",
+                "progress.json",
+                "command.txt",
+                "environment.json",
+            ):
+                source = run_path / name
+                if source.is_file():
+                    shutil.copy2(source, archive_dir / name)
+
+            archived_checkpoints = archive_dir / "checkpoints"
+            archived_checkpoint_names = ("last.pt", "best.pt", "best_fidelity.pt")
+            existing_checkpoints = [
+                name for name in archived_checkpoint_names if (checkpoint_dir / name).is_file()
+            ]
+            if existing_checkpoints:
+                archived_checkpoints.mkdir()
+                for name in existing_checkpoints:
+                    os.link(checkpoint_dir / name, archived_checkpoints / name)
+
+            receipt: dict[str, Any] = {
+                "old_epochs": old_epochs,
+                "new_epochs": epochs,
+                "checkpoint_cursor": checkpoint_cursor,
+                "created_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "before_metadata_archive": extension_dir_relative.as_posix(),
+                "purpose": "explicit epoch-only continuation",
+            }
+            if previous_checkpoint_binding is not None:
+                receipt["previous_checkpoint_config_sha256"] = previous_checkpoint_binding
+            _atomic_text(
+                archive_dir / "receipt.json",
+                json.dumps(receipt, indent=2, sort_keys=True) + "\n",
+            )
+
+            _atomic_text(
+                config_path,
+                yaml.safe_dump(updated_config, sort_keys=False),
+            )
+            metadata_update_started = True
+            _atomic_text(
+                manifest_path,
+                json.dumps(updated_manifest, indent=2, sort_keys=True) + "\n",
+            )
+        except Exception:
+            if metadata_update_started:
+                try:
+                    _atomic_text(config_path, original_config_text)
+                    _atomic_text(manifest_path, original_manifest_text)
+                except Exception as rollback_error:
+                    raise RuntimeError(
+                        "epoch extension metadata write failed and rollback was unsuccessful; "
+                        f"pre-extension archive remains at {archive_dir}"
+                    ) from rollback_error
+            shutil.rmtree(archive_dir, ignore_errors=True)
+            raise
+
+        return cls(run_path, updated_config)
+
     def set_status(self, status: str, **details: Any) -> None:
         payload = {
             "status": status,
@@ -208,7 +366,7 @@ class RunStore:
         therefore leave metrics for updates that recovery will replay. Repeated
         validation of the same checkpoint is reduced to its last complete row.
         """
-        for name in ("history", "validation_history", "topology_validation"):
+        for name in ("history", "validation_history", "topology_validation", "lr_warmup_updates"):
             path = self.run_dir / "metrics" / f"{name}.jsonl"
             if not path.exists():
                 continue

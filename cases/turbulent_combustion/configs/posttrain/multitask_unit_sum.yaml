@@ -1,0 +1,25 @@
+# Portable Run 00 recipe; supply the completed original SOURCE path at invocation.
+defaults: [abc_sliced_persistence.yaml]
+
+source_checkpoint: last.pt
+model: {model_ema_eval: false}
+evaluation:
+  preview: {keep_history: false}
+objectives:
+  data_retention: {enabled: true, weight: 1.0}
+  coherence: {enabled: true, weight: 1.0}
+optimization:
+  epochs: 1000
+  multitask:
+    family_scalarization: {method: fixed_sum}
+    outer_aggregation: {method: sum}
+coherence:
+  family_balance: {mode: none}
+  families:
+    global_distribution: {weight: 1.0}
+    cross_spectrum: {weight: 1.0}
+    topology:
+      weight: 1.0
+      components:
+        mutual: {lines: 1}
+output: {experiment_name: _MultiTask/00_plain_sum_1000ep}

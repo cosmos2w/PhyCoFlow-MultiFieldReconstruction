@@ -39,6 +39,7 @@ from ..evaluation import reconstruction_metrics
 from ..utils.reproducibility import seed_everything
 from .checkpointing import PeriodicCheckpointManager
 from .coherence_calibration import (
+    gradient_cosine,
     gradient_diagnostics,
     gradient_norm,
     loss_gradients,
@@ -48,6 +49,7 @@ from .common import (
     iter_unique_batch_indices,
     sensor_protocol_from_config,
 )
+from .fidelity_budget import ExternalPolicy, FidelityBudget, field_error_sums, field_mse
 from .gradient_balance import data_only_update
 from .gradient_balance import two_objective_update as legacy_two_objective_update
 from .model_lifecycle import (
@@ -91,6 +93,19 @@ from .topology_constraints import (
 )
 from .topology_selection import fidelity_eligibility, topology_selection_report
 from .update_budget import post_training_steps_per_epoch, sample_exposure
+
+
+def _scheduled_model_lr(optimization: Mapping[str, Any], completed_updates: int) -> float | None:
+    """Return the opt-in model LR for the next update, using restored global count."""
+    warmup = optimization.get("lr_warmup", {})
+    if not warmup.get("enabled", False):
+        return None
+    base_lr = float(optimization.get("lr", 5e-5))
+    last_warmup_index = int(warmup["updates"]) - 1
+    if completed_updates >= last_warmup_index:
+        return base_lr
+    start_lr = float(warmup["start_lr"])
+    return start_lr + (base_lr - start_lr) * completed_updates / last_warmup_index
 
 
 def _configure_persistence_workers(config: Mapping[str, Any]) -> None:
@@ -231,6 +246,7 @@ def _coherence_objective(
     source_anchor_model=None,
     step_context: dict | None = None,
     family_losses: dict[str, torch.Tensor] | None = None,
+    endpoint_context: dict | None = None,
 ) -> tuple[FamilyResult, tuple[str, ...]]:
     compute = config["coherence"]["compute_budget"]
     selected = _slice_batch(batch, int(compute["batch_size"]))
@@ -253,6 +269,12 @@ def _coherence_objective(
     )
     if model.capabilities.structured_grid_required:
         prediction = _gather_prediction(prediction, complete, selected)
+    if endpoint_context is not None:
+        # Payload only: unlike the legacy component-controller context, this
+        # never reconstructs a teacher or evaluates the live model again.
+        endpoint_context.update(
+            prediction=prediction, target=selected.target_fields, mask=selected.query_valid_mask
+        )
     if step_context is not None:
 
         def reconstruct(candidate):
@@ -715,6 +737,7 @@ def _calibrate_family_balance(
 ) -> dict[str, Any]:
     """Calibrate fixed family scales at the untouched source checkpoint."""
     settings = dict(config["coherence"].get("family_balance", {}))
+    external = bool(config["optimization"].get("multitask", {}).get("external_policy"))
     mode = str(settings.get("mode", "none"))
     if mode == "none":
         return {
@@ -767,8 +790,8 @@ def _calibrate_family_balance(
     try:
         post_training_mode(model, config)
         for batch_index, batch in enumerate(batch_source):
-            data_loss = model.training_loss(batch).total
-            data_gradients = loss_gradients(data_loss, parameters)
+            data_loss = None if external else model.training_loss(batch).total
+            data_gradients = None if external else loss_gradients(data_loss, parameters)
             family_gradients = {}
             family_losses = {}
             rollout_seed = calibration_seed + 1_000_003 + batch_index
@@ -786,7 +809,25 @@ def _calibrate_family_balance(
                 raw_loss = result.scalar_loss / outer_weight
                 family_losses[name] = float(raw_loss.detach())
                 family_gradients[name] = loss_gradients(raw_loss, parameters)
-            diagnostics = gradient_diagnostics(data_gradients, family_gradients, epsilon=epsilon)
+            if external:
+                diagnostics = {
+                    "native_data_gradient_norm": None,
+                    "data_family_cosines": {},
+                    "family_gradient_norms": {
+                        name: gradient_norm(value) for name, value in family_gradients.items()
+                    },
+                    "family_family_cosines": {
+                        left: {
+                            right: 1.0 if left == right else gradient_cosine(
+                                family_gradients[left], family_gradients[right], epsilon=epsilon
+                            )
+                            for right in families
+                        }
+                        for left in families
+                    },
+                }
+            else:
+                diagnostics = gradient_diagnostics(data_gradients, family_gradients, epsilon=epsilon)
             selected = subset_query_batch(
                 _slice_batch(batch, int(config["coherence"]["compute_budget"]["batch_size"])),
                 int(config["coherence"]["compute_budget"]["point_count"]),
@@ -800,7 +841,7 @@ def _calibrate_family_balance(
                     "batch": batch_index,
                     "sample_ids": list(selected.sample_ids),
                     "query_digest": _query_digest(query_ids),
-                    "native_data_loss": float(data_loss.detach()),
+                    "native_data_loss": None if external else float(data_loss.detach()),
                     "family_losses": family_losses,
                     **diagnostics,
                 }
@@ -855,7 +896,7 @@ def _calibrate_family_balance(
         "effective_weighted_gradient_norms": {
             name: outer_weights[name] * scales[name] * aggregate_norms[name] for name in families
         },
-        "native_data_gradient_norm": float(
+        "native_data_gradient_norm": None if external else float(
             statistics.median(record["native_data_gradient_norm"] for record in batch_records)
         ),
         "family_family_cosines": _median_nested_cosines(batch_records, "family_family_cosines"),
@@ -868,6 +909,77 @@ def _calibrate_family_balance(
             "rollout_first": calibration_seed + 1_000_003,
         },
         "calibration_batches": batch_records,
+    }
+
+
+def _calibrate_fidelity_budget(model, dataset, families, banks, config, family_scales, device):
+    """Measure pooled SOURCE risks and scientific scale on fixed TRAIN draws.
+
+    This runs on the original live model before optimization. Family calibration
+    remains independent; no native loss or scalarizer history is evaluated here.
+    """
+    settings = config["optimization"]["multitask"].get("fidelity_budget", {})
+    count = int(settings.get("calibration_batches", 4))
+    draws = int(settings.get("calibration_draws", 2)) if model.capabilities.generative else 1
+    seed = int(settings.get("calibration_seed", 700103))
+    indices = iter_unique_batch_indices(
+        len(dataset), count, int(config["optimization"]["batch_size"]),
+        generator=torch.Generator(device="cpu").manual_seed(seed),
+    )
+    query_points = (
+        None if model.capabilities.structured_grid_required
+        else int(config["coherence"]["compute_budget"]["point_count"])
+    )
+    cpu_rng, python_rng, numpy_rng = torch.get_rng_state(), random.getstate(), np.random.get_state()
+    cuda_rng = torch.cuda.get_rng_state_all() if device.type == "cuda" else []
+    source = build_training_batch_source(
+        dataset, indices, config, query_points=query_points, device=device, start_step=0
+    )
+    sums = counts = None
+    scientific_sum, samples = 0.0, 0
+    started = perf_counter()
+    try:
+        post_training_mode(model, config)
+        with torch.no_grad():
+            for index, batch in enumerate(source):
+                for draw in range(draws):
+                    endpoint = {}
+                    result, _ = _coherence_objective(
+                        model, batch, families, banks, config, step=index,
+                        generator=torch.Generator(device=device).manual_seed(
+                            seed + 1_000_003 + index * draws + draw
+                        ),
+                        family_scales=family_scales, endpoint_context=endpoint,
+                    )
+                    error, valid = field_error_sums(
+                        endpoint["prediction"], endpoint["target"], endpoint["mask"]
+                    )
+                    error, valid = error.double(), valid.double()
+                    sums = error if sums is None else sums + error
+                    counts = valid if counts is None else counts + valid
+                    size = endpoint["prediction"].shape[0]
+                    scientific_sum += float(result.scalar_loss) * size
+                    samples += size
+                    del endpoint, result
+    finally:
+        source.close()
+        torch.set_rng_state(cpu_rng)
+        if device.type == "cuda":
+            torch.cuda.set_rng_state_all(cuda_rng)
+        random.setstate(python_rng)
+        np.random.set_state(numpy_rng)
+    if sums is None or samples == 0:
+        raise ValueError("SOURCE fidelity calibration requires nonempty TRAIN batches")
+    reference = FidelityBudget.from_reference(
+        dataset.field_names, sums / counts, scientific_sum / samples,
+        relative_increase=float(settings.get("relative_increase", 0.05)),
+        absolute_allowance=float(settings.get("absolute_allowance", 0.0)),
+        denominator_floor=float(settings.get("denominator_floor", 1e-8)),
+    )
+    return reference, {
+        "settings": settings, "effective_draws": draws, "batches": count,
+        "calibration_seconds": perf_counter() - started,
+        "reference": reference.state_dict(),
     }
 
 
@@ -1023,6 +1135,23 @@ def _evaluate(
     inference_batch = _without_target(model_batch)
     evaluation = config.get("evaluation", {})
     evaluation_seed = int(evaluation.get("seed", 2027))
+    external = bool(config["optimization"].get("multitask", {}).get("external_policy"))
+
+    def reconstruct(draw_generator):
+        if external:
+            # Direct regressors' native reconstruct() can return raw outputs.
+            # Evaluate the declared observation-consistent endpoint operator.
+            return differentiable_reconstruction(
+                model, inference_batch,
+                steps=int(evaluation.get("generation_steps", 2)),
+                solver=config["rollout"]["solver"], generator=draw_generator,
+                observation_config=dict(config["observation_consistency"]),
+            )
+        return model.reconstruct(
+            inference_batch, steps=int(evaluation.get("generation_steps", 2)),
+            generator=draw_generator,
+        ).prediction
+
     generator = torch.Generator(device=complete_batch.query_coords.device).manual_seed(
         evaluation_seed
     )
@@ -1031,20 +1160,12 @@ def _evaluate(
         warmup_generator = torch.Generator(device=complete_batch.query_coords.device).manual_seed(
             evaluation_seed + 1
         )
-        model.reconstruct(
-            inference_batch,
-            steps=int(evaluation.get("generation_steps", 2)),
-            generator=warmup_generator,
-        )
+        reconstruct(warmup_generator)
     if complete_batch.query_coords.device.type == "cuda":
         torch.cuda.synchronize(complete_batch.query_coords.device)
     inference_started = perf_counter()
     with evaluation_weight_context(model), torch.no_grad():
-        prediction = model.reconstruct(
-            inference_batch,
-            steps=int(evaluation.get("generation_steps", 2)),
-            generator=generator,
-        ).prediction
+        prediction = reconstruct(generator)
         if model.capabilities.structured_grid_required:
             prediction = _gather_prediction(prediction, complete_batch, comparison_batch)
         if complete_batch.query_coords.device.type == "cuda":
@@ -1057,6 +1178,13 @@ def _evaluate(
             field_names,
             normalizer=normalizer,
         )
+        if config["optimization"].get("multitask", {}).get("external_policy"):
+            # A separate fixed validation SOURCE baseline; TRAIN calibration
+            # thresholds are never reused as validation SOURCE measurements.
+            metrics["endpoint_mse_model_units"] = dict(zip(
+                field_names,
+                field_mse(prediction, target, comparison_batch.query_valid_mask).cpu().tolist(),
+            ))
         families = dict(family) if isinstance(family, Mapping) else {family.family_name: family}
         banks = dict(bank) if isinstance(bank, Mapping) else {name: bank for name in families}
         family_payloads = {}
@@ -1385,13 +1513,19 @@ def run_post_training(
         weight_decay=float(config["optimization"].get("weight_decay", 0.0)),
     )
     multitask = config["optimization"].get("multitask")
+    external_settings = (multitask or {}).get("external_policy")
+    policy = None
     scalarizer = (
         FamilyScalarizer(multitask.get("family_scalarization", {}))
         if multitask is not None else None
     )
     aggregator = (
         OuterAggregator(multitask.get("outer_aggregation", {}))
-        if multitask is not None else None
+        if multitask is not None and external_settings is None else None
+    )
+    coherence_aggregator = (
+        OuterAggregator(multitask["coherence_aggregation"])
+        if multitask is not None and "coherence_aggregation" in multitask else None
     )
 
     if resume is None:
@@ -1516,6 +1650,18 @@ def run_post_training(
         if checkpoint.get("family_scales") != calibration.get("resolved_scales"):
             raise ValueError("resume checkpoint family scales differ from calibration artifact")
     family_scales = {name: float(calibration["resolved_scales"][name]) for name in families}
+    if external_settings is not None:
+        if checkpoint is None:
+            reference, reference_report = _calibrate_fidelity_budget(
+                model, train_dataset, families, banks, config, family_scales, device
+            )
+            store.write_json("artifacts/fidelity_budget_reference.json", reference_report)
+            policy = ExternalPolicy(external_settings, reference, device)
+        else:
+            saved_policy = checkpoint["external_policy"]
+            reference = FidelityBudget.from_state_dict(saved_policy["reference"])
+            policy = ExternalPolicy(external_settings, reference, device)
+            policy.load_state_dict(saved_policy)
     controller = None
     if constrained:
         if "topology_components" not in calibration:
@@ -1750,6 +1896,20 @@ def run_post_training(
         steps_per_epoch=steps_per_epoch,
     )
     panel_metrics_cache = {}
+    if policy is not None and checkpoint_manager.selection_metric == "reconstruction_mse":
+
+        def evaluate_endpoint_panel(step):
+            metrics = _evaluate(
+                model, evaluation_batch, comparison_batch, families, banks,
+                train_dataset.field_names, config, normalizer=train_dataset.normalizer,
+                family_scales=family_scales,
+            )
+            metrics["sensor_manifest_sha256"] = evaluation_manifest.digest()
+            panel_metrics_cache.clear()
+            panel_metrics_cache[step] = metrics
+            return {"metrics": metrics}
+
+        checkpoint_manager.panel_evaluator = evaluate_endpoint_panel
     if checkpoint_manager.selection_metric == "topology_with_fidelity":
 
         def evaluate_panel(step):
@@ -1793,6 +1953,7 @@ def run_post_training(
                     family_scales=family_scales,
                     controller=controller,
                     scalarizer=scalarizer,
+                    policy=policy,
                 ),
                 model=model,
                 preview=preview,
@@ -1808,8 +1969,13 @@ def run_post_training(
         epoch = global_step // steps_per_epoch + 1
         post_training_mode(model, config)
         step_started = perf_counter()
+        scheduled_lr = _scheduled_model_lr(config["optimization"], global_step)
+        if scheduled_lr is not None:
+            for group in optimizer.param_groups:
+                group["lr"] = scheduled_lr
         data_loss = (
-            torch.zeros((), device=device) if constrained else model.training_loss(batch).total
+            torch.zeros((), device=device)
+            if constrained or policy is not None else model.training_loss(batch).total
         )
         every = int(config["coherence"]["schedule"].get("every_n_steps", 1))
         coherence_weight = _coherence_weight(config, epoch)
@@ -1824,8 +1990,8 @@ def run_post_training(
         row: dict[str, Any] = {
             "step": global_step + 1,
             "epoch": epoch,
-            "data_loss": float(data_loss.detach().cpu()),
-            "native_data_loss": float(data_loss.detach().cpu()),
+            "data_loss": 0.0 if policy is not None else float(data_loss.detach().cpu()),
+            "native_data_loss": None if policy is not None else float(data_loss.detach().cpu()),
             "data_retention_objective": (
                 "native_plus_endpoint_retention"
                 if retention_active
@@ -1836,6 +2002,7 @@ def run_post_training(
         }
         if coherence_active or retention_active:
             step_context = {} if constrained else None
+            endpoint_context = {} if policy is not None else None
             retention_losses: dict[str, torch.Tensor] = {}
             raw_family_losses = {} if scalarizer is not None else None
             rollout_generator = torch.Generator(device=device).manual_seed(
@@ -1854,6 +2021,7 @@ def run_post_training(
                 source_anchor_model=source_anchor_model,
                 step_context=step_context,
                 family_losses=raw_family_losses,
+                endpoint_context=endpoint_context,
             )
             for name, loss in retention_losses.items():
                 # Retention has the same sparse cadence as the shared rollout.
@@ -1864,10 +2032,12 @@ def run_post_training(
                 row[f"{name}_retention_loss"] = float(loss.detach().cpu())
             if retention_losses:
                 del loss
-            row["data_loss"] = float(data_loss.detach().cpu())
+            if policy is None:
+                row["data_loss"] = float(data_loss.detach().cpu())
             coherence_loss = result.scalar_loss
+            coherence_objectives = None
             if scalarizer is not None and coherence_active:
-                coherence_loss, scalarization = scalarizer(
+                family_objective, scalarization = scalarizer(
                     raw_family_losses,
                     scales=family_scales,
                     weights={
@@ -1876,9 +2046,18 @@ def run_post_training(
                     },
                 )
                 row["family_scalarization"] = scalarization
-                row["scalarized_coherence_loss"] = float(coherence_loss.detach().cpu())
+                if isinstance(family_objective, Mapping):
+                    coherence_objectives = family_objective
+                else:
+                    coherence_loss = family_objective
+                    row["scalarized_coherence_loss"] = float(coherence_loss.detach().cpu())
+                del family_objective
             if bool(config["coherence"]["schedule"].get("interval_rescale", False)):
                 coherence_loss = coherence_loss * every
+                if coherence_objectives is not None:
+                    coherence_objectives = {
+                        name: loss * every for name, loss in coherence_objectives.items()
+                    }
             diagnostic_every = int(
                 config["coherence"]
                 .get("family_balance", {})
@@ -1901,14 +2080,47 @@ def run_post_training(
                     rollout_seed=seed + 1_000_003 + global_step,
                     device=device,
                     raw_family_losses=raw_family_losses,
-                    scalarized=scalarizer is not None and coherence_active,
+                    scalarized=(
+                        scalarizer is not None and scalarizer.method != "none" and coherence_active
+                    ),
                 )
             data_update_weight, coherence_update_weight = _balanced_weights(
                 config, coherence_weight
             )
             row["data_update_weight"] = data_update_weight
             row["coherence_update_weight"] = coherence_update_weight
-            if constrained:
+            if policy is not None:
+                risks = field_mse(
+                    endpoint_context["prediction"], endpoint_context["target"],
+                    endpoint_context["mask"],
+                )
+                if coherence_aggregator is not None:
+                    # This mapping defines three separate parameter gradients.
+                    # Keep A/B/T order explicit rather than the alphabetical
+                    # construction order of the coherence family modules.
+                    families_abt = {
+                        name: coherence_objectives[name]
+                        for name in ("global_distribution", "cross_spectrum", "topology")
+                    }
+                    gradient = policy.update_with_coherence_aggregation(
+                        model, optimizer, families_abt, risks,
+                        config["optimization"].get("grad_clip"), coherence_aggregator,
+                    )
+                    del families_abt
+                else:
+                    gradient = policy.update(
+                        model, optimizer,
+                        coherence_loss if coherence_objectives is None else coherence_objectives,
+                        risks, config["optimization"].get("grad_clip"),
+                    )
+                row["data_loss"] = (
+                    gradient["endpoint_data_loss"] if "endpoint_data_loss" in gradient
+                    else float(risks.detach().mean())
+                )
+                row["native_data_loss"] = None
+                row["data_retention_objective"] = "paired_endpoint_field_budget"
+                del risks
+            elif constrained:
                 gradient = _constrained_topology_update(
                     controller,
                     result,
@@ -1942,7 +2154,7 @@ def run_post_training(
                     model,
                     optimizer,
                     data_loss,
-                    coherence_loss,
+                    coherence_loss if coherence_objectives is None else coherence_objectives,
                     aggregator=aggregator,
                     data_weight=data_update_weight,
                     coherence_weight=coherence_update_weight,
@@ -1974,7 +2186,8 @@ def run_post_training(
             last_coherence_loss = row["coherence_loss"]
             # The final report needs a scalar, not a retained rollout graph.
             # Release it before the next rollout or large validation panel.
-            del result, coherence_loss, retention_losses, step_context, raw_family_losses
+            del result, coherence_loss, coherence_objectives
+            del retention_losses, step_context, raw_family_losses, endpoint_context
         else:
             row["data_update_weight"] = _data_weight(config)
             row["coherence_update_weight"] = 0.0
@@ -1998,7 +2211,14 @@ def run_post_training(
         ] * row.get("coherence_loss", 0.0) * (
             every if config["coherence"]["schedule"].get("interval_rescale", False) else 1
         )
-        if constrained:
+        if policy is not None:
+            # ConFIG supplies a parameter direction, not a scalar surrogate
+            # whose derivative equals that direction. Retain scientific A/B/T
+            # metrics and leave the scalar-objective history empty for it.
+            row["total"] = row.get("optimized_scalar")
+            if coherence_aggregator is not None:
+                row["total_semantics"] = "parameter_direction_without_scalar_objective"
+        elif constrained:
             row["total"] = row.get("regularized_loss_before", row["balanced_topology_before"])
         elif scalarizer is not None:
             row["total"] = row["data_update_weight"] * row["data_loss"] + row[
@@ -2006,7 +2226,28 @@ def run_post_training(
             ] * row.get("scalarized_coherence_loss", row.get("coherence_loss", 0.0)) * (
                 every if config["coherence"]["schedule"].get("interval_rescale", False) else 1
             )
-        monitor.record(row, lr=optimizer.param_groups[0]["lr"])
+        row["optimizer_lr"] = float(optimizer.param_groups[0]["lr"])
+        if scheduled_lr is not None and global_step < int(
+            config["optimization"]["lr_warmup"]["updates"]
+        ):
+            # Endpoint risks and coherence are measured on the shared prediction
+            # before this model step; the LR is the value actually used by AdamW.
+            keys = (
+                "step", "optimizer_lr", "field_risk", "field_violation",
+                "multipliers_before", "multipliers_after", "scientific_coherence",
+                "model_grad_norm", "gradient_clip_coefficient", "coherence_direction_norm",
+                "constraint_gradient_norm", "combined_direction_norm", "update_accepted",
+                "fidelity_penalty_active",
+            )
+            detail = {key: row.get(key) for key in keys}
+            detail["measurement_position"] = "pre_model_step"
+            detail["coherence_by_family"] = {
+                name: row.get(f"coherence_family/{name}/weighted_contribution")
+                for name in ("global_distribution", "cross_spectrum", "topology")
+            }
+            with (store.run_dir / "metrics/lr_warmup_updates.jsonl").open("a") as handle:
+                handle.write(json.dumps(detail, allow_nan=False) + "\n")
+        monitor.record(row, lr=row["optimizer_lr"])
         checkpoint_result = None
         if checkpoint_manager.due_for_preview_or_checkpoint(global_step + 1, preview):
             # Keep the case artifacts and checkpoint family state at the same
@@ -2031,6 +2272,7 @@ def run_post_training(
                     family_scales=family_scales,
                     controller=controller,
                     scalarizer=scalarizer,
+                    policy=policy,
                 ),
                 model=model,
                 preview=preview,
@@ -2046,6 +2288,7 @@ def run_post_training(
                     "reporting_epoch": (global_step + 1) / steps_per_epoch,
                     **sample_exposure(global_step + 1, len(train_dataset), batch_size),
                     "last_update_seconds": row["update_seconds"],
+                    "optimizer_lr": row["optimizer_lr"],
                     "update_mode": row.get("update_mode"),
                 },
             )
@@ -2077,6 +2320,15 @@ def run_post_training(
             family_scales=family_scales,
         )
     after_metrics["sensor_manifest_sha256"] = evaluation_manifest.digest()
+    if policy is not None:
+        after_metrics["validation_source_endpoint_mse_model_units"] = source_metrics[
+            "endpoint_mse_model_units"
+        ]
+        after_metrics["validation_endpoint_source_ratios"] = {
+            name: (value / source_metrics["endpoint_mse_model_units"][name]
+                   if source_metrics["endpoint_mse_model_units"][name] > 0 else None)
+            for name, value in after_metrics["endpoint_mse_model_units"].items()
+        }
     _add_source_relative_coherence(source_metrics, after_metrics)
     store.write_json("evaluation/after.json", after_metrics)
     fidelity_guard = _fidelity_guard_report(source_metrics, after_metrics, config)
@@ -2107,11 +2359,14 @@ def run_post_training(
         family_scales=family_scales,
         controller=controller,
         scalarizer=scalarizer,
+        policy=policy,
     )
     if checkpoint_manager.selection_metric == "topology_with_fidelity":
         checkpoint_manager.panel_evaluator = lambda step: topology_selection_report(
             source_metrics, after_metrics, config["posttrain_fidelity"]
         )
+    elif policy is not None and checkpoint_manager.selection_metric == "reconstruction_mse":
+        checkpoint_manager.panel_evaluator = lambda step: {"metrics": after_metrics}
     saved = checkpoint_manager.save(
         checkpoint_payload,
         model=model,
@@ -2182,6 +2437,7 @@ def run_post_training(
         ),
         coherence_target_uses={name: family.target_use for name, family in families.items()},
         final_coherence_loss=last_coherence_loss,
+        optimizer_lr=float(optimizer.param_groups[0]["lr"]),
         post_training_seconds=post_training_seconds,
         seconds_per_step=post_training_seconds / max(final_step - start_step, 1),
         peak_cuda_memory_bytes=(
@@ -2213,6 +2469,7 @@ def _post_checkpoint_payload(
     family_scales: Mapping[str, float],
     controller=None,
     scalarizer: FamilyScalarizer | None = None,
+    policy: ExternalPolicy | None = None,
 ) -> dict[str, Any]:
     """Build an internally consistent post-training recovery checkpoint."""
     payload = {
@@ -2242,6 +2499,8 @@ def _post_checkpoint_payload(
         payload["component_controller"] = controller.state_dict()
     if scalarizer is not None and scalarizer.method == "dwa":
         payload["family_scalarizer"] = scalarizer.state_dict()
+    if policy is not None:
+        payload["external_policy"] = policy.state_dict()
     if hasattr(train_dataset, "training_subset_manifest"):
         payload["training_subset_sha256"] = train_dataset.training_subset_manifest["sha256"]
     return add_training_aux_state(payload, model)

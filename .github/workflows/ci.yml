@@ -10,7 +10,7 @@ on:
 jobs:
   cpu-contracts:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -20,12 +20,26 @@ jobs:
           python-version: "3.11"
           cache: pip
       - name: Install project and development dependencies
-        run: python -m pip install --upgrade pip && python -m pip install -e ".[dev,operator,keops,topology]"
+        run: python -m pip install --upgrade pip && python -m pip install -e ".[dev,operator,keops,topology,multitask,posttrain_constraints,posttrain,plot]"
+      - name: Verify TorchJD and Cooper are installed
+        run: |
+          python - <<'PY'
+          from importlib.metadata import version
+
+          import cooper
+          import torchjd
+
+          assert version("torchjd") == "0.17.1"
+          assert version("cooper-optim") == "1.0.1"
+          print(f"TorchJD {version('torchjd')} and Cooper {version('cooper-optim')} are available")
+          PY
       - name: Lint permanent source
         run: ruff check src tests scripts cases benchmarks
       - name: Run CPU contract and unit tests
         env:
           CUDA_VISIBLE_DEVICES: ""
+          OMP_NUM_THREADS: "2"
+          MKL_NUM_THREADS: "2"
         run: pytest
       - name: Validate canonical case configuration composition
         env:

@@ -1,0 +1,15 @@
+defaults: [_common.yaml]
+
+optimization:
+  multitask:
+    external_policy:
+      method: extended_log_barrier
+      vector_reduction: sum
+      objective_scale: source_mean
+      extended_log_barrier:
+        t_initial: 1.0
+        growth_factor: 1.1
+        update_interval: 100
+        t_max: 100.0
+
+output: {experiment_name: fidelity_budget_smoke_extended_log_barrier}
