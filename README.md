@@ -1,8 +1,10 @@
 # PhyCoFlow Multi-Field Reconstruction
 
+> **UPDATE — flexible post-training:** Choose how to scalarize coherence families and how to aggregate their gradients with the native reconstruction loss. Alternatively, replace the native loss with SOURCE-relative, per-field endpoint-fidelity feedback. The same interface works with your own case, dataset and trained model; configurations without `optimization.multitask` retain their legacy behavior. See [the method selectors](#62-choose-scalarization-gradient-balancing-and-fidelity-feedback).
+
 PhyCoFlow reconstructs complete physical states from sparse, multi-field measurements. The primary research workflow studies whether data-driven physical-coherence post-training improves the coherence of a reconstructed state while preserving the immutable source checkpoint and the supervised data contract.
 
-Start with the [post-training strategy guide](docs/Posttraining_Strategies.md) to choose a method, supply your own SOURCE, and continue a saved child. The primary turbulent-combustion example is [Run 11f-style dense Lagrangian + ConFIG with LR warm-up](#63-primary-turbulent-combustion-recipe-run-11f). The [topology-only guide](TOPOLOGY_POSTTRAINING.md) remains available for native-grid topology workflows.
+Start with [coherence post-training](#6-coherence-post-training) to configure a method for your own data, supply your trained SOURCE, and launch or resume a child run. The [strategy guide](docs/Posttraining_Strategies.md) provides detailed compatibility rules and worked examples; the [topology-only guide](TOPOLOGY_POSTTRAINING.md) covers native-grid topology workflows.
 
 The cross-spectrum `self_spectrum` term remains opt-in because its raw-power calculation can be unstable. Topology includes several research strategies; the active-emulsion recipe uses native periodic `cubical_persistence`. Its execution and training updates have been verified; scientific efficacy depends on the selected checkpoint and held-out evaluation.
 
@@ -33,8 +35,8 @@ Physics-informed training and historical compatibility routes are available, but
   - [5.4 Model-specific examples](#54-model-specific-examples)
 - [6. Coherence post-training](#6-coherence-post-training)
   - [6.1 Prepare a portable configuration](#61-prepare-a-portable-configuration)
-  - [6.2 Validate and launch](#62-validate-and-launch)
-  - [6.3 Primary turbulent-combustion recipe: Run 11f](#63-primary-turbulent-combustion-recipe-run-11f)
+  - [6.2 Choose scalarization, gradient balancing and fidelity feedback](#62-choose-scalarization-gradient-balancing-and-fidelity-feedback)
+  - [6.3 Validate, launch and resume on your data](#63-validate-launch-and-resume-on-your-data)
   - [6.4 Physics post-training and direct training](#64-physics-post-training-and-direct-training)
 - [7. Evaluation and local outputs](#7-evaluation-and-local-outputs)
   - [Quick commands for a saved A+B+C run](#quick-commands-for-a-saved-abc-run)
@@ -59,13 +61,13 @@ conda activate phycoflow_reconstruction
 python -m pip install -e '.[dev]'
 ```
 
-The optional `multitask` extra provides TorchJD ConFIG, UPGrad and CAGrad; `posttrain_constraints` provides Cooper for Lagrangian fidelity feedback. The primary Run 11f recipe also needs `topology` (GUDHI) and `keops` for its source model's configured neighbor backend. Install these before selecting that recipe:
+The optional `multitask` extra provides TorchJD ConFIG, UPGrad and CAGrad; `posttrain_constraints` provides Cooper for Lagrangian fidelity feedback. For these methods and saved-run figures, install:
 
 ```bash
-python -m pip install -e '.[dev,multitask,posttrain_constraints,topology,plot,keops]'
+python -m pip install -e '.[dev,multitask,posttrain_constraints,plot]'
 ```
 
-`plot` supports saved-run figures. The separate `posttrain` extra provides the older `conflictfree` ConFIG route; it is not a substitute for `multitask`. `operator` supplies GeoFNO/FNO backbones, and `legacy` supports the optional Demo50 neighbor-search path. Install the extras required by your selected source model and strategy.
+`topology` adds GUDHI when using persistence losses; `keops` is needed only for source models configured with that neighbor backend. `plot` supports saved-run figures. The separate `posttrain` extra provides the older `conflictfree` ConFIG route; it is not a substitute for `multitask`. `operator` supplies GeoFNO/FNO backbones, and `legacy` supports the optional Demo50 neighbor-search path. Install the extras required by your selected source model and strategy.
 
 ### 1.1 First successful local run
 
@@ -341,29 +343,13 @@ Stage 2 strictly loads and freezes the Stage-1 autoencoder. It is the sparse rec
 
 ## 6. Coherence post-training
 
-Post-training creates a child run from a completed, immutable base run. The selected source checkpoint is loaded strictly, while the dataset, model, observations, normalization, and provenance are inherited from the source run's `resolved_config.yaml`; the source run is hashed before and after training and is never modified.
-
-The available coherence families are `global_distribution`, `cross_spectrum`, and `topology`. The current topology strategy uses exact GUDHI `cubical_persistence` pairings and fixed-angle `sliced_wasserstein` H0/H1 diagram matching. Pairing runs on CPU, with batched transfers and sliced distances in PyTorch; the loss retains gradients through the generated critical values. [TOPOLOGY_POSTTRAINING.md](TOPOLOGY_POSTTRAINING.md) describes the topology-only `topology_regularized` recipe on native grids. The turbulent-combustion A+B+C recipe composes all three families and scores topology on a configured fixed-query raster. The [topology family guide](src/phycoflow_reconstruction/coherence/families/topology/README.md) defines the mathematics and its limits. Earlier Betti-curve and spatial strategies remain for explicit historical configurations. Cross-spectrum `self_spectrum` retains its opt-in development status.
-
-The optimization route is explicit in the configuration; selecting the primary example does not change older profiles:
-
-| Route | Configuration | Intended use |
-|---|---|---|
-| Dense SOURCE-relative Lagrangian + family ConFIG + LR warm-up | [Primary Run 11f profile](cases/turbulent_combustion/configs/posttrain/fidelity_budget/lagrangian_config_warmup.yaml) | Refine all three coherence families with per-field endpoint-MSE feedback |
-| Joint RF/A/B/T aggregation | `family_scalarization: {method: none}` plus `outer_aggregation` | Combine native model loss and each coherence family as separate tasks |
-| Hierarchical scalarization/aggregation | `fixed_sum`, `stch` or `dwa` plus `outer_aggregation` | Combine families before aggregating with native loss |
-| Other external fidelity policies | `external_policy.method: rectify` or `extended_log_barrier` | Explicit alternatives with distinct update rules |
-| Historical conditional ConFIG / topology-only | Omit `optimization.multitask`; retain the profile's legacy selectors | Reproduce earlier workflows |
-
-The [strategy guide](docs/Posttraining_Strategies.md) gives complete selector blocks, supported combinations, continuation commands and development boundaries. Source calibration, a TRAIN constraint, and a validation selection guard serve different purposes; none guarantees every held-out field's fidelity.
+Post-training creates a child from your completed, immutable **SOURCE** run. Its dataset, model, observations and normalization are inherited from `resolved_config.yaml`, and the selected checkpoint is loaded strictly. The SOURCE is hashed before and after training and remains unchanged. First prepare your dataset and case (§3–4) and train a base model (§5); no shared research dataset or another user's run directory is required.
 
 ### 6.1 Prepare a portable configuration
 
-For the primary workflow, use §6.3 directly. The following lower-level template describes a native-loss plus coherence route for custom profiles; it is not the Run 11f update rule.
+Keep reusable family definitions in `cases/<case>/configs/coherence/` and launch profiles in `cases/<case>/configs/posttrain/`. Commit reusable configuration with `source_run: null`; supply your local SOURCE at launch. Choose the fields, field pairs, query geometry and statistical targets appropriate to your own data. The available families are `global_distribution`, `cross_spectrum` and `topology`; they share one differentiable reconstruction.
 
-Keep reusable family definitions under `cases/<case>/configs/coherence/`, normal launch profiles under `cases/<case>/configs/posttrain/`, and matched readiness or ablation matrices under `cases/<case>/configs/readiness/`. A standard launch profile uses a common execution file plus a small scientific leaf file. Do not commit machine-specific absolute source paths: set `source_run: null` in the common file and supply the run at launch time.
-
-The common file owns the source contract, optimizer, runtime, rollout, evaluation, and shared coherence compute budget. This compact template is suitable for a native completed run and can be adapted to another case by changing `<case>` and the numerical budgets:
+The common file owns the source contract, optimizer, runtime, rollout, evaluation, and shared coherence compute budget. This template starts with native reconstruction loss plus coherence. Replace `<case>` and field placeholders, choose budgets for your data, and add a selector block from §6.2:
 
 ```yaml
 # cases/<case>/configs/posttrain/_common.yaml
@@ -382,7 +368,7 @@ rollout: {steps: 2, solver: euler}
 observation_consistency: {mode: endpoint_smooth, strength: 1.0, sigma: 0.05, schedule_power: 2.0, final_clamp: true, chunk_size: 4096}
 trainable: {scope: full_model}
 
-optimization: {epochs: 1000, batch_size: 16, train_fraction: 0.2, lr: 5.0e-5, weight_decay: 1.0e-6, grad_clip: 1.0, gradient_balance: weighted_sum, config_missing_behavior: error}
+optimization: {epochs: 100, batch_size: 16, train_fraction: 0.2, lr: 5.0e-5, weight_decay: 1.0e-6, grad_clip: 1.0, gradient_balance: weighted_sum, config_missing_behavior: error}
 runtime: {seed: 42, device: cuda:0, deterministic: true, num_workers: 0, data_strategy: async_cpu, progress: true}
 evaluation: {split: validation, max_samples: 32, query_points: 4096, generation_steps: 2, seed: 2027}
 checkpointing: {enabled: true, every_epochs: 10, save_epoch_one: true, selection_metric: reconstruction_mse}
@@ -417,124 +403,127 @@ coherence:
 output: {experiment_name: <case>_posttrain_global_distribution}
 ```
 
-A cross-spectrum family should normally keep the pending per-field auto-spectrum term disabled while using the distinct-field terms:
+For `target_use: paired_supervised`, disable the reference bank and supply each reconstruction's dense target. For `training_reference`, enable the frozen TRAIN reference bank and match its `points_per_sample` to `coherence.compute_budget.point_count`. Cross-spectrum and topology require `query_policy: fixed_shared`; configure spectral field pairs and topology raster/periodicity for your geometry. Cross-spectrum needs coherence batch size ≥2 for `same_frequency` and ≥3 for `cross_frequency`; the optimizer batch must cover that coherence batch. Keep the experimental `self_spectrum` component disabled unless deliberately testing it. See the [family implementations and guides](src/phycoflow_reconstruction/coherence/families) and [topology guide](TOPOLOGY_POSTTRAINING.md) for full family definitions.
+
+Use `coherence.family_balance.mode: none` for unit family scales, or `initial_grad_norm` for one-time SOURCE gradient calibration. These scales and `coherence.families.<name>.weight` set relative family contributions; they are separate from the scalarization and gradient algorithms below. Adapt rollout settings to the source model's reconstruction contract; the example's two Euler steps are a budget choice, not a requirement for every architecture.
+
+### 6.2 Choose scalarization, gradient balancing and fidelity feedback
+
+Set `optimization.gradient_balance: weighted_sum` when using the explicit `optimization.multitask` interface. Choose one of the following routes; native reconstruction loss means the source model's own training loss, which can differ across architectures.
+
+| Route | What is optimized | Selectors under `optimization.multitask` |
+|---|---|---|
+| Hierarchical | Scalarize coherence families, then combine that task with native reconstruction loss | `family_scalarization: {method: fixed_sum}`, `outer_aggregation: {method: sum}` |
+| Joint | Treat native reconstruction loss and each enabled coherence family as separate tasks | `family_scalarization: {method: none}`, `outer_aggregation: {method: torchjd_config}` |
+| Scalar coherence with endpoint fidelity | Scalarize any supported family subset, then apply SOURCE-relative fidelity feedback; skip native loss computation | `family_scalarization: {method: fixed_sum}`, `outer_aggregation: null`, plus `external_policy` |
+| Family ConFIG with endpoint fidelity | Combine all three family gradients with ConFIG, then apply SOURCE-relative fidelity feedback; skip native loss computation | `family_scalarization: {method: none}`, `coherence_aggregation: {method: torchjd_config}`, `outer_aggregation: null`, plus `external_policy` |
+
+For hierarchical or joint routes, keep `objectives.data_retention` enabled with your chosen weight. The following is a complete selector map for hierarchical STCH plus CAGrad; place it under the common profile's `optimization` mapping:
 
 ```yaml
+multitask:
+  family_scalarization: {method: stch, stch: {mu: 0.1}}
+  outer_aggregation: {method: cagrad, cagrad: {c: 0.5}}
+```
+
+Choose the methods independently from this table. Use only the selected method's parameter map:
+
+| Interface | Supported methods | Optional parameters |
+|---|---|---|
+| `family_scalarization` | `fixed_sum`, `stch`, `dwa`, `none` | STCH: `stch: {mu: 0.1}`; DWA: `dwa: {temperature: 2.0}` |
+| `outer_aggregation` | `sum`, `torchjd_config`, `upgrad`, `cagrad` | CAGrad: `cagrad: {c: 0.5}` |
+| `external_policy` | `lagrangian`, `rectify`, `extended_log_barrier` | Lagrangian: `lagrangian: {dual_lr: 0.01, penalty_interval_updates: 1}`; barrier: `extended_log_barrier: {t_initial: 1.0, growth_factor: 1.1, update_interval: 100, t_max: 100.0}` |
+
+`fixed_sum` uses weighted family losses; STCH uses smooth Tchebycheff scalarization; DWA adapts weights from epoch loss histories. `none` leaves families separate for gradient aggregation. `sum` adds weighted task gradients; ConFIG, UPGrad and CAGrad use their respective gradient-combination algorithms. Invalid directions fail explicitly in this interface rather than silently falling back to a sum.
+
+**Recommended starting recipe: dense Lagrangian fidelity feedback, with family ConFIG when using all three families.** Add the following settings to your own case profile after defining its coherence families. This replaces native loss replay with per-field endpoint-MSE feedback relative to the original SOURCE on fixed TRAIN calibration batches. It still needs paired dense targets; it is not data-free training.
+
+```yaml
+objectives:
+  data_retention: {enabled: false, weight: 0.0}
+  coherence: {enabled: true, weight: 1.0}
+trainable: {scope: full_model}
+optimization:
+  gradient_balance: weighted_sum
+  multitask:
+    family_scalarization: {method: none}
+    coherence_aggregation: {method: torchjd_config}
+    outer_aggregation: null
+    external_policy:
+      method: lagrangian
+      vector_reduction: sum
+      objective_scale: source_mean
+      lagrangian: {dual_lr: 0.01, penalty_interval_updates: 1}
+    fidelity_budget:
+      metric: endpoint_mse_model_units
+      relative_increase: 0.05
+      absolute_allowance: 0.0
+      denominator_floor: 1.0e-8
+      calibration_batches: 4
+      calibration_draws: 2
+      calibration_seed: 700103
 coherence:
-  families:
-    cross_spectrum:
-      enabled: true
-      weight: 1.0
-      target_use: paired_supervised
-      units: model_units
-      fields: [<field_a>, <field_b>, <field_c>]
-      pairs: [[<field_a>, <field_b>], [<field_b>, <field_c>]]
-      components:
-        self_spectrum: {enabled: false, weight: 1.0}  # pending further development
-        same_frequency: {enabled: true, weight: 1.0}
-        cross_frequency: {enabled: true, weight: 1.0}
-        band_energy: {enabled: false, weight: 0.0}
+  schedule: {start_epoch: 1, every_n_steps: 1, weight_warmup_epochs: 0, interval_rescale: false}
+  family_balance: {mode: none, gradient_diagnostics_every_epochs: 0}
+checkpointing: {selection_metric: reconstruction_mse}
 ```
 
-`self_spectrum` is an explicit mode-by-mode auto-spectrum loss for every selected field; it does not need a field pair and needs only one ensemble state. Its current raw-power calculation can be unstable, so it is opt-in and runs only when `self_spectrum.enabled: true` is explicit; omission defaults to disabled. Coworkers developing this term should isolate it in a clearly labeled experimental config and add numerical stability tests. `same_frequency` compares normalized cross-field coherence for each configured distinct-field pair at the same graph mode, while `cross_frequency` compares coupling for distinct fields across different graph-frequency bands (and therefore needs a coherence batch of at least 3). The optional coarse `band_energy` term compares log spectral power aggregated over each band. These component choices are orthogonal to `target_use`: `paired_supervised` supplies the dense target from the current sample after reconstruction, whereas `training_reference` uses an independently sampled frozen training reference bank.
+Here `relative_increase: 0.05` permits a 5% increase in each field's TRAIN endpoint MSE in normalized model units; choose the allowance and calibration budget deliberately. This block requires all three named families enabled. To use a subset, replace `family_scalarization` with `fixed_sum`, `stch` or `dwa` and **remove** `coherence_aggregation`; keep the external policy and null outer aggregator. Optional optimizer LR warm-up uses `optimization.lr_warmup: {enabled: true, start_lr: 5.0e-6, updates: 20}`; choose its starting LR, target `optimization.lr`, update count and total training exposure for your problem. Warm-up uses the global successful-update cursor and resumes from that cursor.
 
-Every data-driven coherence post-training run writes two restart-safe figures at its run root. `loss_history.png` retains the compact native-data/coherence/validation overview. `coherence_history.png` groups enabled components by family and gives every subterm an independently scaled history panel, so marginal, pairwise, joint, spectral, and topology losses remain readable even when their raw magnitudes differ by orders of magnitude. The top panel shows total coherence and, for multi-family runs, calibrated weighted family contributions. Component panels show raw scientific losses and disclose their effective inner-weight × outer-weight × calibration multiplier. Disabled components are omitted, sparse schedules begin only where coherence was evaluated, and partial epochs use open markers.
+External policies require full-model training, dense coherence from the first update, no coherence-weight warm-up/rescaling or recurring family-gradient diagnostics, and selection by `reconstruction_mse` or `topology_with_fidelity`. They do not compose with native retention, endpoint/source-anchor objectives, component constraints, a non-null outer aggregator or a legacy gradient balancer. Merely setting the native loss weight to zero on the ordinary multitask route removes its gradient contribution but still computes that loss; use an external policy to skip native replay.
 
-Both new namespaced component histories and older flat component keys are supported. Re-render an existing or active run without loading its model or dataset:
+For `rectify` or the barrier, replace the entire `external_policy` map and use only that method's parameters. YAML defaults merge recursively: omission does not remove an inherited key, and `coherence_aggregation: null` is invalid. Use an independent profile or replace the full `optimization.multitask` mapping when changing routes, retaining the intended fidelity budget. The [strategy guide](docs/Posttraining_Strategies.md) gives detailed compatibility and override examples; [the fidelity-policy guide](docs/Fidelity_Budget_Posttraining.md) explains the update rules. Omitting `optimization.multitask` preserves legacy behavior.
 
-```bash
-python cases/<case>/run.py render-history \
-  --run runs/<experiment>/<run-id>
-```
+### 6.3 Validate, launch and resume on your data
 
-Use `target_use: paired_supervised` with `reference_bank.enabled: false` when every reconstruction is compared with its own dense target. Use `target_use: training_reference` with an enabled reference bank when matching an independently sampled training distribution; its `points_per_sample` must equal `coherence.compute_budget.point_count`. Cross-spectrum requires `query_policy: fixed_shared`; same-frequency requires coherence batch size at least 2, cross-frequency requires at least 3, and `optimization.batch_size` must not be smaller than the coherence batch size. Topology also requires fixed shared queries. `coherence.family_balance.mode: initial_grad_norm` calibrates the relative family losses once; `optimization.gradient_balance: config` separately combines the data and aggregate-coherence gradients using configured weights. The earlier conditional A+B+C profile uses both; the primary Run 11f profile instead uses unit family scales, internal TorchJD ConFIG and external fidelity feedback. For a single family, `family_balance.mode: none` is normally sufficient.
-
-### 6.2 Validate and launch
-
-Run both commands from the repository root. The launcher resolves the config and source run relative to `cases/<case>/`, inherits the source contracts, validates the post-training schema, and checks the dataset before any optimization begins:
+Run these commands from the repository root after creating the profile above. Replace the values with your case, local completed SOURCE and available device. Config and relative run paths are resolved against `cases/$CASE_NAME/`; absolute SOURCE paths also work. Choose `best.pt` or `last.pt` deliberately and keep that choice fixed for the experiment.
 
 ```bash
-python cases/<case>/run.py validate \
-  --config configs/posttrain/<profile>.yaml \
-  --override source_run=runs/<base-experiment>/<run-id> \
-  --override source_checkpoint=best.pt
-
-python cases/<case>/run.py post-train \
-  --config configs/posttrain/<profile>.yaml \
-  --override source_run=runs/<base-experiment>/<run-id> \
-  --override source_checkpoint=best.pt
-```
-
-Choose the checkpoint explicitly: `best.pt` starts from the best fixed-validation reconstruction, while `last.pt` starts from the final training state. Add `--override runtime.device=<device>` when the config's default device is unsuitable. A successful launch creates `cases/<case>/runs/<experiment_name>/<run-id>/` containing the resolved config, parent/checkpoint lineage and hashes, checkpoints, metrics, previews, and fidelity report. Use `--max-steps 1` only for an intentional smoke run; set `source.allow_integration_source=true` only when the source itself is explicitly an incomplete integration fixture.
-
-The implemented family names are `global_distribution`, `cross_spectrum`, and `topology`, and one leaf config can compose several families over the same differentiable reconstruction. The topology-only native-grid recipe uses `optimization.gradient_balance: topology_regularized`; the earlier A+B+C recipe uses `config` with family calibration. The primary Run 11f recipe uses `optimization.multitask` explicitly. Their source-fidelity and held-out selection requirements are documented in the topology and strategy guides. The cleaned GL-RBF/CQ path preserves state-dict keys, seeded behavior, cached-K/V execution, query microbatching, geometry/reconstruction caches, EMA state, and observation consistency.
-
-<a id="63-turbulent-combustion-abc-sliced-persistence"></a>
-
-### 6.3 Primary turbulent-combustion recipe: Run 11f
-
-Use the [portable dense Lagrangian/ConFIG warm-up profile](cases/turbulent_combustion/configs/posttrain/fidelity_budget/lagrangian_config_warmup.yaml) with your completed GL-RBF/CQ base run on the five fields `CH4, CO, T, U_1, p`. It inherits the source model, data, normalization and observations; it leaves `source_run` unset and explicitly selects the source's `last.pt`. Do not substitute a post-trained child for the original SOURCE when reproducing the method.
-
-| Setting | Primary recipe |
-|---|---|
-| Exposure | 1,000 reporting epochs; batch 32; training fraction 0.15 |
-| Reconstruction | One shared observation-consistent reconstruction; two Euler steps; 4,096 fixed shared queries |
-| Family gradients | Separate A/B/T, unit family scales; internal full-width FP64 TorchJD ConFIG |
-| Fidelity | Paired endpoint MSE for every field, relative to the original TRAIN SOURCE reference; +5% allowance; dense Lagrangian feedback every update |
-| Optimizer | One AdamW model step; LR rises from `5e-6` to `5e-5` over 76 updates; projected dual update at LR `0.01` |
-| Topology and selection | CO/T on 32 × 128 raster, H0/H1, sublevel/superlevel, one mutual line; live-weight validation every five epochs; topology selection subject to total and per-field MSE guards |
-
-Commands below run from the repository root; config and run arguments to the case launcher are case-relative. Select your own completed SOURCE and available device. First validate, then create a separate one-update smoke child:
-
-```bash
-SOURCE_RUN=runs/BASE_EXPERIMENT/RUN_ID
+CASE_NAME=your_case
+PROFILE=configs/posttrain/your_profile.yaml
+SOURCE_RUN=/absolute/path/to/your/completed/base-run
 DEVICE=cuda:0
-PROFILE=configs/posttrain/fidelity_budget/lagrangian_config_warmup.yaml
 
-python cases/turbulent_combustion/run.py validate \
+python "cases/$CASE_NAME/run.py" validate \
   --config "$PROFILE" --override source_run="$SOURCE_RUN" \
-  --override runtime.device="$DEVICE"
+  --override source_checkpoint=last.pt --override runtime.device="$DEVICE"
 
-python cases/turbulent_combustion/run.py post-train \
+python "cases/$CASE_NAME/run.py" post-train \
   --config "$PROFILE" --override source_run="$SOURCE_RUN" \
-  --override runtime.device="$DEVICE" \
-  --override output.experiment_name=posttrain_lagrangian_config_warmup_smoke \
-  --max-steps 1
+  --override source_checkpoint=last.pt --override runtime.device="$DEVICE" \
+  --override output.experiment_name=posttraining_smoke --max-steps 1
+
+# Start a fresh full child after the bounded smoke succeeds.
+python "cases/$CASE_NAME/run.py" post-train \
+  --config "$PROFILE" --override source_run="$SOURCE_RUN" \
+  --override source_checkpoint=last.pt --override runtime.device="$DEVICE" \
+  --override output.experiment_name=posttraining
 ```
 
-For the full run, use the same SOURCE and profile with the normal output name. This starts a fresh child; it does not extend the smoke child:
+Validation checks the composed config, inherited contracts and dataset; the bounded smoke additionally loads the model and executes an update. Keep smoke outputs separate from full experiments. Save the full child's printed directory, then use it for continuation and evaluation:
 
 ```bash
-python cases/turbulent_combustion/run.py post-train \
+CHILD_RUN=runs/posttraining/CHILD_ID
+# Resume only if interrupted; retain the same SOURCE, profile and overrides.
+python "cases/$CASE_NAME/run.py" post-train \
   --config "$PROFILE" --override source_run="$SOURCE_RUN" \
-  --override runtime.device="$DEVICE"
+  --override source_checkpoint=last.pt --override runtime.device="$DEVICE" \
+  --override output.experiment_name=posttraining --resume "$CHILD_RUN"
 
-# Set this to the child printed by the full launch, not the smoke child.
-CHILD_RUN=runs/posttrain_lagrangian_config_warmup/CHILD_ID
-# Continue only if interrupted; keep the same SOURCE, profile and overrides.
-python cases/turbulent_combustion/run.py post-train \
-  --config "$PROFILE" --override source_run="$SOURCE_RUN" \
-  --override runtime.device="$DEVICE" --resume "$CHILD_RUN"
-
-python cases/turbulent_combustion/run.py evaluate-run \
+python "cases/$CASE_NAME/run.py" evaluate-run \
   --run "$CHILD_RUN" --checkpoint best --split validation \
   --max-samples 32 --query-points 4096 --generation-steps 2 \
   --device "$DEVICE" --weight-selection live --report-name selected_validation
-```
 
-An unchanged resume restores AdamW, policy multipliers, original calibration, RNG/family/EMA state and the global warm-up cursor. Changing the horizon is a separate explicit operation, not an ordinary resume override; see the [continuation guide](docs/Posttraining_Strategies.md). The evaluation command above is a validation reconstruction check, not the full broader-panel coherence assessment. Specify `last` when assessing the final equal-exposure checkpoint; do not treat `best_fidelity.pt` as automatically eligible under every field's guard.
-
-The completed historical Run 11f selected `best.pt` at epoch 595. It passed both evaluated pooled guards, with broader topology reduction 66.29% and worst-field MSE change +2.18%. Its epoch-1,000 `last.pt` reached 68.85% topology reduction but CO increased 5.43%, exceeding the allowance. These results motivate the documented workflow and checkpoint policy; they do not establish universal fidelity, superiority over Run 11 or a complete-campaign speedup. See the [results and protocol](docs/Posttraining_Results.md).
-
-For your own runs, re-render saved histories with `render-history`, use the existing [CPU diagnostic report](scripts/visualization/coherence_posttraining_report.py), or summarize multiple saved histories without model execution:
-
-```bash
+python "cases/$CASE_NAME/run.py" render-history --run "$CHILD_RUN"
 python scripts/posttraining/summarize_runs.py \
-  --run primary="cases/turbulent_combustion/$CHILD_RUN" \
+  --run my_method="cases/$CASE_NAME/$CHILD_RUN" \
   --output reports/my_posttraining_summary
 ```
 
-The [earlier portable A+B+C profile](cases/turbulent_combustion/configs/posttrain/abc_sliced_persistence.yaml) remains available for the 5,000-epoch conditional-ConFIG workflow. Its three mutual topology lines, source checkpoint default and loss balancing differ from the primary recipe. For another architecture or case, adapt field lists, spectra, topology geometry, rollout and observation contracts deliberately; a field-name substitution alone does not transfer the scientific protocol.
+An unchanged resume restores optimizer, policy, calibration, family/RNG/EMA state and warm-up progress. For a different method, budget, SOURCE or scientific definition, create a fresh child; extending a saved horizon is a separate [continuation operation](docs/Posttraining_Strategies.md). The evaluation above measures reconstruction on validation; use the coherence assessments in §7 as well, and match evaluation budgets and weight selection to your protocol. Inspect per-field fidelity as well as aggregate scores: a TRAIN allowance is not a held-out guarantee, and `best_fidelity.pt` need not meet every field's guard. Keep TEST separate from checkpoint selection.
+
+Histories, checkpoints, datasets and generated reports stay local. Share portable profiles, code and tests, and exchange resolved configurations and checkpoint identities alongside results. A dataset-specific [dense Lagrangian/ConFIG profile](cases/turbulent_combustion/configs/posttrain/fidelity_budget/lagrangian_config_warmup.yaml) and [measured results](docs/Posttraining_Results.md) are available as worked examples; adapt their fields, geometry and budgets rather than copying their experiment settings unchanged.
 
 ### 6.4 Physics post-training and direct training
 

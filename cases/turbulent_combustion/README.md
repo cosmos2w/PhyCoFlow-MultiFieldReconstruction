@@ -16,7 +16,7 @@ The canonical loader verifies 403 unique x positions, 100 unique y positions, on
 
 ## Primary post-training workflow
 
-Start with [the Run 11f-style portable recipe](configs/posttrain/fidelity_budget/lagrangian_config_warmup.yaml) and the repository [quickstart](../../README.md#63-primary-turbulent-combustion-recipe-run-11f). It combines internal A/B/T TorchJD ConFIG with dense per-field SOURCE-relative Lagrangian feedback and a 76-update AdamW LR warm-up. The profile declares 1,000 epochs directly and requires your own completed SOURCE; it does not need another coworker's `_MultiTask` run directory.
+Start with [the dense Lagrangian/ConFIG warm-up recipe](configs/posttrain/fidelity_budget/lagrangian_config_warmup.yaml) and the repository [quickstart](../../README.md#63-validate-launch-and-resume-on-your-data). It combines internal A/B/T TorchJD ConFIG with dense per-field SOURCE-relative Lagrangian feedback and a 76-update AdamW LR warm-up. The profile declares 1,000 epochs directly and requires your own completed SOURCE; it does not need another coworker's `_MultiTask` run directory.
 
 Install `multitask,posttrain_constraints,topology,keops` alongside the base package (and `plot` for figures). Supply a source with fields `CH4, CO, T, U_1, p`; the source model, dataset, normalization and sensor contracts are inherited. Source `last.pt` is explicit. Keep each experimental variant under a distinct output name, and resume the same child with its original configuration and SOURCE.
 
