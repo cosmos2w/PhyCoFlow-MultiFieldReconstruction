@@ -2,6 +2,8 @@
 
 > **UPDATE — flexible post-training:** Choose how to scalarize coherence families and how to aggregate their gradients with the native reconstruction loss. Alternatively, replace the native loss with SOURCE-relative, per-field endpoint-fidelity feedback. The same interface works with your own case, dataset and trained model; configurations without `optimization.multitask` retain their legacy behavior. See [the method selectors](#62-choose-scalarization-gradient-balancing-and-fidelity-feedback).
 
+> <strong style="color: #d1242f;">🔴 Recommended starting recipe: dense Lagrangian fidelity feedback, with family ConFIG when using all three families.</strong> [Configure it for your own data](#62-choose-scalarization-gradient-balancing-and-fidelity-feedback).
+
 PhyCoFlow reconstructs complete physical states from sparse, multi-field measurements. The primary research workflow studies whether data-driven physical-coherence post-training improves the coherence of a reconstructed state while preserving the immutable source checkpoint and the supervised data contract.
 
 Start with [coherence post-training](#6-coherence-post-training) to configure a method for your own data, supply your trained SOURCE, and launch or resume a child run. The [strategy guide](docs/Posttraining_Strategies.md) provides detailed compatibility rules and worked examples; the [topology-only guide](TOPOLOGY_POSTTRAINING.md) covers native-grid topology workflows.
@@ -436,7 +438,7 @@ Choose the methods independently from this table. Use only the selected method's
 
 `fixed_sum` uses weighted family losses; STCH uses smooth Tchebycheff scalarization; DWA adapts weights from epoch loss histories. `none` leaves families separate for gradient aggregation. `sum` adds weighted task gradients; ConFIG, UPGrad and CAGrad use their respective gradient-combination algorithms. Invalid directions fail explicitly in this interface rather than silently falling back to a sum.
 
-**Recommended starting recipe: dense Lagrangian fidelity feedback, with family ConFIG when using all three families.** Add the following settings to your own case profile after defining its coherence families. This replaces native loss replay with per-field endpoint-MSE feedback relative to the original SOURCE on fixed TRAIN calibration batches. It still needs paired dense targets; it is not data-free training.
+<strong style="color: #d1242f;">🔴 Recommended starting recipe: dense Lagrangian fidelity feedback, with family ConFIG when using all three families.</strong> Add the following settings to your own case profile after defining its coherence families. This replaces native loss replay with per-field endpoint-MSE feedback relative to the original SOURCE on fixed TRAIN calibration batches. It still needs paired dense targets; it is not data-free training.
 
 ```yaml
 objectives:
