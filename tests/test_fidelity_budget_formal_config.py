@@ -180,9 +180,22 @@ def test_coherence_aggregation_rejects_non_null_outer_aggregation():
 def test_external_none_family_route_remains_valid_without_coherence_aggregation():
     config = _formal_config()
     config["optimization"]["multitask"].pop("coherence_aggregation")
-    config["evaluation"]["preview"].pop("loss_every_epochs")
-    config["evaluation"]["preview"].pop("reconstruct_every_epochs")
     validate_config(config)
+
+
+def test_run11S_matches_run11f_except_coherence_aggregation_name_and_horizon():
+    baseline = load_config(_CONFIG_DIR / "run11f_lagrangian_lr_warmup_dense_fast_100ep.yaml")
+    candidate = load_config(_CONFIG_DIR / "run11S_lagrangian_lr_warmup_coherence_sum_1000ep.yaml")
+    validate_config(candidate)
+    assert candidate["optimization"]["epochs"] == 1000
+    assert candidate["optimization"]["multitask"]["family_scalarization"] == {"method": "none"}
+    assert candidate["optimization"]["multitask"]["external_policy"]["vector_reduction"] == "sum"
+    baseline["optimization"]["epochs"] = 1000
+    baseline["optimization"]["multitask"].pop("coherence_aggregation")
+    baseline.pop("output")
+    assert candidate["output"]["experiment_name"] == "_MultiTask/11S_lagrangian_lr_warmup_coherence_sum_1000ep"
+    candidate.pop("output")
+    assert candidate == baseline
 
 
 def test_legacy_none_plus_outer_config_route_keeps_its_existing_meaning():

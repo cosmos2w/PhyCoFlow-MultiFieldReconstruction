@@ -1,0 +1,55 @@
+# Run 11f protocol with an explicit A+B+T sum instead of internal ConFIG.
+# Inherited implementation: 04b38070516947514dbdbd732900740b8abc8a49.
+# Fresh original SOURCE; dense per-update Lagrangian fidelity correction remains.
+# No coherence_aggregation selector: external vector_reduction sums the families.
+defaults: [../multitask_unit_sum.yaml]
+
+source_run: runs/tc_gl_rbf_cq_cached_kv_5000ep/20260826T212231Z_7b68c461
+source_checkpoint: last.pt
+inherit_base_config: true
+source: {kind: native_run, allow_integration_source: false}
+model: {model_ema_eval: false}
+
+objectives:
+  data_retention: {enabled: false, weight: 0.0}
+  coherence: {enabled: true, weight: 1.0}
+
+optimization:
+  epochs: 1000
+  batch_size: 32
+  train_fraction: 0.15
+  lr: 5.0e-5
+  weight_decay: 1.0e-6
+  grad_clip: 1.0
+  gradient_balance: weighted_sum
+  lr_warmup: {enabled: true, start_lr: 5.0e-6, updates: 76}
+  multitask:
+    family_scalarization: {method: none}
+    outer_aggregation: null
+    external_policy:
+      method: lagrangian
+      vector_reduction: sum
+      objective_scale: source_mean
+      lagrangian: {dual_lr: 0.01, penalty_interval_updates: 1}
+    fidelity_budget:
+      metric: endpoint_mse_model_units
+      relative_increase: 0.05
+      absolute_allowance: 0.0
+      denominator_floor: 1.0e-8
+      calibration_batches: 8
+      calibration_draws: 2
+      calibration_seed: 700103
+
+runtime:
+  device: cuda:0
+  plot_every_steps: 1000
+
+evaluation:
+  preview: {enabled: false}
+
+coherence:
+  family_balance:
+    mode: none
+    gradient_diagnostics_every_epochs: 0
+
+output: {experiment_name: _MultiTask/11S_lagrangian_lr_warmup_coherence_sum_1000ep}

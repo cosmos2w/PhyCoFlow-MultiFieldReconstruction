@@ -242,13 +242,13 @@ def _validate_common_sections(config: Mapping[str, Any]) -> None:
     multitask = (
         optimization.get("multitask", {}) if isinstance(optimization, Mapping) else {}
     )
-    has_coherence_aggregation = isinstance(multitask, Mapping) and (
-        "coherence_aggregation" in multitask
+    has_external_policy = isinstance(multitask, Mapping) and (
+        "external_policy" in multitask
     )
     if (
         {"loss_every_epochs", "reconstruct_every_epochs"} & set(preview)
         and not bool(preview.get("enabled", True))
-        and not has_coherence_aggregation
+        and not has_external_policy
     ):
         raise ValueError("modern evaluation.preview validation monitoring must be enabled")
     if int(preview.get("sample_index", 0)) < 0:
