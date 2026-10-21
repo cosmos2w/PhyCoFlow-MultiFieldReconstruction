@@ -1,0 +1,17 @@
+defaults: [_formal_1000ep_common.yaml]
+
+# Supply a completed compatible SOURCE run with the source_run CLI override.
+source_run: null
+source_checkpoint: last.pt
+
+optimization:
+  epochs: 1000
+  lr_warmup: {enabled: true, start_lr: 5.0e-6, updates: 76}
+  multitask:
+    external_policy:
+      method: lagrangian
+      vector_reduction: sum
+      objective_scale: source_mean
+      lagrangian: {dual_lr: 0.01, penalty_interval_updates: 1}
+
+output: {experiment_name: posttrain_lagrangian_config_warmup}

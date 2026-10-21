@@ -1,6 +1,6 @@
 # Multitask optimization: collaborator quick start
 
-For the opt-in SOURCE-relative endpoint policies (`lagrangian`, `rectify`, `extended_log_barrier`), see [Fidelity-budget post-training](Fidelity_Budget_Posttraining.md). The existing gradient-aggregation interface described below remains available.
+For current route choices and the Run 11f-style SOURCE-relative workflow, see [Posttraining strategies](Posttraining_Strategies.md); the completed four-run assessment is in [Posttraining results](Posttraining_Results.md). The maintained policy equations and selector constraints are in [Fidelity-budget post-training](Fidelity_Budget_Posttraining.md), and the gradient-aggregation interface described below remains available.
 
 ## What changed
 
@@ -15,11 +15,11 @@ Existing configurations without `optimization.multitask` retain historical behav
 From the repository root, use the existing environment and install the optional methods:
 
 ```bash
-conda activate phycoflow_env
-python -m pip install -e '.[posttrain,topology,keops,multitask]'
+conda activate phycoflow_reconstruction
+python -m pip install -e '.[posttrain,posttrain_constraints,topology,keops,multitask]'
 ```
 
-TorchJD is pinned to 0.17.1 with the solver extras needed by UPGrad and CAGrad. Fixed Sum + Sum does not require TorchJD. Dependency attribution is in [provenance.md](provenance.md).
+TorchJD is pinned to 0.17.1 with the solver extras needed by UPGrad and CAGrad; Cooper 1.0.1 is supplied by `posttrain_constraints` for the Lagrangian policy. Fixed Sum + Sum does not require TorchJD. Dependency attribution is in [provenance.md](provenance.md).
 
 ## Choose a strategy
 
@@ -98,17 +98,10 @@ For matched scientific experiments, start from `configs/posttrain/abc_sliced_per
 
 To resume, reuse the same source, config, and method parameters and add `--resume /path/to/child-run`. Pass the child run directory, not a checkpoint file; DWA state is recovered automatically.
 
-## Pending experiments and ownership
+## Completed comparison status
 
-The local `_MultiTask` comparison has completed Runs 00–05. Its report retains coherence, fidelity, and cost results. The new plain-sum Run 00 replay and joint ConFIG Run 06 are prepared for review and require a separate launch instruction. Historical Run 00 already implements the same unit-sum objective; its results remain intact. Run 01 remains the matched baseline for the calibrated 01–05 cohort, while Run 06 should be compared with unit-sum Run 00.
+As of 21 October 2026, Runs 00, 06, 11 and 11f completed their 1,000-epoch / 38,000-update campaigns and were assessed on the matched broader validation panel. Run 11f is the maintained example recipe; the recorded comparison is mixed and does not establish method superiority. See [Posttraining results](Posttraining_Results.md) for selected-versus-final checkpoint outcomes and limits. Earlier launch notes are historical preparation guidance, not pending launch requests.
 
-| Owner | Next task |
-| --- | --- |
-| Family-scalarization lead | Review completed STCH and DWA results against Run 02, including DWA epoch weights; agree on any follow-up before starting a sweep. |
-| Outer-aggregation lead | Review the Run 00/06 recipes, then compare plain Sum with joint RF/A/B/T ConFIG after launch is authorized. Keep the existing calibrated 01–05 comparisons separate. |
-| Evaluation lead | Inspect A/B/T separately, including same-/cross-frequency B components and CO near the fidelity limit. Agree on checkpoint selection and the validation/TEST protocol. |
-| All collaborators | Agree on short exposure budgets and seeds; retain resolved configs, SOURCE identity, sampling manifests, and checkpoint lineage. Review individual method effects before combining non-default choices. |
-
-Select candidates on validation and check total/per-field fidelity against SOURCE. Report raw A/B/T, native loss, gradient/weight diagnostics, and runtime alongside candidate results. Keep TEST untouched until candidate selection and criteria are fixed; then evaluate it once. Do not compare topology scores across different rasters, projections, filtrations, or mutual components.
+For any new campaign, select on validation and check total/per-field endpoint fidelity against SOURCE. Report raw A/B/T, native loss, gradient/weight diagnostics, and runtime alongside candidate results. Keep TEST untouched until candidate selection and criteria are fixed; then evaluate it under the separately approved protocol. Do not compare topology scores across different rasters, projections, filtrations, or mutual components.
 
 For configuration rules, see [configuration.md](configuration.md#coherence-post-training-multitask-methods). The two adapters live in [multitask.py](../src/phycoflow_reconstruction/training/multitask.py); the shared trainer is [post_training.py](../src/phycoflow_reconstruction/training/post_training.py).

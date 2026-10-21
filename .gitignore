@@ -66,5 +66,13 @@ venv/
 # Local benchmark/experiment notes may be kept outside the tracked tree.
 local-experiments/
 
+# Dated operational reports retained locally; shared method/protocol guides
+# live in docs/Posttraining_*.md and docs/Fidelity_Budget_Posttraining.md.
+/docs/Fidelity_Budget_Formal_Runs_11_13.md
+/docs/Run11_Dense_Implementation_Optimization.md
+/docs/Run11_Epoch100_Review_and_Continuation.md
+/docs/Run11_Sparse_Fidelity_100ep.md
+/docs/Run11_LR_Warmup_20ep.md
+
 # Optional historical source retained only for local compatibility checks.
 LegacyCoherence/

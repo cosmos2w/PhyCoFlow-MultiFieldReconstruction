@@ -67,6 +67,8 @@ def test_every_canonical_yaml_resolves_and_stage_configs_validate() -> None:
         config = load_config(path)
         if "stage" not in config or path.is_relative_to(PROJECT_ROOT / "configs" / "defaults"):
             continue
+        if config.get("stage") == "post_training" and not config.get("source_run"):
+            config["source_run"] = "schema-only-source"
         try:
             validate_config(config)
         except ValueError as error:
@@ -77,11 +79,6 @@ def test_every_canonical_yaml_resolves_and_stage_configs_validate() -> None:
                 and not config.get("model", {}).get("stage1_checkpoint")
                 and "stage1_checkpoint" in message
             )
-            incomplete_posttrain = (
-                config.get("stage") == "post_training"
-                and not config.get("source_run")
-                and "source_run" in message
-            )
-            assert incomplete_stage2 or incomplete_posttrain, (
+            assert incomplete_stage2, (
                 f"unexpected validation failure in {path.relative_to(PROJECT_ROOT)}: {error}"
             )

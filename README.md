@@ -2,7 +2,7 @@
 
 PhyCoFlow reconstructs complete physical states from sparse, multi-field measurements. The primary research workflow studies whether data-driven physical-coherence post-training improves the coherence of a reconstructed state while preserving the immutable source checkpoint and the supervised data contract.
 
-> **Topology in this checkout:** efficient sliced-persistence post-training is implemented here. The native-grid, topology-only recipe is in [TOPOLOGY_POSTTRAINING.md](TOPOLOGY_POSTTRAINING.md); the turbulent-combustion three-family recipe is in [§6.3](#63-turbulent-combustion-abc-sliced-persistence). Check the branch or pull-request state before assuming these changes are on `main`.
+Start with the [post-training strategy guide](docs/Posttraining_Strategies.md) to choose a method, supply your own SOURCE, and continue a saved child. The primary turbulent-combustion example is [Run 11f-style dense Lagrangian + ConFIG with LR warm-up](#63-primary-turbulent-combustion-recipe-run-11f). The [topology-only guide](TOPOLOGY_POSTTRAINING.md) remains available for native-grid topology workflows.
 
 The cross-spectrum `self_spectrum` term remains opt-in because its raw-power calculation can be unstable. Topology includes several research strategies; the active-emulsion recipe uses native periodic `cubical_persistence`. Its execution and training updates have been verified; scientific efficacy depends on the selected checkpoint and held-out evaluation.
 
@@ -34,7 +34,7 @@ Physics-informed training and historical compatibility routes are available, but
 - [6. Coherence post-training](#6-coherence-post-training)
   - [6.1 Prepare a portable configuration](#61-prepare-a-portable-configuration)
   - [6.2 Validate and launch](#62-validate-and-launch)
-  - [6.3 Turbulent-combustion A+B+C sliced persistence](#63-turbulent-combustion-abc-sliced-persistence)
+  - [6.3 Primary turbulent-combustion recipe: Run 11f](#63-primary-turbulent-combustion-recipe-run-11f)
   - [6.4 Physics post-training and direct training](#64-physics-post-training-and-direct-training)
 - [7. Evaluation and local outputs](#7-evaluation-and-local-outputs)
   - [Quick commands for a saved A+B+C run](#quick-commands-for-a-saved-abc-run)
@@ -59,7 +59,13 @@ conda activate phycoflow_reconstruction
 python -m pip install -e '.[dev]'
 ```
 
-The optional `operator` extra provides `neuraloperator` for GeoFNO and the FNO PointCloudFFM backbone. The `posttrain` extra provides ConFIG gradient balancing, `topology` installs GUDHI for cubical pairing, `plot` installs Matplotlib, `keops` supports the A+B+C source model's configured neighbor backend, and `legacy` provides the optional Demo50 neighbor-search path. Install the extras needed by the selected config; for the turbulent-combustion A+B+C workflow, use `python -m pip install -e '.[dev,posttrain,topology,plot,keops]'`.
+The optional `multitask` extra provides TorchJD ConFIG, UPGrad and CAGrad; `posttrain_constraints` provides Cooper for Lagrangian fidelity feedback. The primary Run 11f recipe also needs `topology` (GUDHI) and `keops` for its source model's configured neighbor backend. Install these before selecting that recipe:
+
+```bash
+python -m pip install -e '.[dev,multitask,posttrain_constraints,topology,plot,keops]'
+```
+
+`plot` supports saved-run figures. The separate `posttrain` extra provides the older `conflictfree` ConFIG route; it is not a substitute for `multitask`. `operator` supplies GeoFNO/FNO backbones, and `legacy` supports the optional Demo50 neighbor-search path. Install the extras required by your selected source model and strategy.
 
 ### 1.1 First successful local run
 
@@ -339,7 +345,21 @@ Post-training creates a child run from a completed, immutable base run. The sele
 
 The available coherence families are `global_distribution`, `cross_spectrum`, and `topology`. The current topology strategy uses exact GUDHI `cubical_persistence` pairings and fixed-angle `sliced_wasserstein` H0/H1 diagram matching. Pairing runs on CPU, with batched transfers and sliced distances in PyTorch; the loss retains gradients through the generated critical values. [TOPOLOGY_POSTTRAINING.md](TOPOLOGY_POSTTRAINING.md) describes the topology-only `topology_regularized` recipe on native grids. The turbulent-combustion A+B+C recipe composes all three families and scores topology on a configured fixed-query raster. The [topology family guide](src/phycoflow_reconstruction/coherence/families/topology/README.md) defines the mathematics and its limits. Earlier Betti-curve and spatial strategies remain for explicit historical configurations. Cross-spectrum `self_spectrum` retains its opt-in development status.
 
+The optimization route is explicit in the configuration; selecting the primary example does not change older profiles:
+
+| Route | Configuration | Intended use |
+|---|---|---|
+| Dense SOURCE-relative Lagrangian + family ConFIG + LR warm-up | [Primary Run 11f profile](cases/turbulent_combustion/configs/posttrain/fidelity_budget/lagrangian_config_warmup.yaml) | Refine all three coherence families with per-field endpoint-MSE feedback |
+| Joint RF/A/B/T aggregation | `family_scalarization: {method: none}` plus `outer_aggregation` | Combine native model loss and each coherence family as separate tasks |
+| Hierarchical scalarization/aggregation | `fixed_sum`, `stch` or `dwa` plus `outer_aggregation` | Combine families before aggregating with native loss |
+| Other external fidelity policies | `external_policy.method: rectify` or `extended_log_barrier` | Explicit alternatives with distinct update rules |
+| Historical conditional ConFIG / topology-only | Omit `optimization.multitask`; retain the profile's legacy selectors | Reproduce earlier workflows |
+
+The [strategy guide](docs/Posttraining_Strategies.md) gives complete selector blocks, supported combinations, continuation commands and development boundaries. Source calibration, a TRAIN constraint, and a validation selection guard serve different purposes; none guarantees every held-out field's fidelity.
+
 ### 6.1 Prepare a portable configuration
+
+For the primary workflow, use §6.3 directly. The following lower-level template describes a native-loss plus coherence route for custom profiles; it is not the Run 11f update rule.
 
 Keep reusable family definitions under `cases/<case>/configs/coherence/`, normal launch profiles under `cases/<case>/configs/posttrain/`, and matched readiness or ablation matrices under `cases/<case>/configs/readiness/`. A standard launch profile uses a common execution file plus a small scientific leaf file. Do not commit machine-specific absolute source paths: set `source_run: null` in the common file and supply the run at launch time.
 
@@ -427,7 +447,7 @@ python cases/<case>/run.py render-history \
   --run runs/<experiment>/<run-id>
 ```
 
-Use `target_use: paired_supervised` with `reference_bank.enabled: false` when every reconstruction is compared with its own dense target. Use `target_use: training_reference` with an enabled reference bank when matching an independently sampled training distribution; its `points_per_sample` must equal `coherence.compute_budget.point_count`. Cross-spectrum requires `query_policy: fixed_shared`; same-frequency requires coherence batch size at least 2, cross-frequency requires at least 3, and `optimization.batch_size` must not be smaller than the coherence batch size. Topology also requires fixed shared queries. `coherence.family_balance.mode: initial_grad_norm` calibrates the relative family losses once; `optimization.gradient_balance: config` separately combines the data and aggregate-coherence gradients using configured weights. The A+B+C profile uses both. For a single family, `family_balance.mode: none` is normally sufficient.
+Use `target_use: paired_supervised` with `reference_bank.enabled: false` when every reconstruction is compared with its own dense target. Use `target_use: training_reference` with an enabled reference bank when matching an independently sampled training distribution; its `points_per_sample` must equal `coherence.compute_budget.point_count`. Cross-spectrum requires `query_policy: fixed_shared`; same-frequency requires coherence batch size at least 2, cross-frequency requires at least 3, and `optimization.batch_size` must not be smaller than the coherence batch size. Topology also requires fixed shared queries. `coherence.family_balance.mode: initial_grad_norm` calibrates the relative family losses once; `optimization.gradient_balance: config` separately combines the data and aggregate-coherence gradients using configured weights. The earlier conditional A+B+C profile uses both; the primary Run 11f profile instead uses unit family scales, internal TorchJD ConFIG and external fidelity feedback. For a single family, `family_balance.mode: none` is normally sufficient.
 
 ### 6.2 Validate and launch
 
@@ -447,37 +467,74 @@ python cases/<case>/run.py post-train \
 
 Choose the checkpoint explicitly: `best.pt` starts from the best fixed-validation reconstruction, while `last.pt` starts from the final training state. Add `--override runtime.device=<device>` when the config's default device is unsuitable. A successful launch creates `cases/<case>/runs/<experiment_name>/<run-id>/` containing the resolved config, parent/checkpoint lineage and hashes, checkpoints, metrics, previews, and fidelity report. Use `--max-steps 1` only for an intentional smoke run; set `source.allow_integration_source=true` only when the source itself is explicitly an incomplete integration fixture.
 
-The implemented family names are `global_distribution`, `cross_spectrum`, and `topology`, and one leaf config can compose several families over the same differentiable reconstruction. The topology-only native-grid recipe uses `optimization.gradient_balance: topology_regularized`; the A+B+C recipe uses `config` with family calibration. Their source-fidelity and held-out selection requirements are documented in the topology guide and the A+B+C profile below. The cleaned GL-RBF/CQ path preserves state-dict keys, seeded behavior, cached-K/V execution, query microbatching, geometry/reconstruction caches, EMA state, and observation consistency.
+The implemented family names are `global_distribution`, `cross_spectrum`, and `topology`, and one leaf config can compose several families over the same differentiable reconstruction. The topology-only native-grid recipe uses `optimization.gradient_balance: topology_regularized`; the earlier A+B+C recipe uses `config` with family calibration. The primary Run 11f recipe uses `optimization.multitask` explicitly. Their source-fidelity and held-out selection requirements are documented in the topology and strategy guides. The cleaned GL-RBF/CQ path preserves state-dict keys, seeded behavior, cached-K/V execution, query microbatching, geometry/reconstruction caches, EMA state, and observation consistency.
 
-### 6.3 Turbulent-combustion A+B+C sliced persistence
+<a id="63-turbulent-combustion-abc-sliced-persistence"></a>
 
-For your own completed **GL-RBF/CQ** turbulent-combustion base model, start with the [portable A+B+C profile](cases/turbulent_combustion/configs/posttrain/abc_sliced_persistence.yaml). It composes the three families from the [formal experiment profile](cases/turbulent_combustion/configs/readiness/ABC_sliced_persistence_formal_5000ep_gpu1.yaml) but leaves `source_run` unset, defaults to the source's `best.pt`, and rejects incomplete integration sources. The formal experiment inherited its [family definitions](cases/turbulent_combustion/configs/readiness/ABC_sliced_persistence_50ep_gpu1.yaml) and [common execution settings](cases/turbulent_combustion/configs/readiness/_common.yaml); the completed run's `resolved_config.yaml` records the exact values used there:
+### 6.3 Primary turbulent-combustion recipe: Run 11f
 
-| Setting | Formal A+B+C value |
+Use the [portable dense Lagrangian/ConFIG warm-up profile](cases/turbulent_combustion/configs/posttrain/fidelity_budget/lagrangian_config_warmup.yaml) with your completed GL-RBF/CQ base run on the five fields `CH4, CO, T, U_1, p`. It inherits the source model, data, normalization and observations; it leaves `source_run` unset and explicitly selects the source's `last.pt`. Do not substitute a post-trained child for the original SOURCE when reproducing the method.
+
+| Setting | Primary recipe |
 |---|---|
-| Training | 5,000 epochs; optimizer batch 32; training fraction 0.15; learning rate `5e-5` |
-| Coherence query | 32 samples per update; 4,096 `fixed_shared` points; paired dense targets |
-| Topology | CO and T on a 32 × 128 nonperiodic raster; H0/H1, sublevel and superlevel; 32 sliced-distance projections; self CO/T and three mutual CO–T lines |
-| Loss balancing | Data/coherence objective weights 0.1/1; `optimization.gradient_balance: config` with additional gradient scales 1/1; `coherence.family_balance.mode: initial_grad_norm` with two calibration batches |
-| Selection and previews | `topology_with_fidelity`; 5% total and per-field relative-MSE eligibility limits; validation every 5 epochs, fixed preview loss every 10, reconstruction every 200 |
+| Exposure | 1,000 reporting epochs; batch 32; training fraction 0.15 |
+| Reconstruction | One shared observation-consistent reconstruction; two Euler steps; 4,096 fixed shared queries |
+| Family gradients | Separate A/B/T, unit family scales; internal full-width FP64 TorchJD ConFIG |
+| Fidelity | Paired endpoint MSE for every field, relative to the original TRAIN SOURCE reference; +5% allowance; dense Lagrangian feedback every update |
+| Optimizer | One AdamW model step; LR rises from `5e-6` to `5e-5` over 76 updates; projected dual update at LR `0.01` |
+| Topology and selection | CO/T on 32 × 128 raster, H0/H1, sublevel/superlevel, one mutual line; live-weight validation every five epochs; topology selection subject to total and per-field MSE guards |
 
-Use a base run trained for the same turbulent-combustion dataset and the five fields `CH4, CO, T, U_1, p`. Check its `status.json`, `resolved_config.yaml`, and chosen source checkpoint first. Set a device available on your machine; the portable profile defaults to `cuda:0`. Replace `BASE_EXPERIMENT/RUN_ID` with your completed run, validate the resolved configuration, and launch:
+Commands below run from the repository root; config and run arguments to the case launcher are case-relative. Select your own completed SOURCE and available device. First validate, then create a separate one-update smoke child:
 
 ```bash
-BASE_RUN=runs/BASE_EXPERIMENT/RUN_ID
+SOURCE_RUN=runs/BASE_EXPERIMENT/RUN_ID
+DEVICE=cuda:0
+PROFILE=configs/posttrain/fidelity_budget/lagrangian_config_warmup.yaml
 
 python cases/turbulent_combustion/run.py validate \
-  --config configs/posttrain/abc_sliced_persistence.yaml \
-  --override source_run="$BASE_RUN" \
-  --override runtime.device=cuda:0
+  --config "$PROFILE" --override source_run="$SOURCE_RUN" \
+  --override runtime.device="$DEVICE"
 
 python cases/turbulent_combustion/run.py post-train \
-  --config configs/posttrain/abc_sliced_persistence.yaml \
-  --override source_run="$BASE_RUN" \
-  --override runtime.device=cuda:0
+  --config "$PROFILE" --override source_run="$SOURCE_RUN" \
+  --override runtime.device="$DEVICE" \
+  --override output.experiment_name=posttrain_lagrangian_config_warmup_smoke \
+  --max-steps 1
 ```
 
-The launched formal run used source `last.pt`, 5,000 epochs, and GPU 1; the portable profile keeps the same objective and budgets but uses source `best.pt` and an experiment name without a device suffix. Override `source_checkpoint` deliberately if the source's final state is the intended starting point. A different architecture needs its own model and rollout settings: the [Senseiver A+B+C profile](cases/turbulent_combustion/configs/readiness/ABC_sliced_persistence_senseiver_formal_5000ep_gpu0.yaml) shows the deterministic-model adaptations. For another case or field set, copy the portable profile and adapt the field lists and pairs, fixed-query geometry and raster, observation protocol, and validation limits before running `validate`; a field-name substitution alone does not transfer the topology contract. GUDHI pairing remains CPU work. Set `PHYCOFLOW_TOPOLOGY_WORKERS` to the CPUs allocated for pairing and optionally raise `PHYCOFLOW_TOPOLOGY_REFERENCE_CACHE` above its 4,096-entry default when repeated references and host RAM justify it. Neither setting changes the persistence objective.
+For the full run, use the same SOURCE and profile with the normal output name. This starts a fresh child; it does not extend the smoke child:
+
+```bash
+python cases/turbulent_combustion/run.py post-train \
+  --config "$PROFILE" --override source_run="$SOURCE_RUN" \
+  --override runtime.device="$DEVICE"
+
+# Set this to the child printed by the full launch, not the smoke child.
+CHILD_RUN=runs/posttrain_lagrangian_config_warmup/CHILD_ID
+# Continue only if interrupted; keep the same SOURCE, profile and overrides.
+python cases/turbulent_combustion/run.py post-train \
+  --config "$PROFILE" --override source_run="$SOURCE_RUN" \
+  --override runtime.device="$DEVICE" --resume "$CHILD_RUN"
+
+python cases/turbulent_combustion/run.py evaluate-run \
+  --run "$CHILD_RUN" --checkpoint best --split validation \
+  --max-samples 32 --query-points 4096 --generation-steps 2 \
+  --device "$DEVICE" --weight-selection live --report-name selected_validation
+```
+
+An unchanged resume restores AdamW, policy multipliers, original calibration, RNG/family/EMA state and the global warm-up cursor. Changing the horizon is a separate explicit operation, not an ordinary resume override; see the [continuation guide](docs/Posttraining_Strategies.md). The evaluation command above is a validation reconstruction check, not the full broader-panel coherence assessment. Specify `last` when assessing the final equal-exposure checkpoint; do not treat `best_fidelity.pt` as automatically eligible under every field's guard.
+
+The completed historical Run 11f selected `best.pt` at epoch 595. It passed both evaluated pooled guards, with broader topology reduction 66.29% and worst-field MSE change +2.18%. Its epoch-1,000 `last.pt` reached 68.85% topology reduction but CO increased 5.43%, exceeding the allowance. These results motivate the documented workflow and checkpoint policy; they do not establish universal fidelity, superiority over Run 11 or a complete-campaign speedup. See the [results and protocol](docs/Posttraining_Results.md).
+
+For your own runs, re-render saved histories with `render-history`, use the existing [CPU diagnostic report](scripts/visualization/coherence_posttraining_report.py), or summarize multiple saved histories without model execution:
+
+```bash
+python scripts/posttraining/summarize_runs.py \
+  --run primary="cases/turbulent_combustion/$CHILD_RUN" \
+  --output reports/my_posttraining_summary
+```
+
+The [earlier portable A+B+C profile](cases/turbulent_combustion/configs/posttrain/abc_sliced_persistence.yaml) remains available for the 5,000-epoch conditional-ConFIG workflow. Its three mutual topology lines, source checkpoint default and loss balancing differ from the primary recipe. For another architecture or case, adapt field lists, spectra, topology geometry, rollout and observation contracts deliberately; a field-name substitution alone does not transfer the scientific protocol.
 
 ### 6.4 Physics post-training and direct training
 
@@ -772,6 +829,8 @@ bash scripts/smoke/reproduce_brusselator_integration.sh
 ```
 
 ## 9. Contributing
+
+For post-training work, read [the strategy and development guide](docs/Posttraining_Strategies.md) first. Share source/configuration changes and concise protocol documentation; keep checkpoints, payloads, local launch/resume scripts, generated report bundles and one-time diagnostics in their ignored locations.
 
 Start with [CONTRIBUTING.md](CONTRIBUTING.md), [docs/architecture.md](docs/architecture.md), and [docs/configuration.md](docs/configuration.md). A coworker should be able to review a change without receiving a private dataset or run directory.
 

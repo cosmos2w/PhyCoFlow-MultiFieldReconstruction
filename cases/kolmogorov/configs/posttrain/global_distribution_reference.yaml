@@ -39,7 +39,7 @@ observation_consistency: {mode: endpoint_smooth, strength: 1.0, sigma: 0.05, sch
 trainable: {scope: full_model}
 
 # Training duration, batch sizing, optimizer, and gradient controls.
-optimization: {epochs: 1, batch_size: 1, train_fraction: 0.01, lr: 5.0e-5, weight_decay: 0.0, grad_clip: 1.0, gradient_balance: weighted_sum, config_missing_behavior: error}
+optimization: {epochs: 1, batch_size: 2, train_fraction: 0.01, lr: 5.0e-5, weight_decay: 0.0, grad_clip: 1.0, gradient_balance: weighted_sum, config_missing_behavior: error}
 
 # Reproducibility and execution. data_strategy choices: auto | vram | async_cpu.
 runtime: {seed: 42, device: 'cuda:0', deterministic: true, num_workers: 0}
