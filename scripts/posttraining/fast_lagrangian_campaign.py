@@ -14,6 +14,7 @@ import fcntl
 import hashlib
 import importlib.metadata
 import json
+import math
 import os
 import shlex
 import signal
@@ -95,6 +96,13 @@ GOAL2_RESIDUAL_OFFLINE_RESERVE_SECONDS = 180.0
 GOAL2_RUNTIME_QUOTA_SECONDS = GOAL2_GPU_HOURS_RESERVE * 3600.0
 GOAL2_SMOKE_MAX_SECONDS = 900.0
 GOAL2_ORDERED_SETTINGS = {"dual_lr": 0.01, "denominator_floor": 1.0e-8}
+GOAL2_FORMAL_ARM = "G2-O"
+GOAL2_SMOKE_ARM = "recovery_smoke2ep"
+GOAL2_SMOKE_EPOCH1_RECEIPT = "manifests/goal2_smoke_epoch1_checkpoint.json"
+GOAL2_SMOKE_RECOVERY_VERIFICATION = "manifests/goal2_smoke_recovery_verification.json"
+GOAL2_FORMAL_READINESS_STATUS = "goal2_formal_readiness_assessed"
+GOAL2_MIN_RESIDUAL_FRACTION = 0.1
+GOAL2_MAX_ORTHOGONALITY_ERROR = 1.0e-6
 GOAL2_ORDERED_PROFILE = {
     "topology_estimator": "p3",
     "family_probability": 1.0,
@@ -132,6 +140,16 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _is_sha256(value: str) -> bool:
+    if not isinstance(value, str) or len(value) != 64:
+        return False
+    try:
+        int(value, 16)
+    except ValueError:
+        return False
+    return True
 
 
 def _atomic_json(path: Path, payload: Mapping[str, Any]) -> None:
@@ -339,6 +357,92 @@ def _arm_specs(selected_estimator: str | None) -> dict[str, dict[str, Any]]:
         }
     )
     return specs
+
+
+def _goal2_arm_specs() -> dict[str, dict[str, Any]]:
+    profile = {
+        "topology_estimator": GOAL2_ORDERED_PROFILE["topology_estimator"],
+        "family_probability": GOAL2_ORDERED_PROFILE["family_probability"],
+        "coefficient_interval": GOAL2_ORDERED_PROFILE["coefficient_interval"],
+        "route": "scalar",
+    }
+    return {
+        GOAL2_FORMAL_ARM: {"stage": "goal2", "epochs": 100, **profile},
+        GOAL2_SMOKE_ARM: {"stage": "goal2_smoke", "epochs": GOAL2_RECOVERY_SMOKE_EPOCHS, **profile},
+    }
+
+
+def _all_config_entries(manifest: Mapping[str, Any]) -> dict[str, Any]:
+    configs = dict(manifest.get("configs", {}))
+    goal2_configs = manifest.get("goal2_configs", {})
+    if isinstance(goal2_configs, Mapping):
+        configs.update(goal2_configs)
+    return configs
+
+
+def _arm_spec(manifest: Mapping[str, Any], arm: str) -> dict[str, Any]:
+    if arm in _goal2_arm_specs():
+        if arm not in manifest.get("goal2_configs", {}):
+            raise CampaignError(f"Goal-2 arm {arm} has not been prepared")
+        return _goal2_arm_specs()[arm]
+    try:
+        return _arm_specs(manifest.get("selected_topology_estimator"))[arm]
+    except KeyError as error:
+        raise CampaignError(f"unknown campaign arm {arm!r}") from error
+
+
+def _goal2_config_from_g1s(
+    g1s_config: Mapping[str, Any], campaign_id: str, arm: str
+) -> dict[str, Any]:
+    if arm not in _goal2_arm_specs():
+        raise CampaignError(f"unsupported Goal-2 config {arm!r}")
+    config = deepcopy(dict(g1s_config))
+    optimization = config.get("optimization")
+    if not isinstance(optimization, dict):
+        raise CampaignError("G1-S config has no optimization map")
+    if "lpc_ordered" in optimization:
+        raise CampaignError("G1-S unexpectedly contains LPC-ordered settings")
+    spec = _goal2_arm_specs()[arm]
+    optimization["epochs"] = spec["epochs"]
+    optimization["lpc_ordered"] = dict(GOAL2_ORDERED_SETTINGS)
+    config["output"]["experiment_name"] = f"_LPCAccel/{campaign_id}/{arm}"
+    if arm == GOAL2_SMOKE_ARM:
+        checkpointing = config.setdefault("checkpointing", {})
+        checkpointing["enabled"] = True
+        checkpointing["every_epochs"] = 1
+        checkpointing["save_epoch_one"] = True
+        checkpointing["epochs"] = [1, 2]
+    return config
+
+
+def prepare_goal2(root: Path) -> dict[str, Any]:
+    """Materialize only the gated ordered arm and its two-epoch recovery smoke."""
+    manifest = _campaign_manifest(root)
+    campaign_root = Path(manifest["root"]).resolve(strict=True)
+    if not manifest.get("gates", {}).get("goal1_authorized"):
+        raise CampaignError("Goal-2 configs require the completed authorized Goal-1 campaign")
+    _verify_goal2_source_binding(manifest)
+    _goal1_residual_runs_complete(campaign_root)
+    g1s = _read_yaml(_config_path(manifest, "G1-S"))
+    configs: dict[str, dict[str, str]] = {}
+    for arm in (GOAL2_FORMAL_ARM, GOAL2_SMOKE_ARM):
+        config = _goal2_config_from_g1s(g1s, manifest["campaign_id"], arm)
+        _validate_config_only(config)
+        path = campaign_root / "configs" / f"{arm}.yaml"
+        text = yaml.safe_dump(config, sort_keys=False, allow_unicode=True)
+        configs[arm] = {"path": str(path), "sha256": _write_new_or_same(path, text)}
+    admission = _acquire_admission_lock(campaign_root)
+    try:
+        current = _campaign_manifest(campaign_root)
+        old = current.get("goal2_configs")
+        if old is not None and old != configs:
+            raise CampaignError("prepared Goal-2 config binding changed; refusing to replace it")
+        if old is None:
+            current["goal2_configs"] = configs
+            _atomic_json(campaign_root / "manifests/campaign.json", current)
+        return current
+    finally:
+        _release_campaign_lock(admission)
 
 
 def _make_config(
@@ -899,7 +1003,8 @@ def _active_elapsed_seconds(record: Mapping[str, Any]) -> float:
 def _status_data(manifest: Mapping[str, Any]) -> dict[str, Any]:
     root = Path(manifest["root"])
     runs = {
-        arm: [_run_record(path) for path in _run_dirs(root, arm)] for arm in manifest["configs"]
+        arm: [_run_record(path) for path in _run_dirs(root, arm)]
+        for arm in _all_config_entries(manifest)
     }
     counted_epochs = sum(
         (float(record["completed_epochs"]) if record["completed_epochs"] is not None else 0.0)
@@ -1002,7 +1107,7 @@ def status(root: Path) -> dict[str, Any]:
 
 
 def _config_path(manifest: Mapping[str, Any], arm: str) -> Path:
-    config = manifest.get("configs", {}).get(arm)
+    config = _all_config_entries(manifest).get(arm)
     if not isinstance(config, dict):
         raise CampaignError(f"arm {arm!r} has no prepared config")
     path = Path(config["path"]).resolve(strict=True)
@@ -1014,18 +1119,22 @@ def _config_path(manifest: Mapping[str, Any], arm: str) -> Path:
 
 
 def _validate_arm(manifest: Mapping[str, Any], arm: str) -> dict[str, Any]:
-    if arm not in manifest.get("configs", {}):
+    if arm not in _all_config_entries(manifest):
         raise CampaignError(f"unknown or unprepared arm {arm!r}")
     excluded = manifest.get("excluded_arms", {}).get(arm)
     if excluded:
         raise CampaignError(f"{arm} is excluded by its TRAIN-only pretest: {excluded}")
-    if arm != "T0" and manifest.get("selected_topology_estimator") is None:
+    if (
+        arm != "T0"
+        and arm not in _goal2_arm_specs()
+        and manifest.get("selected_topology_estimator") is None
+    ):
         raise CampaignError(
             "prepare --selected-topology after TRAIN-only estimator selection before launching this arm"
         )
     path = _config_path(manifest, arm)
     config = _read_yaml(path)
-    spec = _arm_specs(manifest.get("selected_topology_estimator"))[arm]
+    spec = _arm_spec(manifest, arm)
     fast = config.get("optimization", {}).get("fast_lagrangian", {})
     expected = {
         "topology_estimator": spec["topology_estimator"],
@@ -1057,6 +1166,21 @@ def _validate_arm(manifest: Mapping[str, Any], arm: str) -> dict[str, Any]:
             "method": "fixed_sum"
         }:
             raise CampaignError("scalar config retains a recursive ConFIG selector")
+    if arm in _goal2_arm_specs():
+        expected_config = _goal2_config_from_g1s(
+            _read_yaml(_config_path(manifest, "G1-S")), manifest["campaign_id"], arm
+        )
+        if config != expected_config:
+            raise CampaignError(f"{arm} differs from the immutable ordered G1-S profile")
+        if config.get("optimization", {}).get("lpc_ordered") != GOAL2_ORDERED_SETTINGS:
+            raise CampaignError(f"{arm} LPC-ordered settings differ from the declared profile")
+        fidelity = config.get("optimization", {}).get("multitask", {}).get("fidelity_budget", {})
+        if (
+            fidelity.get("relative_increase") != 0.05
+            or fidelity.get("absolute_allowance") != 0.0
+            or fidelity.get("metric") != "endpoint_mse_model_units"
+        ):
+            raise CampaignError(f"{arm} endpoint-fidelity contract differs from the +5% plan")
     return {"config": path, "spec": spec}
 
 
@@ -1065,7 +1189,7 @@ def _validate_gpu_for_arm(arm: str, gpu: int, *, enforce_assignment: bool = True
     expected = G1_GPU_ASSIGNMENTS.get(arm)
     if enforce_assignment and expected is not None and gpu != expected:
         raise CampaignError(f"{arm} is assigned to physical GPU {expected}; refusing GPU {gpu}")
-    if arm.startswith("G2") and gpu != 0:
+    if (arm.startswith("G2") or arm == GOAL2_SMOKE_ARM) and gpu != 0:
         raise CampaignError("Goal 2 is reserved for physical GPU 0")
     return gpu
 
@@ -1207,6 +1331,27 @@ def _goal1_quota_hours(manifest: Mapping[str, Any], arm: str) -> float:
 def _evaluation_reserve_hours(manifest: Mapping[str, Any]) -> float:
     gate = manifest.get("gate_evidence", {}).get("goal1", {})
     return max(MIN_EVALUATION_RESERVE_HOURS, float(gate.get("evaluation_reserve_hours", 0.0)))
+
+
+def _goal2_formal_remaining_seconds(
+    current: Mapping[str, Any],
+) -> float:
+    completed = max(
+        (
+            float(record.get("completed_epochs") or 0.0)
+            for record in current.get("runs", {}).get(GOAL2_FORMAL_ARM, [])
+        ),
+        default=0.0,
+    )
+    if completed >= MAX_G1_EPOCHS:
+        return 0.0
+    process_seconds = current.get(
+        "training_process_seconds_by_arm", current.get("process_seconds_by_arm", {})
+    )
+    return max(
+        0.0,
+        GOAL2_RUNTIME_QUOTA_SECONDS - float(process_seconds.get(GOAL2_FORMAL_ARM, 0.0)),
+    )
 
 
 def _native_maps_approval_binding(root: Path) -> dict[str, Any]:
@@ -1366,6 +1511,445 @@ def _goal2_offline_diagnostic_seconds(
     return OFFLINE_GPU_DIAGNOSTIC_SECONDS + completed + active
 
 
+def _campaign_ledger_rows(root: Path, filename: str = "launch_ledger.jsonl") -> list[dict[str, Any]]:
+    path = root / "manifests" / filename
+    if not path.is_file():
+        return []
+    rows = []
+    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError as error:
+            raise CampaignError(f"invalid {filename} row {number}: {error}") from error
+        if not isinstance(row, dict):
+            raise CampaignError(f"invalid {filename} row {number}: expected an object")
+        rows.append(row)
+    return rows
+
+
+def _goal2_residual_is_meaningful(root: Path, manifest: Mapping[str, Any]) -> dict[str, Any]:
+    expected_binding = _goal2_residual_approval_binding(root)
+    if manifest.get("goal2_residual_probe_approval_binding") != expected_binding:
+        raise CampaignError("Goal-2 residual probe was not run under the stored immutable binding")
+    result_path = root / GOAL2_RESIDUAL_RESULT
+    if not result_path.is_file():
+        raise CampaignError("the predeclared Goal-2 residual diagnostic has no result")
+    result = _read_json(result_path)
+    binding_path = root / GOAL2_RESIDUAL_APPROVAL_FILES["binding"][0]
+    if (
+        result.get("status") != "complete"
+        or result.get("schema_version") != 1
+        or result.get("result_schema") != GOAL2_RESIDUAL_RESULT_SCHEMA
+        or result.get("campaign_id") != manifest.get("campaign_id")
+        or result.get("plan_sha256") != GOAL2_RESIDUAL_APPROVAL_FILES["plan"][1]
+        or result.get("script_sha256") != GOAL2_RESIDUAL_APPROVAL_FILES["script"][1]
+        or result.get("binding_sha256") != _sha256(binding_path)
+        or result.get("source_snapshot_manifest_sha256") != GOAL1_SNAPSHOT_MANIFEST_SHA256
+        or result.get("engineering_gate_passed_both_states") is not True
+        or result.get("no_parameter_vectors_written") is not True
+    ):
+        raise CampaignError("Goal-2 residual result does not pass its frozen schema and source bindings")
+    execution = result.get("execution", {})
+    if (
+        execution.get("source_immutable_verified") is not True
+        or execution.get("optimizer_constructed") is not False
+        or execution.get("optimizer_steps") != 0
+        or execution.get("parameter_updates") is not False
+        or execution.get("test_access") is not False
+    ):
+        raise CampaignError("Goal-2 residual result includes optimizer or TEST activity")
+    g1_runs = _goal1_residual_runs_complete(root)
+    g1s_run = result.get("inputs", {}).get("target_g1s_run", {})
+    if (
+        g1s_run.get("run_path") != str(g1_runs["G1-S"])
+        or g1s_run.get("global_step") != 3800
+        or g1s_run.get("epoch") != MAX_G1_EPOCHS
+    ):
+        raise CampaignError("Goal-2 residual target is not the completed G1-S epoch-100 state")
+    summaries = result.get("state_summaries", {})
+    state_names = {"SOURCE", "G1-S-final-100"}
+    if set(summaries) != state_names:
+        raise CampaignError("Goal-2 residual result does not contain both predeclared states")
+    state_rows = {item.get("state_name"): item for item in result.get("states", [])}
+    if set(state_rows) != state_names:
+        raise CampaignError("Goal-2 residual batch diagnostics do not match the two predeclared states")
+    for name in sorted(state_names):
+        summary = summaries[name]
+        batches = state_rows[name].get("batches", [])
+        residual = summary.get("residual_fraction_median")
+        orthogonality = summary.get("max_relative_tangent_orthogonality_error")
+        if (
+            summary.get("engineering_gate_passed") is not True
+            or summary.get("batch_count") != 4
+            or not isinstance(residual, (int, float))
+            or not math.isfinite(float(residual))
+            or float(residual) < GOAL2_MIN_RESIDUAL_FRACTION
+            or not isinstance(orthogonality, (int, float))
+            or not math.isfinite(float(orthogonality))
+            or float(orthogonality) > GOAL2_MAX_ORTHOGONALITY_ERROR
+            or len(batches) != 4
+            or any(
+                batch.get("family_gradient_diagnostic", {}).get(
+                    "meaningful_finite_nonzero_target"
+                )
+                is not True
+                for batch in batches
+            )
+        ):
+            raise CampaignError(f"Goal-2 residual is not meaningful and finite for {name}")
+    return {"path": str(result_path), "sha256": _sha256(result_path), "status": "complete"}
+
+
+def _goal2_smoke_epoch1_checkpoint_receipt(
+    root: Path, manifest: Mapping[str, Any], run: Path
+) -> dict[str, Any]:
+    receipt_path = root / GOAL2_SMOKE_EPOCH1_RECEIPT
+    receipt = _read_json(receipt_path)
+    run = run.resolve(strict=True)
+    try:
+        checkpoint_path = Path(str(receipt.get("checkpoint_path", ""))).resolve(strict=True)
+    except OSError as error:
+        raise CampaignError("Goal-2 smoke epoch-one checkpoint is missing") from error
+    _verify_goal2_source_binding(manifest)
+    source_hashes = _stage_source_bindings(manifest)["goal2"]["files_sha256"]
+    g1s_run = _goal1_residual_runs_complete(root)["G1-S"]
+    g1s_manifest = _read_json(g1s_run / "run_manifest.json")
+    expected_source_hashes = g1s_manifest.get("source_hashes")
+    if not isinstance(expected_source_hashes, Mapping) or not expected_source_hashes:
+        raise CampaignError("completed G1-S run manifest has no immutable SOURCE artifact hashes")
+    if expected_source_hashes.get("checkpoint") != manifest.get("source_checkpoint_sha256"):
+        raise CampaignError("G1-S source checkpoint differs from the independently pinned Run 11f SOURCE")
+    config_path = run / "resolved_config.yaml"
+    ordered_reference_path = run / "artifacts/lpc_ordered_reference.json"
+    run_manifest = _read_json(run / "run_manifest.json")
+    prepared_config_path = _config_path(manifest, GOAL2_SMOKE_ARM)
+    prepared_config = _read_yaml(prepared_config_path)
+    state = receipt.get("lpc_ordered_state")
+    if not isinstance(state, Mapping):
+        raise CampaignError("Goal-2 smoke epoch-one receipt has no ordered state")
+    try:
+        json.dumps(state, allow_nan=False)
+    except (TypeError, ValueError) as error:
+        raise CampaignError("Goal-2 smoke epoch-one ordered state is not finite JSON") from error
+    reference = state.get("reference")
+    if not isinstance(reference, Mapping):
+        raise CampaignError("Goal-2 smoke epoch-one receipt has no ordered SOURCE reference")
+    try:
+        ordered_reference_artifact = _read_json(ordered_reference_path)
+    except CampaignError as error:
+        raise CampaignError("Goal-2 smoke epoch-one ordered reference artifact is missing") from error
+    reference_digest = _sha256(ordered_reference_path)
+    multipliers = state.get("multipliers")
+    if not isinstance(multipliers, Mapping) or set(multipliers) != {
+        "global_distribution",
+        "cross_spectrum",
+    }:
+        raise CampaignError("Goal-2 smoke epoch-one ordered multipliers are malformed")
+    multiplier_values = [multipliers[name] for name in ("global_distribution", "cross_spectrum")]
+    if any(
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or float(value) < 0.0
+        for value in multiplier_values
+    ):
+        raise CampaignError("Goal-2 smoke epoch-one ordered multipliers are not finite and non-negative")
+    implementation_files = {
+        name: source_hashes[name]
+        for name in (
+            "src/phycoflow_reconstruction/training/lpc_ordered.py",
+            "src/phycoflow_reconstruction/training/post_training.py",
+            "src/phycoflow_reconstruction/training/run_store.py",
+            "src/phycoflow_reconstruction/config/validate.py",
+        )
+    }
+    rng_hashes = receipt.get("rng_state_sha256")
+    optimizer_steps = receipt.get("optimizer_step_counts")
+    if (
+        receipt.get("schema_version") != 1
+        or receipt.get("status") != "atomic_epoch1_checkpoint_verified"
+        or receipt.get("run") != str(run)
+        or not checkpoint_path.is_file()
+        or not checkpoint_path.is_relative_to(run)
+        or checkpoint_path != run / "checkpoints/epoch_001.pt"
+        or receipt.get("checkpoint_sha256") != _sha256(checkpoint_path)
+        or receipt.get("global_step") != 38
+        or receipt.get("reporting_epoch") != 1.0
+        or receipt.get("config_sha256") != run_manifest.get("config_sha256")
+        or run_manifest.get("config_sha256") != receipt.get("config_sha256")
+        or _read_yaml(config_path) != prepared_config
+        or _sha256(prepared_config_path)
+        != manifest["goal2_configs"][GOAL2_SMOKE_ARM]["sha256"]
+        or receipt.get("lpc_ordered_reference_sha256") != reference_digest
+        or ordered_reference_artifact.get("reference") != reference
+        or ordered_reference_artifact.get("settings") != GOAL2_ORDERED_SETTINGS
+        or ordered_reference_artifact.get("source_checkpoint_sha256")
+        != expected_source_hashes.get("checkpoint")
+        or state.get("version") != 1
+        or state.get("completed_updates") != 38
+        or state.get("dual_lr") != GOAL2_ORDERED_SETTINGS["dual_lr"]
+        or state.get("reference", {}).get("denominator_floor")
+        != GOAL2_ORDERED_SETTINGS["denominator_floor"]
+        or state.get("reference", {}).get("family_names")
+        != ["global_distribution", "cross_spectrum", "topology"]
+        or state.get("reference", {}).get("source_sha256")
+        != expected_source_hashes.get("checkpoint")
+        or state.get("reference", {}).get("no_regression_bounds")
+        != {
+            "global_distribution": state.get("reference", {}).get("means", {}).get("global_distribution"),
+            "cross_spectrum": state.get("reference", {}).get("means", {}).get("cross_spectrum"),
+        }
+        or not isinstance(receipt.get("lpc_ordered_implementation"), Mapping)
+        or dict(receipt["lpc_ordered_implementation"]) != implementation_files
+        or receipt.get("external_policy_completed_updates") != 38
+        or not isinstance(receipt.get("external_policy_multipliers"), list)
+        or len(receipt["external_policy_multipliers"]) != 5
+        or any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            for value in receipt.get("external_policy_multipliers", [])
+        )
+        or not isinstance(rng_hashes, Mapping)
+        or not all(
+            isinstance(rng_hashes.get(key), str)
+            and len(rng_hashes[key]) == 64
+            and _is_sha256(rng_hashes[key])
+            for key in ("torch_cpu", "index_generator")
+        )
+        or not isinstance(rng_hashes.get("torch_cuda"), list)
+        or not rng_hashes["torch_cuda"]
+        or any(not isinstance(item, str) or not _is_sha256(item) for item in rng_hashes["torch_cuda"])
+        or not isinstance(optimizer_steps, list)
+        or optimizer_steps != [38]
+        or receipt.get("source_hashes") != expected_source_hashes
+        or not isinstance(receipt.get("created_utc"), str)
+    ):
+        raise CampaignError("Goal-2 smoke epoch-one checkpoint receipt failed its frozen binding checks")
+    try:
+        created_utc = datetime.fromisoformat(receipt["created_utc"].replace("Z", "+00:00"))
+    except (TypeError, ValueError) as error:
+        raise CampaignError("Goal-2 smoke epoch-one receipt has an invalid creation time") from error
+    if created_utc.tzinfo is None:
+        raise CampaignError("Goal-2 smoke epoch-one receipt time must include a timezone")
+    return {
+        "path": str(receipt_path.resolve(strict=True)),
+        "sha256": _sha256(receipt_path),
+        "checkpoint_path": str(checkpoint_path),
+        "checkpoint_sha256": receipt["checkpoint_sha256"],
+        "config_sha256": receipt["config_sha256"],
+        "reference_sha256": reference_digest,
+    }
+
+
+def _goal2_smoke_recovery_verification(
+    root: Path, manifest: Mapping[str, Any], run: Path, checkpoint_receipt: Mapping[str, Any]
+) -> dict[str, Any]:
+    verification_path = root / GOAL2_SMOKE_RECOVERY_VERIFICATION
+    verification = _read_json(verification_path)
+    required_checks = {
+        "checkpoint_and_source_binding",
+        "lpc_ordered_reference_and_implementation",
+        "per_field_mu_and_external_policy_state",
+        "optimizer_and_rng_state",
+        "first_resumed_step_is_39",
+        "sampler_and_replayed_batch_values_reconciled",
+        "log_tail_has_no_duplicate_update",
+    }
+    details = verification.get("details")
+    checks = verification.get("checks")
+    if (
+        verification.get("schema_version") != 1
+        or verification.get("status") != "verified"
+        or verification.get("run") != str(run.resolve(strict=True))
+        or verification.get("checkpoint_receipt_path") != checkpoint_receipt["path"]
+        or verification.get("epoch1_checkpoint_receipt_sha256") != checkpoint_receipt["sha256"]
+        or verification.get("checkpoint_sha256") != checkpoint_receipt["checkpoint_sha256"]
+        or verification.get("source_binding_sha256") != _stage_source_digest(root, manifest, "goal2")
+        or verification.get("config_sha256") != checkpoint_receipt["config_sha256"]
+        or verification.get("lpc_ordered_reference_sha256")
+        != checkpoint_receipt["reference_sha256"]
+        or verification.get("first_resumed_step") != 39
+        or verification.get("final_step") != 76
+        or not isinstance(checks, Mapping)
+        or set(checks) != required_checks
+        or any(value is not True for value in checks.values())
+        or not isinstance(details, Mapping)
+    ):
+        raise CampaignError("Goal-2 smoke recovery verification is incomplete or not bound to epoch one")
+    return {
+        "path": str(verification_path.resolve(strict=True)),
+        "sha256": _sha256(verification_path),
+        "status": "verified",
+        "first_resumed_step": 39,
+    }
+
+
+def _goal2_smoke_recovery_receipt(
+    root: Path, manifest: Mapping[str, Any]
+) -> dict[str, Any]:
+    runs = _run_dirs(root, GOAL2_SMOKE_ARM)
+    if len(runs) != 1:
+        raise CampaignError("Goal-2 formal gate requires exactly one recovery-smoke lineage")
+    run = runs[0].resolve(strict=True)
+    record = _run_record(run)
+    run_manifest = _read_json(run / "run_manifest.json")
+    config = _read_yaml(run / "resolved_config.yaml")
+    prepared = _read_yaml(_config_path(manifest, GOAL2_SMOKE_ARM))
+    if (
+        record.get("status") != "completed"
+        or record.get("completed_epochs") != 2.0
+        or record.get("completed_updates") != 76
+        or record.get("steps_per_epoch") != 38
+        or run_manifest.get("experiment_name")
+        != f"_LPCAccel/{manifest['campaign_id']}/{GOAL2_SMOKE_ARM}"
+        or config != prepared
+    ):
+        raise CampaignError("Goal-2 recovery smoke did not complete two epochs on its frozen config")
+
+    rows = [
+        row
+        for row in _campaign_ledger_rows(root)
+        if row.get("arm") == GOAL2_SMOKE_ARM and row.get("action") in {"launch", "resume"}
+    ]
+    if len(rows) != 2 or [row.get("action") for row in rows] != ["launch", "resume"]:
+        raise CampaignError("Goal-2 recovery smoke requires one interrupted launch and one same-lineage resume")
+    first, resumed = rows
+    source_digest = _stage_source_digest(root, manifest, "goal2")
+    if (
+        first.get("gpu_index") != 0
+        or resumed.get("gpu_index") != 0
+        or first.get("source_stage") != "goal2"
+        or resumed.get("source_stage") != "goal2"
+        or first.get("source_binding_sha256") != source_digest
+        or resumed.get("source_binding_sha256") != source_digest
+        or Path(first.get("run", "")).resolve() != run
+        or Path(resumed.get("run", "")).resolve() != run
+        or float(first.get("segment_start_epoch", -1)) != 0.0
+        or float(first.get("epochs_charged", -1)) != GOAL2_RECOVERY_SMOKE_EPOCHS
+        or first.get("return_code") == 0
+        or float(resumed.get("segment_start_epoch", -1)) != 1.0
+        or float(resumed.get("segment_end_epoch", -1)) != 2.0
+        or float(resumed.get("epochs_charged", -1)) != 1.0
+        or resumed.get("return_code") != 0
+    ):
+        raise CampaignError("Goal-2 recovery ledger does not prove a conservative SIGINT/resume sequence")
+    first_end = float(first.get("segment_end_epoch", -1))
+    if not math.isfinite(first_end) or not 1.0 <= first_end < 2.0:
+        raise CampaignError("Goal-2 interrupted segment did not preserve its observed epoch-one tail")
+    checkpoint_receipt = _goal2_smoke_epoch1_checkpoint_receipt(root, manifest, run)
+    stop_rows = [
+        row
+        for row in _campaign_ledger_rows(root, "stop_requests.jsonl")
+        if row.get("arm") == GOAL2_SMOKE_ARM
+        and row.get("pid") == first.get("pid")
+        and Path(row.get("run", "")).resolve() == run
+        and row.get("signal") == "SIGINT"
+        and row.get("checkpoint_receipt_path") == checkpoint_receipt["path"]
+        and row.get("checkpoint_receipt_sha256") == checkpoint_receipt["sha256"]
+    ]
+    if len(stop_rows) != 1:
+        raise CampaignError("Goal-2 smoke SIGINT is not bound to the preserved atomic epoch-one checkpoint")
+    recovery_verification = _goal2_smoke_recovery_verification(
+        root, manifest, run, checkpoint_receipt
+    )
+    charged = sum(float(row.get("epochs_charged", 0.0)) for row in rows)
+    if charged != GOAL2_RECOVERY_SMOKE_EPOCH_BUDGET:
+        raise CampaignError("Goal-2 recovery smoke exceeded its three-epoch conservative exposure cap")
+    return {
+        "run": str(run),
+        "config_sha256": checkpoint_receipt["config_sha256"],
+        "prepared_config_file_sha256": manifest["goal2_configs"][GOAL2_SMOKE_ARM]["sha256"],
+        "launch_pid": first["pid"],
+        "resume_pid": resumed["pid"],
+        "stop_request": stop_rows[0],
+        "checkpoint_receipt": checkpoint_receipt,
+        "recovery_verification": recovery_verification,
+        "observed_first_segment_end_epoch": first_end,
+        "epochs_charged": charged,
+        "completed_epochs": 2,
+    }
+
+
+def _goal2_budget_readiness(
+    manifest: Mapping[str, Any], current: Mapping[str, Any]
+) -> dict[str, float]:
+    if float(current.get("training_epochs_charged", 0.0)) + MAX_G1_EPOCHS + 6 > MAX_TOTAL_EPOCHS:
+        raise CampaignError("the single 100-epoch Goal-2 arm exceeds the remaining 556-epoch cap")
+    if _goal1_remaining_hours(manifest, current_status=current) > 0:
+        raise CampaignError("Goal-2 cannot reserve time while any approved Goal-1 lineage remains open")
+    diagnostic_seconds = _goal2_offline_diagnostic_seconds(Path(manifest["root"]), current)
+    if diagnostic_seconds > MAX_OFFLINE_DIAGNOSTIC_SECONDS:
+        raise CampaignError("Goal-2 offline diagnostics exceed the 45-minute cap")
+    evaluation_remaining = max(
+        0.0,
+        _evaluation_reserve_hours(manifest)
+        - _evaluation_spent_seconds(Path(manifest["root"]), current) / 3600,
+    )
+    future_seconds = GOAL2_RUNTIME_QUOTA_SECONDS + evaluation_remaining * 3600
+    future_seconds += GPU_CAP_GRACE_SECONDS * MAX_CONCURRENT_GPU_RUNS
+    available_seconds = MAX_GPU_SECONDS - float(current.get("gpu_seconds_charged", 0.0))
+    if future_seconds > available_seconds:
+        raise CampaignError("the 16-hour cap cannot cover Goal-2, remaining evaluation, and watchdog reserves")
+    return {
+        "reported_gpu_seconds": float(current.get("gpu_seconds_charged", 0.0)),
+        "goal2_gpu_seconds_reserved": GOAL2_RUNTIME_QUOTA_SECONDS,
+        "evaluation_gpu_seconds_reserved": evaluation_remaining * 3600,
+        "watchdog_shutdown_gpu_seconds_reserved": GPU_CAP_GRACE_SECONDS * MAX_CONCURRENT_GPU_RUNS,
+        "available_gpu_seconds": available_seconds,
+    }
+
+
+def _goal2_smoke_gate(manifest: Mapping[str, Any]) -> dict[str, Any]:
+    if not manifest.get("gates", {}).get("goal2_smoke_authorized"):
+        raise CampaignError("the bounded Goal-2 smoke requires its explicit schema/unit-test gate")
+    record = manifest.get("gate_evidence", {}).get("goal2_smoke", {})
+    path = Path(manifest["root"]) / str(record.get("path", ""))
+    if (
+        not path.is_file()
+        or _sha256(path) != record.get("sha256")
+        or record.get("source_binding_sha256")
+        != _stage_source_bindings(manifest).get("goal2", {}).get("source_binding_sha256")
+    ):
+        raise CampaignError("Goal-2 smoke implementation/schema evidence or source binding changed")
+    source_binding = _verify_goal2_source_binding(manifest)
+    if (
+        record.get("goal2_config_sha256")
+        != manifest.get("goal2_configs", {}).get(GOAL2_FORMAL_ARM, {}).get("sha256")
+        or record.get("smoke_config_sha256")
+        != manifest.get("goal2_configs", {}).get(GOAL2_SMOKE_ARM, {}).get("sha256")
+        or record.get("source_binding_sha256") != source_binding["source_binding_sha256"]
+    ):
+        raise CampaignError("Goal-2 smoke gate no longer binds the prepared profiles and source")
+    return record
+
+
+def _goal2_formal_gate(manifest: Mapping[str, Any]) -> dict[str, Any]:
+    if not manifest.get("gates", {}).get("goal2_authorized"):
+        raise CampaignError("G2-O is gated until the residual, recovery, and budget evidence passes")
+    record = manifest.get("gate_evidence", {}).get("goal2", {})
+    path = Path(manifest["root"]) / str(record.get("path", ""))
+    if not path.is_file() or _sha256(path) != record.get("sha256"):
+        raise CampaignError("Goal-2 formal readiness evidence changed after authorization")
+    evidence = _read_json(path)
+    source_binding = _verify_goal2_source_binding(manifest)
+    if (
+        evidence.get("schema_version") != 1
+        or evidence.get("status") != GOAL2_FORMAL_READINESS_STATUS
+        or evidence.get("goal2_ready") is not True
+        or evidence.get("source_binding_sha256") != source_binding["source_binding_sha256"]
+        or record.get("source_binding_sha256") != source_binding["source_binding_sha256"]
+    ):
+        raise CampaignError("Goal-2 formal readiness receipt no longer matches the applied source binding")
+    if record.get("goal2_config_sha256") != manifest.get("goal2_configs", {}).get(
+        GOAL2_FORMAL_ARM, {}
+    ).get("sha256"):
+        raise CampaignError("Goal-2 formal readiness receipt names a changed G2-O config")
+    _goal2_residual_is_meaningful(Path(manifest["root"]), manifest)
+    _goal2_smoke_recovery_receipt(Path(manifest["root"]), manifest)
+    return record
+
+
 def goal2_residual_probe(
     root: Path,
     run_dir: Path,
@@ -1479,6 +2063,8 @@ def _reserved_gpu_seconds(manifest: Mapping[str, Any], arm: str) -> float:
             + evaluation_reserve
             + _goal1_remaining_hours(manifest, skip_arm=arm, current_status=current)
         ) * 3600
+    if arm == GOAL2_FORMAL_ARM:
+        return (evaluation_reserve + goal1_remaining) * 3600
     return (GOAL2_GPU_HOURS_RESERVE + evaluation_reserve + goal1_remaining) * 3600
 
 
@@ -1522,6 +2108,9 @@ def _watchdog_seconds(
     )
     approved = manifest.get("gate_evidence", {}).get("goal1", {}).get("approved_arms", [])
     goal1_remaining = _goal1_remaining_hours(manifest, current_status=current) * 3600
+    formal_goal2_training = arm == GOAL2_FORMAL_ARM and action in {"launch", "resume"}
+    goal2_remaining = _goal2_formal_remaining_seconds(current)
+    future_goal2 = 0.0 if formal_goal2_training else goal2_remaining
     if arm.startswith("G1-"):
         if arm not in approved:
             raise CampaignError(f"{arm} has no individually approved runtime quota")
@@ -1589,13 +2178,15 @@ def _watchdog_seconds(
         - future_evaluation
         - active_evaluation_remaining
         - active_non_goal1_remaining
-        - GOAL2_GPU_HOURS_RESERVE * 3600
+        - future_goal2
         - GPU_CAP_GRACE_SECONDS * MAX_CONCURRENT_GPU_RUNS
     )
     if arm.startswith("G1-"):
         allocation = min(own_goal1, global_room)
     elif action.startswith("evaluate-"):
         allocation = min(own_evaluation, global_room)
+    elif formal_goal2_training:
+        allocation = min(goal2_remaining, global_room)
     else:
         available_slots = max(1, MAX_CONCURRENT_GPU_RUNS - len(active))
         allocation = global_room / available_slots
@@ -2107,11 +2698,24 @@ def _execute_runner(
                 else:
                     epoch_charge = segment_epoch_charge(
                         process.poll(),
-                        _arm_specs(manifest.get("selected_topology_estimator"))[arm]["epochs"],
+                        _arm_spec(manifest, arm)["epochs"],
                         start_epoch,
                         end_epoch,
                         has_run,
                     )
+                    if (
+                        arm == GOAL2_SMOKE_ARM
+                        and action == "launch"
+                        and float(end_epoch or 0.0) < GOAL2_RECOVERY_SMOKE_EPOCHS
+                        and has_run
+                    ):
+                        # A planned SIGINT after checkpoint 1 conservatively
+                        # charges the full two-epoch first segment; the one
+                        # remaining epoch is allowed only for same-run resume.
+                        epoch_charge = max(
+                            epoch_charge,
+                            GOAL2_RECOVERY_SMOKE_EPOCHS - start_epoch,
+                        )
                 elapsed_seconds = max(0.0, time.monotonic() - started)
                 admission = admission or _acquire_admission_lock(root, timeout_seconds=STOP_WAIT_SECONDS)
                 try:
@@ -2187,9 +2791,14 @@ def _g1_gate(manifest: Mapping[str, Any], arm: str) -> None:
         raise CampaignError(f"{arm} was not individually approved by the Goal-1 readiness evidence")
 
 
+def _source_stage_for_arm(arm: str) -> str:
+    return "goal2" if arm in _goal2_arm_specs() else "goal1"
+
+
 def _check_budget(manifest: Mapping[str, Any], arm: str) -> None:
     current = status(Path(manifest["root"]))
-    next_horizon = _arm_specs(manifest.get("selected_topology_estimator"))[arm]["epochs"]
+    spec = _arm_spec(manifest, arm)
+    next_horizon = int(spec["epochs"])
     if current["training_epochs_charged"] + 6 >= MAX_TOTAL_EPOCHS:
         raise CampaignError(
             "the 556-epoch cap, including its six reserved public-smoke epochs, is exhausted"
@@ -2200,6 +2809,13 @@ def _check_budget(manifest: Mapping[str, Any], arm: str) -> None:
         )
     if arm.startswith("T") and current["timing_epochs_charged"] + next_horizon > 50:
         raise CampaignError("this attempt would exceed the 50-epoch timing exposure cap")
+    if arm == GOAL2_SMOKE_ARM and (
+        float(current.get("charged_epochs_by_arm", {}).get(arm, 0.0)) + next_horizon
+        > GOAL2_RECOVERY_SMOKE_EPOCH_BUDGET
+    ):
+        raise CampaignError("the one Goal-2 recovery smoke would exceed its three-epoch exposure cap")
+    if arm == GOAL2_FORMAL_ARM and next_horizon != MAX_G1_EPOCHS:
+        raise CampaignError("G2-O must remain exactly one 100-epoch lineage")
     if current["reported_gpu_hours"] >= MAX_GPU_SECONDS / 3600:
         raise CampaignError("the 16-hour GPU-use cap is exhausted")
     existing = _run_dirs(Path(manifest["root"]), arm)
@@ -2213,8 +2829,6 @@ def _check_budget(manifest: Mapping[str, Any], arm: str) -> None:
 
 def launch(root: Path, arm: str, *, gpu: int = 1, execute: bool = False) -> str:
     manifest = _campaign_manifest(root)
-    if arm.startswith("G2"):
-        raise CampaignError("Goal 2 has no implemented LPC-ordered runner and remains gated")
     gpu = _validate_gpu_for_arm(arm, gpu)
     info = _validate_arm(manifest, arm)
     _validate_config_only(_read_yaml(info["config"]))
@@ -2222,10 +2836,15 @@ def launch(root: Path, arm: str, *, gpu: int = 1, execute: bool = False) -> str:
     if spec["stage"] == "goal1":
         _timing_gate(manifest)
         _g1_gate(manifest, arm)
+    elif arm == GOAL2_SMOKE_ARM:
+        _goal2_smoke_gate(manifest)
+    elif arm == GOAL2_FORMAL_ARM:
+        _goal2_formal_gate(manifest)
     _check_budget(manifest, arm)
+    source_stage = _source_stage_for_arm(arm)
     command = _command(arm, info["config"])
     rendered = _rendered_command(
-        Path(manifest["root"]), command, gpu, source_stage="goal1"
+        Path(manifest["root"]), command, gpu, source_stage=source_stage
     )
     if not execute:
         return rendered
@@ -2236,7 +2855,7 @@ def launch(root: Path, arm: str, *, gpu: int = 1, execute: bool = False) -> str:
         command,
         reserve_gpu_seconds=_reserved_gpu_seconds(manifest, arm),
         gpu=gpu,
-        source_stage="goal1",
+        source_stage=source_stage,
     )
     return f"completed {arm}; inspect {status(root)['runs'].get(arm)}"
 
@@ -2346,12 +2965,53 @@ def stop(
     if _pid_is_alive(selected_pid) and not live:
         raise CampaignError("active PID exists but does not match the recorded campaign command; refusing to signal it")
     if live:
+        admission = _acquire_admission_lock(campaign_root)
         try:
-            os.killpg(int(selected_pid), signal.SIGINT)
-        except ProcessLookupError:
-            pass
-        except OSError as error:
-            raise CampaignError(f"could not send SIGINT to verified campaign process {selected_pid}: {error}") from error
+            current = _read_json(active_path) if active_path.is_file() else {}
+            if current.get("pid") != selected_pid:
+                raise CampaignError("active campaign process changed before stop could signal it")
+            if _pid_matches(selected_pid, config, run):
+                try:
+                    os.killpg(int(selected_pid), signal.SIGINT)
+                except ProcessLookupError:
+                    live = False
+                except OSError as error:
+                    raise CampaignError(
+                        f"could not send SIGINT to verified campaign process {selected_pid}: {error}"
+                    ) from error
+                else:
+                    stop_path = campaign_root / "manifests/stop_requests.jsonl"
+                    request = {
+                        "arm": active.get("arm"),
+                        "action": action,
+                        "pid": selected_pid,
+                        "coordinator_pid": active.get("coordinator_pid"),
+                        "gpu_index": gpu,
+                        "run": active.get("run"),
+                        "config": active.get("config"),
+                        "signal": "SIGINT",
+                        "requested_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                    }
+                    if active.get("arm") == GOAL2_SMOKE_ARM:
+                        checkpoint_receipt_path = campaign_root / GOAL2_SMOKE_EPOCH1_RECEIPT
+                        if checkpoint_receipt_path.is_file():
+                            request["checkpoint_receipt_path"] = str(
+                                checkpoint_receipt_path.resolve(strict=True)
+                            )
+                            request["checkpoint_receipt_sha256"] = _sha256(
+                                checkpoint_receipt_path
+                            )
+                    descriptor = os.open(
+                        stop_path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600
+                    )
+                    try:
+                        os.write(descriptor, (json.dumps(request, sort_keys=True) + "\n").encode())
+                    finally:
+                        os.close(descriptor)
+            else:
+                live = False
+        finally:
+            _release_campaign_lock(admission)
 
     deadline = time.monotonic() + timeout_seconds
     while True:
@@ -2398,13 +3058,15 @@ def resume(
     root: Path, arm: str, run_dir: Path, *, gpu: int = 1, execute: bool = False
 ) -> str:
     manifest = _campaign_manifest(root)
-    if arm.startswith("G2"):
-        raise CampaignError("Goal 2 has no implemented LPC-ordered runner and remains gated")
     gpu = _validate_gpu_for_arm(arm, gpu)
     info = _validate_arm(manifest, arm)
     if info["spec"]["stage"] == "goal1":
         _timing_gate(manifest)
         _g1_gate(manifest, arm)
+    elif arm == GOAL2_SMOKE_ARM:
+        _goal2_smoke_gate(manifest)
+    elif arm == GOAL2_FORMAL_ARM:
+        _goal2_formal_gate(manifest)
     run_dir = run_dir.resolve(strict=True)
     campaign_runs = (Path(manifest["root"]) / "runs").resolve()
     if not run_dir.is_relative_to(campaign_runs):
@@ -2424,6 +3086,14 @@ def resume(
         float(run_config["optimization"]["epochs"])
         - float(run_manifest.get("last_checkpoint_epoch", 0.0)),
     )
+    if remaining <= 0:
+        raise CampaignError("the named campaign lineage has no remaining configured epochs")
+    if arm == GOAL2_SMOKE_ARM:
+        charged = float(current.get("charged_epochs_by_arm", {}).get(arm, 0.0))
+        if charged + remaining > GOAL2_RECOVERY_SMOKE_EPOCH_BUDGET:
+            raise CampaignError(
+                "same-lineage recovery would exceed the three-epoch conservative smoke budget"
+            )
     if current["training_epochs_charged"] + remaining + 6 > MAX_TOTAL_EPOCHS:
         raise CampaignError("resuming with discarded exposure charged would exceed 556 epochs")
     if arm.startswith("T") and current["timing_epochs_charged"] + remaining > 50:
@@ -2432,8 +3102,9 @@ def resume(
         )
     _check_gpu_reserve(manifest, arm)
     command = _command(arm, info["config"], run_dir)
+    source_stage = _source_stage_for_arm(arm)
     rendered = _rendered_command(
-        Path(manifest["root"]), command, gpu, source_stage="goal1"
+        Path(manifest["root"]), command, gpu, source_stage=source_stage
     )
     if not execute:
         return rendered
@@ -2445,7 +3116,7 @@ def resume(
         reserve_gpu_seconds=_reserved_gpu_seconds(manifest, arm),
         run=run_dir,
         gpu=gpu,
-        source_stage="goal1",
+        source_stage=source_stage,
     )
     return f"resumed {arm} in {run_dir}"
 
@@ -2628,6 +3299,7 @@ def maps(
 
 def authorize(root: Path, stage: str, evidence_path: Path) -> dict[str, Any]:
     manifest = _campaign_manifest(root)
+    stage_evidence_extra: dict[str, Any] = {}
     evidence_path = evidence_path.resolve(strict=True)
     if not evidence_path.is_relative_to(Path(manifest["root"]).resolve()):
         raise CampaignError("gate evidence must be stored under the owned campaign root")
@@ -2754,12 +3426,68 @@ def authorize(root: Path, stage: str, evidence_path: Path) -> dict[str, Any]:
                 "measured timing projections with the 2x runtime allowance, the 2-hour Goal-2 reserve, and at least 1 hour of evaluation reserve exceed the remaining 16-hour budget"
             )
         manifest["gates"]["goal1_authorized"] = True
+    elif stage == "goal2-smoke":
+        root = Path(manifest["root"]).resolve(strict=True)
+        if not manifest.get("gates", {}).get("goal1_authorized"):
+            raise CampaignError("Goal-2 smoke requires the completed authorized Goal-1 campaign")
+        if not manifest.get("goal2_configs"):
+            raise CampaignError("run prepare-goal2 before authorizing the recovery smoke")
+        source_binding = _verify_goal2_source_binding(manifest)
+        bound_evidence_path = (root / source_binding["evidence_path"]).resolve(strict=True)
+        if evidence_path != bound_evidence_path:
+            raise CampaignError(
+                "Goal-2 smoke gate must use the exact helper/schema/integration test receipt bound to the source pin"
+            )
+        _goal1_residual_runs_complete(root)
+        for arm in (GOAL2_FORMAL_ARM, GOAL2_SMOKE_ARM):
+            _validate_config_only(_read_yaml(_validate_arm(manifest, arm)["config"]))
+            if _run_dirs(root, arm):
+                raise CampaignError("Goal-2 smoke authorization must precede either Goal-2 lineage")
+        manifest["gates"]["goal2_implemented"] = True
+        manifest["gates"]["goal2_smoke_authorized"] = True
+        stage_evidence_extra = {
+            "source_binding_sha256": source_binding["source_binding_sha256"],
+            "goal2_config_sha256": manifest["goal2_configs"][GOAL2_FORMAL_ARM]["sha256"],
+            "smoke_config_sha256": manifest["goal2_configs"][GOAL2_SMOKE_ARM]["sha256"],
+            "smoke_epoch_budget": GOAL2_RECOVERY_SMOKE_EPOCH_BUDGET,
+        }
+    elif stage == "goal2":
+        root = Path(manifest["root"]).resolve(strict=True)
+        if not manifest.get("gates", {}).get("goal2_smoke_authorized"):
+            raise CampaignError("Goal-2 smoke schema/unit-test gate must pass before formal readiness")
+        if (
+            evidence.get("schema_version") != 1
+            or evidence.get("status") != GOAL2_FORMAL_READINESS_STATUS
+            or evidence.get("goal2_ready") is not True
+        ):
+            raise CampaignError("Goal-2 formal gate requires an explicit reviewed readiness receipt")
+        source_binding = _verify_goal2_source_binding(manifest)
+        if evidence.get("source_binding_sha256") != source_binding["source_binding_sha256"]:
+            raise CampaignError("Goal-2 readiness evidence uses a different current numerical source pin")
+        closeout = _read_json(root / GOAL1_COMPLETION_ASSESSMENT)
+        if closeout.get("scalar_bounded_learning_gate", {}).get("passed") is not True:
+            raise CampaignError("G1-S did not pass the bounded-learning prerequisite for LPC ordering")
+        residual_receipt = _goal2_residual_is_meaningful(root, manifest)
+        recovery_receipt = _goal2_smoke_recovery_receipt(root, manifest)
+        current_status = status(root)
+        budget_receipt = _goal2_budget_readiness(manifest, current_status)
+        if _run_dirs(root, GOAL2_FORMAL_ARM):
+            raise CampaignError("the single optional G2-O lineage already exists")
+        manifest["gates"]["goal2_authorized"] = True
+        stage_evidence_extra = {
+            "source_binding_sha256": source_binding["source_binding_sha256"],
+            "goal2_config_sha256": manifest["goal2_configs"][GOAL2_FORMAL_ARM]["sha256"],
+            "residual_result": residual_receipt,
+            "recovery_smoke": recovery_receipt,
+            "budget": budget_receipt,
+        }
     else:
-        raise CampaignError("only timing and Goal-1 gates are implemented; Goal 2 is unavailable")
+        raise CampaignError("unsupported campaign authorization stage")
     manifest.setdefault("gate_evidence", {})[stage] = {
         "path": str(evidence_path),
         "sha256": _sha256(evidence_path),
     }
+    manifest["gate_evidence"][stage].update(stage_evidence_extra)
     if stage == "goal1":
         manifest["gate_evidence"][stage].update(
             {
@@ -2792,9 +3520,10 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     prep = subparsers.add_parser("prepare")
     prep.add_argument("--selected-topology", choices=("full", "p3", "s2"))
+    subparsers.add_parser("prepare-goal2")
     subparsers.add_parser("status")
     gate = subparsers.add_parser("authorize")
-    gate.add_argument("stage", choices=("timing", "goal1"))
+    gate.add_argument("stage", choices=("timing", "goal1", "goal2-smoke", "goal2"))
     gate.add_argument("--evidence", type=Path, required=True)
     source = subparsers.add_parser("bind-source")
     source.add_argument("stage", choices=("goal2",))
@@ -2838,6 +3567,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "prepare":
             result = prepare(args.root, args.selected_topology)
+        elif args.command == "prepare-goal2":
+            result = prepare_goal2(args.root)
         elif args.command == "status":
             result = status(args.root)
         elif args.command == "authorize":

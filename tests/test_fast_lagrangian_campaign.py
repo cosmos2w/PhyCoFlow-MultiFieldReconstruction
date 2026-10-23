@@ -224,8 +224,8 @@ def test_goal1_and_goal2_remain_blocked_until_their_evidence_exists(tmp_path, mo
     monkeypatch.setattr(MODULE, "_campaign_manifest", lambda _: manifest)
     with pytest.raises(MODULE.CampaignError, match="timing gate must pass"):
         MODULE.authorize(root, "goal1", evidence)
-    with pytest.raises(MODULE.CampaignError, match="no implemented LPC-ordered runner"):
-        MODULE.launch(root, "G2", execute=False)
+    with pytest.raises(MODULE.CampaignError, match="unknown or unprepared arm"):
+        MODULE.launch(root, "G2", gpu=0, execute=False)
 
 
 def test_evaluation_command_is_validation_only_and_never_selects_test(tmp_path, monkeypatch):
@@ -740,6 +740,43 @@ def test_stop_clears_a_dead_coordinator_receipt_only_after_child_exit(tmp_path, 
     result = MODULE.stop(root, gpu=2, timeout_seconds=0.1)
     assert "orphaned campaign process 42323 exited" in result
     assert not active_path.exists()
+
+
+def test_stop_receipt_binds_preexisting_goal2_epoch1_checkpoint_before_sigint(tmp_path, monkeypatch):
+    root = tmp_path / "campaign"
+    manifests = root / "manifests"
+    manifests.mkdir(parents=True)
+    run = root / "runs/recovery_smoke2ep/run-1"
+    receipt_path = root / MODULE.GOAL2_SMOKE_EPOCH1_RECEIPT
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    receipt_path.write_text('{"status":"atomic_epoch1_checkpoint_verified"}\n', encoding="utf-8")
+    selected_pid = 42324
+    active_path = MODULE._gpu_active_path(root, 0)
+    active_path.write_text(
+        json.dumps(
+            {
+                "arm": MODULE.GOAL2_SMOKE_ARM,
+                "action": "launch",
+                "pid": selected_pid,
+                "coordinator_pid": 55555,
+                "gpu_index": 0,
+                "config": str(root / "configs/recovery_smoke2ep.yaml"),
+                "run": str(run),
+            }
+        ),
+        encoding="utf-8",
+    )
+    live_states = iter((True, True, False))
+    monkeypatch.setattr(MODULE, "_campaign_manifest", lambda _root: {"root": str(root)})
+    monkeypatch.setattr(MODULE, "_pid_matches", lambda *_args: next(live_states))
+    monkeypatch.setattr(MODULE, "_pid_is_alive", lambda _pid: False)
+    monkeypatch.setattr(MODULE.os, "killpg", lambda *_args: None)
+
+    MODULE.stop(root, gpu=0, timeout_seconds=0.1)
+
+    row = json.loads((manifests / "stop_requests.jsonl").read_text(encoding="utf-8"))
+    assert row["checkpoint_receipt_path"] == str(receipt_path.resolve())
+    assert row["checkpoint_receipt_sha256"] == hashlib.sha256(receipt_path.read_bytes()).hexdigest()
 
 
 def test_physical_gpu_parser_and_g1_assignment_are_explicit():
@@ -1411,3 +1448,305 @@ def test_goal2_offline_diagnostic_spend_includes_fixed_reserve_live_and_ledger(t
         },
     )
     assert spent == 180.0 + 800.0 + 100.0
+
+
+def _goal2_smoke_recovery_fixture(tmp_path, monkeypatch, observed_end):
+    root = tmp_path / "campaign"
+    run = root / "runs/recovery_smoke2ep/run-1"
+    manifests = root / "manifests"
+    configs = root / "configs"
+    run.mkdir(parents=True)
+    manifests.mkdir(parents=True)
+    configs.mkdir(parents=True)
+    prepared_config = configs / "recovery_smoke2ep.yaml"
+    prepared_config.write_text("profile: frozen\n", encoding="utf-8")
+    (run / "resolved_config.yaml").write_text("profile: frozen\n", encoding="utf-8")
+    (run / "run_manifest.json").write_text(
+        json.dumps({"experiment_name": f"_LPCAccel/{root.name}/{MODULE.GOAL2_SMOKE_ARM}"}),
+        encoding="utf-8",
+    )
+    config_sha = hashlib.sha256(prepared_config.read_bytes()).hexdigest()
+    manifest = {
+        "root": str(root),
+        "campaign_id": root.name,
+        "goal2_configs": {MODULE.GOAL2_SMOKE_ARM: {"sha256": config_sha}},
+    }
+    monkeypatch.setattr(MODULE, "_config_path", lambda _manifest, _arm: prepared_config)
+    monkeypatch.setattr(MODULE, "_run_dirs", lambda _root, _arm: [run])
+    monkeypatch.setattr(
+        MODULE,
+        "_run_record",
+        lambda _run: {
+            "status": "completed",
+            "completed_epochs": 2.0,
+            "completed_updates": 76,
+            "steps_per_epoch": 38,
+        },
+    )
+    monkeypatch.setattr(MODULE, "_stage_source_digest", lambda *_args: "source-binding")
+    checkpoint_receipt = {
+        "path": str((root / MODULE.GOAL2_SMOKE_EPOCH1_RECEIPT).resolve()),
+        "sha256": "receipt-digest",
+        "checkpoint_path": str((run / "checkpoints/epoch_001.pt").resolve()),
+        "checkpoint_sha256": "checkpoint-digest",
+        "config_sha256": "canonical-run-config",
+        "reference_sha256": "reference-digest",
+    }
+    monkeypatch.setattr(
+        MODULE,
+        "_goal2_smoke_epoch1_checkpoint_receipt",
+        lambda *_args: checkpoint_receipt,
+    )
+    monkeypatch.setattr(
+        MODULE,
+        "_goal2_smoke_recovery_verification",
+        lambda *_args: {"status": "verified"},
+    )
+    launch_row = {
+        "arm": MODULE.GOAL2_SMOKE_ARM,
+        "action": "launch",
+        "pid": 101,
+        "run": str(run.resolve()),
+        "gpu_index": 0,
+        "source_stage": "goal2",
+        "source_binding_sha256": "source-binding",
+        "segment_start_epoch": 0.0,
+        "segment_end_epoch": observed_end,
+        "epochs_charged": 2.0,
+        "return_code": -2,
+    }
+    resume_row = {
+        **launch_row,
+        "action": "resume",
+        "pid": 102,
+        "segment_start_epoch": 1.0,
+        "segment_end_epoch": 2.0,
+        "epochs_charged": 1.0,
+        "return_code": 0,
+    }
+    (manifests / "launch_ledger.jsonl").write_text(
+        json.dumps(launch_row) + "\n" + json.dumps(resume_row) + "\n", encoding="utf-8"
+    )
+    stop_row = {
+        "arm": MODULE.GOAL2_SMOKE_ARM,
+        "pid": 101,
+        "run": str(run.resolve()),
+        "signal": "SIGINT",
+        "checkpoint_receipt_path": checkpoint_receipt["path"],
+        "checkpoint_receipt_sha256": checkpoint_receipt["sha256"],
+    }
+    (manifests / "stop_requests.jsonl").write_text(json.dumps(stop_row) + "\n", encoding="utf-8")
+    return root, run, manifest
+
+
+def test_goal2_recovery_gate_preserves_fractional_interrupted_tail_and_safe_charge(
+    tmp_path, monkeypatch
+):
+    root, _run, manifest = _goal2_smoke_recovery_fixture(tmp_path, monkeypatch, 1.375)
+
+    receipt = MODULE._goal2_smoke_recovery_receipt(root, manifest)
+
+    assert receipt["observed_first_segment_end_epoch"] == 1.375
+    assert receipt["epochs_charged"] == 3.0
+    assert receipt["checkpoint_receipt"]["checkpoint_sha256"] == "checkpoint-digest"
+    assert receipt["recovery_verification"]["status"] == "verified"
+
+
+@pytest.mark.parametrize("observed_end", [0.99, 2.0, float("nan")])
+def test_goal2_recovery_gate_rejects_missing_epoch1_or_full_epoch2_tail(
+    tmp_path, monkeypatch, observed_end
+):
+    root, _run, manifest = _goal2_smoke_recovery_fixture(tmp_path, monkeypatch, observed_end)
+
+    with pytest.raises(MODULE.CampaignError, match="observed epoch-one tail"):
+        MODULE._goal2_smoke_recovery_receipt(root, manifest)
+
+
+def test_goal2_epoch1_checkpoint_receipt_binds_immutable_state_and_goal2_source(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "campaign"
+    run = root / "runs/recovery_smoke2ep/run-1"
+    (run / "checkpoints").mkdir(parents=True)
+    (root / "manifests").mkdir(parents=True)
+    config_path = run / "resolved_config.yaml"
+    config_path.write_text("profile: ordered\n", encoding="utf-8")
+    checkpoint_path = run / "checkpoints/epoch_001.pt"
+    checkpoint_path.write_bytes(b"immutable epoch-one checkpoint")
+    source_run = root / "source"
+    source_run.mkdir()
+    source_checkpoint = source_run / "checkpoints/last.pt"
+    source_checkpoint.parent.mkdir()
+    source_checkpoint.write_bytes(b"source checkpoint")
+    source_config = source_run / "resolved_config.yaml"
+    source_config.write_text("source: fixed\n", encoding="utf-8")
+    source_run_manifest = source_run / "run_manifest.json"
+    source_run_manifest.write_text("{}\n", encoding="utf-8")
+    source_hashes = {
+        "checkpoint": hashlib.sha256(source_checkpoint.read_bytes()).hexdigest(),
+        "resolved_config": hashlib.sha256(source_config.read_bytes()).hexdigest(),
+        "run_manifest": hashlib.sha256(source_run_manifest.read_bytes()).hexdigest(),
+    }
+    g1s_run = root / "runs/G1-S/run-g1s"
+    g1s_run.mkdir(parents=True)
+    (g1s_run / "run_manifest.json").write_text(
+        json.dumps({"source_hashes": source_hashes}), encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        MODULE,
+        "_goal1_residual_runs_complete",
+        lambda _root: {"G1-S": g1s_run},
+    )
+    source_files = {
+        path: hashlib.sha256(path.encode()).hexdigest()
+        for path in (
+            "src/phycoflow_reconstruction/training/lpc_ordered.py",
+            "src/phycoflow_reconstruction/training/post_training.py",
+            "src/phycoflow_reconstruction/training/run_store.py",
+            "src/phycoflow_reconstruction/config/validate.py",
+            "src/phycoflow_reconstruction/other.py",
+        )
+    }
+    monkeypatch.setattr(MODULE, "_verify_goal2_source_binding", lambda _manifest: {"source_binding_sha256": "pin"})
+    reference = {
+        "version": 1,
+        "family_names": ["global_distribution", "cross_spectrum", "topology"],
+        "means": {"global_distribution": 1.0, "cross_spectrum": 2.0, "topology": 3.0},
+        "denominators": {"global_distribution": 1.0, "cross_spectrum": 2.0, "topology": 3.0},
+        "denominator_floor": MODULE.GOAL2_ORDERED_SETTINGS["denominator_floor"],
+        "source_sha256": source_hashes["checkpoint"],
+        "no_regression_bounds": {"global_distribution": 1.0, "cross_spectrum": 2.0},
+    }
+    state = {
+        "version": 1,
+        "reference": reference,
+        "dual_lr": MODULE.GOAL2_ORDERED_SETTINGS["dual_lr"],
+        "multipliers": {"global_distribution": 0.25, "cross_spectrum": 0.0},
+        "completed_updates": 38,
+    }
+    ordered_reference_artifact = {
+        "reference": reference,
+        "settings": MODULE.GOAL2_ORDERED_SETTINGS,
+        "source_checkpoint_sha256": source_hashes["checkpoint"],
+    }
+    ordered_reference_path = run / "artifacts/lpc_ordered_reference.json"
+    ordered_reference_path.parent.mkdir()
+    ordered_reference_path.write_text(json.dumps(ordered_reference_artifact), encoding="utf-8")
+    prepared_config_path = root / "configs/recovery_smoke2ep.yaml"
+    prepared_config_path.parent.mkdir()
+    prepared_config_path.write_text("profile: ordered\n", encoding="utf-8")
+    canonical_config_sha = hashlib.sha256(b"canonical config digest, not raw yaml").hexdigest()
+    prepared_config_file_sha = hashlib.sha256(prepared_config_path.read_bytes()).hexdigest()
+    assert canonical_config_sha != prepared_config_file_sha
+    (run / "run_manifest.json").write_text(
+        json.dumps({"config_sha256": canonical_config_sha}), encoding="utf-8"
+    )
+    implementation_paths = (
+        "src/phycoflow_reconstruction/training/lpc_ordered.py",
+        "src/phycoflow_reconstruction/training/post_training.py",
+        "src/phycoflow_reconstruction/training/run_store.py",
+        "src/phycoflow_reconstruction/config/validate.py",
+    )
+    receipt = {
+        "schema_version": 1,
+        "status": "atomic_epoch1_checkpoint_verified",
+        "run": str(run.resolve()),
+        "checkpoint_path": str(checkpoint_path.resolve()),
+        "checkpoint_sha256": hashlib.sha256(checkpoint_path.read_bytes()).hexdigest(),
+        "global_step": 38,
+        "reporting_epoch": 1.0,
+        "config_sha256": canonical_config_sha,
+        "lpc_ordered_reference_sha256": hashlib.sha256(
+            ordered_reference_path.read_bytes()
+        ).hexdigest(),
+        "lpc_ordered_implementation": {path: source_files[path] for path in implementation_paths},
+        "lpc_ordered_state": state,
+        "external_policy_multipliers": [0.0] * 5,
+        "external_policy_completed_updates": 38,
+        "rng_state_sha256": {
+            "torch_cpu": "b" * 64,
+            "index_generator": "c" * 64,
+            "torch_cuda": ["d" * 64],
+        },
+        "optimizer_step_counts": [38],
+        "source_hashes": source_hashes,
+        "created_utc": "2026-10-23T15:10:00Z",
+    }
+    receipt_path = root / MODULE.GOAL2_SMOKE_EPOCH1_RECEIPT
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+    manifest = {
+        "root": str(root),
+        "source_run": str(source_run),
+        "source_checkpoint": str(source_checkpoint),
+        "source_checkpoint_sha256": source_hashes["checkpoint"],
+        "source_config_sha256": hashlib.sha256(b"separate Run 11f anchor config").hexdigest(),
+        "goal2_configs": {
+            MODULE.GOAL2_SMOKE_ARM: {
+                "path": str(prepared_config_path),
+                "sha256": prepared_config_file_sha,
+            }
+        },
+        "stage_source_bindings": {"goal2": {"files_sha256": source_files}},
+    }
+
+    verified = MODULE._goal2_smoke_epoch1_checkpoint_receipt(root, manifest, run)
+
+    assert verified["sha256"] == hashlib.sha256(receipt_path.read_bytes()).hexdigest()
+    assert verified["checkpoint_sha256"] == receipt["checkpoint_sha256"]
+    checkpoint_path.write_bytes(b"changed after stop")
+    with pytest.raises(MODULE.CampaignError, match="receipt failed"):
+        MODULE._goal2_smoke_epoch1_checkpoint_receipt(root, manifest, run)
+
+
+def test_goal2_recovery_verification_binds_stop_checkpoint_resume_and_replay(tmp_path, monkeypatch):
+    root = tmp_path / "campaign"
+    run = root / "runs/recovery_smoke2ep/run-1"
+    (root / "manifests").mkdir(parents=True)
+    run.mkdir(parents=True)
+    receipt = {
+        "path": str((root / MODULE.GOAL2_SMOKE_EPOCH1_RECEIPT).resolve()),
+        "sha256": "receipt-sha",
+        "checkpoint_sha256": "checkpoint-sha",
+        "config_sha256": "config-sha",
+        "reference_sha256": "reference-sha",
+    }
+    manifest = {
+        "root": str(root),
+        "goal2_configs": {MODULE.GOAL2_SMOKE_ARM: {"sha256": "config-sha"}},
+    }
+    monkeypatch.setattr(MODULE, "_stage_source_digest", lambda *_args: "source-sha")
+    checks = {
+        "checkpoint_and_source_binding": True,
+        "lpc_ordered_reference_and_implementation": True,
+        "per_field_mu_and_external_policy_state": True,
+        "optimizer_and_rng_state": True,
+        "first_resumed_step_is_39": True,
+        "sampler_and_replayed_batch_values_reconciled": True,
+        "log_tail_has_no_duplicate_update": True,
+    }
+    verification = {
+        "schema_version": 1,
+        "status": "verified",
+        "run": str(run.resolve()),
+        "checkpoint_receipt_path": receipt["path"],
+        "epoch1_checkpoint_receipt_sha256": receipt["sha256"],
+        "checkpoint_sha256": receipt["checkpoint_sha256"],
+        "source_binding_sha256": "source-sha",
+        "config_sha256": "config-sha",
+        "lpc_ordered_reference_sha256": "reference-sha",
+        "first_resumed_step": 39,
+        "final_step": 76,
+        "checks": checks,
+        "details": {"limitation": "raw sample IDs are not present in fast history"},
+    }
+    verification_path = root / MODULE.GOAL2_SMOKE_RECOVERY_VERIFICATION
+    verification_path.write_text(json.dumps(verification), encoding="utf-8")
+
+    result = MODULE._goal2_smoke_recovery_verification(root, manifest, run, receipt)
+
+    assert result["status"] == "verified"
+    assert result["first_resumed_step"] == 39
+    verification["checks"]["sampler_and_replayed_batch_values_reconciled"] = False
+    verification_path.write_text(json.dumps(verification), encoding="utf-8")
+    with pytest.raises(MODULE.CampaignError, match="incomplete or not bound"):
+        MODULE._goal2_smoke_recovery_verification(root, manifest, run, receipt)
