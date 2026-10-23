@@ -1045,10 +1045,10 @@ def _figure1_cache_caption(inputs: dict[str, Any]) -> str:
 
 
 def _elapsed_axis(rows: list[dict[str, Any]]) -> tuple[list[float] | None, str]:
-    """Choose cold process time consistently, including allocated profile work."""
+    """Choose native check-completion time, including allocated profile work."""
     candidates = (
-        ("cold_process_seconds_including_profile_acquisition", "cold process hours including profile acquisition"),
-        ("completion_seconds", "cold process hours including profile acquisition"),
+        ("cold_process_seconds_including_profile_acquisition", "cold check-completion hours including profile acquisition"),
+        ("completion_seconds", "cold check-completion hours including profile acquisition"),
         ("completion_seconds_from_first_training_command", "active process hours excluding profile acquisition"),
         ("wall_seconds_from_first_training_command", "calendar wall hours from first training command"),
     )
@@ -1541,7 +1541,7 @@ def _fixed_query_count_text(inputs: dict[str, Any]) -> str:
     if not _has_fixed_query_attestation(inputs):
         return "The native history does not serialize per-check valid-query counts; the 4,096-query count is not independently verified for this input set."
     return (
-        f"The native JSONL omits valid-mask counts, so 4,096 valid queries per validation snapshot are reconstructed from the frozen equal-shape HDF5 loader and all-valid sensor-mask invariant, not read from serialized per-check counts ([attestation](../{relative})). "
+        f"The native JSONL omits valid-mask counts, so 4,096 valid queries per validation snapshot are reconstructed from the frozen equal-shape HDF5 loader and all-valid query-mask invariant, not read from serialized per-check counts ([attestation](../{relative})). "
         "This code-derived count applies only to the current fixed-shape loader; masked or variable-length future loaders require serialized valid counts. The attestation opened no dataset bytes or validators."
     )
 
@@ -1881,10 +1881,10 @@ def _write_quality_figure(inputs: dict[str, Any], path: Path) -> None:
                 arm_colors=arm_colors, arm_styles={arm: "-" for arm in arms},
                 arm_markers=arm_markers, fields=fields,
             )
-            ax.set_title("B. Same additive ratio vs numeric cold process time", loc="left")
+            ax.set_title("B. Same additive ratio vs cold check-completion time", loc="left")
             ax.set_ylabel("child / paired SOURCE additive sum")
             ax.set_xlim(*common_hours_xlim)
-            ax.set_xlabel("cold process hours, including strategy profile allocation")
+            ax.set_xlabel("cold check-completion hours\n(including strategy profile allocation)")
             ax.set_ylim(*ylimits["sum"])
             ax.axhline(1.0, color="#222222", linestyle="-", linewidth=0.85, zorder=2)
             ax.axhline(0.90, color="#c44e52", linestyle="--", linewidth=0.9, zorder=2)
@@ -2705,7 +2705,7 @@ def _make_report(inputs: dict[str, Any], attempts: list[dict[str, Any]], complet
             "",
             *_attainment_table_lines(inputs),
             "",
-            "Window cells show assessor-native pass/fail/censored status and raw whole-target check occupancy; the linked `analysis/mature_window_metrics.csv` retains each metric’s pooled numerator/counts, pooled ratio, per-check mean/median, slope, range, raw violations, and limit. Raw occupancy and per-metric worst excursions above are computed from each observed native check separately and remain visible even when a pooled window passes. If a completed E100 assessment has no confirmed mature attainment, retention is reported as not established; confirmation at E100 is right-censored for future retention because no later window exists.",
+            "Window cells show assessor-native pass/fail/censored status and raw whole-target check occupancy; the linked `analysis/mature_window_metrics.csv` retains each metric’s pooled numerator/counts, pooled ratio, per-check mean/median, slope, range, raw violations, and limit. Raw occupancy and per-metric worst excursions above are computed from each observed native check separately and remain visible even when a pooled window passes. If no qualifying consecutive window pair is observed by E100, confirmation is right-censored at the horizon and retention is not established. If confirmation first occurs at E100, subsequent retention is right-censored because no later window exists.",
             "",
             "The table below copies assessor-native post-confirmation excursion durations and maximum metric excesses, and lists censored spans without recomputation. The compact JSON/CSV also preserve post-confirmation window/check counts and fractions, final-window pooled ratios, and complete native excursion objects; raw whole-history maxima and counts remain in the attainment table.",
             "",
@@ -2775,7 +2775,7 @@ def _make_report(inputs: dict[str, Any], attempts: list[dict[str, Any]], complet
             ),
             "",
             f"![Figure 2. Complete native scheduled quality histories for G and D, including endpoint aggregate and fields, A/B/T, and paired self/mutual diagnostics.]({figure_names[1]})",
-            "Figure 2. Each task’s first page compares the same additive coherence ratio against epoch and numeric accounted cold hours; those totals include profile allocation split into measured and recorded estimated amounts in the companion table. Lower panels show A/B/T and endpoint aggregate plus all five endpoint-field model-unit MSE ratios against epoch. Additional pages show positively weighted direct self/mutual component leaves separately: their values are pooled only on the same canonical path as sum(child)/sum(SOURCE) across four fixed 32-snapshot groups, with B independently computed in each; this is a source-weighted mean, not a 128-snapshot covariance claim. Zero-weight diagnostics remain in the raw component CSV, no distinct metric paths or aliases are combined, and self/mutual paths are not summed. Every history point is a primary native scheduled validation check paired to validation SOURCE; no epoch-0 completion time is imputed. Calendar wall completion times are separate in the machine-readable table, and duplicate rows and disagreements remain in analyzer provenance. Final portable evaluations are endpoint audits only and cannot replace scheduled histories or mature-window completion times.",
+            "Figure 2. Each task’s first page compares the same additive coherence ratio against epoch and numeric accounted cold check-completion hours; these clocks stop at each native check and include profile allocation split into measured and recorded estimated amounts in the companion table. Terminal command charges include later closeout and are reported separately in the cost table. Lower panels show A/B/T and endpoint aggregate plus all five endpoint-field model-unit MSE ratios against epoch. Additional pages show positively weighted direct self/mutual component leaves separately: their values are pooled only on the same canonical path as sum(child)/sum(SOURCE) across four fixed 32-snapshot groups, with B independently computed in each; this is a source-weighted mean, not a 128-snapshot covariance claim. Zero-weight diagnostics remain in the raw component CSV, no distinct metric paths or aliases are combined, and self/mutual paths are not summed. Every history point is a primary native scheduled validation check paired to validation SOURCE; no epoch-0 completion time is imputed. Calendar wall completion times are separate in the machine-readable table, and duplicate rows and disagreements remain in analyzer provenance. Final portable evaluations are endpoint audits only and cannot replace scheduled histories or mature-window completion times.",
             "",
             f"![Figure 3. Mature-window confirmation and retention with optional X transfer when run evidence exists.]({figure_names[2]})",
             "Figure 3. Mature windows use the frozen 40-epoch interval `(e-40,e]` and are marked complete only when every scheduled check is present; retention and confirmation are copied from the assessor-native output. X histories are exploratory until both predeclared arms are present; the cost plan alone is not transfer evidence.",

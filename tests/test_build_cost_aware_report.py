@@ -236,7 +236,7 @@ def test_quality_axis_prioritizes_cold_process_and_reports_wall_separately() -> 
     ]
     x, label = report._elapsed_axis(rows)
     assert x == [0.25, 0.5]
-    assert label == "cold process hours including profile acquisition"
+    assert label == "cold check-completion hours including profile acquisition"
     summary = report._arm_metric_summary({"uniform_evaluations": rows})
     assert summary["cold_seconds"] == 1800.0
     assert summary["wall_seconds"] == 2400.0
