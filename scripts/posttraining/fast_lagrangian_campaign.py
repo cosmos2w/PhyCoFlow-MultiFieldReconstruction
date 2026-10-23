@@ -1903,7 +1903,7 @@ def _goal2_budget_readiness(
 def _goal2_smoke_gate(manifest: Mapping[str, Any]) -> dict[str, Any]:
     if not manifest.get("gates", {}).get("goal2_smoke_authorized"):
         raise CampaignError("the bounded Goal-2 smoke requires its explicit schema/unit-test gate")
-    record = manifest.get("gate_evidence", {}).get("goal2_smoke", {})
+    record = manifest.get("gate_evidence", {}).get("goal2-smoke", {})
     path = Path(manifest["root"]) / str(record.get("path", ""))
     if (
         not path.is_file()

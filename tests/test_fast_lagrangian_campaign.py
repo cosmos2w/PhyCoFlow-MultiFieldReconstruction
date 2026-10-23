@@ -1750,3 +1750,32 @@ def test_goal2_recovery_verification_binds_stop_checkpoint_resume_and_replay(tmp
     verification_path.write_text(json.dumps(verification), encoding="utf-8")
     with pytest.raises(MODULE.CampaignError, match="incomplete or not bound"):
         MODULE._goal2_smoke_recovery_verification(root, manifest, run, receipt)
+
+
+def test_goal2_smoke_authorization_round_trips_to_launch_gate(tmp_path, monkeypatch):
+    root = tmp_path / "campaign"
+    (root / "manifests").mkdir(parents=True)
+    evidence = root / "manifests/ready.json"
+    evidence.write_text("{}\n")
+    config = root / "prepared.yaml"
+    config.write_text("{}\n")
+    binding = {"evidence_path": "manifests/ready.json", "source_binding_sha256": "source-pin"}
+    manifest = {
+        "root": str(root), "gates": {"goal1_authorized": True},
+        "stage_source_bindings": {"goal2": binding},
+        "goal2_configs": {
+            MODULE.GOAL2_FORMAL_ARM: {"sha256": "formal-config"},
+            MODULE.GOAL2_SMOKE_ARM: {"sha256": "smoke-config"},
+        },
+    }
+    monkeypatch.setattr(MODULE, "_campaign_manifest", lambda _: manifest)
+    monkeypatch.setattr(MODULE, "_verify_goal2_source_binding", lambda _: binding)
+    monkeypatch.setattr(MODULE, "_goal1_residual_runs_complete", lambda _: {})
+    monkeypatch.setattr(MODULE, "_validate_arm", lambda *_: {"config": config})
+    monkeypatch.setattr(MODULE, "_validate_config_only", lambda _: None)
+    monkeypatch.setattr(MODULE, "_run_dirs", lambda *_: [])
+    MODULE.authorize(root, "goal2-smoke", evidence)
+    launch_gate = MODULE._goal2_smoke_gate(manifest)
+    assert launch_gate["path"] == str(evidence)
+    assert launch_gate["sha256"] == MODULE._sha256(evidence)
+    assert launch_gate["source_binding_sha256"] == "source-pin"
