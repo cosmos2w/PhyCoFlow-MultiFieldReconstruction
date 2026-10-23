@@ -449,6 +449,18 @@ class ExternalPolicy:
             config_direction, aggregation_diagnostics = aggregator._aggregate(
                 matrix64, row_norms=family_norms, row_gram=gram
             )
+            periodic = getattr(self, "periodic_config", None)
+            if periodic is not None:
+                from .periodic_config import extract_config_coefficients
+
+                recovered = extract_config_coefficients(matrix64, oracle_direction=config_direction)
+                if recovered.relative_reconstruction_error > 1.0e-6:
+                    raise FloatingPointError("periodic ConFIG coefficient reconstruction failed oracle tolerance")
+                periodic.refresh(
+                    family_names, recovered.coefficients,
+                    force=getattr(self, "force_periodic_refresh", False),
+                )
+                aggregation_diagnostics["coefficient_reconstruction"] = recovered.diagnostics
             config_norm = aggregation_diagnostics["direction_norm"]
             if not math.isfinite(config_norm) or config_norm == 0.0:
                 raise FloatingPointError("TorchJD ConFIG returned a zero or non-finite direction")
@@ -607,6 +619,8 @@ class ExternalPolicy:
                 {f"rectify_repair_field/{name}": name == repair_field for name in self.reference.field_names}
             )
         diagnostics.update(policy_diagnostics)
+        if getattr(self, "periodic_config", None) is not None:
+            self.periodic_config.advance()
         return diagnostics
 
     def _penalty_diagnostics(self) -> dict[str, Any]:
@@ -653,7 +667,7 @@ class ExternalPolicy:
         return None if self._multiplier is None else [float(x) for x in self._multiplier().detach().cpu()]
 
     def state_dict(self) -> dict[str, Any]:
-        return {
+        state = {
             "version": 1,
             "method": self.method,
             "settings": self.settings,
@@ -662,6 +676,9 @@ class ExternalPolicy:
             "dual_optimizer": None if self._dual_optimizer is None else self._dual_optimizer.state_dict(),
             "completed_updates": self.completed_updates,
         }
+        if getattr(self, "periodic_config", None) is not None:
+            state["periodic_config"] = self.periodic_config.state_dict()
+        return state
 
     def load_state_dict(self, state: Mapping[str, Any]) -> None:
         if state.get("version") != 1 or state.get("method") != self.method or state.get("settings") != self.settings:
@@ -674,6 +691,11 @@ class ExternalPolicy:
         if isinstance(updates, bool) or not isinstance(updates, int) or updates < 0:
             raise ValueError("invalid completed update count")
         self.completed_updates = updates
+        periodic = getattr(self, "periodic_config", None)
+        if (periodic is not None) != ("periodic_config" in state):
+            raise ValueError("periodic ConFIG recovery state/configuration mismatch")
+        if periodic is not None:
+            periodic.load_state_dict(state["periodic_config"])
         if self.method == "lagrangian":
             values = torch.as_tensor(state["multipliers"], dtype=torch.float64, device=self.device)
             if values.numel() != len(self.reference.field_names) or not bool(torch.isfinite(values).all()) or bool((values < 0).any()):
