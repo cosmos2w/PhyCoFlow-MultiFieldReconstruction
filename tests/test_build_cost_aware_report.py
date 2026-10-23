@@ -341,6 +341,75 @@ def test_final_interpretation_requires_current_hashes_and_complete_horizons(tmp_
     assert paragraphs[0] in " ".join(report._final_interpretation_lines(reviewed))
 
 
+def test_runtime_policy_summary_links_actual_strategy_coverage_and_keeps_missing_pending(tmp_path: Path) -> None:
+    (tmp_path / "tasks").mkdir()
+    analysis = tmp_path / "analysis"
+    analysis.mkdir()
+    (tmp_path / "manifests").mkdir()
+    (tmp_path / "tasks" / "task_inventory.json").write_text(
+        json.dumps(
+            {
+                "tasks": {
+                    "G": {"role": "mandatory", "arms": ["strategy"]},
+                    "D": {"role": "mandatory", "arms": ["strategy"]},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    (analysis / "full_train_audit.json").write_text('{"source":"TRAIN"}\n', encoding="utf-8")
+    runtime_summary = {
+        "schema": 1,
+        "records": [
+            {
+                "task_id": "G",
+                "arm": "strategy",
+                "checkpoint_step": 380,
+                "checkpoint_sha256": "a" * 64,
+                "initial_plan_id": "full",
+                "final_plan_id": "nested",
+                "accepted_cursor": 380,
+                "plan_step_counts": {"full": 120, "nested": 260},
+                "topology_included_updates": 260,
+                "max_importance_multiplier_observed": 4.0,
+                "monitor_overhead_seconds": 12.5,
+                "accepted_training_seconds": 125.0,
+                "fallback_reason": "timing_guard",
+                "full_recovery_intervals": [{"start": 120, "end": 139}],
+                "train_audit_epochs": [25, 50, 75, 100],
+                "noise_audit_epochs": [25, 50, 75, 100],
+                "full_train_audit_artifact": "analysis/full_train_audit.json",
+            }
+        ],
+    }
+    summary_path = analysis / "runtime_policy_summary.json"
+    summary_path.write_text(json.dumps(runtime_summary), encoding="utf-8")
+
+    inputs = report._load_inputs(tmp_path)
+    rendered = "\n".join(report._runtime_policy_table_lines(inputs))
+
+    assert inputs["runtime_policy_summary"] == runtime_summary
+    assert f"SHA-256 `{report._sha256(summary_path)}`" in rendered
+    assert "G / strategy | recorded" in rendered
+    assert "`full` → `nested`" in rendered
+    assert "plans `{\"full\":120,\"nested\":260}`" in rendered
+    assert "12.50 s / 125.00 s (10.0%)" in rendered
+    assert "timing_guard" in rendered
+    assert "train `[25,50,75,100]`" in rendered
+    assert "[`analysis/full_train_audit.json`](<../analysis/full_train_audit.json>)" in rendered
+    assert "D / strategy | pending: no strategy record" in rendered
+
+    missing_root = tmp_path / "missing"
+    (missing_root / "tasks").mkdir(parents=True)
+    (missing_root / "tasks" / "task_inventory.json").write_text(
+        json.dumps({"tasks": {"G": {"arms": ["strategy"]}}}), encoding="utf-8"
+    )
+    missing_inputs = report._load_inputs(missing_root)
+    missing_rendered = "\n".join(report._runtime_policy_table_lines(missing_inputs))
+    assert "Pending: `analysis/runtime_policy_summary.json` is absent." in missing_rendered
+    assert "G / strategy | pending: schema 1 summary is unavailable" in missing_rendered
+
+
 def test_machine_tables_preserve_cost_split_censoring_and_raw_target_excursions(tmp_path: Path) -> None:
     fields = ["f1", "f2", "f3", "f4", "f5"]
     ratios = {

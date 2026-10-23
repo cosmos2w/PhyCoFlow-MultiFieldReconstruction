@@ -159,6 +159,13 @@ def _load_inputs(root: Path, history_path: Path | None = None) -> dict[str, Any]
     fixed_query_attestation = _read_json(root / "analysis" / "fixed_query_count_attestation.json")
     bottleneck_scope_limitations = _read_json(root / "analysis" / "bottleneck_scope_limitations.json")
     profile_proxy_label_erratum = _read_json(root / "analysis" / "profile_proxy_label_erratum.json")
+    runtime_policy_summary_path = root / "analysis" / "runtime_policy_summary.json"
+    runtime_policy_summary_error = None
+    try:
+        runtime_policy_summary = _read_json(runtime_policy_summary_path)
+    except ReportBuildError:
+        runtime_policy_summary = None
+        runtime_policy_summary_error = "runtime policy summary is invalid JSON"
     components_path = root / "analysis" / "quality_components.csv"
     fast_report_path = root / "manifests" / "FAST_LAGRANGIAN_LPC_REPORT_at_6021c62.md"
     revisions = {
@@ -195,6 +202,9 @@ def _load_inputs(root: Path, history_path: Path | None = None) -> dict[str, Any]
         "bottleneck_scope_limitations_path": root / "analysis" / "bottleneck_scope_limitations.json",
         "profile_proxy_label_erratum": profile_proxy_label_erratum,
         "profile_proxy_label_erratum_path": root / "analysis" / "profile_proxy_label_erratum.json",
+        "runtime_policy_summary": runtime_policy_summary,
+        "runtime_policy_summary_path": runtime_policy_summary_path,
+        "runtime_policy_summary_error": runtime_policy_summary_error,
         "components_path": components_path,
         "fast_report_path": fast_report_path,
         "revisions": revisions,
@@ -539,6 +549,141 @@ def _final_interpretation_lines(state: dict[str, Any]) -> list[str]:
         f"> **Main-reviewed interpretation:** {state['status'].upper()} — {state['detail']}. No prior interpretation is carried into this report.",
         "",
     ]
+
+
+def _runtime_policy_table_lines(inputs: dict[str, Any]) -> list[str]:
+    root = inputs["root"]
+    summary_path = inputs.get("runtime_policy_summary_path", root / "analysis" / "runtime_policy_summary.json")
+    summary = inputs.get("runtime_policy_summary")
+    inventory_tasks = (inputs.get("inventory") or {}).get("tasks", {})
+    expected_tasks = [
+        str(task_id)
+        for task_id, task in inventory_tasks.items()
+        if isinstance(task, dict)
+        and isinstance(task.get("arms"), list)
+        and "strategy" in task["arms"]
+    ] if isinstance(inventory_tasks, dict) else []
+    expected_tasks = expected_tasks or ["G", "D", "X"]
+    artifact_digest = _sha256(summary_path)
+    if artifact_digest:
+        summary_ref = _rel(summary_path, root)
+        summary_line = f"[Runtime-policy summary](../{summary_ref}), SHA-256 `{artifact_digest}`."
+    elif inputs.get("runtime_policy_summary_error"):
+        summary_line = f"Pending: {inputs['runtime_policy_summary_error']}."
+    else:
+        summary_line = "Pending: `analysis/runtime_policy_summary.json` is absent."
+
+    records_by_task: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    invalid_count = 0
+    schema_detail = None
+    if not isinstance(summary, dict):
+        schema_detail = "schema 1 summary is unavailable"
+    elif type(summary.get("schema")) is not int or summary.get("schema") != 1 or not isinstance(summary.get("records"), list):
+        schema_detail = "summary does not match schema 1 with a records list"
+    else:
+        for record in summary["records"]:
+            if not isinstance(record, dict) or not isinstance(record.get("task_id"), str) or record.get("arm") != "strategy":
+                invalid_count += 1
+                continue
+            records_by_task[record["task_id"]].append(record)
+
+    task_ids = list(expected_tasks)
+    if schema_detail is None:
+        task_ids.extend(sorted(set(records_by_task) - set(task_ids)))
+    required_fields = (
+        "checkpoint_step", "checkpoint_sha256", "initial_plan_id", "final_plan_id",
+        "accepted_cursor", "plan_step_counts", "topology_included_updates",
+        "max_importance_multiplier_observed", "monitor_overhead_seconds",
+        "accepted_training_seconds", "fallback_reason", "full_recovery_intervals",
+        "train_audit_epochs", "noise_audit_epochs", "full_train_audit_artifact",
+    )
+    table_rows = []
+    for task_id in task_ids:
+        row: dict[str, Any] = {"task_id": task_id, "status": "pending", "record": {}}
+        if schema_detail is not None:
+            row["status"] = "pending: " + schema_detail
+        else:
+            candidates = records_by_task.get(task_id, [])
+            if not candidates:
+                row["status"] = "pending: no strategy record"
+            elif len(candidates) != 1:
+                row["status"] = f"ambiguous: {len(candidates)} strategy records"
+            else:
+                row["record"] = candidates[0]
+                missing = [name for name in required_fields if name not in candidates[0]]
+                row["status"] = "recorded" if not missing else "partial: missing " + ", ".join(missing)
+        table_rows.append(row)
+
+    def display(value: Any, *, missing: bool = False) -> str:
+        if missing:
+            return "not recorded"
+        if isinstance(value, (dict, list)):
+            return "`" + _safe_text(json.dumps(value, sort_keys=True, separators=(",", ":"))) + "`"
+        if value is None:
+            return "null"
+        return "`" + _safe_text(value) + "`"
+
+    def audit_artifact(value: Any, *, missing: bool = False) -> str:
+        if missing:
+            return "not recorded"
+        if not isinstance(value, str) or not value:
+            return display(value)
+        candidate = Path(value)
+        candidate = candidate if candidate.is_absolute() else root / candidate
+        try:
+            relative = candidate.resolve(strict=False).relative_to(root.resolve(strict=False)).as_posix()
+        except ValueError:
+            return "`" + _safe_text(value) + "` (outside campaign root; not linked)"
+        if candidate.is_file() and not candidate.is_symlink():
+            return f"[`{relative}`](<../{relative}>)"
+        return "`" + _safe_text(value) + "` (not present)"
+
+    lines = [summary_line]
+    if invalid_count:
+        lines.append(f"The schema-1 input contains {invalid_count} malformed or non-strategy record(s), which are not attributed to an arm.")
+    if not task_ids:
+        lines.extend(["", "| Task / arm | Status | Checkpoint | Plan initial → final | Accepted cursor | Observed coverage | Monitor / training | Fallback | Recovery intervals | Fixed-TRAIN audit epochs | Full-TRAIN audit artifact |", "|---|---|---|---|---:|---|---|---|---|---|---|"])
+        lines.append("| strategy arms | pending | not recorded | not recorded | not recorded | not recorded | not recorded | not recorded | not recorded | not recorded | not recorded |")
+        return lines
+    lines.extend(
+        [
+            "",
+            "| Task / arm | Status | Checkpoint step / SHA-256 | Plan initial → final | Accepted cursor | Observed coverage | Monitor / training | Fallback | Recovery intervals | Fixed-TRAIN audit epochs | Full-TRAIN audit artifact |",
+            "|---|---|---|---|---:|---|---|---|---|---|---|",
+        ]
+    )
+    for row in table_rows:
+        record = row["record"]
+        step = display(record.get("checkpoint_step"), missing="checkpoint_step" not in record)
+        raw_digest = record.get("checkpoint_sha256")
+        digest = (
+            f"`{raw_digest[:12]}…`" if isinstance(raw_digest, str) and len(raw_digest) == 64
+            else display(raw_digest, missing="checkpoint_sha256" not in record)
+        )
+        checkpoint = f"{step} / {digest}"
+        plan = f"{display(record.get('initial_plan_id'), missing='initial_plan_id' not in record)} → {display(record.get('final_plan_id'), missing='final_plan_id' not in record)}"
+        counts = display(record.get("plan_step_counts"), missing="plan_step_counts" not in record)
+        topology = display(record.get("topology_included_updates"), missing="topology_included_updates" not in record)
+        importance = display(record.get("max_importance_multiplier_observed"), missing="max_importance_multiplier_observed" not in record)
+        coverage = f"plans {counts}; topology updates {topology}; max importance {importance}"
+        monitor = _number(record.get("monitor_overhead_seconds"))
+        training = _number(record.get("accepted_training_seconds"))
+        monitor_cell = (
+            f"{display(record.get('monitor_overhead_seconds'), missing='monitor_overhead_seconds' not in record)} s / "
+            f"{display(record.get('accepted_training_seconds'), missing='accepted_training_seconds' not in record)} s"
+        )
+        if monitor is not None and training is not None and monitor >= 0 and training > 0:
+            monitor_cell = f"{monitor:.2f} s / {training:.2f} s ({_pct(monitor / training, 1)})"
+        fallback = display(record.get("fallback_reason"), missing="fallback_reason" not in record)
+        intervals = display(record.get("full_recovery_intervals"), missing="full_recovery_intervals" not in record)
+        train_epochs = display(record.get("train_audit_epochs"), missing="train_audit_epochs" not in record)
+        noise_epochs = display(record.get("noise_audit_epochs"), missing="noise_audit_epochs" not in record)
+        audit_epochs = f"train {train_epochs}; noise {noise_epochs}"
+        audit_link = audit_artifact(record.get("full_train_audit_artifact"), missing="full_train_audit_artifact" not in record)
+        lines.append(
+            f"| {row['task_id']} / strategy | {row['status']} | {checkpoint} | {plan} | {display(record.get('accepted_cursor'), missing='accepted_cursor' not in record)} | {coverage} | {monitor_cell} | {fallback} | {intervals} | {audit_epochs} | {audit_link} |"
+        )
+    return lines
 
 
 def _profile_cost_rows(inputs: dict[str, Any], attempts: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -2577,6 +2722,14 @@ def _make_report(inputs: dict[str, Any], attempts: list[dict[str, Any]], complet
             "Every analyzer-validated portable uniform audit and disjoint supplementary audit is listed; arms without an artifact remain explicitly pending. These endpoint audits do not enter native scheduled histories, mature-window assessment, or time-to-quality. Checkpoint labels follow the existing anchor-bound `topology_with_fidelity` selector, separate from the additive primary optimization and assessment objective; displayed validation ratios do not select or revise a checkpoint.",
             "",
             *_portable_audit_table_lines(inputs),
+            "",
+            "### Strategy runtime policy and audit coverage",
+            "",
+            *_runtime_policy_table_lines(inputs),
+            "",
+            "The monitor percentage is computed from that record as `monitor_overhead_seconds / accepted_training_seconds`; the other plan counts, included-update counts, importance maximum, fallback text, recovery intervals, and audit epochs are copied from the record. Missing strategy records remain pending.",
+            "",
+            "The strategy runtime summary is checkpoint-bound actual run metadata. Sampled optimized Lagrangian training logs describe updates executed under the sampled plan; fixed full-TRAIN audit logs describe the separate full-objective training audits recorded in the summary; scheduled validation histories are a third evidence stream. Their epochs, coverage counts, or outcomes are not substituted for one another.",
         ]
     )
     lines.extend(
@@ -2715,6 +2868,7 @@ def _make_report(inputs: dict[str, Any], attempts: list[dict[str, Any]], complet
         inputs["root"] / "analysis" / "first_science_contract_check.json",
         inputs["history_path"],
         inputs["root"] / "analysis" / "final_interpretation.json",
+        inputs["runtime_policy_summary_path"],
         inputs["root"] / "analysis" / "quality_history.csv",
         inputs["root"] / "analysis" / "quality_components.csv",
         inputs["root"] / "analysis" / "decision_cost_quality.json",
