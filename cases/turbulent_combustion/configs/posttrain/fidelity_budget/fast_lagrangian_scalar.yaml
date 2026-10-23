@@ -1,0 +1,46 @@
+# Portable P3 scalar profile. Supply your original pretrained SOURCE explicitly.
+# Single-seed bounded learning was useful, with mixed validation-history stability.
+defaults: [../multitask_unit_sum.yaml]
+source_run: null
+source_checkpoint: last.pt
+inherit_base_config: true
+source: {kind: native_run, allow_integration_source: false}
+model: {model_ema_eval: false}
+objectives:
+  data_retention: {enabled: false, weight: 0.0}
+  coherence: {enabled: true, weight: 1.0}
+optimization:
+  epochs: 100
+  batch_size: 32
+  train_fraction: 0.15
+  lr: 5.0e-5
+  weight_decay: 1.0e-6
+  grad_clip: 1.0
+  gradient_balance: weighted_sum
+  lr_warmup: {enabled: true, start_lr: 5.0e-6, updates: 76}
+  fast_lagrangian:
+    topology_estimator: p3
+    family_probability: 1.0
+    coefficient_interval: 1
+    seed: 700211
+  multitask:
+    family_scalarization: {method: fixed_sum}
+    outer_aggregation: null
+    external_policy:
+      method: lagrangian
+      vector_reduction: sum
+      objective_scale: source_mean
+      lagrangian: {dual_lr: 0.01, penalty_interval_updates: 1}
+    fidelity_budget:
+      metric: endpoint_mse_model_units
+      relative_increase: 0.05
+      absolute_allowance: 0.0
+      denominator_floor: 1.0e-8
+      calibration_batches: 8
+      calibration_draws: 2
+      calibration_seed: 700103
+coherence:
+  family_balance: {mode: none, gradient_diagnostics_every_epochs: 0}
+runtime: {device: cuda:0, plot_every_steps: 1000}
+evaluation: {preview: {enabled: false}}
+output: {experiment_name: posttrain_fast_lagrangian_scalar}

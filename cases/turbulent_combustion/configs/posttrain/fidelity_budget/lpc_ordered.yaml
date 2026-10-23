@@ -1,0 +1,6 @@
+# Exploratory ordered preference, not a conditional-KL or exact LPC estimator.
+# A/B bounds are exact full SOURCE TRAIN means; endpoint budgets retain +5%.
+defaults: [fast_lagrangian_scalar.yaml]
+optimization:
+  lpc_ordered: {dual_lr: 0.01, denominator_floor: 1.0e-8}
+output: {experiment_name: posttrain_lpc_ordered}

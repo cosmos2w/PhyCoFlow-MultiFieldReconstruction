@@ -1158,6 +1158,7 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
             "grad_clip",
             "multitask",
             "fast_lagrangian",
+            "lpc_ordered",
             "gradient_balance",
             "config_missing_behavior",
             "config_data_grad_scale",
@@ -1178,6 +1179,9 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
     from ..training.fast_lagrangian import validate_fast_lagrangian
 
     validate_fast_lagrangian(config)
+    from ..training.lpc_ordered import validate_lpc_ordered
+
+    validate_lpc_ordered(config)
     if "steps_per_epoch" in optimization:
         from ..training.update_budget import post_training_steps_per_epoch
 

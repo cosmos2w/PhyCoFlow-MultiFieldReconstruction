@@ -1,0 +1,10 @@
+# Portable P3 ConFIG profile; signed periodic reuse is not supported by this study.
+defaults: [lagrangian_config_warmup.yaml]
+optimization:
+  epochs: 100
+  fast_lagrangian:
+    topology_estimator: p3
+    family_probability: 1.0
+    coefficient_interval: 1
+    seed: 700211
+output: {experiment_name: posttrain_fast_lagrangian_config}

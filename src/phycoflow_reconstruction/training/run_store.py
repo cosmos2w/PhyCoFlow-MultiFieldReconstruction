@@ -369,6 +369,7 @@ class RunStore:
         for name in (
             "history", "validation_history", "topology_validation", "lr_warmup_updates",
             "fast_lagrangian_updates",
+            "lpc_ordered_updates",
         ):
             path = self.run_dir / "metrics" / f"{name}.jsonl"
             if not path.exists():

@@ -936,7 +936,9 @@ def _calibrate_family_balance(
     }
 
 
-def _calibrate_fidelity_budget(model, dataset, families, banks, config, family_scales, device):
+def _calibrate_fidelity_budget(
+    model, dataset, families, banks, config, family_scales, device, *, family_means=None
+):
     """Measure pooled SOURCE risks and scientific scale on fixed TRAIN draws.
 
     This runs on the original live model before optimization. Family calibration
@@ -961,6 +963,7 @@ def _calibrate_fidelity_budget(model, dataset, families, banks, config, family_s
     )
     sums = counts = None
     scientific_sum, samples = 0.0, 0
+    family_sums = {name: 0.0 for name in families} if family_means is not None else None
     started = perf_counter()
     try:
         post_training_mode(model, config)
@@ -983,6 +986,11 @@ def _calibrate_fidelity_budget(model, dataset, families, banks, config, family_s
                     counts = valid if counts is None else counts + valid
                     size = endpoint["prediction"].shape[0]
                     scientific_sum += float(result.scalar_loss) * size
+                    if family_sums is not None:
+                        for name in families:
+                            family_sums[name] += float(
+                                result.diagnostics["families"][name]["weighted_contribution"]
+                            ) * size
                     samples += size
                     del endpoint, result
     finally:
@@ -994,6 +1002,8 @@ def _calibrate_fidelity_budget(model, dataset, families, banks, config, family_s
         np.random.set_state(numpy_rng)
     if sums is None or samples == 0:
         raise ValueError("SOURCE fidelity calibration requires nonempty TRAIN batches")
+    if family_means is not None:
+        family_means.update({name: total / samples for name, total in family_sums.items()})
     reference = FidelityBudget.from_reference(
         dataset.field_names, sums / counts, scientific_sum / samples,
         relative_increase=float(settings.get("relative_increase", 0.05)),
@@ -1539,6 +1549,7 @@ def run_post_training(
     multitask = config["optimization"].get("multitask")
     external_settings = (multitask or {}).get("external_policy")
     fast_settings = config["optimization"].get("fast_lagrangian", {})
+    ordered_settings = config["optimization"].get("lpc_ordered")
     policy = None
     scalarizer = (
         FamilyScalarizer(multitask.get("family_scalarization", {}))
@@ -1567,6 +1578,13 @@ def run_post_training(
         checkpoint = store.load_checkpoint("last")
         if fast_settings and checkpoint.get("fast_lagrangian_implementation") != implementation_binding():
             raise ValueError("fast Lagrangian implementation changed; start a fresh arm")
+        if ordered_settings is not None:
+            from .lpc_ordered import implementation_binding as ordered_implementation_binding
+
+            if checkpoint.get("lpc_ordered_implementation") != ordered_implementation_binding():
+                raise ValueError("LPC-ordered implementation changed; start a fresh arm")
+        elif "lpc_ordered_state" in checkpoint:
+            raise ValueError("an ordered checkpoint cannot resume as the summed objective")
         load_model_state_strict(model, checkpoint["model"])
         load_training_aux_state(model, checkpoint)
         optimizer.load_state_dict(checkpoint["optimizer"])
@@ -1679,8 +1697,10 @@ def run_post_training(
     family_scales = {name: float(calibration["resolved_scales"][name]) for name in families}
     if external_settings is not None:
         if checkpoint is None:
+            ordered_means = {} if ordered_settings is not None else None
             reference, reference_report = _calibrate_fidelity_budget(
-                model, train_dataset, families, banks, config, family_scales, device
+                model, train_dataset, families, banks, config, family_scales, device,
+                family_means=ordered_means,
             )
             store.write_json("artifacts/fidelity_budget_reference.json", reference_report)
             policy = ExternalPolicy(external_settings, reference, device)
@@ -1697,6 +1717,44 @@ def run_post_training(
             )
         if checkpoint is not None:
             policy.load_state_dict(saved_policy)
+        if ordered_settings is not None:
+            from .lpc_ordered import LPCOrderedReference, LPCOrderedState
+
+            ordered_path = store.run_dir / "artifacts/lpc_ordered_reference.json"
+            if checkpoint is None:
+                ordered_reference = LPCOrderedReference.from_means(
+                    ordered_means,
+                    source_sha256=source_hashes_before["checkpoint"],
+                    denominator_floor=float(ordered_settings.get("denominator_floor", 1e-8)),
+                )
+                store.write_json("artifacts/lpc_ordered_reference.json", {
+                    "reference": ordered_reference.state_dict(),
+                    "settings": dict(ordered_settings),
+                    "source_checkpoint_sha256": source_hashes_before["checkpoint"],
+                    "calibration": "same full-descriptor SOURCE TRAIN draws as fidelity/C0; no extra forward",
+                })
+            else:
+                if file_sha256(ordered_path) != checkpoint.get("lpc_ordered_reference_sha256"):
+                    raise ValueError("ordered recovery reference artifact changed")
+                ordered_report = json.loads(ordered_path.read_text())
+                if (
+                    ordered_report["settings"] != dict(ordered_settings)
+                    or ordered_report["source_checkpoint_sha256"] != source_hashes_before["checkpoint"]
+                ):
+                    raise ValueError("ordered recovery reference/source settings changed")
+                ordered_reference = LPCOrderedReference.from_state_dict(ordered_report["reference"])
+            policy.lpc_ordered = LPCOrderedState(
+                ordered_reference,
+                dual_lr=float(ordered_settings.get("dual_lr", 0.01)),
+                device=device,
+            )
+            policy.lpc_ordered_reference_sha256 = file_sha256(ordered_path)
+            if checkpoint is not None:
+                policy.lpc_ordered.load_state_dict(checkpoint["lpc_ordered_state"])
+                if policy.lpc_ordered.completed_updates != start_step:
+                    raise ValueError("ordered recovery dual cursor differs from accepted model updates")
+                if policy.completed_updates != start_step:
+                    raise ValueError("ordered recovery field dual cursor differs from model updates")
     controller = None
     if constrained:
         if "topology_components" not in calibration:
@@ -2132,6 +2190,18 @@ def run_post_training(
             row["data_update_weight"] = data_update_weight
             row["coherence_update_weight"] = coherence_update_weight
             if policy is not None:
+                ordered = getattr(policy, "lpc_ordered", None)
+                if ordered is not None:
+                    ordered_losses = {
+                        name: raw_family_losses[name]
+                        * float(getattr(families[name], "family_weight", 1.0))
+                        * family_scales[name]
+                        for name in ("global_distribution", "cross_spectrum", "topology")
+                    }
+                    coherence_loss = ordered.primary(
+                        ordered_losses, objective_scale=policy.reference.objective_scale
+                    )
+                    row["ordered_primary_surrogate"] = float(coherence_loss.detach().cpu())
                 risks = field_mse(
                     endpoint_context["prediction"], endpoint_context["target"],
                     endpoint_context["mask"],
@@ -2203,6 +2273,11 @@ def run_post_training(
                         coherence_loss if coherence_objectives is None else coherence_objectives,
                         risks, config["optimization"].get("grad_clip"),
                     )
+                if ordered is not None:
+                    if not gradient.get("update_accepted", False):
+                        raise RuntimeError("ordered dual action requires an accepted model update")
+                    gradient["lpc_ordered"] = ordered.accept(ordered_losses)
+                    del ordered_losses
                 row["data_loss"] = (
                     gradient["endpoint_data_loss"] if "endpoint_data_loss" in gradient
                     else float(risks.detach().mean())
@@ -2273,6 +2348,21 @@ def run_post_training(
                 **_family_scalar_report(result),
                 **gradient,
             )
+            if "lpc_ordered" in gradient:
+                row["objective_semantics"] = "T_over_T0_with_dense_A_B_and_endpoint_constraints"
+                with (store.run_dir / "metrics/lpc_ordered_updates.jsonl").open("a") as handle:
+                    handle.write(json.dumps(_json_safe({
+                        "epoch": epoch, "step": global_step + 1,
+                        "raw_coherence_sum": row["coherence_loss"],
+                        "primary_scalar": gradient["primary_scalar"],
+                        "scaled_primary_scalar": gradient["scaled_primary_scalar"],
+                        "optimized_scalar": gradient["optimized_scalar"],
+                        "ordered": gradient["lpc_ordered"],
+                        "field_risk": gradient["field_risk"],
+                        "multipliers_before": gradient["multipliers_before"],
+                        "multipliers_after": gradient["multipliers_after"],
+                        "update_accepted": gradient["update_accepted"],
+                    }), allow_nan=False) + "\n")
             if execution is not None:
                 row["fast_lagrangian"] = execution
                 row["T_estimate"] = (
@@ -2610,6 +2700,12 @@ def _post_checkpoint_payload(
         payload["family_scalarizer"] = scalarizer.state_dict()
     if policy is not None:
         payload["external_policy"] = policy.state_dict()
+        if hasattr(policy, "lpc_ordered"):
+            from .lpc_ordered import implementation_binding as ordered_implementation_binding
+
+            payload["lpc_ordered_state"] = policy.lpc_ordered.state_dict()
+            payload["lpc_ordered_implementation"] = ordered_implementation_binding()
+            payload["lpc_ordered_reference_sha256"] = policy.lpc_ordered_reference_sha256
     if "fast_lagrangian" in config["optimization"]:
         payload["fast_lagrangian_implementation"] = implementation_binding()
     if hasattr(train_dataset, "training_subset_manifest"):
