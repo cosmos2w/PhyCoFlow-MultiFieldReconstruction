@@ -55,6 +55,21 @@ GOAL2_GPU_HOURS_RESERVE = 2.0
 GOAL1_RUNTIME_QUOTA_FACTOR = 2.0
 MAX_CONCURRENT_GPU_RUNS = 3
 ADMISSION_LOCK_TIMEOUT_SECONDS = 5.0
+NATIVE_MAP_MAX_SECONDS = 180.0
+NATIVE_MAP_APPROVAL_FILES = {
+    "extractor": (
+        "analysis/extract_native_grid_field_maps.py",
+        "b9f7ca1c6cbce8bee9c164dad9c31aa2eb215b2c3f13e86730af32edd70bfbf7",
+    ),
+    "plan": (
+        "analysis/native_grid_field_map_predeclaration.json",
+        "b189c295b2cda6b630df1a86ad93263f9a726455f2a37d4d046db914a891f4b6",
+    ),
+    "clarification": (
+        "analysis/native_grid_field_map_schema_clarification.json",
+        "29736e04ba0357bbaaa04f5b20a1aa0dd0c6b693ce66c459055ff53330fd776a",
+    ),
+}
 EXCLUDED_ARMS = {
     "T4": "periodic coefficients failed the TRAIN-only age probe: cosine fell to 0.79993 at refresh pair 2->3",
     "G1-P": "periodic coefficients failed the TRAIN-only age probe: cosine fell to 0.79993 at refresh pair 2->3",
@@ -580,7 +595,7 @@ def _ledger_training_seconds(root: Path) -> dict[str, float]:
     return totals
 
 
-def _ledger_action_seconds(root: Path, action: str) -> float:
+def _ledger_action_seconds(root: Path, action: str, *, prefix: bool = False) -> float:
     path = root / "manifests/launch_ledger.jsonl"
     if not path.is_file():
         return 0.0
@@ -597,7 +612,8 @@ def _ledger_action_seconds(root: Path, action: str) -> float:
             raise CampaignError(
                 f"negative elapsed time in campaign launch ledger row {line_number}"
             )
-        if row.get("action") == action:
+        row_action = str(row.get("action", ""))
+        if (row_action.startswith(action) if prefix else row_action == action):
             total += elapsed
     return total
 
@@ -987,8 +1003,39 @@ def _evaluation_reserve_hours(manifest: Mapping[str, Any]) -> float:
     return max(MIN_EVALUATION_RESERVE_HOURS, float(gate.get("evaluation_reserve_hours", 0.0)))
 
 
+def _native_maps_approval_binding(root: Path) -> dict[str, Any]:
+    binding: dict[str, Any] = {"schema_version": 1}
+    for key, (relative_path, expected_sha256) in NATIVE_MAP_APPROVAL_FILES.items():
+        path = root / relative_path
+        if not path.is_file():
+            raise CampaignError(f"native-map approval file is missing: {path}")
+        actual_sha256 = _sha256(path)
+        if actual_sha256 != expected_sha256:
+            raise CampaignError(f"native-map approval file changed: {path}")
+        binding[key] = {"path": relative_path, "sha256": actual_sha256}
+    return binding
+
+
+def _store_native_maps_approval_binding(
+    root: Path, binding: Mapping[str, Any]
+) -> dict[str, Any]:
+    root = root.resolve(strict=True)
+    admission = _acquire_admission_lock(root)
+    try:
+        manifest = _campaign_manifest(root)
+        current = manifest.get("native_map_approval_binding")
+        if current is not None and current != binding:
+            raise CampaignError("native-map approval binding changed after it was recorded")
+        if current is None:
+            manifest["native_map_approval_binding"] = dict(binding)
+            _atomic_json(root / "manifests/campaign.json", manifest)
+        return manifest
+    finally:
+        _release_campaign_lock(admission)
+
+
 def _evaluation_spent_seconds(root: Path, current: Mapping[str, Any]) -> float:
-    completed = _ledger_action_seconds(root, "evaluate-full-abt-validation")
+    completed = _ledger_action_seconds(root, "evaluate-", prefix=True)
     active = sum(
         float(record.get("elapsed_seconds", 0.0))
         for record in current.get("active_processes", [])
@@ -1082,7 +1129,9 @@ def _watchdog_seconds(
         if evaluation_reserve_seconds is not None
         else evaluation_hours * 3600
     )
-    eval_ledger = _ledger_action_seconds(Path(manifest["root"]), "evaluate-full-abt-validation")
+    eval_ledger = _ledger_action_seconds(
+        Path(manifest["root"]), "evaluate-", prefix=True
+    )
     active_eval_elapsed = sum(
         float(record.get("elapsed_seconds", 0.0))
         for record in active
@@ -2024,8 +2073,8 @@ def evaluate(
     current = status(Path(manifest["root"]))
     goal1_gate = manifest.get("gate_evidence", {}).get("goal1", {})
     reserve_hours = float(goal1_gate.get("evaluation_reserve_hours", MIN_EVALUATION_RESERVE_HOURS))
-    remaining_evaluation = reserve_hours * 3600 - _ledger_action_seconds(
-        Path(manifest["root"]), "evaluate-full-abt-validation"
+    remaining_evaluation = reserve_hours * 3600 - _evaluation_spent_seconds(
+        Path(manifest["root"]), current
     )
     remaining_training = (
         _goal1_remaining_hours(manifest) * 3600
@@ -2052,6 +2101,91 @@ def evaluate(
         gpu=gpu,
     )
     return f"evaluated {arm} checkpoint {checkpoint} with full A/B/T on the evenly spaced validation panel"
+
+
+def maps(
+    root: Path,
+    run_dir: Path,
+    *,
+    max_seconds: float = NATIVE_MAP_MAX_SECONDS,
+    execute: bool = False,
+) -> str:
+    manifest = _campaign_manifest(root)
+    if not manifest.get("gates", {}).get("goal1_authorized"):
+        raise CampaignError("native maps require the authorized Goal-1 campaign")
+    if isinstance(max_seconds, bool) or not 0 < max_seconds <= NATIVE_MAP_MAX_SECONDS:
+        raise CampaignError("native-map max-seconds must be positive and at most 180")
+
+    campaign_root = Path(manifest["root"]).resolve(strict=True)
+    run_dir = run_dir.resolve(strict=True)
+    g1c_root = (campaign_root / "runs/G1-C").resolve(strict=True)
+    if not run_dir.is_relative_to(g1c_root):
+        raise CampaignError("native maps use the campaign-owned G1-C run as their outer binding")
+    run_manifest = _read_json(run_dir / "run_manifest.json")
+    if run_manifest.get("experiment_name") != f"_LPCAccel/{manifest['campaign_id']}/G1-C":
+        raise CampaignError("native-map run belongs to another campaign arm")
+
+    binding = _native_maps_approval_binding(campaign_root)
+    existing_binding = manifest.get("native_map_approval_binding")
+    if existing_binding is not None and existing_binding != binding:
+        raise CampaignError("native-map approval binding changed after it was recorded")
+
+    command = [
+        str(PYTHON),
+        str(REPO_ROOT / "scripts/posttraining/fast_lagrangian_evaluate.py"),
+        "--campaign-root",
+        str(campaign_root),
+        "--run",
+        str(run_dir),
+        "--native-maps",
+        "--device",
+        "cuda:0",
+    ]
+    command = _with_short_multiprocessing_tmp(command)
+    rendered = _rendered_command(campaign_root, command, 0)
+    if not execute:
+        return rendered
+
+    current = status(campaign_root)
+    if current.get("active_processes"):
+        raise CampaignError("native maps require all campaign GPU processes to be idle")
+    goal1_gate = manifest.get("gate_evidence", {}).get("goal1", {})
+    if not goal1_gate.get("approved_arms"):
+        raise CampaignError("native maps require the approved Goal-1 arm set")
+    approved_arms = tuple(goal1_gate.get("approved_arms", ()))
+    if set(approved_arms) != {"G1-C", "G1-R", "G1-S"}:
+        raise CampaignError("native maps require the complete approved G1-C/G1-R/G1-S campaign")
+    for arm in ("G1-C", "G1-R", "G1-S"):
+        runs = current.get("runs", {}).get(arm, [])
+        if (
+            len(runs) != 1
+            or runs[0].get("status") != "completed"
+            or float(runs[0].get("completed_epochs") or 0.0) != MAX_G1_EPOCHS
+            or int(runs[0].get("completed_updates") or 0) != 3800
+            or int(runs[0].get("steps_per_epoch") or 0) != 38
+        ):
+            raise CampaignError(f"native maps require exactly one completed 100-epoch {arm} run")
+
+    goal1_remaining = _goal1_remaining_hours(manifest, current_status=current) * 3600
+    reserve_hours = _evaluation_reserve_hours(manifest)
+    evaluation_remaining = reserve_hours * 3600 - _evaluation_spent_seconds(
+        campaign_root, current
+    )
+    if evaluation_remaining <= 0:
+        raise CampaignError("the protected one-hour evaluation reserve is exhausted")
+    manifest = _store_native_maps_approval_binding(campaign_root, binding)
+    _execute_runner(
+        manifest,
+        "G1-C",
+        "evaluate-native-maps",
+        command,
+        reserve_gpu_seconds=goal1_remaining,
+        max_seconds=max_seconds,
+        evaluation_reserve_seconds=reserve_hours * 3600,
+        run=run_dir,
+        gpu=0,
+    )
+    return "extracted predeclared native-grid validation maps for the completed Goal-1 arms"
 
 
 def authorize(root: Path, stage: str, evidence_path: Path) -> dict[str, Any]:
@@ -2246,6 +2380,10 @@ def build_parser() -> argparse.ArgumentParser:
     eval_parser.add_argument("--max-seconds", type=float)
     eval_parser.add_argument("--execute", action="store_true")
     eval_parser.add_argument("--gpu", type=_parse_gpu, default=1, metavar="PHYSICAL_GPU")
+    maps_parser = subparsers.add_parser("maps")
+    maps_parser.add_argument("--run", type=Path, required=True, help="the campaign-owned G1-C run")
+    maps_parser.add_argument("--max-seconds", type=float, default=NATIVE_MAP_MAX_SECONDS)
+    maps_parser.add_argument("--execute", action="store_true")
     return parser
 
 
@@ -2273,6 +2411,13 @@ def main(argv: list[str] | None = None) -> int:
                 max_samples=args.max_samples,
                 max_seconds=args.max_seconds,
                 gpu=args.gpu,
+                execute=args.execute,
+            )
+        elif args.command == "maps":
+            result = maps(
+                args.root,
+                args.run,
+                max_seconds=args.max_seconds,
                 execute=args.execute,
             )
         else:  # pragma: no cover - argparse constrains this

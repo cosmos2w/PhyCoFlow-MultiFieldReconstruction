@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import json
+
 import pytest
 import torch
 from torch import nn
@@ -15,6 +18,7 @@ from phycoflow_reconstruction.contracts import (
 )
 from phycoflow_reconstruction.data.normalization import FieldNormalizer
 from phycoflow_reconstruction.data.sensor_protocols import SensorProtocol, build_observation_batch
+from scripts.posttraining import fast_lagrangian_evaluate as EVALUATOR
 from scripts.posttraining.fast_lagrangian_evaluate import (
     EvaluationError,
     _compact_evaluation,
@@ -73,6 +77,133 @@ def test_evaluation_identity_is_bound_and_output_names_are_immutable(tmp_path):
     assert baseline != _evaluation_filename("T0", "last", 10, 64, "b" * 64)
     args = _parser().parse_args(["--campaign-root", str(root), "--run", str(root)])
     assert args.device == "cpu"
+
+
+def test_native_map_approval_binding_rejects_changed_file_and_manifest(tmp_path, monkeypatch):
+    files = {}
+    entries = {}
+    for key in ("extractor", "plan", "clarification"):
+        path = tmp_path / f"{key}.json"
+        payload = f"fixed {key} payload\n".encode()
+        path.write_bytes(payload)
+        digest = hashlib.sha256(payload).hexdigest()
+        files[key] = (path.name, digest)
+        entries[key] = {"path": path.name, "sha256": digest}
+    monkeypatch.setattr(EVALUATOR, "NATIVE_MAP_APPROVAL_FILES", files)
+
+    binding = EVALUATOR._native_map_approval_binding(tmp_path)
+    assert binding == {"schema_version": 1, **entries}
+    EVALUATOR._verify_native_map_approval_binding(tmp_path, {"native_map_approval_binding": binding})
+    with pytest.raises(EvaluationError, match="exact native-map approval binding"):
+        EVALUATOR._verify_native_map_approval_binding(
+            tmp_path,
+            {"native_map_approval_binding": {**binding, "plan": {"sha256": "0" * 64}}},
+        )
+
+    (tmp_path / "plan.json").write_text("changed after approval\n", encoding="utf-8")
+    with pytest.raises(EvaluationError, match="approval file changed"):
+        EVALUATOR._native_map_approval_binding(tmp_path)
+
+
+def test_native_map_readiness_rejects_one_g1_arm_below_3800_updates(tmp_path, monkeypatch):
+    root = tmp_path / "campaign"
+    runs_root = root / "runs"
+    campaign_root = root
+    campaign = {
+        "root": str(root),
+        "campaign_id": root.name,
+        "gates": {"goal1_authorized": True},
+        "eligible_arms": {"goal1": ["G1-C", "G1-S", "G1-R"]},
+        "gate_evidence": {"goal1": {"approved_arms": ["G1-C", "G1-S", "G1-R"]}},
+    }
+    (root / "analysis").mkdir(parents=True)
+    (root / "manifests").mkdir()
+    (root / "manifests/campaign.json").write_text(json.dumps(campaign), encoding="utf-8")
+    (runs_root / "G1-C/run-c").mkdir(parents=True)
+    (runs_root / "G1-S/run-s").mkdir(parents=True)
+    (runs_root / "G1-R/run-r").mkdir(parents=True)
+    (root / "analysis/native_grid_field_map_predeclaration.json").write_text(
+        json.dumps({"goal1_arms": ["G1-C", "G1-S", "G1-R"]}), encoding="utf-8"
+    )
+    for arm, run_name in (("G1-C", "run-c"), ("G1-S", "run-s"), ("G1-R", "run-r")):
+        run = runs_root / arm / run_name
+        (run / "run_manifest.json").write_text(
+            json.dumps(
+                {
+                    "last_checkpoint_epoch": 100.0,
+                    "last_checkpoint_step": 3800,
+                    "source_immutable_verified": True,
+                    "source_hashes": {"source": "same"},
+                    "source_hashes_after": {"source": "same"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        (run / "status.json").write_text(
+            json.dumps(
+                {
+                    "status": "completed",
+                    "steps_per_epoch": 38,
+                    "configured_steps": 3800,
+                    "global_step": 3799 if arm == "G1-S" else 3800,
+                    "source_immutable_verified": True,
+                }
+            ),
+            encoding="utf-8",
+        )
+        (run / "progress.json").write_text(
+            json.dumps(
+                {
+                    "completed_updates": 3799 if arm == "G1-S" else 3800,
+                    "reporting_epoch": 100.0,
+                }
+            ),
+            encoding="utf-8",
+        )
+    selected = runs_root / "G1-C/run-c"
+    monkeypatch.setattr(
+        EVALUATOR,
+        "_validate_campaign_run",
+        lambda _campaign, _run: (campaign_root, selected, "G1-C"),
+    )
+    monkeypatch.setattr(
+        EVALUATOR,
+        "_load_run_inputs",
+        lambda run, _checkpoint: (
+            {"optimization": {"epochs": 100}},
+            EVALUATOR._read_json(run / "run_manifest.json"),
+            run / "checkpoints/epoch_100.pt",
+            "checkpoint-hash",
+        ),
+    )
+    monkeypatch.setattr(EVALUATOR, "_validate_experiment_binding", lambda *_args: None)
+
+    with pytest.raises(EvaluationError, match="completed 100-epoch / 3800-step"):
+        EVALUATOR._validate_native_maps_runs(root, selected)
+
+
+def test_evaluator_default_path_remains_full_abt_without_native_maps(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        EVALUATOR,
+        "evaluate_campaign_run",
+        lambda *args, **kwargs: calls.append((args, kwargs)) or "full-abt-result.json",
+    )
+    monkeypatch.setattr(
+        EVALUATOR,
+        "extract_native_maps_campaign",
+        lambda *_args, **_kwargs: pytest.fail("default evaluator path invoked native-map extraction"),
+    )
+    result = EVALUATOR.main(
+        ["--campaign-root", str(tmp_path), "--run", str(tmp_path / "runs/G1-C/run-c")]
+    )
+    assert result == 0
+    assert calls == [
+        (
+            (tmp_path, tmp_path / "runs/G1-C/run-c"),
+            {"checkpoint_name": "best", "max_samples": 64, "device_name": "cpu"},
+        )
+    ]
 
 
 def test_validation_selection_gates_and_uniform_group_boundaries():

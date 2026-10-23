@@ -12,6 +12,7 @@ import argparse
 import hashlib
 import json
 import os
+import runpy
 import sys
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
@@ -31,6 +32,20 @@ GROUP_SIZE = 32
 MAX_SAMPLES = 128
 VALIDATION_SEED = 2027
 CHECKPOINT_NAMES = ("best", "last", "epoch_050", "epoch_075", "epoch_100")
+NATIVE_MAP_APPROVAL_FILES = {
+    "extractor": (
+        "analysis/extract_native_grid_field_maps.py",
+        "b9f7ca1c6cbce8bee9c164dad9c31aa2eb215b2c3f13e86730af32edd70bfbf7",
+    ),
+    "plan": (
+        "analysis/native_grid_field_map_predeclaration.json",
+        "b189c295b2cda6b630df1a86ad93263f9a726455f2a37d4d046db914a891f4b6",
+    ),
+    "clarification": (
+        "analysis/native_grid_field_map_schema_clarification.json",
+        "29736e04ba0357bbaaa04f5b20a1aa0dd0c6b693ce66c459055ff53330fd776a",
+    ),
+}
 
 
 class EvaluationError(RuntimeError):
@@ -54,6 +69,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--run", type=Path, required=True, help="one child run below campaign/runs")
     parser.add_argument("--checkpoint", choices=CHECKPOINT_NAMES, default="best")
     parser.add_argument("--device", choices=("cpu", "cuda:0"), default="cpu")
+    parser.add_argument(
+        "--native-maps",
+        action="store_true",
+        help="extract the fixed campaign-owned native-grid maps after all G1 arms complete",
+    )
     parser.add_argument(
         "--max-samples",
         type=int,
@@ -420,6 +440,127 @@ def _validate_experiment_binding(config, manifest, root: Path, arm: str) -> None
         or config.get("output", {}).get("experiment_name") != expected
     ):
         raise EvaluationError("run config/manifest belongs to another campaign arm")
+
+
+def _native_map_approval_binding(root: Path) -> dict[str, Any]:
+    binding: dict[str, Any] = {"schema_version": 1}
+    for key, (relative_path, expected_sha256) in NATIVE_MAP_APPROVAL_FILES.items():
+        path = root / relative_path
+        if not path.is_file():
+            raise EvaluationError(f"native-map approval file is missing: {path}")
+        actual_sha256 = _sha256(path)
+        if actual_sha256 != expected_sha256:
+            raise EvaluationError(f"native-map approval file changed: {path}")
+        binding[key] = {"path": relative_path, "sha256": actual_sha256}
+    return binding
+
+
+def _verify_native_map_approval_binding(
+    root: Path, campaign_manifest: Mapping[str, Any]
+) -> dict[str, Any]:
+    binding = _native_map_approval_binding(root)
+    if campaign_manifest.get("native_map_approval_binding") != binding:
+        raise EvaluationError("campaign manifest lacks the exact native-map approval binding")
+    return binding
+
+
+def _validate_native_maps_runs(campaign_root: Path, run_path: Path) -> tuple[Path, Path]:
+    root, selected_run, selected_arm = _validate_campaign_run(campaign_root, run_path)
+    if selected_arm != "G1-C":
+        raise EvaluationError("native maps require the campaign-owned G1-C run as the outer binding")
+    campaign_manifest = _read_json(root / "manifests/campaign.json")
+    if (
+        campaign_manifest.get("campaign_id") != root.name
+        or Path(campaign_manifest.get("root", "")).resolve(strict=True) != root
+    ):
+        raise EvaluationError("campaign manifest identity differs from its root")
+    if not campaign_manifest.get("gates", {}).get("goal1_authorized"):
+        raise EvaluationError("native maps require the authorized Goal-1 campaign")
+    expected_arms = ("G1-C", "G1-S", "G1-R")
+    if set(campaign_manifest.get("eligible_arms", {}).get("goal1", ())) != set(expected_arms):
+        raise EvaluationError("native maps require the preapproved G1-C/G1-R/G1-S arm set")
+    if set(
+        campaign_manifest.get("gate_evidence", {}).get("goal1", {}).get("approved_arms", ())
+    ) != set(expected_arms):
+        raise EvaluationError("native maps require all three approved Goal-1 arms")
+
+    plan_path = root / "analysis/native_grid_field_map_predeclaration.json"
+    plan = _read_json(plan_path)
+    if tuple(plan.get("goal1_arms", ())) != expected_arms:
+        raise EvaluationError("native-map predeclaration does not bind all three Goal-1 arms")
+
+    runs_root = (root / "runs").resolve(strict=True)
+    for arm in expected_arms:
+        arm_root = (runs_root / arm).resolve(strict=True)
+        if not arm_root.is_relative_to(runs_root):
+            raise EvaluationError(f"campaign run directory escapes runs/: {arm_root}")
+        candidates = sorted(
+            path for path in arm_root.iterdir() if path.is_dir() and (path / "run_manifest.json").is_file()
+        )
+        if len(candidates) != 1:
+            raise EvaluationError(f"native maps require exactly one {arm} lineage; found {len(candidates)}")
+        run_dir = candidates[0].resolve(strict=True)
+        if not run_dir.is_relative_to(runs_root) or run_dir.stat().st_uid != os.getuid():
+            raise EvaluationError(f"{arm} run is not owned below the campaign runs directory")
+        if arm == "G1-C" and run_dir != selected_run:
+            raise EvaluationError("outer --run is not the unique campaign-owned G1-C lineage")
+
+        config, run_manifest, _checkpoint_path, _checkpoint_sha256 = _load_run_inputs(
+            run_dir, "epoch_100"
+        )
+        _validate_experiment_binding(config, run_manifest, root, arm)
+        if int(config.get("optimization", {}).get("epochs", 0)) != 100:
+            raise EvaluationError(f"{arm} resolved config is not a 100-epoch Goal-1 arm")
+        status_path = run_dir / "status.json"
+        progress_path = run_dir / "progress.json"
+        status = _read_json(status_path)
+        progress = _read_json(progress_path)
+        if (
+            status.get("status") != "completed"
+            or int(status.get("steps_per_epoch", 0)) != 38
+            or int(status.get("configured_steps", 0)) != 3800
+            or int(status.get("global_step", -1)) != 3800
+            or int(progress.get("completed_updates", -1)) != 3800
+            or float(progress.get("reporting_epoch", 0.0)) != 100.0
+            or float(run_manifest.get("last_checkpoint_epoch", 0.0)) != 100.0
+            or int(run_manifest.get("last_checkpoint_step", -1)) != 3800
+        ):
+            raise EvaluationError(f"{arm} does not have a completed 100-epoch / 3800-step lineage")
+        if (
+            status.get("source_immutable_verified") is not True
+            or run_manifest.get("source_immutable_verified") is not True
+            or run_manifest.get("source_hashes") != run_manifest.get("source_hashes_after")
+        ):
+            raise EvaluationError(f"{arm} lacks a passing SOURCE immutability binding")
+    return root, selected_run
+
+
+def extract_native_maps_campaign(
+    campaign_root: Path,
+    run_path: Path,
+    *,
+    device_name: str = "cuda:0",
+) -> str:
+    root, _selected_run = _validate_native_maps_runs(campaign_root, run_path)
+    _validate_device_admission(root, device_name)
+    if (
+        device_name != "cuda:0"
+        or os.environ.get("CUDA_VISIBLE_DEVICES") != "0"
+        or os.environ.get("PHYCOFLOW_CAMPAIGN_GPU") != "0"
+    ):
+        raise EvaluationError("native maps require the campaign-reserved physical GPU 0")
+    campaign_manifest = _read_json(root / "manifests/campaign.json")
+    _verify_native_map_approval_binding(root, campaign_manifest)
+
+    extractor_path = root / "analysis/extract_native_grid_field_maps.py"
+    namespace = runpy.run_path(str(extractor_path), run_name="lpc_native_grid_field_maps")
+    extractor_main = namespace.get("main")
+    if not callable(extractor_main):
+        raise EvaluationError("campaign-owned native-map extractor has no callable main")
+    return_code = extractor_main(["--execute", "--device", device_name])
+    if return_code != 0:
+        raise EvaluationError(f"campaign-owned native-map extractor failed with code {return_code}")
+    return "native maps extracted for the completed G1-C/G1-R/G1-S campaign"
 
 
 def _evaluation_filename(
@@ -806,14 +947,21 @@ def evaluate_campaign_run(
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        _validate_max_samples(args.max_samples)
-        output = evaluate_campaign_run(
-            args.campaign_root,
-            args.run,
-            checkpoint_name=args.checkpoint,
-            max_samples=args.max_samples,
-            device_name=args.device,
-        )
+        if args.native_maps:
+            output = extract_native_maps_campaign(
+                args.campaign_root,
+                args.run,
+                device_name=args.device,
+            )
+        else:
+            _validate_max_samples(args.max_samples)
+            output = evaluate_campaign_run(
+                args.campaign_root,
+                args.run,
+                checkpoint_name=args.checkpoint,
+                max_samples=args.max_samples,
+                device_name=args.device,
+            )
     except (EvaluationError, OSError, ValueError, KeyError, TypeError, RuntimeError) as error:
         print(f"fast_lagrangian_evaluate: {error}", file=sys.stderr)
         return 2

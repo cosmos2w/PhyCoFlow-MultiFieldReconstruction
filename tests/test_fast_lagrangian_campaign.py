@@ -212,6 +212,112 @@ def test_evaluation_command_is_validation_only_and_never_selects_test(tmp_path, 
     assert "--eval-set test" not in command
 
 
+def test_evaluation_reserve_counts_every_completed_and_active_evaluation(tmp_path):
+    root = tmp_path / "campaign"
+    (root / "manifests").mkdir(parents=True)
+    ledger = root / "manifests/launch_ledger.jsonl"
+    ledger.write_text(
+        "\n".join(
+            json.dumps(row)
+            for row in (
+                {"action": "evaluate-full-abt-validation", "elapsed_seconds": 12.0},
+                {"action": "evaluate-native-maps", "elapsed_seconds": 25.0},
+                {"action": "launch", "elapsed_seconds": 900.0},
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert MODULE._evaluation_spent_seconds(
+        root,
+        {
+            "active_processes": [
+                {"action": "evaluate-native-maps", "elapsed_seconds": 3.0},
+                {"action": "launch", "elapsed_seconds": 500.0},
+            ]
+        },
+    ) == 40.0
+
+
+def _native_maps_campaign_fixture(tmp_path):
+    root = tmp_path / "campaign"
+    run = root / "runs/G1-C/run-c"
+    run.mkdir(parents=True)
+    (run / "run_manifest.json").write_text(
+        json.dumps({"experiment_name": "_LPCAccel/campaign/G1-C"}), encoding="utf-8"
+    )
+    manifest = {
+        "root": str(root),
+        "campaign_id": "campaign",
+        "gates": {"goal1_authorized": True},
+        "gate_evidence": {"goal1": {"approved_arms": ["G1-C", "G1-R", "G1-S"]}},
+    }
+    status = {
+        "active_processes": [],
+        "runs": {
+            arm: [
+                {
+                    "status": "completed",
+                    "completed_epochs": 100.0,
+                    "completed_updates": 3800,
+                    "steps_per_epoch": 38,
+                }
+            ]
+            for arm in ("G1-C", "G1-R", "G1-S")
+        },
+    }
+    return root, run, manifest, status
+
+
+def test_native_maps_uses_fixed_evaluator_entrypoint_and_requires_all_g1_complete(
+    tmp_path, monkeypatch
+):
+    root, run, manifest, campaign_status = _native_maps_campaign_fixture(tmp_path)
+    monkeypatch.setattr(MODULE, "_campaign_manifest", lambda _root: manifest)
+    monkeypatch.setattr(MODULE, "_native_maps_approval_binding", lambda _root: {"schema_version": 1})
+    monkeypatch.setattr(MODULE, "_evaluation_spent_seconds", lambda *_args: 17.0)
+    monkeypatch.setattr(MODULE, "_goal1_remaining_hours", lambda *_args, **_kwargs: 0.0)
+    monkeypatch.setattr(MODULE, "_evaluation_reserve_hours", lambda _manifest: 1.0)
+    monkeypatch.setattr(MODULE, "status", lambda _root: campaign_status)
+    stores = []
+    monkeypatch.setattr(
+        MODULE,
+        "_store_native_maps_approval_binding",
+        lambda _root, binding: stores.append(binding) or manifest,
+    )
+    calls = []
+    monkeypatch.setattr(
+        MODULE, "_execute_runner", lambda *args, **kwargs: calls.append((args, kwargs))
+    )
+
+    rendered = MODULE.maps(root, run, execute=False)
+    assert "fast_lagrangian_evaluate.py" in rendered
+    assert "--native-maps" in rendered
+    assert "--run" in rendered and str(run.resolve()) in rendered
+    assert "--device cuda:0" in rendered
+    assert stores == [] and calls == []
+
+    MODULE.maps(root, run, execute=True)
+    assert stores == [{"schema_version": 1}]
+    assert len(calls) == 1
+    args, kwargs = calls[0]
+    assert args[1:3] == ("G1-C", "evaluate-native-maps")
+    assert "--native-maps" in args[3]
+    assert "--run" in args[3] and str(run.resolve()) in args[3]
+    assert kwargs["run"] == run.resolve()
+    assert kwargs["gpu"] == 0
+    assert kwargs["max_seconds"] == 180.0
+    assert kwargs["evaluation_reserve_seconds"] == 3600.0
+
+    campaign_status["runs"]["G1-S"][0]["completed_epochs"] = 99.0
+    stores.clear()
+    calls.clear()
+    with pytest.raises(MODULE.CampaignError, match="100-epoch G1-S"):
+        MODULE.maps(root, run, execute=True)
+    assert stores == [] and calls == []
+
+
 def test_campaign_launch_prints_existing_runner_command_without_execution(tmp_path, monkeypatch):
     root = tmp_path / "campaign"
     configs = root / "configs"
@@ -471,7 +577,7 @@ def test_evaluation_execute_uses_shared_runner_with_run_binding_and_cap(tmp_path
     calls = []
     monkeypatch.setattr(MODULE, "_campaign_manifest", lambda _root: manifest)
     monkeypatch.setattr(MODULE, "status", lambda _root: {"gpu_seconds_charged": 0.0})
-    monkeypatch.setattr(MODULE, "_ledger_action_seconds", lambda *_args: 0.0)
+    monkeypatch.setattr(MODULE, "_evaluation_spent_seconds", lambda *_args: 0.0)
     monkeypatch.setattr(MODULE, "_goal1_remaining_hours", lambda *_args, **_kwargs: 0.0)
     monkeypatch.setattr(
         MODULE,
