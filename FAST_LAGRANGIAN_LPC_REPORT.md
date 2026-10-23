@@ -1,33 +1,16 @@
-# Fast Lagrangian refinement and LPC ordering: bounded execution report
+# Fast Lagrangian refinement and LPC ordering: measured bounded study
 
-Campaign date: 2026-10-22 (America/New_York). Branch: `cosmos2w/fast-lagrangian-lpc`. This report retains the completed short-run evidence and is being extended for the 2026-10-23 continuation. The user now authorizes three SOURCE-initialized 100-epoch Goal-1 arms on physical GPUs 1/2/0, followed by the gated Goal-2 diagnostic and at most one supported 100-epoch ordered arm on GPU 0. Long-run results remain pending until measured; the earlier no-long-launch restriction is superseded for this bounded continuation.
+Study dates: 2026-10-22–23, America/New_York. Branch: `cosmos2w/fast-lagrangian-lpc`. Payload root throughout this report: `/data2/wanglz/PhyCoFlow-MultiFieldReconstruction/experiments/LPCAccel_20261022_01a16674` (called ROOT below). The original no-long-launch boundary was superseded by the user's explicit three-GPU 100-epoch authorization; all three eligible Goal-1 arms have finished and are assessed. Subsequent work uses physical GPU 0. No lineage is automatically extended beyond 100 epochs.
 
-## Authorized continuation — 2026-10-23
+## Result and scope
 
-The user now authorizes G1-C/G1-S/G1-R for 100 fresh SOURCE-initialized epochs on physical GPUs 1/2/0 respectively, followed by Goal 2 only after all three finish and are assessed. Physical GPU 0 becomes the main working device afterward. All three devices were verified idle. The scientific Python source and prepared configuration hashes remain unchanged. Per-device lifetime locks, short shared admission locking, cross-device arm/orphan checks, conservative interrupted-exposure accounting, and combined live GPU-time accounting support the concurrent launch. The continuation campaign/evaluator suite passed all 39 focused tests.
+Complete-filtration P3 sampling reduced matched ten-epoch user-command time by **18.3%** with dense ConFIG. Scalarization saved another **34.8%** against P3 ConFIG; scalar topology-family importance sampling saved **16.4%** against dense-family scalar training. The combined 55.5% short-run saving changes both descriptor work and nonlinear optimization behavior. These are cost measurements, not a claim of equal optimization trajectories or retained-quality speedup.
 
-Readiness is applied from `manifests/goal1_readiness.authorized_20261023.json`, linked to the explicit user authorization receipt. Per-arm maximum runtime allowances are twice the matched ten-epoch projections, with two GPU hours reserved for Goal 2, at least one for evaluation/diagnostic work, and bounded shutdown margins inside the 16-hour combined cap. The 100-epoch study uses the existing first-32 full-descriptor validation every ten epochs; the final uniform-128 audit stays distinct. Per-check visibility timing is monitored externally with observation intervals. Concurrent long-run time-to-quality is observational across physical devices and shared CPU/storage; the prior single-GPU timings remain the matched idle-hardware latency evidence. Long-run outcomes are pending until measured; the short-run results below are retained as stage-one evidence.
+All three independent Goal-1 arms completed 100 reporting epochs from the original pretrained SOURCE. Their final uniform-128 full-descriptor audit passes the +5% aggregate/every-field endpoint guards and reduces T by 46–54%. Complete routine histories give a more qualified result: only G1-R reaches the common useful target at two consecutive checks, and it later regresses. No arm demonstrates stable target retention through epoch 100. The efficient scalar route shows useful bounded learning, with mixed stability and a selected-checkpoint pressure-field miss on the broader panel. It is a candidate for further controlled study, not a demonstrated universal replacement for dense ConFIG.
 
-## Answer and current evidence boundary
+Signed ConFIG coefficient recovery reconstructs the FP64 oracle, but periodic reuse fails the declared staleness probe at both tested cadences. The periodic timing/100-epoch arm remains excluded; no replacement arm was added. Goal 1 is complete. The subsequent read-only Goal-2 gradient diagnostic and real SIGINT/own-state recovery smoke pass their declared gates. The single authorized ordered 100-epoch arm is running on physical GPU 0; its quality result is pending completion and full evaluation.
 
-The existing Run 11f A/B/T definitions, endpoint operator, model, normalizer, five dense endpoint constraints, and epoch exposure are preserved. The selected acceleration is P3: one shared randomly sampled polarity, with both unary fields and the existing joint line computed together, including H0/H1. The scalar randomized-family variant additionally samples the entire topology family with probability one half and applies its importance factor once. Full existing A/B/T remains the evaluation target.
-
-Four fresh ten-epoch profiles completed on physical GPU 1. P3 with dense ConFIG saved 18.3% inclusive user-command wall time against full-bank dense ConFIG. Moving from P3 ConFIG to P3 scalar sum saved 34.8%; sampling the whole topology family on that scalar route saved 16.4% against its matched dense-family scalar control. T3’s total saving against T0 is 55.5%, but that comparison also changes scalarization and stochastic optimization behavior. These are measured short-run costs, not retained-quality speedups.
-
-```text
-implementation_verified: true
-latency_effect: positive for supported short-run comparisons
-quality_retention_100ep: unsupported
-model_agnostic_interface: real_adapter_smoke_verified
-lpc_ordering: not_executed
-long_run_stability: untested
-```
-
-Periodic ConFIG coefficient extraction reconstructs the pinned full-width FP64 TorchJD oracle, retaining coefficient signs. Reusing those coefficients on fresh current gradients failed the small P3 staleness probe at both tested cadences. T4/G1-P are therefore excluded. No stale parameter gradient or direction is used by the implementation. This mechanism is unsupported for the selected estimator in this campaign.
-
-The matched 100-epoch Goal-1 learning histories were unexecuted at the end of the short study. The user explicitly authorized their execution on 2026-10-23, followed by Goal 2. Until the three runs finish and their complete evidence is assessed, 100-epoch quality retention, the mature 60–100 epoch window, and matched time-to-quality remain pending. The real-model residual-gradient diagnostic and any ordered-refinement training stay gated until then; the residual helper currently has numerical unit coverage only.
-
-**TEST exception:** one readiness attempt mistakenly called the existing dataset validator. Its structural probe read one final HDF5 scalar in the TEST frame range. No TEST model evaluation, metric, selection, or estimator tuning was performed. The scalar value was not retained. The incident is recorded in `manifests/test_access_exception.json`, and subsequent validation is config-only. This campaign cannot be described as having zero TEST access.
+**TEST lock and disclosed exception:** no TEST model evaluation, metric, selection, or estimator tuning was performed. An earlier readiness attempt mistakenly invoked the existing dataset validator, which structurally read one final HDF5 scalar in the TEST frame range; the scalar value was not retained. `manifests/test_access_exception.json` records this incident. Later validation is config-only, and the broader/native-map/gradient evaluators disable temporal derivatives where necessary. This study cannot be described as having zero TEST access.
 
 ## Verified baseline and immutable inputs
 
@@ -123,108 +106,129 @@ Endpoint ratios are model-unit field MSE, child/SOURCE. T0 selects epoch 10; T1 
 
 No arm meets the useful target at both saved nonzero checks. T3’s epoch-5 CO ratio is 1.0509: a strict miss that remains within the separate engineering corridor. These ten-epoch outcomes check gross instability and provide full-metric context for timing. They do not select a scientific winner. Training estimates are not substituted for full validation metrics, and a small fidelity miss is kept visible. Strict +5% per-field/aggregate feasibility and the separate +5% aggregate/+10% per-field engineering corridor retain their distinct meanings.
 
-The predeclared common useful target for the future 100-epoch study is strict endpoint feasibility, at least 10% full-T reduction, and A/B no more than 5% above SOURCE, sustained at two routine checks. Its mature-window time-to-quality comparison is pending. The JSON audit uses uniform validation snapshots in complete groups of 32. B is the mean of B(32) ensemble statistics, not B computed once on the entire larger panel. Dense endpoint and per-field MSE pool exactly with fully valid equal-sized groups; worst-field relative L2 is recomputed from pooled field scores. Observed/unobserved-entry MSE stays in individual group records because sensor counts vary. This panel is distinct from the historical first-32 selection panel and must not be merged into a historical leaderboard. The T0 final checkpoint completed a real 64-snapshot CLI audit in 11.20 coordinated process seconds; its A/B/T ratios are 0.903/1.042/0.472 and endpoint field ratios are 0.976/1.010/0.990/1.023/0.982. That single-arm command check is not an accelerated-arm generalization comparison. Its immutable JSON is `analysis/T0_last_epoch10_n64_8427446ffd19_20261023T030504200236Z_validation.json`.
+## Goal 1: complete 100-epoch evidence
 
-## Compatibility, recovery, and resource accounting
+The three children started together at approximately 12:56:52 UTC on 2026-10-23, after all three physical GPUs were idle. Each completed 3,800 accepted updates, 121,600 sample exposures, or 15.2 TRAIN dataset passes. A reporting epoch remains 38 batches of 32 (1,216 samples); it is not an 8,000-snapshot dataset pass. No ten-epoch prefix or post-trained Run-11 checkpoint was used for initialization.
 
-The real deterministic compatibility SOURCE is `cases/turbulent_combustion/runs/tc_deeponet_5000ep/20260829T125329Z_2ebc837b/checkpoints/last.pt`. Its existing model, observation contract, dataset, and normalizer were inherited. The one-epoch smoke uses the same endpoint policy without RF hooks, retains nonzero trainable gradients, and verifies SOURCE immutability. It establishes adapter compatibility, not deterministic-model efficacy or superiority.
+| Arm | Change relative to matched predecessor | Physical GPU | Complete coordinated process, s (min) | Exact run below ROOT |
+|---|---|---:|---:|---|
+| G1-C | P3, dense topology family, dense ConFIG | 1 | 5558.311 (92.64) | `runs/G1-C/20261023T125652Z_6467aba9` |
+| G1-S | P3, dense topology family, scalar sum | 2 | 3316.947 (55.28) | `runs/G1-S/20261023T125652Z_482d2d98` |
+| G1-R | P3, scalar sum, entire T family sampled with p=1/2 | 0 | 2754.535 (45.91) | `runs/G1-R/20261023T125652Z_47715345` |
 
-The separate flow recovery smoke has a two-epoch horizon. It stopped at epoch one with an atomic checkpoint, then resumed the same unchanged arm through epoch two. Calibration, multipliers, RNG/cursors, implementation bindings, normalizer, and source references were recovered; the fast per-batch log contains no duplicate accepted cursor after history recovery. It is separate from the fresh timing children and is not extended automatically. Focused fixtures also check periodic coefficient-state recovery and a repository-link RunStore round trip.
+These long-run wall costs are observational across different physical devices and shared CPU/storage. The prior sequential GPU-1 ten-epoch trials provide the matched idle-device latency evidence. Complete coordinated time includes startup/calibration, training, routine full evaluation, checkpoints and finalization; update timers alone are not end-to-end cost. All three completed before GPU 0 became the main working device. Later unrelated jobs on GPUs 1/2 were left untouched.
 
-| Resource | Actual exposure / charge | Limit |
+Every routine check uses the fixed first-32 validation IDs, sensors, shared queries, noise and SOURCE comparison. Existing full A/B/T, six deterministic topology filtrations and all five model-unit endpoint risks are evaluated at epochs 0,10,…,100. Selected means the trainer's existing topology-with-fidelity selection, not a new post-hoc selection rule. The following ratios use their own matched SOURCE panel; strict means aggregate and every field at most 1.05. The engineering corridor allows every field at most 1.10 while retaining aggregate at most 1.05.
+
+| Arm / role | Epoch | A / SOURCE | B / SOURCE | T / SOURCE | Aggregate endpoint / SOURCE | CH4 | CO | T field | U_1 | p | Strict endpoint |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| C selected = final | 100 | .8682 | 1.0086 | .4153 | .9382 | .9853 | 1.0276 | 1.0171 | .9221 | .8935 | pass |
+| S selected | 20 | .9265 | .9315 | .4225 | .9882 | .9987 | 1.0427 | 1.0325 | .9765 | .9676 | pass |
+| S final | 100 | .9421 | 1.0553 | .4988 | .9873 | .9745 | 1.0305 | 1.0245 | .9781 | .9743 | pass |
+| R selected | 60 | .9181 | 1.0314 | .4089 | 1.0076 | .9960 | 1.0220 | 1.0280 | 1.0280 | .9680 | pass |
+| R final | 100 | 1.0488 | 1.3105 | .5049 | 1.0288 | 1.0310 | 1.0501 | 1.0619 | 1.0002 | 1.0550 | fail (CO, T, p) |
+
+Rounded table entries do not decide feasibility; the audit uses unrounded values. S's final routine B exceeds its +5% common-target limit by approximately 0.53 percentage points. R's final B increase is dominated by the legacy cross-frequency squared-band-energy coupling (1.545× SOURCE, versus same-frequency 1.022×); it remains visible rather than being hidden by a favorable T value. Its final engineering endpoint corridor passes, while strict endpoint feasibility fails (CO is only 0.00770 percentage points above its +5% boundary).
+
+The predeclared common useful target requires strict endpoint feasibility, T≤0.90, A≤1.05, B≤1.05, sustained at two adjacent routine checks. R first confirms it at epochs 10+20; confirmation-row visibility bounds are 548.158–558.180 seconds after child start. S has isolated passes at 20/40/80, and C at 40/80/100; neither has two consecutive passing checks. R later leaves the target. There is therefore no successful stable-through-100 retained-quality time ranking. R's early time-to-target is a limited observed event, not a convergence guarantee.
+
+| Mature window, epochs 60–100 | Strict endpoint checks / 5 | Engineering checks / 5 | Common-target checks / 5 | Median A / B / T | Median aggregate / worst-field endpoint |
+|---|---:|---:|---:|---|---|
+| C | 3 | 4 | 2 | .9889 / 1.0175 / .4327 | 1.0129 / 1.0363 |
+| S | 2 | 3 | 1 | .9421 / 1.0332 / .4519 | .9873 / 1.0552 |
+| R | 3 | 5 | 1 | .9620 / 1.0665 / .4796 | 1.0076 / 1.0363 |
+
+### Broader uniform-128 audit
+
+Six immutable selected/final audits use identical 128 uniform validation IDs and identical observation/query hashes, in four complete groups of 32 with generation seeds 2027,102030,202033,302036. SOURCE group metrics match exactly across every audit (maximum numeric difference zero). Each SOURCE and child group executes all six topology filtrations. B is the mean of B(32) ensemble scores, not B computed once on 128 snapshots. Endpoint errors pool by valid entry counts; worst-field ratios are computed from pooled field scores. This broader panel partly overlaps the routine panel and remains validation data, not independent TEST generalization.
+
+| Arm / role | Epoch | A / SOURCE | B / SOURCE | T / SOURCE | Aggregate endpoint | CH4 | CO | T field | U_1 | p | Strict endpoint |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| C selected = final | 100 | .9294 | .9177 | .4622 | 1.0085 | 1.0041 | 1.0237 | 1.0172 | 1.0057 | .9996 | pass |
+| S selected | 20 | .9889 | .8812 | .4838 | 1.0380 | .9836 | 1.0187 | 1.0003 | 1.0483 | 1.0571 | fail (p) |
+| S final | 100 | .9576 | .9859 | .5379 | 1.0158 | .9997 | 1.0037 | 1.0293 | 1.0187 | 1.0215 | pass |
+| R selected | 60 | .8692 | .9628 | .4900 | 1.0077 | .9966 | 1.0022 | 1.0097 | 1.0284 | .9747 | pass |
+| R final | 100 | .9097 | .8503 | .5106 | 1.0116 | 1.0213 | 1.0045 | 1.0305 | 1.0199 | .9950 | pass |
+
+The broader panel reverses some routine-panel impressions: R final's B improves there, while S selected fails pressure at +5.71%. These are genuine panel differences, not permission to discard the unfavorable history or choose checkpoints on the broader result. Broader checks are single-check observations and do not establish the two-adjacent-check target. `analysis/goal1_uniform128_comparison.json` retains all family components, endpoint vectors, exact paths/hashes and sampling assertions; companion history audits keep selected and final inputs separate.
+
+Two predeclared native-grid qualitative panels use validation index 0/CO and index 500/T, fixed sensor seed 42, generation seed 2027 and all 100×403 native queries. SOURCE and every child use the same G1-C runtime configuration (raw weights, two Euler steps, same endpoint correction); the SOURCE's own historical EMA/four-step defaults are not used. Values are decoded original-dataset units; physical field units were not specified, so no Kelvin or other units are invented. Main visual review found no gross collapse; remaining front errors are visible. These two panels cannot establish general field fidelity. Numerical maps for distinct selected states, all final states and selected-minus-final differences remain in `analysis/native_grid_field_maps/`.
+
+### Training integrity and measurement limits
+
+The complete per-batch audit verifies 3,800 accepted cursors per arm, exact sampler replay, all five dense current risks, projected dual formula/continuity, unchanged SOURCE references/C0 and full calibration/evaluation. C/S execute T on every update. R executes it on 1,906 and omits it on 1,894; skipped values are missing, and importance factors are correct. Maximum dual-formula error is below 5.6e-17. Minibatch violation frequencies and five multiplier trajectories are retained in `analysis/g1_dense_training_diagnostics.json`; they are training feedback, not proof of full-population feasibility.
+
+R and S training children and launch-ledger rows exited successfully, but their original c073eba coordinators subsequently returned CLI code 2 because live sibling DataLoader descendants were misclassified as orphans during final status collection. No training was repeated. The actual completed status/checkpoints, child return code 0, source hashes, elapsed time and exact process ancestry are preserved in the two `G1-{R,S}_post_success_cli_error.json` receipts. Commit a30e07e corrects owned-descendant verification while still rejecting wrong-config/wrong-GPU/reparented processes; its focused suite passed 42 checks. This operational defect does not turn their successfully completed learning histories into failed or missing experiments.
+
+A read-only ten-second visibility monitor stopped unexpectedly after poll 110 at 13:16:18 UTC; the cause is not established. One replacement finished normally. The observation gap is approximately 26.3 seconds; no newly visible validation row crossed that gap. In-session maximum polling interval was 10.041 seconds. SOURCE-at-zero rows were already visible on the first scan and are left-censored. Row visibility/process wall bounds are not exact GPU-kernel times. One broader R-last preflight briefly refused a busy GPU 0 without starting a child, then idle snapshots resolved the block in about four minutes and the single retry succeeded. This remained below the machine's 30-minute blocked-GPU stop rule; no other job was disturbed.
+
+Goal-1 closeout and evidence hashes are in `manifests/goal1_completion_assessment.json`. All 142 numerical source files remained unchanged through its training, broader audit and map extraction. The immutable source snapshot `source_snapshots/goal1_c073eba` binds those files plus the original campaign/evaluation scripts; its manifest SHA256 is `3e05b001318b16876c33c759a8014db2559afd4f5f949704bd9c21b4e1d66fd9`. Later evaluation of old arms explicitly uses this verified snapshot rather than changed Goal-2 code.
+
+## Goal 2: residual diagnostic and ordered prototype
+
+The user explicitly retained the **+5% endpoint budget** for Goal 2 (`manifests/goal2_constraint_clarification_20261023.json`). A/B bounds are exact fixed full-SOURCE TRAIN means with zero added slack; denominator floors affect scaling only. No conditional-density estimator, descriptor regressor, new descriptor definition, production projector/QP, or flow-only method was introduced.
+
+The read-only probe compares original SOURCE and G1-S final100 on four paired fixed TRAIN batches of 32, with 4,096 shared queries, identical sensors/noise and the full six-filtration A/B/T definitions. Each batch supplies gA,gB,gT and five field-MSE gradients from one differentiable endpoint. Normalized A/B gradient rows form H; the pinned FP64 QR/SVD helper evaluates rT=gT−Hᵀ(HHᵀ)†HgT without a parameter-sized projector. Only compact Gram/norm/rank/cosine/manifests are saved, not parameter vectors. The engineering threshold was declared before results: finite nonzero T gradient, relative tangent orthogonality≤1e-8 and median residual fraction≥0.10 at both states.
+
+| Fixed state | Residual fraction median [range] | Maximum relative tangent orthogonality error | Engineering gate |
+|---|---|---:|---|
+| SOURCE | .9753 [.9382,.9832] | 4.23e-15 | pass |
+| G1-S final100 | .9959 [.9937,1.0000] | 2.24e-15 | pass |
+
+The admitted physical-GPU-0 process took 38.670 seconds inclusive (32.755 seconds recorded computational scope), made zero optimizer steps, and verified unchanged parameters/SOURCE. `analysis/goal2_residual_probe.result.json` records the eight full-filtration evaluations, per-field fidelity-gradient interference and input/code SHA bindings. The result establishes a nontrivial local Euclidean parameter-gradient direction tangent to A/B equalities on these batches. It depends on parameterization/metric, does not residualize descriptor laws, and does not guarantee behavior after AdamW, clipping, weight decay, active endpoint constraints or finite steps.
+
+The default-off ordered prototype minimizes T/T0 with dense A/B and endpoint inequalities through the existing scalar external Lagrangian. For hA=(A−A0)/max(A0,1e-8), hB=(B−B0)/max(B0,1e-8), it supplies the signed surrogate C0·[T/max(T0,1e-8)+μA hA+μB hB]; ExternalPolicy divides by C0 exactly once and adds its unchanged field terms. Detached μA/μB start at zero and update by projected SGD with LR .01 only after an accepted model/field-dual action. Negative signed scalar values remain valid. Full SOURCE A0/B0/T0 means are collected during the existing eight-by-two calibration, with no extra forward or RNG change; C0 and the five field reference objects remain identical. Raw scientific A+B+T, T estimates, ordered scalar and all dual trajectories have separate log names.
+
+Checkpoint recovery binds the ordered reference artifact, source, exact integration/helper implementation, multipliers and accepted cursor. Speculative ordered JSONL rows are truncated at the atomic checkpoint. Tiny flow and deterministic Senseiver integration tests verify one endpoint/one backward, unchanged legacy calibration/RNG, nonzero parameter updates and reference/dual/log recovery; separate fixtures verify signed/C0/floor math and invalid combinations. These tests establish interface/correctness, not deterministic-model efficacy.
+
+The real ordered recovery smoke `runs/recovery_smoke2ep/20261023T152631Z_a028a667` used an unchanged two-epoch horizon and one-epoch checkpoints. Actual SIGINT interrupted its first process after 46 durable accepted updates; recovery restored the atomic epoch-1 checkpoint at update 38 and finished at 76. The first resumed loss/risks/dual action and all eight repeated sampler decisions match their preserved counterparts. Optimizer steps, CPU/CUDA RNG state, index-RNG advance, ordered/fidelity references, multiplier continuity and unique recovered logs are verified in `manifests/goal2_smoke_recovery_verification.json`. Individual sample IDs were not separately logged; next indices derive from saved RNG state. The first repeated gradient norm differs by 5.77e-7 and later repeated ordered scalars by up to 2.48e-6. This is successful state/cursor recovery, not bitwise CUDA trajectory equivalence. cuDNN deterministic settings do not make every CUDA operation deterministic.
+
+The interrupted segment's coarse status still reported epoch zero because ordinary validation had not reached epoch 10. The bound atomic epoch-1 checkpoint and hashed pre-resume log inventory establish actual progress. The original ledger row is retained; the recovery gate explicitly reconciles this evidence instead of rewriting elapsed work. The smoke charges three conservative epoch exposures, including eight durable repeated minibatches and at most one additional in-flight minibatch. Its two processes took 81.376 and 64.250 seconds.
+
+**Ordered training status:** the single fresh original-SOURCE arm `runs/G2-O/20261023T154059Z_df6c299b` started at 15:40:55 UTC on 2026-10-23 with a 100-epoch horizon and two-hour watchdog. It matches G1-S in exposure, P3/family probability 1, optimizer/warm-up and model. Only objective roles/T0 normalization change. Full calibration reproduces G1-S's C0 and complete five-field reference object exactly; ordered A0/B0/T0 are `0.012916506850160658`, `0.0014809288622927852`, and `0.008211889740778133`. Its receipt is `manifests/goal2_execution_receipt.json`. No tolerance sweep, second ordered arm or automatic continuation is allowed. Quality conclusions await all 100 epochs, complete histories and selected/final uniform-128 checks.
+
+## Resource and recovery accounting
+
+| Resource before the running ordered arm | Actual / conservative charge | Limit |
 |---|---:|---:|
-| Timing profiles | 4 × 10 = 40 epochs | ≤5 × 10 = 50 |
-| Adapter + recovery smokes | 1 + 2 = 3 epochs | 6 |
-| Actual total training | 43 epochs | 556 |
-| Conservative epoch accounting, including reserved smokes | 46 epochs | 556 |
-| Goal-1 / Goal-2 100-epoch arms | 0 / 0 | ≤4 / ≤1 |
-| Extra full64 validation command | 11.20 s | Within evaluation reserve |
-| Offline GPU diagnostic reservation | 180 s, conservative upper charge | 2,700 s |
-| Smoke process reservation | 900 s, conservative upper charge | Included below |
-| Combined GPU-use charge | 1.1128 h | 16 h |
+| Ten-epoch timing trials | 4 × 10 = 40 epochs | ≤5 × 10 |
+| Three Goal-1 arms | 3 × 100 = 300 epochs | ≤4 × 100 |
+| All adapter/recovery smokes | 5.2105–5.2368 actual; 6 conservative epochs | ≤6 total public smokes |
+| Actual training before ordered arm | 345.2105–345.2368 epochs | 556 |
+| True conservative total before ordered arm | 346 epochs | 556 |
+| Offline GPU diagnosis | 180 s old conservative reservation + 38.670 s new process | 2700 s |
+| Combined GPU process charge before ordered arm | 4.4154 h; exact locked ledger retained | 16 h |
+| Optional ordered arm | One 100-epoch arm running | ≤1 × 100 |
 
-The campaign runner refuses occupied GPU 1, different arm/source/config bindings, more than five timing profiles, more than 50 timing epochs, a lineage horizon above 100, or insufficient 556-epoch/16-hour capacity after reserving evaluation and smoke work. Its watchdog charges the complete owned process, with a safe-stop margin. Interrupted attempts are charged conservatively when their final accepted exposure is unknown; resume never silently erases discarded work. Public status distinguishes observed accepted epochs from conservative charges/reservations. Training and evaluation share one persistent `flock` and a locked GPU-idle recheck. Stop waits for the verified child and coordinator to release the reservation. No process can automatically start another arm.
+The original real deterministic adapter smoke uses the DeepONet SOURCE `cases/turbulent_combustion/runs/tc_deeponet_5000ep/20260829T125329Z_2ebc837b`. It proves adapter compatibility, not efficacy. The original two-epoch flow recovery used bounded max-steps interruption/resume, while the new ordered smoke exercised actual SIGINT. Rolling checkpoint intervals can discard up to almost five attempted reporting epochs in the ordinary profile. Discarded/repeated work is charged, and no smoke extends the scientific lineage. The controller additionally reserves the six smoke epochs on top of its new smoke rows, overcharging by three epochs: it reports 349 before ordered training, versus 346 true conservative and approximately 345.22 actual. This extra reserve is retained and must not be called measured exposure. Completion of the single ordered arm would give approximately 445.22 actual, 446 true conservative, or 449 launcher-reserved epochs.
 
-All numerical payloads, processed outputs, compiler/Python/Matplotlib caches, and test temporaries reside at `/data2/wanglz/PhyCoFlow-MultiFieldReconstruction/experiments/LPCAccel_20261022_01a16674`, verified on mounted ext4 `/dev/nvme0n1p1`. The run link is `cases/turbulent_combustion/runs/_LPCAccel/LPCAccel_20261022_01a16674`; the report link is `reports/LPCAccel_20261022_01a16674`. Only short multiprocessing Unix-socket directories use `/tmp`, because Linux rejects longer AF_UNIX paths. Historical SOURCE and run payloads were not migrated, overwritten, or cleaned.
+All numerical outputs, compiler/Python/plot caches and temporary test data remain on verified mounted ext4 `/dev/nvme0n1p1` under ROOT. Repository links resolve there: `cases/turbulent_combustion/runs/_LPCAccel/LPCAccel_20261022_01a16674` → ROOT/runs; `reports/LPCAccel_20261022_01a16674` → ROOT/reports. Only short Unix-domain multiprocessing socket directories use `/tmp` to avoid Linux AF_UNIX path limits. Historical SOURCE, Run11f/11S and previous runs remain in place and untouched.
 
-## Code mappings and validation
+The campaign uses per-device lifetime locks, shared admission locking, owned-PID/config/GPU ancestry checks, locked idle rechecks and watchdogs. Launch/stop/resume are explicit foreground actions, never a queue of successor runs. The combined ledger counts process lifetime, live reservations, evaluation and interrupted exposure; six-epoch smoke and finalization capacity stay protected. A required GPU blocked continuously for 30 minutes pauses the goal and stops owned launch-capable retries; no such sustained block occurred here.
 
-| Boundary | Implementation |
+## Code, tests and reproducibility paths
+
+| Purpose | Repository mapping |
 |---|---|
-| Complete filtration enumeration, P3/S2, exact category weights, raster adapter | `src/phycoflow_reconstruction/coherence/families/topology/filtration_sampling.py` |
-| Independent execution streams, strict opt-in combinations, implementation binding | `src/phycoflow_reconstruction/training/fast_lagrangian.py` |
-| One shared endpoint, genuine T omission, full calibration/evaluation, truthful estimate history | `src/phycoflow_reconstruction/training/post_training.py` |
-| Existing dense fidelity/dual composition; oracle refresh capture and periodic recovery | `src/phycoflow_reconstruction/training/fidelity_budget.py` |
-| Stable signed coefficient recovery, fresh-loss reuse, default-off residual helper | `src/phycoflow_reconstruction/training/periodic_config.py` |
-| Strict estimator/config/route validation | `src/phycoflow_reconstruction/config/validate.py` |
-| Truncate speculative per-batch estimator logs at recovery checkpoint | `src/phycoflow_reconstruction/training/run_store.py` |
-| Prepare/status/explicit foreground launch/stop/resume/evaluation and campaign bounds | `scripts/posttraining/fast_lagrangian_campaign.py` |
-| Real SOURCE TRAIN estimator/coefficient probe | `scripts/posttraining/fast_lagrangian_pretest.py` |
-| One-epoch deterministic and two-epoch flow recovery smokes | `scripts/posttraining/fast_lagrangian_smoke.py` |
-| Compact full-descriptor validation, exact 32-snapshot groups, no plot exports | `scripts/posttraining/fast_lagrangian_evaluate.py` |
+| Complete filtration weights, P3/S2 and raster dispatch | `src/phycoflow_reconstruction/coherence/families/topology/filtration_sampling.py` |
+| Independent family/filtration execution streams, opt-in bindings | `src/phycoflow_reconstruction/training/fast_lagrangian.py` |
+| Signed FP64 coefficient recovery/fresh-loss reuse; rank-aware residual helper | `src/phycoflow_reconstruction/training/periodic_config.py` |
+| Existing dense field-risk primal/dual policy | `src/phycoflow_reconstruction/training/fidelity_budget.py` |
+| Ordered reference, signed scalar and projected A/B dual state | `src/phycoflow_reconstruction/training/lpc_ordered.py` |
+| Shared endpoint, full calibration, ordered integration and raw/optimized logs | `src/phycoflow_reconstruction/training/post_training.py` |
+| Strict opt-in validation; speculative-log recovery | `src/phycoflow_reconstruction/config/validate.py`; `training/run_store.py` |
+| Bounded device/storage/source-stage/launch/evaluation control | `scripts/posttraining/fast_lagrangian_campaign.py` |
+| Full existing-family campaign evaluation, exact groups/manifests | `scripts/posttraining/fast_lagrangian_evaluate.py` |
+| Portable P3 scalar / ConFIG / exploratory ordered profiles | `cases/turbulent_combustion/configs/posttrain/fidelity_budget/{fast_lagrangian_scalar,fast_lagrangian_config,lpc_ordered}.yaml` |
 
-The complete accelerated-history audit checks all 380 accepted minibatches in each of T1–T3: every batch retains five finite endpoint risks, active dense fidelity, continuous multipliers, and the original projected dual formula (maximum absolute error below 3e-17). Sampling decisions replay exactly from the accepted cursor. T3 executes T on 192/380 batches; all 188 omissions retain missing topology values. `analysis/accelerated_dense_update_audit.json` stores these checks. T0 uses the unchanged original path and has no new per-batch audit log.
+The earlier short-stage relevant CPU suite passed 251 tests (one CUDA-only case skipped), and that CUDA oracle was subsequently run on idle GPU1 and passed. Later independent rounds passed 42 ownership/evaluator checks, 47 native-map checks, 149 production-policy/estimator/recovery regressions, and 55 source-stage/residual controls. The final ordered source passed 14 unit/profile/flow/deterministic cases plus its added direct-Python rejection test; the latter initially expected the wrong exception class, was corrected in the test only, and passed. Ruff and diff checks passed. CPU tests are distinct from scientific dataset execution and physical GPU timing.
 
-The final relevant CPU regression suite passed 251 tests with one CUDA-only test skipped in the CPU run. That warm-up/primal-dual oracle test was subsequently run alone on idle GPU 1 and passed. The final launcher/evaluator suite separately passed all 24 targeted tests after the admission, locking, stop, output-identity and pooling fixes. The retained validation receipts record these distinct checks. Coverage includes all-options-off policy behavior, original topology value/gradient oracle, exact P3/S2 expectations, signed/rank-degenerate coefficient examples, current-gradient reuse, interval-one oracle/AdamW equivalence, dense dual updates, true T omission, deterministic endpoint dispatch, strict recovery bindings, safe links, atomic checkpoint recovery, and launch/split/cap exclusions. Ruff and diff checks are also recorded. Numerical tests and real-SOURCE smokes are distinct from scientific learning evidence. The campaign manifest pins all 142 numerical Python files, including the update integration, original descriptors, model and normalizer code; campaign launch/resume/evaluation rejects a changed source tree. Native checkpoints separately bind the three new helper files only, so direct native resumes require the frozen integration version. P3/S2 support the verified cubical Run-11 topology profile, not arbitrary replacement topology definitions.
+Goal-2 numerical source is independently pinned at commit `11d9167` in `manifests/goal2_source_binding_ready.json` and `source_snapshots/goal2_11d9167` (143 numerical Python files, plus tested controller/evaluator snapshots). The original Goal-1 142-file pin is preserved. Run checkpoints and stage receipts retain exact configurations, reference/family/normalizer/source hashes, sampler cursors, RNG/optimizer/dual state and paths. New code-revision rounds are committed and pushed on the study branch; generated numerical/figure payloads and this machine-local UpdatePlans file are not placed in Git.
 
-## User-operated commands
+Important retained ROOT paths: `analysis/g1_complete_history_audit.json`, `analysis/g1_dense_training_diagnostics.json`, `analysis/goal1_uniform128_comparison.json`, `analysis/g1_validation_observations.jsonl`, `analysis/native_grid_field_maps/`, `analysis/goal2_residual_probe.{plan,binding,result}.json`, `manifests/goal1_completion_assessment.json`, `manifests/launch_ledger.jsonl`, `manifests/protocol_identity.json`, `manifests/preflight.json`, and per-run configuration/history/evaluation/checkpoint files. Original ten-epoch numerical evidence remains in `analysis/timing_summary.json`, `analysis/pretest_full.json` and `analysis/pretest_p3.json`.
 
-Run these from the repository root with `phycoflow_env`. The commands print an action by default; `--execute` runs exactly one foreground action. They do not queue a successor. The wrapper invokes the existing public `cases/turbulent_combustion/run.py post-train --config CONFIG` entry point; training is not implemented in a separate campaign trainer. The prepared G1 configurations remain fixed at 100 epochs and original SOURCE initialization; the excluded periodic arm remains blocked.
+## Portable operation and figures
 
-```bash
-export LPC_CAMPAIGN=/data2/wanglz/PhyCoFlow-MultiFieldReconstruction/experiments/LPCAccel_20261022_01a16674
-conda run --no-capture-output -n phycoflow_env python scripts/posttraining/fast_lagrangian_campaign.py --root "$LPC_CAMPAIGN" status
-```
+Three tested scientific profiles are available: dense-family P3 scalar, dense-family P3 ConFIG, and the default-off exploratory ordered profile. The scalar profile trades lower cost for the mixed history described above; periodic reuse is unsupported. [Portable user commands](docs/posttraining/FAST_LAGRANGIAN_LPC_USER_GUIDE.md) cover explicit original SOURCE, new mounted payload/safe link, foreground launch, Ctrl-C, unchanged-config own-state resume, and full-descriptor selected/final validation. The public `scripts/posttraining/evaluate_full_abt.py` writes immutable JSON, uses the child's raw-weight/two-Euler contract for both models, groups B in exact batches of 32, and refuses the historical campaign layout so its frozen-stage wrapper cannot be bypassed. Eleven focused evaluator tests include a real CPU synthetic-dataset CLI round trip; three profile tests check the measured checkpoint/validation schedule. The separate campaign evaluator/control suite passes 70 checks. No larger horizon is launched, queued or inherited from this campaign.
 
-The next user-operated study is the matched G1-C/G1-S comparison; G1-R additionally isolates randomized-family scalar training if its measured cost is useful. G1-P remains excluded. No recipe has 100-epoch quality support yet. The timing receipt is recorded; the separate Goal-1 readiness proposal does not enable or launch anything until the user applies it. No long launch was executed here.
-
-```bash
-# Review the proposed arms, measured cost projections and reserve first.
-cat "$LPC_CAMPAIGN/manifests/goal1_readiness.proposed.json"
-conda run --no-capture-output -n phycoflow_env python scripts/posttraining/fast_lagrangian_campaign.py --root "$LPC_CAMPAIGN" authorize goal1 --evidence "$LPC_CAMPAIGN/manifests/goal1_readiness.proposed.json"
-
-# One explicit foreground arm; choose G1-C, G1-S or eligible G1-R.
-conda run --no-capture-output -n phycoflow_env python scripts/posttraining/fast_lagrangian_campaign.py --root "$LPC_CAMPAIGN" launch G1-S --execute
-```
-
-The resolved candidates use the existing standard trainer. Its portable syntax is `python cases/turbulent_combustion/run.py post-train --config CONFIG [--resume OWN_RUN]`; the tested campaign wrapper supplies physical-GPU admission, mounted-cache paths, the short socket bootstrap, environment settings and budget accounting around that call. The two-epoch recovery smoke exercised this same trainer's own-state resume. Direct calls do not enforce the campaign's resource ledger, so the bounded-study commands above use the wrapper.
-
-
-To interrupt the currently verified campaign-owned training process, use the following command. It does not signal unrelated jobs. Recovery uses the last atomic rolling checkpoint and replays only the same configured arm; discarded exposure remains charged. A checkpoint older than the interruption is not an exact continuation from the final attempted batch.
-
-```bash
-conda run --no-capture-output -n phycoflow_env python scripts/posttraining/fast_lagrangian_campaign.py --root "$LPC_CAMPAIGN" stop
-conda run --no-capture-output -n phycoflow_env python scripts/posttraining/fast_lagrangian_campaign.py --root "$LPC_CAMPAIGN" resume G1-S --run "$LPC_CAMPAIGN/runs/G1-S/REPLACE_WITH_OWN_RUN" --execute
-```
-
-Full-descriptor validation uses the original dense evaluator and the matched SOURCE on the same uniform panel. It writes compact JSON under the campaign analysis directory and cannot select TEST. Evaluate both final and existing selected checkpoints; retain complete histories for the mature-window comparison.
-
-```bash
-conda run --no-capture-output -n phycoflow_env python scripts/posttraining/fast_lagrangian_campaign.py --root "$LPC_CAMPAIGN" evaluate G1-S --run "$LPC_CAMPAIGN/runs/G1-S/REPLACE_WITH_OWN_RUN" --checkpoint last --max-samples 64 --execute
-conda run --no-capture-output -n phycoflow_env python scripts/posttraining/fast_lagrangian_campaign.py --root "$LPC_CAMPAIGN" evaluate G1-S --run "$LPC_CAMPAIGN/runs/G1-S/REPLACE_WITH_OWN_RUN" --checkpoint best --max-samples 64 --execute
-```
-
-## Figures, retained evidence, and remaining work
-
-[Filtration estimators and signed coefficient staleness](reports/LPCAccel_20261022_01a16674/filtration_and_coefficient_pretests.pdf)
-
-<object data="reports/LPCAccel_20261022_01a16674/filtration_and_coefficient_pretests.pdf" type="application/pdf" width="100%" height="520" aria-label="Filtration estimators and signed coefficient staleness"><a href="reports/LPCAccel_20261022_01a16674/filtration_and_coefficient_pretests.pdf">Open PDF master: Filtration estimators and signed coefficient staleness</a></object>
-
-One real SOURCE TRAIN endpoint: complete-work-unit cost and exact finite-support gradient variance; fresh-batch P3 reuse comparisons on a fixed model. The 0.9 engineering line exposes the failed interval-two reuse pair. These are descriptor/replay scopes, not complete training speedups.
-
-[Bounded timing and fieldwise validation](reports/LPCAccel_20261022_01a16674/bounded_timing_and_validation.pdf)
-
-<object data="reports/LPCAccel_20261022_01a16674/bounded_timing_and_validation.pdf" type="application/pdf" width="100%" height="520" aria-label="Bounded timing and fieldwise validation"><a href="reports/LPCAccel_20261022_01a16674/bounded_timing_and_validation.pdf">Open PDF master: Bounded timing and fieldwise validation</a></object>
-
-Four complete fresh ten-epoch user commands with unchanged epoch exposure. Complete epoch wall times include validation/checkpoint/finalization work. Full final A/B/T and each endpoint field are shown against the matched SOURCE; they provide short-run context, not 100-epoch quality retention.
-
-[Complete short validation histories](reports/LPCAccel_20261022_01a16674/short_validation_histories.pdf)
-
-<object data="reports/LPCAccel_20261022_01a16674/short_validation_histories.pdf" type="application/pdf" width="100%" height="520" aria-label="Complete short validation histories"><a href="reports/LPCAccel_20261022_01a16674/short_validation_histories.pdf">Open PDF master: Complete short validation histories</a></object>
-
-Full first-32 validation at epochs 0, 5 and 10 for all four timing arms. The worst field ratio retains temporary fidelity excursions, including T1 at epoch 5. Duplicate final records are reduced by accepted epoch. The mature window and comparative time-to-quality remain pending.
-
-
-Numerical sources and exact run paths are retained in `analysis/timing_summary.json`, `analysis/pretest_full.json`, `analysis/pretest_p3.json`, `manifests/preflight.json`, `manifests/campaign.json`, `manifests/launch_ledger.jsonl`, `manifests/smoke_receipt.json`, and the per-run configuration/history/evaluation/checkpoint files. The figure regeneration script is `analysis/build_report_figures.py`. The planned 100-epoch field/error maps and LPC diagnostic master remain deferred with their unexecuted scientific stages; the short-run PDFs do not stand in for them. Within the current campaign all user-operated lineages remain capped at 100 epochs. A larger user-selected horizon belongs to a separate explicit future study, after the quality decision; it is neither prepared as an automatic continuation nor recommended by these short results. Only owned disposable fixtures, redundant generated presentation images, and QA rasters are eligible for cleanup. Original numerical evidence and recovery state are retained. Cleanup and final delivery receipts are `manifests/cleanup_result.json` and `manifests/delivery.json`; the latter records the pushed branch/commit and protected-input verification.
-
-Before Goal 2, complete the eligible Goal-1 arms and assess full histories, strict fieldwise fidelity, the mature window, and common-target time. Only then perform the small real-model residual-gradient diagnostic. Any optional ordered arm must minimize full-defined T/T0 with dense A/B no-regression and endpoint constraints, fixed full SOURCE calibration, and at most 100 fresh epochs. It changes objective preferences and is not a conditional KL estimator. No conditional estimators, descriptor regressors, new descriptor definitions, new optimizers, flow-only methods, or unrecorded continuation are included here.
+The final figure set remains limited to three PDF masters. Existing short-stage vector pages will be retained and combined with complete Goal-1 histories, time/field evidence, native maps and Goal-2 diagnostics. Current new pages are review drafts under ROOT/tmp/figure_drafts; final PDF paths, regeneration inputs, render QA and the exact owned-disposable cleanup receipt will be updated at closeout. Numerical evidence/checkpoints/source snapshots remain protected.
