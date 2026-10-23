@@ -670,6 +670,185 @@ def test_unrepresented_admitted_child_is_rejected_as_an_orphan(tmp_path):
         child.wait(timeout=5)
 
 
+def test_process_ownership_requires_a_live_parent_chain_not_a_shared_group(monkeypatch):
+    parents = {
+        4002: 4001,
+        4003: 4002,
+        4010: 3999,
+        4011: 4010,
+        4020: 4021,
+        4021: 4020,
+    }
+    monkeypatch.setattr(MODULE, "_proc_parent_pid", lambda pid: parents.get(pid))
+    assert MODULE._is_descendant_process(4002, 4001)
+    assert MODULE._is_descendant_process(4003, 4001)
+    assert not MODULE._is_descendant_process(4011, 4001)
+    assert not MODULE._is_descendant_process(4020, 4001)
+    assert not MODULE._is_descendant_process(4001, 4001)
+
+
+def test_campaign_process_gpu_binding_rejects_mismatched_or_unbound_devices(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "campaign"
+    monkeypatch.setattr(
+        MODULE,
+        "_campaign_process_environment",
+        lambda _pid: {
+            "PHYCOFLOW_CAMPAIGN_ADMITTED": str(root.resolve()),
+            "CUDA_VISIBLE_DEVICES": "2",
+            "PHYCOFLOW_CAMPAIGN_GPU": "2",
+        },
+    )
+    assert MODULE._campaign_process_matches_gpu(4001, root, 2)
+    assert not MODULE._campaign_process_matches_gpu(4001, root, 1)
+    monkeypatch.setattr(
+        MODULE,
+        "_campaign_process_environment",
+        lambda _pid: {
+            "PHYCOFLOW_CAMPAIGN_ADMITTED": str((root / "other").resolve()),
+            "CUDA_VISIBLE_DEVICES": "2",
+            "PHYCOFLOW_CAMPAIGN_GPU": "2",
+        },
+    )
+    assert not MODULE._campaign_process_matches_gpu(4001, root, 2)
+    monkeypatch.setattr(
+        MODULE,
+        "_campaign_process_environment",
+        lambda _pid: {
+            "PHYCOFLOW_CAMPAIGN_ADMITTED": str(root.resolve()),
+            "CUDA_VISIBLE_DEVICES": "1",
+            "PHYCOFLOW_CAMPAIGN_GPU": "2",
+        },
+    )
+    assert not MODULE._campaign_process_matches_gpu(4001, root, 1)
+    monkeypatch.setattr(
+        MODULE,
+        "_campaign_process_environment",
+        lambda _pid: {
+            "PHYCOFLOW_CAMPAIGN_ADMITTED": str(root.resolve()),
+            "CUDA_VISIBLE_DEVICES": "1",
+        },
+    )
+    assert not MODULE._campaign_process_matches_gpu(4001, root, 1)
+    assert MODULE._campaign_process_matches_gpu(
+        4001, root, 1, allow_legacy_gpu_token=True
+    )
+
+
+def test_forked_admitted_worker_is_only_owned_while_descended_from_locked_run(
+    tmp_path, monkeypatch
+):
+    import signal
+    import subprocess
+    import time
+
+    root = tmp_path / "campaign"
+    config = root / "configs/G1-C.yaml"
+    config.parent.mkdir(parents=True)
+    config.write_text("optimization: {epochs: 100}\n", encoding="utf-8")
+    run = root / "runs/G1-C/run-1"
+    run.mkdir(parents=True)
+    (root / "manifests").mkdir(parents=True, exist_ok=True)
+    env = dict(os.environ)
+    env.update(
+        {
+            "CUDA_VISIBLE_DEVICES": "1",
+            "PHYCOFLOW_CAMPAIGN_ADMITTED": str(root.resolve()),
+            "PHYCOFLOW_CAMPAIGN_GPU": "1",
+        }
+    )
+    worker_code = (
+        "import multiprocessing,time\n"
+        "def worker():\n"
+        "    while True: time.sleep(1)\n"
+        "if __name__ == '__main__':\n"
+        "    child=multiprocessing.get_context('fork').Process(target=worker)\n"
+        "    child.start()\n"
+        "    print(child.pid, flush=True)\n"
+        "    while True: time.sleep(1)\n"
+    )
+    owner = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            worker_code,
+            str(MODULE.CASE_DIR / "run.py"),
+            "post-train",
+            "--config",
+            str(config),
+        ],
+        cwd=MODULE.REPO_ROOT,
+        env=env,
+        stdout=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    worker_pid = None
+    lock = None
+    active_path = MODULE._gpu_active_path(root, 1)
+    try:
+        assert owner.stdout is not None
+        worker_pid = int(owner.stdout.readline().strip())
+        assert MODULE._is_descendant_process(worker_pid, owner.pid)
+        assert os.getpgid(worker_pid) == owner.pid
+        lock = MODULE._acquire_gpu_lock(root, 1)
+        MODULE._atomic_json(
+            active_path,
+            {
+                "arm": "G1-C",
+                "action": "launch",
+                "pid": owner.pid,
+                "coordinator_pid": os.getpid(),
+                "config": str(config),
+                "run": str(run),
+                "gpu_index": 1,
+                "gpu_uuid": "GPU-test-1",
+                "started_monotonic_ns": MODULE.time.monotonic_ns(),
+                "watchdog_seconds": 600.0,
+            },
+        )
+
+        verified = MODULE._reject_active_or_orphaned_process(root)
+        assert len(verified) == 1
+
+        with monkeypatch.context() as wrong_config:
+            wrong_config.setattr(
+                MODULE,
+                "_pid_matches",
+                lambda pid, _config, _run=None: pid == owner.pid,
+            )
+            with pytest.raises(
+                MODULE.CampaignError,
+                match="without a matching per-GPU owner",
+            ):
+                MODULE._reject_active_or_orphaned_process(root)
+
+        owner.terminate()
+        owner.wait(timeout=5)
+        deadline = time.monotonic() + 3.0
+        while MODULE._proc_parent_pid(worker_pid) == owner.pid and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert MODULE._proc_parent_pid(worker_pid) != owner.pid
+        # The worker kept the same process group but lost its verified ancestry.
+        assert os.getpgid(worker_pid) == owner.pid
+        with pytest.raises(MODULE.CampaignError, match="without a matching per-GPU owner"):
+            MODULE._reject_active_or_orphaned_process(root)
+    finally:
+        if owner.poll() is None:
+            owner.terminate()
+            owner.wait(timeout=5)
+        try:
+            os.killpg(owner.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        if owner.stdout is not None:
+            owner.stdout.close()
+        active_path.unlink(missing_ok=True)
+        if lock is not None:
+            MODULE._release_campaign_lock(lock)
+
+
 def test_idle_gpu_check_queries_the_selected_physical_index(monkeypatch):
     calls = []
     answers = iter(["GPU-two, 0, 0\n", "\n"])

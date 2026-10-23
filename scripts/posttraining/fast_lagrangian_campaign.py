@@ -1255,6 +1255,76 @@ def _pid_is_alive(pid_value: Any) -> bool:
     return Path(f"/proc/{pid_value}").exists()
 
 
+def _proc_parent_pid(pid_value: int) -> int | None:
+    """Read a live process's parent PID from Linux procfs."""
+    try:
+        stat = Path(f"/proc/{pid_value}/stat").read_text(encoding="ascii")
+        close = stat.rfind(")")
+        if close < 0:
+            return None
+        fields = stat[close + 1 :].split()
+        # The suffix starts at proc field 3 (state); field 4 is its parent PID.
+        if len(fields) < 2 or fields[0] in {"Z", "X"}:
+            return None
+        return int(fields[1])
+    except (OSError, ValueError):
+        return None
+
+
+def _is_descendant_process(pid_value: int, ancestor_pid: int, *, max_depth: int = 64) -> bool:
+    """Return true only while a live PPID chain reaches the verified owner."""
+    if pid_value == ancestor_pid or pid_value <= 1 or ancestor_pid <= 1:
+        return False
+    current = pid_value
+    visited: set[int] = set()
+    for _ in range(max_depth):
+        if current in visited:
+            return False
+        visited.add(current)
+        parent_pid = _proc_parent_pid(current)
+        if parent_pid is None or parent_pid <= 1:
+            return False
+        if parent_pid == ancestor_pid:
+            return True
+        current = parent_pid
+    return False
+
+
+def _campaign_process_environment(pid_value: int) -> dict[str, str]:
+    try:
+        entries = Path(f"/proc/{pid_value}/environ").read_bytes().split(b"\0")
+    except OSError:
+        return {}
+    result: dict[str, str] = {}
+    for entry in entries:
+        key, separator, value = entry.partition(b"=")
+        if separator:
+            result[key.decode(errors="replace")] = value.decode(errors="replace")
+    return result
+
+
+def _campaign_process_matches_gpu(
+    pid_value: int,
+    root: Path,
+    gpu: int,
+    *,
+    allow_legacy_gpu_token: bool = False,
+) -> bool:
+    """Check the inherited admission root and physical-GPU environment."""
+    environment = _campaign_process_environment(pid_value)
+    if environment.get("PHYCOFLOW_CAMPAIGN_ADMITTED") != str(root.resolve()):
+        return False
+    expected_gpu = str(gpu)
+    if environment.get("CUDA_VISIBLE_DEVICES") != expected_gpu:
+        return False
+    campaign_gpu = environment.get("PHYCOFLOW_CAMPAIGN_GPU")
+    if campaign_gpu == expected_gpu:
+        return True
+    # Older serial receipts predate the explicit physical-GPU token and were
+    # restricted to physical GPU 1; keep that one compatibility case narrow.
+    return allow_legacy_gpu_token and gpu == 1 and campaign_gpu is None
+
+
 def _live_campaign_children(root: Path) -> list[tuple[int, str]]:
     """Find admitted training/evaluation children even if their JSON receipt vanished."""
     admission = f"PHYCOFLOW_CAMPAIGN_ADMITTED={root.resolve()}".encode()
@@ -1295,6 +1365,7 @@ def _reject_active_or_orphaned_process(
         coordinator_pid = record.get("coordinator_pid")
         coordinator_live = _pid_is_alive(coordinator_pid)
         lock_held = not _campaign_lock_available(lock_path)
+        legacy_coordinator = coordinator_pid is None
 
         if child_live and coordinator_pid is not None and not coordinator_live:
             raise CampaignError(
@@ -1316,9 +1387,17 @@ def _reject_active_or_orphaned_process(
             raise CampaignError(
                 f"active metadata for physical GPU {gpu} names live PID {pid_value} that cannot be verified"
             )
+        if child_live and not _campaign_process_matches_gpu(
+            pid_value,
+            root,
+            gpu,
+            allow_legacy_gpu_token=legacy_coordinator,
+        ):
+            raise CampaignError(
+                f"active metadata for physical GPU {gpu} names a live PID without matching campaign admission and GPU environment"
+            )
         # Older serial receipts have no coordinator PID.  Their held lifetime
         # flock remains the authority while the child is present or winding down.
-        legacy_coordinator = coordinator_pid is None
         if (
             (child_matches or coordinator_live or legacy_coordinator)
             and lock_held
@@ -1334,7 +1413,34 @@ def _reject_active_or_orphaned_process(
         Path(record["metadata_path"]).unlink(missing_ok=True)
 
     orphans = _live_campaign_children(root)
-    unrepresented = [pid for pid, _command in orphans if pid not in represented_pids]
+    verified_owners = [
+        record
+        for record in verified
+        if record.get("pid") in represented_pids and _pid_is_alive(record.get("pid"))
+    ]
+    unrepresented = []
+    for pid, _command in orphans:
+        if pid in represented_pids:
+            continue
+        descendant_owner = next(
+            (
+                record
+                for record in verified_owners
+                if _is_descendant_process(pid, int(record["pid"]))
+                and _pid_matches(pid, record.get("config"), record.get("run"))
+                and _campaign_process_matches_gpu(
+                    pid,
+                    root,
+                    _gpu_index(record.get("gpu_index", 1)),
+                    allow_legacy_gpu_token=record.get("coordinator_pid") is None,
+                )
+            ),
+            None,
+        )
+        if descendant_owner is None:
+            unrepresented.append(pid)
+        else:
+            represented_pids.add(pid)
     if unrepresented:
         details = ", ".join(str(pid) for pid in unrepresented)
         raise CampaignError(
