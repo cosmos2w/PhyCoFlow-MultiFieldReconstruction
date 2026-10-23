@@ -141,3 +141,17 @@ def test_ordered_shared_endpoint_calibration_and_recovery(tmp_path, monkeypatch,
     assert all(row["coherence_loss"] != row["primary_scalar"] for row in history)
     assert all(row["native_data_loss"] is None for row in history)
     assert any(not torch.equal(first["model"][key], value) for key, value in second["model"].items())
+
+
+def test_direct_python_ordered_call_validates_before_source_access(tmp_path, monkeypatch):
+    import phycoflow_reconstruction.training.post_training as trainer
+
+    config = _post_config(tmp_path / "unopened.h5", tmp_path / "unopened_source")
+    config["optimization"]["lpc_ordered"] = {}
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("invalid ordered profile reached SOURCE access")
+
+    monkeypatch.setattr(trainer, "source_hashes", forbidden)
+    with pytest.raises(TypeError, match="LPC-ordered requires optimization.multitask"):
+        run_post_training(config, case_dir=tmp_path)

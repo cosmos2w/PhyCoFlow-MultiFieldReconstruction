@@ -34,6 +34,45 @@ def test_campaign_pins_integration_and_descriptor_code_before_resume(tmp_path, m
         MODULE._verify_numerical_source_binding(None)
 
 
+def test_goal1_stage_source_comes_from_verified_immutable_snapshot(tmp_path, monkeypatch):
+    root = tmp_path / "campaign"
+    snapshot_root = root / "source_snapshots/goal1_c073eba"
+    source = snapshot_root / "src/phycoflow_reconstruction/training.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("frozen numerical implementation\n", encoding="utf-8")
+    files = {"src/phycoflow_reconstruction/training.py": hashlib.sha256(source.read_bytes()).hexdigest()}
+    snapshot_manifest = snapshot_root / "snapshot_manifest.json"
+    snapshot_manifest.write_text(
+        json.dumps(
+            {
+                "stage": "goal1",
+                "git_head": "goal1-head",
+                "snapshot": str(snapshot_root.resolve()),
+                "files_sha256": files,
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(MODULE, "GOAL1_SNAPSHOT_MANIFEST_SHA256", hashlib.sha256(snapshot_manifest.read_bytes()).hexdigest())
+    monkeypatch.setattr(MODULE, "GOAL1_SNAPSHOT_GIT_HEAD", "goal1-head")
+
+    selected = MODULE._verify_goal1_source_snapshot(
+        root,
+        {"numerical_source_sha256": files},
+    )
+    assert selected == snapshot_root / "src"
+
+    source.write_text("tampered\n", encoding="utf-8")
+    with pytest.raises(MODULE.CampaignError, match="snapshot file changed"):
+        MODULE._verify_goal1_source_snapshot(root, {"numerical_source_sha256": files})
+
+
+def test_stage_source_binding_rejects_malformed_binding_map():
+    with pytest.raises(MODULE.CampaignError, match="stage source bindings are malformed"):
+        MODULE._stage_source_bindings({"stage_source_bindings": None})
+
+
 def _resolved_config() -> dict:
     return {
         "source_run": "/data/source-run",
@@ -1213,3 +1252,162 @@ def test_completed_goal1_arm_releases_its_unused_runtime_quota():
         },
     }
     assert MODULE._goal1_remaining_hours(manifest, current_status=current) == 2.0
+
+
+def test_goal2_residual_approval_binding_fixes_probe_plan_and_goal1_snapshot(tmp_path, monkeypatch):
+    root = tmp_path / "campaign"
+    snapshot_root = root / "source_snapshots/goal1_c073eba"
+    snapshot_src_file = snapshot_root / "src/phycoflow_reconstruction/training.py"
+    snapshot_src_file.parent.mkdir(parents=True)
+    snapshot_src_file.write_text("frozen source\n", encoding="utf-8")
+    snapshot_files = {
+        "src/phycoflow_reconstruction/training.py": hashlib.sha256(snapshot_src_file.read_bytes()).hexdigest()
+    }
+    snapshot_manifest_path = snapshot_root / "snapshot_manifest.json"
+    snapshot_manifest_path.write_text(
+        json.dumps(
+            {
+                "stage": "goal1",
+                "git_head": "goal1-head",
+                "snapshot": str(snapshot_root.resolve()),
+                "files_sha256": snapshot_files,
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    snapshot_manifest_sha = hashlib.sha256(snapshot_manifest_path.read_bytes()).hexdigest()
+    monkeypatch.setattr(MODULE, "GOAL1_SNAPSHOT_MANIFEST_SHA256", snapshot_manifest_sha)
+    monkeypatch.setattr(MODULE, "GOAL1_SNAPSHOT_GIT_HEAD", "goal1-head")
+
+    for relative in ("manifests", "analysis"):
+        (root / relative).mkdir(parents=True, exist_ok=True)
+    closeout = {
+        "status": "goal1_complete_assessed",
+        "goal1_arms_completed_100": ["G1-C", "G1-S", "G1-R"],
+        "source_142_files_unchanged": True,
+        "test_evaluation_or_selection": False,
+    }
+    clarification = {
+        "endpoint_relative_increase": 0.05,
+        "endpoint_absolute_allowance": 0.0,
+        "A_bound": "fixed full SOURCE TRAIN mean without slack",
+        "B_bound": "fixed full SOURCE TRAIN mean without slack",
+    }
+    closeout_path = root / MODULE.GOAL1_COMPLETION_ASSESSMENT
+    clarification_path = root / MODULE.GOAL2_CONSTRAINT_CLARIFICATION
+    closeout_path.write_text(json.dumps(closeout), encoding="utf-8")
+    clarification_path.write_text(json.dumps(clarification), encoding="utf-8")
+    monkeypatch.setattr(MODULE, "GOAL1_COMPLETION_ASSESSMENT_SHA256", hashlib.sha256(closeout_path.read_bytes()).hexdigest())
+    monkeypatch.setattr(MODULE, "GOAL2_CONSTRAINT_CLARIFICATION_SHA256", hashlib.sha256(clarification_path.read_bytes()).hexdigest())
+
+    script_rel = "analysis/probe.py"
+    plan_rel = "analysis/probe.plan.json"
+    binding_rel = "analysis/probe.binding.json"
+    script_path = root / script_rel
+    plan_path = root / plan_rel
+    binding_path = root / binding_rel
+    script_path.write_text("probe script\n", encoding="utf-8")
+    plan_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "status": "predeclared_protocol_no_results",
+                "campaign_id": root.name,
+                "campaign_root": str(root),
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    script_sha = hashlib.sha256(script_path.read_bytes()).hexdigest()
+    plan_sha = hashlib.sha256(plan_path.read_bytes()).hexdigest()
+    result_rel = "analysis/probe.result.json"
+    binding = {
+        "schema_version": 1,
+        "status": "frozen_hash_binding",
+        "script_path": str(script_path),
+        "script_sha256": script_sha,
+        "plan_path": str(plan_path),
+        "plan_sha256": plan_sha,
+        "result_path": str(root / result_rel),
+        "result_schema": "goal2_residual_probe.result.v1",
+        "source_snapshot_manifest_sha256": snapshot_manifest_sha,
+        "code_dependencies_sha256": snapshot_files,
+        "input_dependencies": {
+            "goal1_closeout_sha256": MODULE.GOAL1_COMPLETION_ASSESSMENT_SHA256,
+            "goal2_constraint_clarification_sha256": MODULE.GOAL2_CONSTRAINT_CLARIFICATION_SHA256,
+        },
+    }
+    binding_path.write_text(json.dumps(binding, sort_keys=True), encoding="utf-8")
+    binding_sha = hashlib.sha256(binding_path.read_bytes()).hexdigest()
+    monkeypatch.setattr(
+        MODULE,
+        "GOAL2_RESIDUAL_APPROVAL_FILES",
+        {
+            "script": (script_rel, script_sha),
+            "plan": (plan_rel, plan_sha),
+            "binding": (binding_rel, binding_sha),
+        },
+    )
+    monkeypatch.setattr(MODULE, "GOAL2_RESIDUAL_RESULT", result_rel)
+    manifest_path = root / "manifests/campaign.json"
+    manifest_path.write_text(json.dumps({"numerical_source_sha256": snapshot_files}), encoding="utf-8")
+
+    result = MODULE._goal2_residual_approval_binding(root)
+    assert result["files"]["script"]["sha256"] == script_sha
+    assert result["source_snapshot_manifest_sha256"] == snapshot_manifest_sha
+    assert result["goal1_closeout_sha256"] == MODULE.GOAL1_COMPLETION_ASSESSMENT_SHA256
+
+    script_path.write_text("changed probe\n", encoding="utf-8")
+    with pytest.raises(MODULE.CampaignError, match="approval file changed"):
+        MODULE._goal2_residual_approval_binding(root)
+
+
+def test_residual_action_prints_fixed_goal2_evaluator_and_gpu0_without_execution(tmp_path, monkeypatch):
+    root = tmp_path / "campaign"
+    run = root / "runs/G1-C/run-c"
+    run.mkdir(parents=True)
+    plan_path = root / MODULE.GOAL2_RESIDUAL_APPROVAL_FILES["plan"][0]
+    plan_path.parent.mkdir(parents=True)
+    plan_path.write_text(
+        json.dumps({"admission_anchor": {"run_path": str(run.resolve())}}), encoding="utf-8"
+    )
+    manifest = {
+        "root": str(root),
+        "campaign_id": root.name,
+        "gates": {"goal1_authorized": True},
+    }
+    monkeypatch.setattr(MODULE, "_campaign_manifest", lambda _root: manifest)
+    monkeypatch.setattr(MODULE, "_goal1_residual_runs_complete", lambda _root: {"G1-C": run.resolve()})
+    monkeypatch.setattr(MODULE, "_goal2_residual_approval_binding", lambda _root: {"schema_version": 1})
+
+    command = MODULE.goal2_residual_probe(root, run, execute=False)
+    assert "fast_lagrangian_evaluate.py" in command
+    assert "--goal2-residual-probe" in command
+    assert "--run" in command and str(run.resolve()) in command
+    assert "CUDA_VISIBLE_DEVICES=0" in command
+    assert f"PHYCOFLOW_CAMPAIGN_ADMITTED={root.resolve()}" in command
+    assert "PHYCOFLOW_CAMPAIGN_SOURCE_STAGE=goal2" in command
+
+
+def test_goal2_offline_diagnostic_spend_includes_fixed_reserve_live_and_ledger(tmp_path):
+    root = tmp_path / "campaign"
+    (root / "manifests").mkdir(parents=True)
+    (root / "manifests/launch_ledger.jsonl").write_text(
+        json.dumps({"action": MODULE.GOAL2_RESIDUAL_ACTION, "elapsed_seconds": 800.0})
+        + "\n"
+        + json.dumps({"action": "evaluate-full-abt-validation", "elapsed_seconds": 400.0})
+        + "\n",
+        encoding="utf-8",
+    )
+    spent = MODULE._goal2_offline_diagnostic_seconds(
+        root,
+        {
+            "active_processes": [
+                {"action": MODULE.GOAL2_RESIDUAL_ACTION, "elapsed_seconds": 100.0},
+                {"action": "evaluate-full-abt-validation", "elapsed_seconds": 1000.0},
+            ]
+        },
+    )
+    assert spent == 180.0 + 800.0 + 100.0

@@ -25,9 +25,31 @@ import torch
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SOURCE_PATH = REPO_ROOT / "src"
-if str(SOURCE_PATH) not in sys.path:
-    sys.path.insert(0, str(SOURCE_PATH))
+
+
+def _campaign_source_path() -> Path:
+    stage = os.environ.get("PHYCOFLOW_CAMPAIGN_SOURCE_STAGE")
+    if stage is None:
+        return REPO_ROOT / "src"
+    admitted_root = os.environ.get("PHYCOFLOW_CAMPAIGN_ADMITTED")
+    if not admitted_root:
+        raise RuntimeError("campaign source stage requires the campaign admission token")
+    if str(REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(REPO_ROOT))
+    from scripts.posttraining.fast_lagrangian_campaign import (
+        _campaign_manifest,
+        _stage_source_root,
+    )
+
+    root = Path(admitted_root).resolve(strict=True)
+    manifest = _campaign_manifest(root)
+    return _stage_source_root(root, manifest, stage)
+
+
+SOURCE_PATH = _campaign_source_path()
+if str(SOURCE_PATH) in sys.path:
+    sys.path.remove(str(SOURCE_PATH))
+sys.path.insert(0, str(SOURCE_PATH))
 GROUP_SIZE = 32
 MAX_SAMPLES = 128
 VALIDATION_SEED = 2027
@@ -46,6 +68,33 @@ NATIVE_MAP_APPROVAL_FILES = {
         "29736e04ba0357bbaaa04f5b20a1aa0dd0c6b693ce66c459055ff53330fd776a",
     ),
 }
+GOAL1_COMPLETION_ASSESSMENT = "manifests/goal1_completion_assessment.json"
+GOAL1_COMPLETION_ASSESSMENT_SHA256 = (
+    "2a6f4ee7666e5a782f7d8f0c03a6d33bfb35cb55393766481f2ad36648390c8f"
+)
+GOAL2_CONSTRAINT_CLARIFICATION = "manifests/goal2_constraint_clarification_20261023.json"
+GOAL2_CONSTRAINT_CLARIFICATION_SHA256 = (
+    "30d52a085bc6c53c835bc10783448a5ae33a509e916ffe421b757d7e6804c196"
+)
+GOAL2_RESIDUAL_APPROVAL_FILES = {
+    "script": (
+        "analysis/goal2_residual_probe.py",
+        "ab6c667da30fbf2f791503872ce8c1a9abad994497ff4b723247ff5642150174",
+    ),
+    "plan": (
+        "analysis/goal2_residual_probe.plan.json",
+        "b38a96c2ca834e96410e57aa4d79c3f800a0a5442c32fe618235d3e57ab0c872",
+    ),
+    "binding": (
+        "analysis/goal2_residual_probe.binding.json",
+        "27b2eb1c666dbc85110940076b3dc7ad1f04c6cded7df097d93dab9796d2182e",
+    ),
+}
+GOAL2_RESIDUAL_RESULT = "analysis/goal2_residual_probe.result.json"
+GOAL2_RESIDUAL_RESULT_SCHEMA = "goal2_residual_probe.result.v1"
+GOAL1_SOURCE_SNAPSHOT_MANIFEST_SHA256 = (
+    "3e05b001318b16876c33c759a8014db2559afd4f5f949704bd9c21b4e1d66fd9"
+)
 
 
 class EvaluationError(RuntimeError):
@@ -73,6 +122,11 @@ def _parser() -> argparse.ArgumentParser:
         "--native-maps",
         action="store_true",
         help="extract the fixed campaign-owned native-grid maps after all G1 arms complete",
+    )
+    parser.add_argument(
+        "--goal2-residual-probe",
+        action="store_true",
+        help="run the one fixed, hash-bound read-only Goal-2 residual diagnostic",
     )
     parser.add_argument(
         "--max-samples",
@@ -563,6 +617,137 @@ def extract_native_maps_campaign(
     return "native maps extracted for the completed G1-C/G1-R/G1-S campaign"
 
 
+def run_goal2_residual_probe_campaign(
+    campaign_root: Path, run_path: Path, *, device_name: str = "cpu"
+) -> Path:
+    """Run the single hash-bound residual probe through its fixed campaign entrypoint."""
+    root, selected_run, selected_arm = _validate_campaign_run(campaign_root, run_path)
+    if selected_arm != "G1-C":
+        raise EvaluationError("Goal-2 residual probe requires the campaign-owned G1-C outer run")
+    _validate_device_admission(root, device_name)
+    if (
+        device_name != "cuda:0"
+        or os.environ.get("CUDA_VISIBLE_DEVICES") != "0"
+        or os.environ.get("PHYCOFLOW_CAMPAIGN_GPU") != "0"
+        or os.environ.get("PHYCOFLOW_CAMPAIGN_SOURCE_STAGE") != "goal2"
+    ):
+        raise EvaluationError("Goal-2 residual probe requires admitted physical GPU 0 and Goal-2 source")
+
+    if os.environ.get("PHYCOFLOW_CAMPAIGN_ADMITTED") != str(root):
+        raise EvaluationError("Goal-2 residual probe requires the campaign admission token")
+    if str(REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(REPO_ROOT))
+    from scripts.posttraining.fast_lagrangian_campaign import (
+        GOAL1_COMPLETION_ASSESSMENT,
+        GOAL1_COMPLETION_ASSESSMENT_SHA256,
+        GOAL1_SNAPSHOT_MANIFEST_SHA256,
+        GOAL2_CONSTRAINT_CLARIFICATION,
+        GOAL2_CONSTRAINT_CLARIFICATION_SHA256,
+        GOAL2_RESIDUAL_APPROVAL_FILES,
+        GOAL2_RESIDUAL_RESULT,
+        GOAL2_RESIDUAL_RESULT_SCHEMA,
+        _campaign_manifest,
+        _goal1_residual_runs_complete,
+        _goal2_residual_approval_binding,
+        _verify_goal1_source_snapshot,
+    )
+
+    campaign_manifest = _campaign_manifest(root)
+    if not campaign_manifest.get("gates", {}).get("goal1_authorized"):
+        raise EvaluationError("Goal-2 residual probe requires the applied Goal-1 authorization")
+    if campaign_manifest.get("goal2_residual_probe_approval_binding") != (
+        _goal2_residual_approval_binding(root)
+    ):
+        raise EvaluationError("campaign manifest lacks the exact frozen residual-probe approval binding")
+    _verify_goal1_source_snapshot(root, campaign_manifest)
+
+    closeout_path = root / GOAL1_COMPLETION_ASSESSMENT
+    clarification_path = root / GOAL2_CONSTRAINT_CLARIFICATION
+    if (
+        _sha256(closeout_path) != GOAL1_COMPLETION_ASSESSMENT_SHA256
+        or _sha256(clarification_path) != GOAL2_CONSTRAINT_CLARIFICATION_SHA256
+    ):
+        raise EvaluationError("Goal-1 closeout or +5% endpoint clarification changed")
+    g1_runs = _goal1_residual_runs_complete(root)
+    if selected_run != g1_runs["G1-C"]:
+        raise EvaluationError("outer --run is not the unique completed Goal-1 G1-C lineage")
+
+    script_rel, script_sha256 = GOAL2_RESIDUAL_APPROVAL_FILES["script"]
+    plan_rel, plan_sha256 = GOAL2_RESIDUAL_APPROVAL_FILES["plan"]
+    binding_rel, _binding_sha256 = GOAL2_RESIDUAL_APPROVAL_FILES["binding"]
+    script_path = root / script_rel
+    plan_path = root / plan_rel
+    binding_path = root / binding_rel
+    binding = _read_json(binding_path)
+    plan = _read_json(plan_path)
+    if (
+        _sha256(script_path) != script_sha256
+        or _sha256(plan_path) != plan_sha256
+        or binding.get("script_path") != str(script_path)
+        or binding.get("script_sha256") != script_sha256
+        or binding.get("plan_path") != str(plan_path)
+        or binding.get("plan_sha256") != plan_sha256
+        or binding.get("source_snapshot_manifest_sha256") != GOAL1_SNAPSHOT_MANIFEST_SHA256
+        or binding.get("input_dependencies", {}).get("goal1_closeout_sha256")
+        != GOAL1_COMPLETION_ASSESSMENT_SHA256
+        or binding.get("input_dependencies", {}).get("goal2_constraint_clarification_sha256")
+        != GOAL2_CONSTRAINT_CLARIFICATION_SHA256
+        or binding.get("result_path") != str(root / GOAL2_RESIDUAL_RESULT)
+        or binding.get("result_schema") != GOAL2_RESIDUAL_RESULT_SCHEMA
+        or plan.get("admission_anchor", {}).get("run_path") != str(selected_run)
+        or plan.get("status") != "predeclared_protocol_no_results"
+    ):
+        raise EvaluationError("residual probe script, plan, or input binding changed")
+    result_path = root / GOAL2_RESIDUAL_RESULT
+    if result_path.exists():
+        raise EvaluationError("the fixed residual-probe result already exists; refusing a second execution")
+
+    old_argv = sys.argv
+    try:
+        namespace = runpy.run_path(str(script_path), run_name="lpc_goal2_residual_probe")
+        probe_main = namespace.get("main")
+        if not callable(probe_main):
+            raise EvaluationError("campaign-owned residual probe has no callable main")
+        return_code = probe_main(
+            [
+                "--campaign-root",
+                str(root),
+                "--plan",
+                str(plan_path),
+                "--run",
+                str(selected_run),
+                "--execute",
+                "--device",
+                device_name,
+            ]
+        )
+    finally:
+        sys.argv = old_argv
+    if return_code != 0:
+        raise EvaluationError(f"campaign-owned Goal-2 residual probe failed with code {return_code}")
+    if not result_path.is_file():
+        raise EvaluationError("Goal-2 residual probe returned without its declared JSON artifact")
+    result = _read_json(result_path)
+    if (
+        result.get("status") != "complete"
+        or result.get("campaign_id") != root.name
+        or result.get("result_schema") != GOAL2_RESIDUAL_RESULT_SCHEMA
+        or result.get("plan_sha256") != plan_sha256
+        or result.get("script_sha256") != script_sha256
+        or result.get("binding_sha256") != _sha256(binding_path)
+        or result.get("source_snapshot_manifest_sha256") != GOAL1_SOURCE_SNAPSHOT_MANIFEST_SHA256
+        or result.get("execution", {}).get("optimizer_steps") != 0
+        or result.get("execution", {}).get("optimizer_constructed") is not False
+        or result.get("execution", {}).get("parameter_updates") is not False
+        or result.get("execution", {}).get("parameter_grad_buffers_accumulated") is not False
+        or result.get("execution", {}).get("test_access") is not False
+        or result.get("execution", {}).get("source_immutable_verified") is not True
+        or not isinstance(result.get("engineering_gate_passed_both_states"), bool)
+    ):
+        raise EvaluationError("Goal-2 residual result violates the frozen read-only diagnostic contract")
+    return result_path
+
+
 def _evaluation_filename(
     arm, checkpoint_name, epoch, sample_count, checkpoint_hash, evaluation_id=None,
 ) -> str:
@@ -947,7 +1132,15 @@ def evaluate_campaign_run(
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        if args.native_maps:
+        if args.native_maps and args.goal2_residual_probe:
+            raise EvaluationError("native maps and Goal-2 residual probe are separate evaluator modes")
+        if args.goal2_residual_probe:
+            output = run_goal2_residual_probe_campaign(
+                args.campaign_root,
+                args.run,
+                device_name=args.device,
+            )
+        elif args.native_maps:
             output = extract_native_maps_campaign(
                 args.campaign_root,
                 args.run,

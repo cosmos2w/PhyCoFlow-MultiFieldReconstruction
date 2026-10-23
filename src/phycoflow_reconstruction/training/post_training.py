@@ -1488,10 +1488,13 @@ def run_post_training(
     resume: str | Path | None = None,
 ) -> Path:
     """Create or resume one immutable child post-training run."""
-    if "multitask" in config["optimization"] or config["optimization"].get("gradient_balance") in {
-        "component_constrained",
-        "topology_regularized",
-    }:
+    if (
+        "multitask" in config["optimization"]
+        or config["optimization"].get("lpc_ordered") is not None
+        or config["optimization"].get("gradient_balance") in {
+            "component_constrained", "topology_regularized",
+        }
+    ):
         # Direct Python callers use the same method and geometry validation as the CLI.
         from ..config.validate import validate_config
 

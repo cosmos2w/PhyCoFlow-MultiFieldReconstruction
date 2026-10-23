@@ -18,6 +18,7 @@ from phycoflow_reconstruction.contracts import (
 )
 from phycoflow_reconstruction.data.normalization import FieldNormalizer
 from phycoflow_reconstruction.data.sensor_protocols import SensorProtocol, build_observation_batch
+from scripts.posttraining import fast_lagrangian_campaign as CAMPAIGN
 from scripts.posttraining import fast_lagrangian_evaluate as EVALUATOR
 from scripts.posttraining.fast_lagrangian_evaluate import (
     EvaluationError,
@@ -204,6 +205,85 @@ def test_evaluator_default_path_remains_full_abt_without_native_maps(tmp_path, m
             {"checkpoint_name": "best", "max_samples": 64, "device_name": "cpu"},
         )
     ]
+
+
+def test_goal2_residual_mode_is_opt_in_and_uses_its_fixed_outer_entrypoint(tmp_path, monkeypatch):
+    parsed = _parser().parse_args(
+        [
+            "--campaign-root",
+            str(tmp_path),
+            "--run",
+            str(tmp_path / "runs/G1-C/run-c"),
+            "--goal2-residual-probe",
+        ]
+    )
+    assert parsed.goal2_residual_probe is True
+    assert parsed.native_maps is False
+
+    calls = []
+    monkeypatch.setattr(
+        EVALUATOR,
+        "run_goal2_residual_probe_campaign",
+        lambda *args, **kwargs: calls.append((args, kwargs)) or tmp_path / "probe.json",
+    )
+    monkeypatch.setattr(
+        EVALUATOR,
+        "extract_native_maps_campaign",
+        lambda *_args, **_kwargs: pytest.fail("residual mode dispatched to native maps"),
+    )
+    assert EVALUATOR.main(
+        [
+            "--campaign-root",
+            str(tmp_path),
+            "--run",
+            str(tmp_path / "runs/G1-C/run-c"),
+            "--goal2-residual-probe",
+        ]
+    ) == 0
+    assert calls == [
+        (
+            (tmp_path, tmp_path / "runs/G1-C/run-c"),
+            {"device_name": "cpu"},
+        )
+    ]
+    assert EVALUATOR.main(
+        [
+            "--campaign-root",
+            str(tmp_path),
+            "--run",
+            str(tmp_path / "runs/G1-C/run-c"),
+            "--goal2-residual-probe",
+            "--native-maps",
+        ]
+    ) == 2
+
+
+def test_goal2_residual_entry_rejects_nonzero_physical_gpu(tmp_path, monkeypatch):
+    root = tmp_path / "campaign"
+    run = root / "runs/G1-C/run-c"
+    monkeypatch.setattr(EVALUATOR, "_validate_campaign_run", lambda *_args: (root, run, "G1-C"))
+    monkeypatch.setattr(EVALUATOR, "_validate_device_admission", lambda *_args: None)
+    monkeypatch.setenv("PHYCOFLOW_CAMPAIGN_ADMITTED", str(root))
+    monkeypatch.setenv("PHYCOFLOW_CAMPAIGN_GPU", "1")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1")
+    monkeypatch.setenv("PHYCOFLOW_CAMPAIGN_SOURCE_STAGE", "goal2")
+    with pytest.raises(EvaluationError, match="physical GPU 0"):
+        EVALUATOR.run_goal2_residual_probe_campaign(root, run, device_name="cuda:0")
+
+
+def test_campaign_stage_bootstrap_selects_the_goal1_snapshot_before_project_imports(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "campaign"
+    root.mkdir()
+    snapshot_src = root / "source_snapshots/goal1_c073eba/src"
+    snapshot_src.mkdir(parents=True)
+    monkeypatch.setenv("PHYCOFLOW_CAMPAIGN_SOURCE_STAGE", "goal1")
+    monkeypatch.setenv("PHYCOFLOW_CAMPAIGN_ADMITTED", str(root))
+    monkeypatch.setattr(CAMPAIGN, "_campaign_manifest", lambda _root: {"root": str(root)})
+    monkeypatch.setattr(CAMPAIGN, "_stage_source_root", lambda *_args: snapshot_src)
+
+    assert EVALUATOR._campaign_source_path() == snapshot_src
 
 
 def test_validation_selection_gates_and_uniform_group_boundaries():

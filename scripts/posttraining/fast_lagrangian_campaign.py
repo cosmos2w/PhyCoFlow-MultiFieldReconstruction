@@ -47,6 +47,10 @@ MAX_TIMING_PROFILES = 5
 MAX_TIMING_EPOCHS = 10
 MAX_G1_EPOCHS = 100
 OFFLINE_GPU_DIAGNOSTIC_SECONDS = 180.0
+MAX_OFFLINE_DIAGNOSTIC_SECONDS = 2700.0
+GOAL2_RESIDUAL_MAX_SECONDS = 600.0
+GOAL2_RECOVERY_SMOKE_EPOCHS = 2
+GOAL2_RECOVERY_SMOKE_EPOCH_BUDGET = 3
 GPU_CAP_GRACE_SECONDS = 150.0
 STOP_WAIT_SECONDS = 30.0
 LOCK_POLL_INTERVAL_SECONDS = 0.1
@@ -70,6 +74,46 @@ NATIVE_MAP_APPROVAL_FILES = {
         "29736e04ba0357bbaaa04f5b20a1aa0dd0c6b693ce66c459055ff53330fd776a",
     ),
 }
+GOAL2_RESIDUAL_APPROVAL_FILES = {
+    "script": (
+        "analysis/goal2_residual_probe.py",
+        "ab6c667da30fbf2f791503872ce8c1a9abad994497ff4b723247ff5642150174",
+    ),
+    "plan": (
+        "analysis/goal2_residual_probe.plan.json",
+        "b38a96c2ca834e96410e57aa4d79c3f800a0a5442c32fe618235d3e57ab0c872",
+    ),
+    "binding": (
+        "analysis/goal2_residual_probe.binding.json",
+        "27b2eb1c666dbc85110940076b3dc7ad1f04c6cded7df097d93dab9796d2182e",
+    ),
+}
+GOAL2_RESIDUAL_RESULT = "analysis/goal2_residual_probe.result.json"
+GOAL2_RESIDUAL_RESULT_SCHEMA = "goal2_residual_probe.result.v1"
+GOAL2_RESIDUAL_ACTION = "evaluate-goal2-residual-probe"
+GOAL2_RESIDUAL_OFFLINE_RESERVE_SECONDS = 180.0
+GOAL2_RUNTIME_QUOTA_SECONDS = GOAL2_GPU_HOURS_RESERVE * 3600.0
+GOAL2_SMOKE_MAX_SECONDS = 900.0
+GOAL2_ORDERED_SETTINGS = {"dual_lr": 0.01, "denominator_floor": 1.0e-8}
+GOAL2_ORDERED_PROFILE = {
+    "topology_estimator": "p3",
+    "family_probability": 1.0,
+    "coefficient_interval": 1,
+    "seed": 700211,
+}
+GOAL1_SNAPSHOT_RELATIVE = Path("source_snapshots/goal1_c073eba")
+GOAL1_SNAPSHOT_MANIFEST_SHA256 = (
+    "3e05b001318b16876c33c759a8014db2559afd4f5f949704bd9c21b4e1d66fd9"
+)
+GOAL1_SNAPSHOT_GIT_HEAD = "c073ebad9a48192c7e6eb3a8533199c323281db4"
+GOAL1_COMPLETION_ASSESSMENT = "manifests/goal1_completion_assessment.json"
+GOAL1_COMPLETION_ASSESSMENT_SHA256 = (
+    "2a6f4ee7666e5a782f7d8f0c03a6d33bfb35cb55393766481f2ad36648390c8f"
+)
+GOAL2_CONSTRAINT_CLARIFICATION = "manifests/goal2_constraint_clarification_20261023.json"
+GOAL2_CONSTRAINT_CLARIFICATION_SHA256 = (
+    "30d52a085bc6c53c835bc10783448a5ae33a509e916ffe421b757d7e6804c196"
+)
 EXCLUDED_ARMS = {
     "T4": "periodic coefficients failed the TRAIN-only age probe: cosine fell to 0.79993 at refresh pair 2->3",
     "G1-P": "periodic coefficients failed the TRAIN-only age probe: cosine fell to 0.79993 at refresh pair 2->3",
@@ -367,6 +411,151 @@ def _numerical_source_binding() -> dict[str, str]:
     }
 
 
+def _verify_goal1_source_snapshot(root: Path, manifest: Mapping[str, Any]) -> Path:
+    snapshot_root = (root / GOAL1_SNAPSHOT_RELATIVE).resolve(strict=True)
+    if not snapshot_root.is_relative_to(root.resolve(strict=True)):
+        raise CampaignError("Goal-1 source snapshot escapes the owned campaign root")
+    manifest_path = snapshot_root / "snapshot_manifest.json"
+    if _sha256(manifest_path) != GOAL1_SNAPSHOT_MANIFEST_SHA256:
+        raise CampaignError("Goal-1 source snapshot manifest changed")
+    snapshot = _read_json(manifest_path)
+    if (
+        snapshot.get("stage") != "goal1"
+        or snapshot.get("git_head") != GOAL1_SNAPSHOT_GIT_HEAD
+        or Path(snapshot.get("snapshot", "")).resolve(strict=True) != snapshot_root
+    ):
+        raise CampaignError("Goal-1 source snapshot identity changed")
+    snapshot_files = snapshot.get("files_sha256")
+    if not isinstance(snapshot_files, dict) or not snapshot_files:
+        raise CampaignError("Goal-1 source snapshot has no file digest map")
+    for relative_text, expected_digest in snapshot_files.items():
+        relative = Path(relative_text)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise CampaignError("Goal-1 source snapshot contains an unsafe relative path")
+        path = (snapshot_root / relative).resolve(strict=True)
+        if not path.is_relative_to(snapshot_root) or not path.is_file():
+            raise CampaignError(f"Goal-1 source snapshot file escapes or is missing: {relative_text}")
+        if _sha256(path) != expected_digest:
+            raise CampaignError(f"Goal-1 source snapshot file changed: {relative_text}")
+    snapshot_numerical = {
+        name: digest
+        for name, digest in snapshot_files.items()
+        if name.startswith("src/phycoflow_reconstruction/") and name.endswith(".py")
+    }
+    if manifest.get("numerical_source_sha256") != snapshot_numerical:
+        raise CampaignError("frozen Goal-1 numerical source pin differs from its immutable snapshot")
+    return snapshot_root / "src"
+
+
+def _stage_source_bindings(manifest: Mapping[str, Any]) -> Mapping[str, Any]:
+    value = manifest.get("stage_source_bindings", {})
+    if not isinstance(value, Mapping):
+        raise CampaignError("campaign stage source bindings are malformed")
+    return value
+
+
+def _verify_goal2_source_binding(manifest: Mapping[str, Any]) -> dict[str, Any]:
+    stage_bindings = _stage_source_bindings(manifest)
+    binding = stage_bindings.get("goal2") if isinstance(stage_bindings, Mapping) else None
+    if not isinstance(binding, dict):
+        raise CampaignError("Goal-2 current-source pin is missing; bind it after passing integration tests")
+    expected = binding.get("files_sha256")
+    if not isinstance(expected, dict) or not expected:
+        raise CampaignError("Goal-2 current-source pin has no numerical file digests")
+    if expected != _numerical_source_binding():
+        raise CampaignError("Goal-2 current numerical source changed after its explicit binding")
+    root = Path(manifest["root"]).resolve(strict=True)
+    try:
+        evidence_path = (root / str(binding.get("evidence_path", ""))).resolve(strict=True)
+    except OSError as error:
+        raise CampaignError("Goal-2 source-binding test evidence is missing") from error
+    if (
+        not evidence_path.is_file()
+        or not evidence_path.is_relative_to(root)
+        or _sha256(evidence_path) != binding.get("evidence_sha256")
+    ):
+        raise CampaignError("Goal-2 source-binding test evidence changed")
+    evidence = _read_json(evidence_path)
+    if (
+        evidence.get("status") != "goal2_source_binding_ready"
+        or evidence.get("helper_unit_tests_passed") is not True
+        or evidence.get("config_schema_tests_passed") is not True
+        or evidence.get("integration_tests_passed") is not True
+        or evidence.get("source_sha256") != expected
+    ):
+        raise CampaignError("Goal-2 source-binding evidence no longer passes its recorded test gate")
+    return binding
+
+
+def _stage_source_root(root: Path, manifest: Mapping[str, Any], stage: str) -> Path:
+    root = root.resolve(strict=True)
+    if stage == "goal1":
+        return _verify_goal1_source_snapshot(root, manifest)
+    if stage == "goal2":
+        _verify_goal2_source_binding(manifest)
+        return REPO_ROOT / "src"
+    raise CampaignError(f"unsupported campaign numerical source stage {stage!r}")
+
+
+def _stage_source_digest(root: Path, manifest: Mapping[str, Any], stage: str) -> str:
+    _stage_source_root(root, manifest, stage)
+    if stage == "goal1":
+        return GOAL1_SNAPSHOT_MANIFEST_SHA256
+    binding = _stage_source_bindings(manifest)["goal2"]
+    return str(binding["source_binding_sha256"])
+
+
+def bind_goal2_source(root: Path, evidence_path: Path, *, apply: bool = False) -> dict[str, Any]:
+    manifest = _campaign_manifest(root)
+    root = Path(manifest["root"]).resolve(strict=True)
+    evidence_path = evidence_path.resolve(strict=True)
+    if not evidence_path.is_relative_to(root):
+        raise CampaignError("Goal-2 source-binding evidence must be stored under the campaign root")
+    evidence = _read_json(evidence_path)
+    current_source = _numerical_source_binding()
+    if (
+        evidence.get("status") != "goal2_source_binding_ready"
+        or evidence.get("helper_unit_tests_passed") is not True
+        or evidence.get("config_schema_tests_passed") is not True
+        or evidence.get("integration_tests_passed") is not True
+        or evidence.get("source_sha256") != current_source
+    ):
+        raise CampaignError(
+            "Goal-2 source binding requires passing helper, schema, and integration tests for the exact current source"
+        )
+    binding = {
+        "evidence_path": str(evidence_path.relative_to(root)),
+        "evidence_sha256": _sha256(evidence_path),
+        "git_head": str(evidence.get("git_head", "")),
+        "files_sha256": current_source,
+        "source_binding_sha256": hashlib.sha256(
+            json.dumps(current_source, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+    }
+    if not binding["git_head"]:
+        raise CampaignError("Goal-2 source-binding evidence must name the tested Git commit")
+    old = _stage_source_bindings(manifest).get("goal2")
+    if old is not None and old != binding:
+        raise CampaignError("Goal-2 current-source pin is immutable once applied")
+    if not apply:
+        return binding
+    admission = _acquire_admission_lock(root)
+    try:
+        current = _campaign_manifest(root)
+        stage_bindings = current.setdefault("stage_source_bindings", {})
+        if not isinstance(stage_bindings, dict):
+            raise CampaignError("campaign stage source bindings are malformed")
+        previous = stage_bindings.get("goal2")
+        if previous is not None and previous != binding:
+            raise CampaignError("Goal-2 current-source pin changed before it could be applied")
+        if previous is None:
+            stage_bindings["goal2"] = binding
+            _atomic_json(root / "manifests/campaign.json", current)
+        return binding
+    finally:
+        _release_campaign_lock(admission)
+
+
 def _verify_numerical_source_binding(expected: Any) -> None:
     if not isinstance(expected, dict) or not expected:
         raise CampaignError("campaign lacks its reviewed numerical source binding")
@@ -385,7 +574,9 @@ def prepare(root: Path, selected_estimator: str | None = None) -> dict[str, Any]
     t0_migration_sha: str | None = None
     if manifest_path.exists():
         old = _read_json(manifest_path)
-        _verify_numerical_source_binding(old.get("numerical_source_sha256"))
+        _verify_goal1_source_snapshot(root, old)
+        if _stage_source_bindings(old).get("goal2") is not None:
+            _verify_goal2_source_binding(old)
         old_manifest = old
         for key in ("campaign_id", "root", "source_config_sha256", "source_checkpoint_sha256"):
             if old.get(key) != verified.get(key, campaign_id if key == "campaign_id" else None):
@@ -512,7 +703,9 @@ def _campaign_manifest(root: Path) -> dict[str, Any]:
     manifest = _read_json(Path(verified["root"]) / "manifests/campaign.json")
     if manifest.get("root") != verified["root"]:
         raise CampaignError("campaign manifest root does not match the verified data root")
-    _verify_numerical_source_binding(manifest.get("numerical_source_sha256"))
+    _verify_goal1_source_snapshot(Path(verified["root"]), manifest)
+    if _stage_source_bindings(manifest).get("goal2") is not None:
+        _verify_goal2_source_binding(manifest)
     if (
         manifest.get("source_config_sha256") != verified["source_config_sha256"]
         or manifest.get("source_checkpoint_sha256") != verified["source_checkpoint_sha256"]
@@ -901,7 +1094,9 @@ def _with_short_multiprocessing_tmp(command: list[str]) -> list[str]:
     return [command[0], "-c", bootstrap, *command[1:]]
 
 
-def _environment(root: Path, gpu: int = 1) -> dict[str, str]:
+def _environment(
+    root: Path, gpu: int = 1, *, source_stage: str | None = None
+) -> dict[str, str]:
     gpu = _gpu_index(gpu)
     cache_root = root / "caches"
     (cache_root / "keops").mkdir(parents=True, exist_ok=True)
@@ -923,6 +1118,8 @@ def _environment(root: Path, gpu: int = 1) -> dict[str, str]:
             "PHYCOFLOW_CAMPAIGN_GPU": str(gpu),
         }
     )
+    if source_stage is not None:
+        env["PHYCOFLOW_CAMPAIGN_SOURCE_STAGE"] = source_stage
     return env
 
 
@@ -942,8 +1139,14 @@ def _prepare_keops_build_folder(root: Path, env: Mapping[str, str], gpu: int = 1
     return build_folder
 
 
-def _rendered_command(root: Path, command: list[str], gpu: int = 1) -> str:
-    env = _environment(root, gpu)
+def _rendered_command(
+    root: Path,
+    command: list[str],
+    gpu: int = 1,
+    *,
+    source_stage: str | None = None,
+) -> str:
+    env = _environment(root, gpu, source_stage=source_stage)
     names = (
         "CUDA_VISIBLE_DEVICES",
         "PYTHONPYCACHEPREFIX",
@@ -953,8 +1156,11 @@ def _rendered_command(root: Path, command: list[str], gpu: int = 1) -> str:
         "OMP_NUM_THREADS",
         "MKL_NUM_THREADS",
         "PHYCOFLOW_TOPOLOGY_WORKERS",
+        "PHYCOFLOW_CAMPAIGN_ADMITTED",
         "PHYCOFLOW_CAMPAIGN_GPU",
     )
+    if source_stage is not None:
+        names += ("PHYCOFLOW_CAMPAIGN_SOURCE_STAGE",)
     prefix = " ".join(f"{name}={shlex.quote(env[name])}" for name in names)
     return f"{prefix} {shlex.join(command)}"
 
@@ -1032,6 +1238,218 @@ def _store_native_maps_approval_binding(
         return manifest
     finally:
         _release_campaign_lock(admission)
+
+
+def _goal1_residual_runs_complete(root: Path) -> dict[str, Path]:
+    completed: dict[str, Path] = {}
+    for arm in ("G1-C", "G1-S", "G1-R"):
+        runs = _run_dirs(root, arm)
+        if len(runs) != 1:
+            raise CampaignError(
+                f"Goal-2 residual probe requires exactly one completed {arm} lineage; found {len(runs)}"
+            )
+        record = _run_record(runs[0])
+        if (
+            record.get("status") != "completed"
+            or float(record.get("completed_epochs") or 0.0) != MAX_G1_EPOCHS
+            or int(record.get("completed_updates") or 0) != 3800
+            or int(record.get("steps_per_epoch") or 0) != 38
+        ):
+            raise CampaignError(
+                f"Goal-2 residual probe requires exactly 100 completed epochs for {arm}"
+            )
+        completed[arm] = runs[0].resolve(strict=True)
+    return completed
+
+
+def _goal2_residual_approval_binding(root: Path) -> dict[str, Any]:
+    root = root.resolve(strict=True)
+    snapshot_src = _verify_goal1_source_snapshot(root, _read_json(root / "manifests/campaign.json"))
+    snapshot_root = snapshot_src.parent
+    snapshot_manifest_path = snapshot_root / "snapshot_manifest.json"
+    snapshot_manifest = _read_json(snapshot_manifest_path)
+    files: dict[str, dict[str, str]] = {}
+    for key, (relative_path, expected_sha256) in GOAL2_RESIDUAL_APPROVAL_FILES.items():
+        path = root / relative_path
+        if not path.is_file() or _sha256(path) != expected_sha256:
+            raise CampaignError(f"Goal-2 residual approval file changed or is missing: {path}")
+        files[key] = {"path": relative_path, "sha256": expected_sha256}
+
+    binding = _read_json(root / GOAL2_RESIDUAL_APPROVAL_FILES["binding"][0])
+    plan = _read_json(root / GOAL2_RESIDUAL_APPROVAL_FILES["plan"][0])
+    script_path = root / GOAL2_RESIDUAL_APPROVAL_FILES["script"][0]
+    plan_path = root / GOAL2_RESIDUAL_APPROVAL_FILES["plan"][0]
+    if (
+        binding.get("schema_version") != 1
+        or binding.get("status") != "frozen_hash_binding"
+        or binding.get("script_path") != str(script_path)
+        or binding.get("script_sha256") != GOAL2_RESIDUAL_APPROVAL_FILES["script"][1]
+        or binding.get("plan_path") != str(plan_path)
+        or binding.get("plan_sha256") != GOAL2_RESIDUAL_APPROVAL_FILES["plan"][1]
+        or binding.get("result_path") != str(root / GOAL2_RESIDUAL_RESULT)
+        or binding.get("result_schema") != GOAL2_RESIDUAL_RESULT_SCHEMA
+        or binding.get("source_snapshot_manifest_sha256") != GOAL1_SNAPSHOT_MANIFEST_SHA256
+        or binding.get("code_dependencies_sha256") != snapshot_manifest.get("files_sha256")
+    ):
+        raise CampaignError("Goal-2 residual probe binding does not match its frozen code/plan contract")
+    if (
+        plan.get("schema_version") != 1
+        or plan.get("status") != "predeclared_protocol_no_results"
+        or plan.get("campaign_id") != root.name
+        or plan.get("campaign_root") != str(root)
+    ):
+        raise CampaignError("Goal-2 residual probe plan identity or status changed")
+
+    closeout = root / GOAL1_COMPLETION_ASSESSMENT
+    clarification = root / GOAL2_CONSTRAINT_CLARIFICATION
+    if (
+        _sha256(closeout) != GOAL1_COMPLETION_ASSESSMENT_SHA256
+        or _sha256(clarification) != GOAL2_CONSTRAINT_CLARIFICATION_SHA256
+    ):
+        raise CampaignError("Goal-2 residual closeout or endpoint-constraint receipt changed")
+    closeout_data = _read_json(closeout)
+    clarification_data = _read_json(clarification)
+    if (
+        closeout_data.get("status") != "goal1_complete_assessed"
+        or set(closeout_data.get("goal1_arms_completed_100", ())) != {"G1-C", "G1-S", "G1-R"}
+        or closeout_data.get("source_142_files_unchanged") is not True
+        or closeout_data.get("test_evaluation_or_selection") is not False
+        or clarification_data.get("endpoint_relative_increase") != 0.05
+        or clarification_data.get("endpoint_absolute_allowance") != 0.0
+        or clarification_data.get("A_bound") != "fixed full SOURCE TRAIN mean without slack"
+        or clarification_data.get("B_bound") != "fixed full SOURCE TRAIN mean without slack"
+    ):
+        raise CampaignError("Goal-2 residual closeout or +5% endpoint contract is not verified")
+    dependencies = binding.get("input_dependencies", {})
+    if (
+        dependencies.get("goal1_closeout_sha256") != GOAL1_COMPLETION_ASSESSMENT_SHA256
+        or dependencies.get("goal2_constraint_clarification_sha256")
+        != GOAL2_CONSTRAINT_CLARIFICATION_SHA256
+    ):
+        raise CampaignError("Goal-2 residual binding does not include the frozen Goal-1 and endpoint receipts")
+    return {
+        "schema_version": 1,
+        "files": files,
+        "source_snapshot_manifest_sha256": GOAL1_SNAPSHOT_MANIFEST_SHA256,
+        "goal1_closeout_sha256": GOAL1_COMPLETION_ASSESSMENT_SHA256,
+        "goal2_constraint_clarification_sha256": GOAL2_CONSTRAINT_CLARIFICATION_SHA256,
+    }
+
+
+def _store_goal2_residual_approval_binding(
+    root: Path, binding: Mapping[str, Any]
+) -> dict[str, Any]:
+    root = root.resolve(strict=True)
+    admission = _acquire_admission_lock(root)
+    try:
+        manifest = _campaign_manifest(root)
+        current = manifest.get("goal2_residual_probe_approval_binding")
+        if current is not None and current != binding:
+            raise CampaignError("Goal-2 residual probe approval binding changed after recording")
+        if current is None:
+            manifest["goal2_residual_probe_approval_binding"] = dict(binding)
+            _atomic_json(root / "manifests/campaign.json", manifest)
+        return manifest
+    finally:
+        _release_campaign_lock(admission)
+
+
+def _goal2_offline_diagnostic_seconds(
+    root: Path, current: Mapping[str, Any]
+) -> float:
+    completed = _ledger_action_seconds(root, GOAL2_RESIDUAL_ACTION)
+    active = sum(
+        float(record.get("elapsed_seconds", 0.0))
+        for record in current.get("active_processes", [])
+        if record.get("action") == GOAL2_RESIDUAL_ACTION
+    )
+    return OFFLINE_GPU_DIAGNOSTIC_SECONDS + completed + active
+
+
+def goal2_residual_probe(
+    root: Path,
+    run_dir: Path,
+    *,
+    max_seconds: float = GOAL2_RESIDUAL_MAX_SECONDS,
+    execute: bool = False,
+) -> str:
+    manifest = _campaign_manifest(root)
+    campaign_root = Path(manifest["root"]).resolve(strict=True)
+    if not manifest.get("gates", {}).get("goal1_authorized"):
+        raise CampaignError("Goal-2 residual diagnostics require the authorized Goal-1 campaign")
+    if isinstance(max_seconds, bool) or not 0 < max_seconds <= GOAL2_RESIDUAL_MAX_SECONDS:
+        raise CampaignError("Goal-2 residual max-seconds must be positive and at most 600")
+    g1_runs = _goal1_residual_runs_complete(campaign_root)
+    run_dir = run_dir.resolve(strict=True)
+    if run_dir != g1_runs["G1-C"]:
+        raise CampaignError("Goal-2 residual outer binding must be the unique completed G1-C run")
+    plan = _read_json(campaign_root / GOAL2_RESIDUAL_APPROVAL_FILES["plan"][0])
+    anchor = plan.get("admission_anchor", {})
+    if anchor.get("run_path") != str(run_dir):
+        raise CampaignError("Goal-2 residual plan is frozen to a different G1-C admission anchor")
+    binding = _goal2_residual_approval_binding(campaign_root)
+    result_path = campaign_root / GOAL2_RESIDUAL_RESULT
+    if result_path.exists():
+        raise CampaignError("the one predeclared Goal-2 residual probe already has a result")
+
+    command = [
+        str(PYTHON),
+        str(REPO_ROOT / "scripts/posttraining/fast_lagrangian_evaluate.py"),
+        "--campaign-root",
+        str(campaign_root),
+        "--run",
+        str(run_dir),
+        "--goal2-residual-probe",
+        "--device",
+        "cuda:0",
+    ]
+    command = _with_short_multiprocessing_tmp(command)
+    rendered = _rendered_command(campaign_root, command, 0, source_stage="goal2")
+    if not execute:
+        return rendered
+
+    current = status(campaign_root)
+    if current.get("active_processes"):
+        raise CampaignError("Goal-2 residual probe requires all campaign GPU processes to be idle")
+    diagnostic_spent = _goal2_offline_diagnostic_seconds(campaign_root, current)
+    diagnostic_remaining = MAX_OFFLINE_DIAGNOSTIC_SECONDS - diagnostic_spent
+    if diagnostic_remaining <= 0:
+        raise CampaignError("the 45-minute offline GPU diagnostic cap is exhausted")
+    evaluation_remaining = (
+        _evaluation_reserve_hours(manifest) * 3600
+        - _evaluation_spent_seconds(campaign_root, current)
+    )
+    if evaluation_remaining <= 0:
+        raise CampaignError("the protected evaluation reserve is exhausted")
+    binding_path = campaign_root / GOAL2_RESIDUAL_APPROVAL_FILES["binding"][0]
+    _store_goal2_residual_approval_binding(campaign_root, binding)
+    max_seconds = min(float(max_seconds), diagnostic_remaining)
+    _execute_runner(
+        manifest,
+        "G1-C",
+        GOAL2_RESIDUAL_ACTION,
+        command,
+        reserve_gpu_seconds=_goal1_remaining_hours(manifest, current_status=current) * 3600,
+        max_seconds=max_seconds,
+        evaluation_reserve_seconds=_evaluation_reserve_hours(manifest) * 3600,
+        run=run_dir,
+        gpu=0,
+        source_stage="goal2",
+    )
+    if not result_path.is_file():
+        raise CampaignError("Goal-2 residual runner exited without its declared JSON artifact")
+    result = _read_json(result_path)
+    if (
+        result.get("status") != "complete"
+        or result.get("result_schema") != GOAL2_RESIDUAL_RESULT_SCHEMA
+        or result.get("plan_sha256") != GOAL2_RESIDUAL_APPROVAL_FILES["plan"][1]
+        or result.get("script_sha256") != GOAL2_RESIDUAL_APPROVAL_FILES["script"][1]
+    ):
+        raise CampaignError("Goal-2 residual JSON does not match the approved result schema and hashes")
+    # Retain the plan binding path explicitly for later gate evidence audits.
+    if not binding_path.is_file():
+        raise CampaignError("Goal-2 residual plan binding disappeared during execution")
+    return f"completed the bounded Goal-2 residual diagnostic; inspect {result_path}"
 
 
 def _evaluation_spent_seconds(root: Path, current: Mapping[str, Any]) -> float:
@@ -1536,9 +1954,15 @@ def _execute_runner(
     evaluation_reserve_seconds: float | None = None,
     run: Path | None = None,
     gpu: int = 1,
+    source_stage: str | None = None,
 ) -> None:
     root = Path(manifest["root"]).resolve()
     gpu = _gpu_index(gpu)
+    source_binding_digest = (
+        _stage_source_digest(root, manifest, source_stage)
+        if source_stage is not None
+        else None
+    )
     active_path = _gpu_active_path(root, gpu)
     if max_seconds is not None and (max_seconds <= 0 or not float(max_seconds) < float("inf")):
         raise CampaignError("runner max_seconds must be a finite positive number")
@@ -1590,7 +2014,7 @@ def _execute_runner(
         if watchdog_seconds <= 0:
             raise CampaignError("the allocated watchdog has no remaining execution time")
 
-        env = _environment(root, gpu)
+        env = _environment(root, gpu, source_stage=source_stage)
         _prepare_keops_build_folder(root, env, gpu)
         gpu_snapshot = _ensure_gpu_idle(gpu)
         started = time.monotonic()
@@ -1609,6 +2033,8 @@ def _execute_runner(
                     "run": str(selected_run) if selected_run is not None else None,
                     "gpu_index": gpu,
                     "gpu_uuid": gpu_snapshot["uuid"],
+                    "source_stage": source_stage,
+                    "source_binding_sha256": source_binding_digest,
                     "started_utc": started_utc,
                     "started_monotonic_ns": started_monotonic_ns,
                     "watchdog_seconds": watchdog_seconds,
@@ -1697,6 +2123,8 @@ def _execute_runner(
                         "coordinator_pid": os.getpid(),
                         "gpu_index": gpu,
                         "gpu_uuid": gpu_snapshot["uuid"],
+                        "source_stage": source_stage,
+                        "source_binding_sha256": source_binding_digest,
                         "return_code": process.poll(),
                         "budget_interrupt": budget_interrupt,
                         "runtime_interrupt": runtime_interrupt,
@@ -1796,7 +2224,9 @@ def launch(root: Path, arm: str, *, gpu: int = 1, execute: bool = False) -> str:
         _g1_gate(manifest, arm)
     _check_budget(manifest, arm)
     command = _command(arm, info["config"])
-    rendered = _rendered_command(Path(manifest["root"]), command, gpu)
+    rendered = _rendered_command(
+        Path(manifest["root"]), command, gpu, source_stage="goal1"
+    )
     if not execute:
         return rendered
     _execute_runner(
@@ -1806,6 +2236,7 @@ def launch(root: Path, arm: str, *, gpu: int = 1, execute: bool = False) -> str:
         command,
         reserve_gpu_seconds=_reserved_gpu_seconds(manifest, arm),
         gpu=gpu,
+        source_stage="goal1",
     )
     return f"completed {arm}; inspect {status(root)['runs'].get(arm)}"
 
@@ -2001,7 +2432,9 @@ def resume(
         )
     _check_gpu_reserve(manifest, arm)
     command = _command(arm, info["config"], run_dir)
-    rendered = _rendered_command(Path(manifest["root"]), command, gpu)
+    rendered = _rendered_command(
+        Path(manifest["root"]), command, gpu, source_stage="goal1"
+    )
     if not execute:
         return rendered
     _execute_runner(
@@ -2012,6 +2445,7 @@ def resume(
         reserve_gpu_seconds=_reserved_gpu_seconds(manifest, arm),
         run=run_dir,
         gpu=gpu,
+        source_stage="goal1",
     )
     return f"resumed {arm} in {run_dir}"
 
@@ -2067,7 +2501,9 @@ def evaluate(
         "cuda:0",
     ]
     command = _with_short_multiprocessing_tmp(command)
-    rendered = _rendered_command(Path(manifest["root"]), command, gpu)
+    rendered = _rendered_command(
+        Path(manifest["root"]), command, gpu, source_stage="goal1"
+    )
     if not execute:
         return rendered
     current = status(Path(manifest["root"]))
@@ -2099,6 +2535,7 @@ def evaluate(
         evaluation_reserve_seconds=reserve_hours * 3600,
         run=run_dir,
         gpu=gpu,
+        source_stage="goal1",
     )
     return f"evaluated {arm} checkpoint {checkpoint} with full A/B/T on the evenly spaced validation panel"
 
@@ -2142,7 +2579,7 @@ def maps(
         "cuda:0",
     ]
     command = _with_short_multiprocessing_tmp(command)
-    rendered = _rendered_command(campaign_root, command, 0)
+    rendered = _rendered_command(campaign_root, command, 0, source_stage="goal1")
     if not execute:
         return rendered
 
@@ -2184,6 +2621,7 @@ def maps(
         evaluation_reserve_seconds=reserve_hours * 3600,
         run=run_dir,
         gpu=0,
+        source_stage="goal1",
     )
     return "extracted predeclared native-grid validation maps for the completed Goal-1 arms"
 
@@ -2358,6 +2796,10 @@ def build_parser() -> argparse.ArgumentParser:
     gate = subparsers.add_parser("authorize")
     gate.add_argument("stage", choices=("timing", "goal1"))
     gate.add_argument("--evidence", type=Path, required=True)
+    source = subparsers.add_parser("bind-source")
+    source.add_argument("stage", choices=("goal2",))
+    source.add_argument("--evidence", type=Path, required=True)
+    source.add_argument("--execute", action="store_true", help="apply this immutable source pin")
     launch_parser = subparsers.add_parser("launch")
     launch_parser.add_argument("arm")
     launch_parser.add_argument(
@@ -2384,6 +2826,10 @@ def build_parser() -> argparse.ArgumentParser:
     maps_parser.add_argument("--run", type=Path, required=True, help="the campaign-owned G1-C run")
     maps_parser.add_argument("--max-seconds", type=float, default=NATIVE_MAP_MAX_SECONDS)
     maps_parser.add_argument("--execute", action="store_true")
+    residual_parser = subparsers.add_parser("residual")
+    residual_parser.add_argument("--run", type=Path, required=True, help="the completed campaign-owned G1-C anchor")
+    residual_parser.add_argument("--max-seconds", type=float, default=GOAL2_RESIDUAL_MAX_SECONDS)
+    residual_parser.add_argument("--execute", action="store_true")
     return parser
 
 
@@ -2396,6 +2842,8 @@ def main(argv: list[str] | None = None) -> int:
             result = status(args.root)
         elif args.command == "authorize":
             result = authorize(args.root, args.stage, args.evidence)
+        elif args.command == "bind-source":
+            result = bind_goal2_source(args.root, args.evidence, apply=args.execute)
         elif args.command == "launch":
             result = launch(args.root, args.arm, gpu=args.gpu, execute=args.execute)
         elif args.command == "stop":
@@ -2415,6 +2863,13 @@ def main(argv: list[str] | None = None) -> int:
             )
         elif args.command == "maps":
             result = maps(
+                args.root,
+                args.run,
+                max_seconds=args.max_seconds,
+                execute=args.execute,
+            )
+        elif args.command == "residual":
+            result = goal2_residual_probe(
                 args.root,
                 args.run,
                 max_seconds=args.max_seconds,
