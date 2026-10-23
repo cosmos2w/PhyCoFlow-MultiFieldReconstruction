@@ -613,7 +613,6 @@ def _validate_evaluation(
             or set(excluded).intersection(indices)
         ):
             raise CampaignAnalysisError("disjoint validation panel is not separate from the uniform panel")
-        return panel_kind, epoch, None
 
     raw: dict[str, Any] = {
         "families": {},
@@ -784,7 +783,7 @@ def _read_history_artifacts(
         record = {
             "path": str(path),
             "sha256": _sha256(path),
-            "status": "valid_metrics" if raw is not None else "supplementary_disjoint_panel",
+            "status": "supplementary_disjoint_panel" if panel_kind == "disjoint" else "valid_metrics",
             "panel_kind": panel_kind,
             "epoch": epoch,
             "checkpoint": payload.get("checkpoint"),

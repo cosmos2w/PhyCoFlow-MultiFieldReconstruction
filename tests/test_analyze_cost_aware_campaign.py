@@ -104,6 +104,74 @@ def _child_metrics(*, child_factor: float = 0.9) -> dict:
     }
 
 
+def _disjoint_portable_evaluation(run_dir: Path, *, child_factor: float = 0.7) -> dict:
+    validation_indices = list(range(128, 256))
+    sample_ids = [f"disjoint-sample-{index}" for index in validation_indices]
+    groups = []
+    for group_index in range(4):
+        start = group_index * 32
+        group_indices = validation_indices[start : start + 32]
+        group_ids = sample_ids[start : start + 32]
+        source = _metric_group(group_index, source=True)
+        child = _metric_group(group_index, source=False, child_factor=child_factor)
+        source["sample_ids"] = group_ids
+        child["sample_ids"] = group_ids
+        groups.append(
+            {
+                "group": group_index,
+                "sample_ids": group_ids,
+                "validation_indices": group_indices,
+                "source": source,
+                "child": child,
+            }
+        )
+    return {
+        "schema": "phycoflow_full_abt_validation.v1",
+        "run": str(run_dir),
+        "config_sha256": CONFIG_SHA,
+        "source": {"run": SOURCE_RUN, "hashes": {"checkpoint": SOURCE_SHA}},
+        "dataset": {
+            "path": DATA_PATH,
+            "split": "validation",
+            "fingerprint": DATA_SHA,
+            "field_names": FIELDS,
+        },
+        "checkpoint": "last",
+        "checkpoint_path": str(run_dir / "checkpoints" / "last.pt"),
+        "checkpoint_sha256": "e" * 64,
+        "checkpoint_training_epoch": 100.0,
+        "evaluated_at_utc": FINISH,
+        "inference_contract": {
+            "weight_identity": "raw_live_model_weights",
+            "model_ema_eval": False,
+            "rollout_steps": 2,
+            "rollout_solver": "euler",
+        },
+        "selection": {
+            "split": "validation",
+            "panel": {
+                "kind": "disjoint",
+                "algorithm": "chronological_linspace_after_uniform_exclusion_v1",
+                "reference_count": 128,
+                "excluded_validation_indices": list(range(128)),
+            },
+            "validation_indices": validation_indices,
+            "sample_ids": sample_ids,
+            "group_size": 32,
+            "group_count": 4,
+            "comparison_query_count": 4096,
+            "query_indices_shape": [128, 4096],
+            "groups": [group["validation_indices"] for group in groups],
+        },
+        "evaluation": {
+            "panel_kind": "disjoint",
+            "samples": 128,
+            "topology_scalar_filtrations": 6,
+        },
+        "groups": groups,
+    }
+
+
 def _write_json(path: Path, value: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value), encoding="utf-8")
@@ -357,6 +425,35 @@ def test_pending_arms_are_preserved_without_promoting_portable_panels(tmp_path):
     assert report["tasks"]["G"]["arms"]["heuristic"]["status"] == "pending_run"
 
 
+def test_disjoint_portable_metrics_remain_supplementary_and_keep_four_groups(tmp_path):
+    root = _fixture_root(tmp_path)
+    run_dir = root / "runs" / "G" / "dense" / "child-001"
+    artifact_path = root / "analysis" / "G" / "dense" / "child-001" / "portable" / "disjoint.json"
+    _write_json(artifact_path, _disjoint_portable_evaluation(run_dir))
+
+    report, _ = ANALYZER.build_campaign_quality_history(root)
+    run = report["tasks"]["G"]["arms"]["dense"]["runs"][0]
+
+    assert len(run["uniform_evaluations"]) == 10
+    assert {row["panel_kind"] for row in run["uniform_evaluations"]} == {"uniform"}
+    assert [row["epoch"] for row in run["uniform_evaluations"]] == list(range(10, 101, 10))
+    assert run["quality_assessment"]["confirmation"]["confirmation_epoch"] == 70
+
+    assert len(run["supplementary_evaluations"]) == 1
+    supplementary = run["supplementary_evaluations"][0]
+    assert supplementary["panel_kind"] == "disjoint"
+    assert supplementary["status"] == "supplementary_disjoint_panel"
+    assert supplementary["epoch"] == 100
+    assert supplementary["raw"]["coherence_sum"]["count"] == 128
+    assert len(supplementary["raw"]["b_groups"]) == 4
+    assert [group["snapshot_count"] for group in supplementary["raw"]["b_groups"]] == [32] * 4
+    assert supplementary["raw"]["endpoint_fields"]["u"]["count"] == 128 * 4096
+    assert supplementary["raw"]["endpoint_aggregate"]["count"] == 2 * 128 * 4096
+    assert supplementary["ratios"]["coherence_sum"] == pytest.approx(0.7)
+    assert set(supplementary["ratios"]["endpoint_fields"]) == set(FIELDS)
+    assert run["uniform_evaluations"][-1]["ratios"]["coherence_sum"] == pytest.approx(0.9)
+
+
 def test_live_launch_binds_pathless_ledger_to_its_new_run_manifest(tmp_path):
     root = _fixture_root(tmp_path)
     run_dir = root / "runs" / "G" / "dense" / "child-001"
@@ -454,7 +551,7 @@ def test_pre_admission_profile_bound_is_separate_from_measured_time(tmp_path):
     assert estimate == 1
     assert records[0]["conservative_command_seconds"] == 1
     assert records[0]["basis"] == (
-        "pre-admission command upper bound; zero GPU time and optimizer exposures"
+        "recorded conservative pre-admission command estimate; zero GPU time and optimizer exposures; not a proven timing bound"
     )
     assert ANALYZER._allocated_profile_seconds("strategy", measured + estimate) == pytest.approx(
         323.05613095900117
