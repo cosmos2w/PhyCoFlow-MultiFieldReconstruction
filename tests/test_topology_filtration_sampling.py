@@ -40,6 +40,31 @@ def run11_objective():
     return config
 
 
+def generalized_objective():
+    config = persistence_config()
+    config["fields"] = ["b", "a", "c"]
+    config["filtration"] = {
+        "directions": ["superlevel", "sublevel"],
+        "dimensions": [0, 1],
+    }
+    config["components"] = {
+        "self": {"enabled": True, "weight": 2.3, "fields": ["speed", "c"]},
+        "mutual": {
+            "enabled": True,
+            "weight": 0.47,
+            "groups": [["a", "b"], ["b", "c"]],
+            "lines": 2,
+            "seed": 197,
+        },
+    }
+    config["persistence"] = {
+        "projections": 7,
+        "essential_weight": 0.1,
+        "descriptors": {"speed": {"provider": "vector_magnitude", "fields": ["a", "b"]}},
+    }
+    return config
+
+
 def tensors():
     generator = torch.Generator().manual_seed(8241)
     reference = torch.randn((2, 2, 7, 9), generator=generator, dtype=torch.float64)
@@ -101,6 +126,116 @@ def test_full_helper_matches_legacy_value_and_input_gradient():
     torch.testing.assert_close(gradient, oracle_gradient, rtol=1e-10, atol=1e-11)
 
 
+def test_polarity_sampling_generalizes_and_matches_reordered_subset_oracle():
+    objective = PersistenceTopologyObjective(generalized_objective(), ("a", "b", "c"))
+    assert objective.fields == ("b", "a", "c", "speed")
+    assert objective.self_fields == ("speed", "c")
+    assert objective.self_ids == (3, 2)
+    generator = torch.Generator().manual_seed(42017)
+    reference = torch.randn((2, 3, 7, 8), generator=generator, dtype=torch.float64)
+    prediction = reference + 0.13 * torch.randn(
+        reference.shape, generator=generator, dtype=torch.float64
+    )
+    oracle_value, oracle_gradient = value_and_input_gradient(objective, prediction, reference)
+
+    sampler = TopologyFiltrationSampler(objective, strategy="polarity", seed=91)
+    assert sampler.PROVIDER_ID == "topology.complete_filtration.v1"
+    assert len(sampler.units) == 12
+    assert sum(unit.component == "self" for unit in sampler.units) == 4
+    assert sum(unit.component == "mutual" for unit in sampler.units) == 8
+    for unit in sampler.units:
+        if unit.component == "self":
+            assert (
+                unit.descriptor_index == objective.self_ids[objective.self_fields.index(unit.field)]
+            )
+            assert unit.coefficient == pytest.approx(objective.weights["self.persistence"] / 4)
+        else:
+            assert unit.descriptor_index is None
+            assert unit.coefficient == pytest.approx(
+                objective.weights["mutual.persistence"] * unit.line_weight / 8
+            )
+
+    support = sampler.support_summary()
+    assert support.choice_probabilities == (0.5, 0.5)
+    assert support.inclusion_probabilities == (0.5,) * 12
+    assert len(support.choices) == 2
+    for choice in support.choices:
+        selected = [sampler.units[index] for index in choice.indices]
+        assert len(selected) == 6
+        assert len({unit.direction for unit in selected}) == 1
+        assert choice.inclusion_probabilities == (0.5,) * 6
+    for left, left_unit in enumerate(sampler.units):
+        for right, right_unit in enumerate(sampler.units):
+            expected_joint = 0.5 if left_unit.direction == right_unit.direction else 0.0
+            assert support.joint_inclusion_probabilities[left][right] == expected_joint
+
+    values = []
+    gradients = []
+    reference_cache = {}
+    for choice in support.choices:
+        generated = prediction.detach().clone().requires_grad_()
+        estimate = sampler.evaluate(
+            generated, reference, choice=choice, reference_cache=reference_cache
+        )
+        values.append(estimate.scalar_loss.detach())
+        gradients.append(torch.autograd.grad(estimate.scalar_loss, generated)[0].detach())
+    probabilities = torch.tensor(support.choice_probabilities, dtype=prediction.dtype)
+    values = torch.stack(values)
+    gradients = torch.stack(gradients)
+    torch.testing.assert_close((values * probabilities).sum(), oracle_value, rtol=1e-10, atol=1e-11)
+    torch.testing.assert_close(
+        (gradients * probabilities[:, None, None, None, None]).sum(0),
+        oracle_gradient,
+        rtol=1e-10,
+        atol=1e-11,
+    )
+    support_variance = (probabilities * (values - oracle_value).square()).sum()
+    assert support_variance > 0
+
+
+def test_support_summary_preserves_s2_correlations_and_nested_probability():
+    objective = PersistenceTopologyObjective(run11_objective(), ("a", "b"))
+    sampler = TopologyFiltrationSampler(objective, strategy="s2", seed=17)
+    support = sampler.support_summary()
+    assert support.choice_probabilities == (0.125,) * 8
+    self_indices = [unit.index for unit in sampler.units if unit.component == "self"]
+    mutual_indices = [unit.index for unit in sampler.units if unit.component == "mutual"]
+    assert all(support.inclusion_probabilities[index] == 0.25 for index in self_indices)
+    assert all(support.inclusion_probabilities[index] == 0.5 for index in mutual_indices)
+    assert support.joint_inclusion_probabilities[self_indices[0]][self_indices[1]] == 0.0
+    assert support.joint_inclusion_probabilities[mutual_indices[0]][mutual_indices[1]] == 0.0
+    assert support.joint_inclusion_probabilities[self_indices[0]][mutual_indices[0]] == 0.125
+
+    # Nest the polarity draw under a whole-family Bernoulli action with p=1/2.
+    # The exact support includes the no-family point and both conditional strata.
+    polarity = TopologyFiltrationSampler(objective, strategy="polarity", seed=19)
+    nested = [((), 0.5)]
+    polarity_support = polarity.support_summary()
+    nested.extend(
+        (choice.indices, 0.5 * mass)
+        for choice, mass in zip(polarity_support.choices, polarity_support.choice_probabilities)
+    )
+    for unit in polarity.units:
+        marginal = sum(mass for indices, mass in nested if unit.index in indices)
+        assert marginal == 0.25
+        assert 1.0 / marginal == 4.0
+    first_direction = polarity.units[0].direction
+    same_direction = [unit.index for unit in polarity.units if unit.direction == first_direction]
+    other_direction = [unit.index for unit in polarity.units if unit.direction != first_direction]
+    same_pair_joint = sum(
+        mass
+        for indices, mass in nested
+        if same_direction[0] in indices and same_direction[1] in indices
+    )
+    cross_pair_joint = sum(
+        mass
+        for indices, mass in nested
+        if same_direction[0] in indices and other_direction[0] in indices
+    )
+    assert same_pair_joint == 0.25
+    assert cross_pair_joint == 0.0
+
+
 def test_sampler_rng_is_private_reproducible_and_resumable():
     objective = PersistenceTopologyObjective(run11_objective(), ("a", "b"))
     sampler = TopologyFiltrationSampler(objective, strategy="s2", seed=510)
@@ -133,6 +268,48 @@ def test_sampler_rng_is_private_reproducible_and_resumable():
     )
     with pytest.raises(ValueError, match="objective changed"):
         TopologyFiltrationSampler(incompatible, strategy="s2").load_state_dict(saved)
+
+
+def test_legacy_v1_state_replays_for_identity_mapping_and_legacy_strategy():
+    objective = PersistenceTopologyObjective(run11_objective(), ("a", "b"))
+    sampler = TopologyFiltrationSampler(objective, strategy="s2", seed=510)
+    assert objective.self_ids == (0, 1)
+    sampler.draw()
+    legacy_state = sampler.state_dict()
+    assert legacy_state["version"] == TopologyFiltrationSampler.STATE_VERSION == 2
+    legacy_state["version"] = 1
+    expected_next = sampler.draw()
+
+    resumed = TopologyFiltrationSampler(objective, strategy="s2", seed=999)
+    resumed.load_state_dict(legacy_state)
+    assert resumed.draw() == expected_next
+
+
+@pytest.mark.parametrize("self_fields", [("b", "a"), ("b",)])
+def test_legacy_v1_state_rejects_reordered_or_subset_descriptor_mapping(self_fields):
+    config = run11_objective()
+    config["components"]["self"]["fields"] = list(self_fields)
+    objective = PersistenceTopologyObjective(config, ("a", "b"))
+    assert tuple(objective.self_ids) != tuple(range(len(objective.self_fields)))
+    sampler = TopologyFiltrationSampler(objective, strategy="full", seed=31)
+    legacy_state = sampler.state_dict()
+    legacy_state["version"] = 1
+
+    resumed = TopologyFiltrationSampler(objective, strategy="full", seed=999)
+    with pytest.raises(ValueError, match="legacy v1 sampler state requires identity descriptor"):
+        resumed.load_state_dict(legacy_state)
+
+
+def test_legacy_v1_state_rejects_new_polarity_strategy_even_for_identity_mapping():
+    objective = PersistenceTopologyObjective(run11_objective(), ("a", "b"))
+    assert objective.self_ids == (0, 1)
+    sampler = TopologyFiltrationSampler(objective, strategy="polarity", seed=11)
+    legacy_state = sampler.state_dict()
+    legacy_state["version"] = 1
+
+    resumed = TopologyFiltrationSampler(objective, strategy="polarity", seed=999)
+    with pytest.raises(ValueError, match="legacy v1 sampler state requires identity descriptor"):
+        resumed.load_state_dict(legacy_state)
 
 
 def test_sampled_family_adapter_preserves_full_family_result():

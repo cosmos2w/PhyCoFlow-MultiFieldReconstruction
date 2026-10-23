@@ -13,6 +13,31 @@ import torch
 from ..contracts import FieldSample, ObservationBatch
 from .sensor_protocols import SensorProtocol, build_observation_batch
 
+_METADATA_IDENTITIES: dict[str, tuple[str, tuple[int, int, int, int]]] = {}
+
+
+def register_dataset_identity(path, fingerprint, expected_stat):
+    """Opt into an attested SOURCE identity without reading dataset boundary bytes.
+
+    A split-locked operator must supply the retained SOURCE fingerprint and a
+    frozen (device, inode, size, mtime_ns) stat receipt. This is metadata-bound
+    reuse of a historical fingerprint, not a fresh content checksum. Ordinary
+    callers retain the existing fingerprint implementation.
+    """
+    path = Path(path).resolve(strict=True)
+    if not isinstance(fingerprint, str) or len(fingerprint) != 64:
+        raise ValueError("retained dataset fingerprint must be a SHA256 identity")
+    int(fingerprint, 16)
+    expected = tuple(int(value) for value in expected_stat)
+    stat = path.stat()
+    actual = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+    if expected != actual:
+        raise ValueError("metadata-bound dataset identity changed")
+    identity = (fingerprint, expected)
+    if str(path) in _METADATA_IDENTITIES and _METADATA_IDENTITIES[str(path)] != identity:
+        raise ValueError("conflicting metadata-bound dataset identity")
+    _METADATA_IDENTITIES[str(path)] = identity
+
 
 @dataclass(frozen=True)
 class SensorManifest:
@@ -54,6 +79,11 @@ class SensorManifest:
 def dataset_fingerprint(path: str | Path) -> str:
     path = Path(path).resolve()
     stat = path.stat()
+    if str(path) in _METADATA_IDENTITIES:
+        fingerprint, expected = _METADATA_IDENTITIES[str(path)]
+        if (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns) != expected:
+            raise ValueError("metadata-bound dataset identity changed")
+        return fingerprint
     # Keep the identity portable across equivalent relinks/copies. This is a
     # fast structural fingerprint (size plus file boundary bytes), not a claim
     # of a full multi-gigabyte content checksum; catalog READMEs record full

@@ -201,9 +201,16 @@ def _validate_common_sections(config: Mapping[str, Any]) -> None:
             "preview",
             "sample_selection",
             "native_topology",
+            "group_size",
         },
         "evaluation",
     )
+    group_size = config.get("evaluation", {}).get("group_size")
+    if group_size is not None and (
+        isinstance(group_size, bool) or not isinstance(group_size, int) or group_size < 1
+        or int(config["evaluation"].get("max_samples", 1)) % group_size
+    ):
+        raise ValueError("evaluation.group_size must exactly divide max_samples")
     if config.get("evaluation", {}).get("sample_selection", "first") not in {"first", "uniform"}:
         raise ValueError("evaluation.sample_selection must be first or uniform")
     for key in ("max_samples", "query_points", "generation_steps"):
@@ -1158,6 +1165,7 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
             "grad_clip",
             "multitask",
             "fast_lagrangian",
+            "execution_strategy",
             "lpc_ordered",
             "gradient_balance",
             "config_missing_behavior",
@@ -1179,6 +1187,9 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
     from ..training.fast_lagrangian import validate_fast_lagrangian
 
     validate_fast_lagrangian(config)
+    from ..training.execution_strategy.runtime import validate_execution_strategy
+
+    validate_execution_strategy(config)
     from ..training.lpc_ordered import validate_lpc_ordered
 
     validate_lpc_ordered(config)
@@ -1416,6 +1427,7 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
             "preview",
             "sample_selection",
             "native_topology",
+            "group_size",
         },
         "evaluation",
     )

@@ -50,6 +50,15 @@ def test_supported_contract_rejects_unapproved_inference_changes(path, value, me
         PORTABLE._validate_supported_config(config, manifest)
 
 
+def test_native_deeponet_keeps_its_no_ema_model_contract():
+    config, manifest = _supported_config()
+    config["model"] = {"name": "deeponet", "width": 256, "basis_dim": 128}
+    PORTABLE._validate_supported_config(config, manifest)
+    config["model"] = {"name": "gl_rbf_cq"}
+    with pytest.raises(PORTABLE.PortableEvaluationError, match="raw live weights"):
+        PORTABLE._validate_supported_config(config, manifest)
+
+
 @pytest.mark.parametrize(
     ("update", "message"),
     [
@@ -62,6 +71,59 @@ def test_supported_contract_requires_fixed_shared_query_manifest(update, message
     config["coherence"]["compute_budget"].update(update)
     with pytest.raises(PORTABLE.PortableEvaluationError, match=message):
         PORTABLE._validate_supported_config(config, manifest)
+
+
+def test_uniform_validation_panel_remains_the_existing_frozen_selection():
+    shared = PORTABLE._helpers()
+    expected = shared._uniform_validation_indices(512, 128)
+    selected, excluded = PORTABLE._select_validation_panel(shared, 512, 128, "uniform")
+    assert selected == expected
+    assert excluded == []
+    assert PORTABLE.PANEL_ALGORITHMS["uniform"] == "chronological_linspace_v1"
+
+
+def test_disjoint_validation_panel_is_chronological_and_excludes_uniform_panel():
+    shared = PORTABLE._helpers()
+    uniform = shared._uniform_validation_indices(512, 128)
+    selected, excluded = PORTABLE._select_validation_panel(shared, 512, 128, "disjoint")
+    candidates = [index for index in range(512) if index not in set(uniform)]
+    expected_positions = np.linspace(0, len(candidates) - 1, 128).round().astype(np.int64)
+    assert selected == [candidates[index] for index in expected_positions]
+    assert excluded == uniform
+    assert len(selected) == 128
+    assert selected == sorted(selected)
+    assert set(selected).isdisjoint(excluded)
+    assert len(PORTABLE._helpers()._group_slices(len(selected))) == 4
+    assert PORTABLE.PANEL_ALGORITHMS["disjoint"] == (
+        "chronological_linspace_after_uniform_exclusion_v1"
+    )
+
+
+def test_disjoint_panel_requires_a_full_second_panel_and_valid_panel_name():
+    shared = PORTABLE._helpers()
+    with pytest.raises(PORTABLE.PortableEvaluationError, match="2 \\* max_samples"):
+        PORTABLE._select_validation_panel(shared, 127, 64, "disjoint")
+    with pytest.raises(PORTABLE.PortableEvaluationError, match="panel must be"):
+        PORTABLE._select_validation_panel(shared, 256, 64, "test")
+
+
+def test_panel_filename_is_distinct_while_uniform_filename_stays_compatible():
+    from datetime import datetime, timezone
+
+    evaluated_at = datetime(2026, 10, 23, tzinfo=timezone.utc)
+    uniform = PORTABLE._evaluation_filename("best", 128, "a" * 64, evaluated_at, "uniform")
+    disjoint = PORTABLE._evaluation_filename("best", 128, "a" * 64, evaluated_at, "disjoint")
+    assert uniform == "full_abt_best_n128_aaaaaaaaaaaa_20261023T000000000000Z_validation.json"
+    assert disjoint == "full_abt_best_n128_aaaaaaaaaaaa_20261023T000000000000Z_disjoint_validation.json"
+    assert uniform != disjoint
+
+
+def test_panel_cli_defaults_to_uniform_and_accepts_disjoint():
+    parser = PORTABLE._parser()
+    args = parser.parse_args(["--run", "/tmp/run"])
+    assert args.panel == "uniform"
+    args = parser.parse_args(["--run", "/tmp/run", "--panel", "disjoint"])
+    assert args.panel == "disjoint"
 
 
 def test_run_and_output_locations_are_confined_to_data_root(tmp_path):

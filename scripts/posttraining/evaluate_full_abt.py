@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import torch
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -33,10 +34,59 @@ CAMPAIGN_ENVIRONMENT = (
 )
 CHECKPOINT_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,95}$")
 EXPECTED_FAMILIES = ("global_distribution", "cross_spectrum", "topology")
+PANEL_ALGORITHMS = {
+    "uniform": "chronological_linspace_v1",
+    "disjoint": "chronological_linspace_after_uniform_exclusion_v1",
+}
 
 
 class PortableEvaluationError(RuntimeError):
     """Raised when a portable run does not satisfy the fixed validation contract."""
+
+
+def _select_validation_panel(
+    shared,
+    dataset_size: int,
+    count: int,
+    panel_kind: str,
+) -> tuple[list[int], list[int]]:
+    """Return chronological validation indices and indices excluded from this panel.
+
+    The disjoint panel is frozen relative to the established uniform panel at the
+    same requested size. Both selections use chronological linspace spacing.
+    """
+    if panel_kind not in {"uniform", "disjoint"}:
+        raise PortableEvaluationError("panel must be uniform or disjoint")
+    uniform_indices = shared._uniform_validation_indices(dataset_size, count)
+    if panel_kind == "uniform":
+        return uniform_indices, []
+
+    excluded = set(uniform_indices)
+    candidates = [index for index in range(dataset_size) if index not in excluded]
+    if len(candidates) < count:
+        raise PortableEvaluationError(
+            "disjoint validation panel requires at least 2 * max_samples validation samples"
+        )
+    positions = np.linspace(0, len(candidates) - 1, count).round().astype(np.int64).tolist()
+    indices = [int(candidates[position]) for position in positions]
+    if len(indices) != count or len(set(indices)) != count or excluded.intersection(indices):
+        raise PortableEvaluationError("disjoint validation selection violated its frozen-panel contract")
+    return indices, uniform_indices
+
+
+def _evaluation_filename(
+    checkpoint_name: str,
+    max_samples: int,
+    checkpoint_sha256: str,
+    evaluated_at: datetime,
+    panel_kind: str,
+) -> str:
+    panel_suffix = "_disjoint" if panel_kind == "disjoint" else ""
+    return (
+        f"full_abt_{checkpoint_name}_n{max_samples}_"
+        f"{checkpoint_sha256[:12]}_{evaluated_at.strftime('%Y%m%dT%H%M%S%fZ')}"
+        f"{panel_suffix}_validation.json"
+    )
 
 
 def _reject_campaign_environment() -> None:
@@ -131,7 +181,9 @@ def _validate_supported_config(config: Mapping[str, Any], manifest: Mapping[str,
         raise PortableEvaluationError("only the validation split is supported; TEST is never opened")
     if config.get("dataset", {}).get("include_temporal_derivative", False) is not False:
         raise PortableEvaluationError("include_temporal_derivative must be false")
-    if config.get("model", {}).get("model_ema_eval") is not False:
+    model_config = config.get("model", {})
+    native_deeponet = model_config.get("name") == "deeponet" and "model_ema_eval" not in model_config
+    if not native_deeponet and model_config.get("model_ema_eval") is not False:
         raise PortableEvaluationError("resolved post-training inference must use raw live weights")
     if config.get("rollout") != {"steps": 2, "solver": "euler"}:
         raise PortableEvaluationError("supported inference requires exactly two Euler rollout steps")
@@ -282,14 +334,17 @@ def evaluate_run(
     *,
     checkpoint_name: str = "best",
     max_samples: int = 64,
+    panel_kind: str = "uniform",
     device_name: str = "cpu",
     output_dir: str | Path | None = None,
     _data_root: Path | None = None,
     _require_mount: bool = True,
 ) -> Path:
-    """Evaluate a native post-training run on paired, uniform validation groups."""
+    """Evaluate a native post-training run on paired validation groups."""
     shared = _helpers()
     shared._validate_max_samples(max_samples)
+    if panel_kind not in {"uniform", "disjoint"}:
+        raise PortableEvaluationError("panel must be uniform or disjoint")
     if not isinstance(checkpoint_name, str) or not CHECKPOINT_PATTERN.fullmatch(checkpoint_name):
         raise PortableEvaluationError("checkpoint must be a safe checkpoint basename")
     if device_name not in {"cpu", "cuda:0"}:
@@ -372,7 +427,9 @@ def evaluate_run(
         )
         if tuple(validation_dataset.field_names) != tuple(train_dataset.field_names):
             raise PortableEvaluationError("validation field order differs from SOURCE field order")
-        validation_indices = shared._uniform_validation_indices(len(validation_dataset), max_samples)
+        validation_indices, excluded_validation_indices = _select_validation_panel(
+            shared, len(validation_dataset), max_samples, panel_kind
+        )
         samples = [validation_dataset[index] for index in validation_indices]
         protocol = sensor_protocol_from_config(config)
         evaluation_config = deepcopy(dict(config))
@@ -431,6 +488,12 @@ def evaluate_run(
             )
         selection_payload = {
             "split": "validation",
+            "panel": {
+                "kind": panel_kind,
+                "algorithm": PANEL_ALGORITHMS[panel_kind],
+                "reference_count": max_samples,
+                "excluded_validation_indices": excluded_validation_indices,
+            },
             "dataset_path": str(dataset_path),
             "dataset_fingerprint": initial_dataset_fingerprint,
             "validation_indices": validation_indices,
@@ -595,6 +658,7 @@ def evaluate_run(
             },
             "evaluation": {
                 "mode": "full_existing_A_B_T_family_forward",
+                "panel_kind": panel_kind,
                 "samples": max_samples,
                 "aggregation": (
                     "sample-weighted mean of full 32-snapshot group scores; "
@@ -629,9 +693,12 @@ def evaluate_run(
             },
             "groups": group_rows,
         }
-        output_path = output_path_directory / (
-            f"full_abt_{checkpoint_name}_n{max_samples}_"
-            f"{checkpoint_sha256[:12]}_{evaluated_at.strftime('%Y%m%dT%H%M%S%fZ')}_validation.json"
+        output_path = output_path_directory / _evaluation_filename(
+            checkpoint_name,
+            max_samples,
+            checkpoint_sha256,
+            evaluated_at,
+            panel_kind,
         )
         _write_immutable_json(shared, output_path, payload)
         return output_path
@@ -653,7 +720,16 @@ def _parser() -> argparse.ArgumentParser:
         type=int,
         default=64,
         choices=(32, 64, 96, 128),
-        help="uniform validation panel, evaluated in exact groups of 32",
+        help="validation panel size, evaluated in exact groups of 32",
+    )
+    parser.add_argument(
+        "--panel",
+        choices=("uniform", "disjoint"),
+        default="uniform",
+        help=(
+            "validation panel; disjoint excludes the frozen uniform panel at the same "
+            "--max-samples size"
+        ),
     )
     parser.add_argument("--device", choices=("cpu", "cuda:0"), default="cpu")
     parser.add_argument(
@@ -672,6 +748,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.run,
             checkpoint_name=args.checkpoint,
             max_samples=args.max_samples,
+            panel_kind=args.panel,
             device_name=args.device,
             output_dir=args.output_dir,
         )

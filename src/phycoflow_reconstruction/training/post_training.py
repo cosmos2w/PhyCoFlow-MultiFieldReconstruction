@@ -18,6 +18,7 @@ import warnings
 from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import asdict
+from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
 from typing import Any
@@ -49,7 +50,12 @@ from .common import (
     iter_unique_batch_indices,
     sensor_protocol_from_config,
 )
-from .fast_lagrangian import implementation_binding, training_execution
+from .fast_lagrangian import (
+    family_callable,
+    family_execution,
+    implementation_binding,
+    training_execution,
+)
 from .fidelity_budget import ExternalPolicy, FidelityBudget, field_error_sums, field_mse
 from .gradient_balance import data_only_update
 from .gradient_balance import two_objective_update as legacy_two_objective_update
@@ -345,7 +351,8 @@ def _coherence_objective(
     scalar_loss = prediction.sum() * 0.0
     per_sample_parts = []
     for family_name, family_module in families.items():
-        if family_name == "topology" and execution is not None and not execution["topology_included"]:
+        included, probability, within = family_execution(execution, family_name)
+        if not included:
             continue
         family_bank = banks.get(family_name)
         if family_module.target_use == "paired_supervised":
@@ -381,14 +388,7 @@ def _coherence_objective(
                 query_ids if isinstance(query_ids, torch.Tensor) else None,
                 bank_rows=bank_rows,
             )
-        family_call = family_module
-        if family_name == "topology" and execution is not None and execution["estimator"] != "full":
-            from ..coherence.families.topology.filtration_sampling import sampled_family_forward
-
-            family_call = lambda generated, reference, _family=family_module, **kwargs: sampled_family_forward(
-                _family, generated, reference, **kwargs,
-                strategy=execution["estimator"], seed=execution["topology_seed"],
-            )
+        family_call = family_callable(family_module, within)
         result = family_call(
             prediction,
             reference,
@@ -404,10 +404,7 @@ def _coherence_objective(
             },
         )
         family_results[family_name] = result
-        inclusion_scale = (
-            1.0 / execution["family_probability"]
-            if execution is not None and family_name == "topology" else 1.0
-        )
+        inclusion_scale = 1.0 / probability
         if family_losses is not None:
             family_losses[family_name] = inclusion_scale * result.scalar_loss
         component_results.update(result.component_results)
@@ -430,16 +427,12 @@ def _coherence_objective(
                 name: {
                     "weight": float(getattr(families[name], "family_weight", 1.0)),
                     "calibration_scale": float((family_scales or {}).get(name, 1.0)),
-                    "family_inclusion_probability": (
-                        execution["family_probability"]
-                        if execution is not None and name == "topology" else 1.0
-                    ),
+                    "family_inclusion_probability": family_execution(execution, name)[1],
                     "scalar_loss": result.scalar_loss.detach(),
                     "weighted_contribution": (
                         float(getattr(families[name], "family_weight", 1.0))
                         * float((family_scales or {}).get(name, 1.0))
-                        / (execution["family_probability"]
-                           if execution is not None and name == "topology" else 1.0)
+                        / family_execution(execution, name)[1]
                         * result.scalar_loss.detach()
                     ),
                     **result.diagnostics,
@@ -1160,6 +1153,15 @@ def _evaluate(
     normalizer=None,
     family_scales: Mapping[str, float] | None = None,
 ) -> dict[str, Any]:
+    if config.get("evaluation", {}).get("group_size") is not None:
+        from ..evaluation.fixed_groups import evaluate_fixed_groups
+
+        grouped = evaluate_fixed_groups(
+            _evaluate, model, complete_batch, comparison_batch, family, bank,
+            field_names, config, normalizer=normalizer, family_scales=family_scales,
+        )
+        grouped.update(_evaluation_completion_clock())
+        return grouped
     target = comparison_batch.target_fields
     if target is None:
         raise ValueError("evaluation requires dense targets for metrics")
@@ -1354,6 +1356,7 @@ def _evaluate(
             }
     return {
         **metrics,
+        **_evaluation_completion_clock(),
         "native_topology": native_topology,
         "inference": {
             "seconds": inference_seconds,
@@ -1371,6 +1374,16 @@ def _evaluate(
         "generation_seed": evaluation_seed,
         "generation_steps": int(evaluation.get("generation_steps", 2)),
         "evaluation_weight_source": "configured_evaluation_weights",
+    }
+
+
+def _evaluation_completion_clock():
+    origin = os.environ.get("PHYCOFLOW_COMMAND_STARTED_MONOTONIC")
+    if origin is None:
+        return {}
+    return {
+        "evaluation_completed_utc": datetime.now(timezone.utc).isoformat(),
+        "command_elapsed_seconds": perf_counter() - float(origin),
     }
 
 
@@ -1552,6 +1565,7 @@ def run_post_training(
     multitask = config["optimization"].get("multitask")
     external_settings = (multitask or {}).get("external_policy")
     fast_settings = config["optimization"].get("fast_lagrangian", {})
+    strategy_settings = config["optimization"].get("execution_strategy", {})
     ordered_settings = config["optimization"].get("lpc_ordered")
     policy = None
     scalarizer = (
@@ -1581,6 +1595,11 @@ def run_post_training(
         checkpoint = store.load_checkpoint("last")
         if fast_settings and checkpoint.get("fast_lagrangian_implementation") != implementation_binding():
             raise ValueError("fast Lagrangian implementation changed; start a fresh arm")
+        if strategy_settings.get("enabled", False):
+            from .execution_strategy.runtime import implementation_binding as strategy_binding
+
+            if checkpoint.get("execution_strategy_implementation") != strategy_binding():
+                raise ValueError("execution strategy implementation changed; start a fresh arm")
         if ordered_settings is not None:
             from .lpc_ordered import implementation_binding as ordered_implementation_binding
 
@@ -1758,6 +1777,19 @@ def run_post_training(
                     raise ValueError("ordered recovery dual cursor differs from accepted model updates")
                 if policy.completed_updates != start_step:
                     raise ValueError("ordered recovery field dual cursor differs from model updates")
+    execution_runtime = None
+    if strategy_settings.get("enabled", False):
+        from .execution_strategy.runtime import ExecutionRuntime
+
+        execution_runtime = ExecutionRuntime(
+            config, state=None if checkpoint is None else checkpoint["execution_strategy"],
+            start_step=start_step,
+            steps_per_epoch=post_training_steps_per_epoch(config, len(train_dataset)),
+        )
+        execution_runtime.bind_reference(reference)
+        policy.execution_runtime = execution_runtime
+        if checkpoint is None:
+            store.write_json("artifacts/execution_strategy.json", strategy_settings)
     controller = None
     if constrained:
         if "topology_components" not in calibration:
@@ -1907,6 +1939,24 @@ def run_post_training(
         raise ValueError("optimization.train_fraction must lie in (0,1]")
     steps_per_epoch = post_training_steps_per_epoch(config, len(train_dataset))
     configured_steps = epochs * steps_per_epoch
+    execution_probe_batches = []
+    if execution_runtime is not None:
+        from .execution_strategy.audit import preserve_rng_and_modes
+
+        with preserve_rng_and_modes(model):
+            probe_source = build_training_batch_source(
+                train_dataset,
+                iter_unique_batch_indices(
+                    len(train_dataset), 2, batch_size,
+                    generator=torch.Generator().manual_seed(700313),
+                ),
+                config, query_points=int(config["coherence"]["compute_budget"]["point_count"]),
+                device=device, start_step=0,
+            )
+            try:
+                execution_probe_batches = list(probe_source)
+            finally:
+                probe_source.close()
     final_step = (
         min(configured_steps, start_step + max_steps) if max_steps is not None else configured_steps
     )
@@ -2104,7 +2154,8 @@ def run_post_training(
             rollout_generator = torch.Generator(device=device).manual_seed(
                 seed + 1_000_003 + global_step
             )
-            execution = training_execution(config, global_step)
+            execution = (execution_runtime.decision(global_step) if execution_runtime is not None
+                         else training_execution(config, global_step))
             result, reference_ids = _coherence_objective(
                 model,
                 batch,
@@ -2134,7 +2185,9 @@ def run_post_training(
                 row["data_loss"] = float(data_loss.detach().cpu())
             coherence_loss = result.scalar_loss
             coherence_objectives = None
-            if execution is not None and execution["family_probability"] != 1.0:
+            if execution is not None and any(
+                family_execution(execution, name)[1] != 1.0 for name in families
+            ):
                 # The scalar route can omit T entirely; do not feed a dummy
                 # zero task to the scalarizer or internal ConFIG.
                 coherence_loss = result.scalar_loss
@@ -2367,9 +2420,10 @@ def run_post_training(
                         "update_accepted": gradient["update_accepted"],
                     }), allow_nan=False) + "\n")
             if execution is not None:
-                row["fast_lagrangian"] = execution
+                row["execution_strategy" if execution_runtime is not None else "fast_lagrangian"] = execution
+                topology_probability = family_execution(execution, "topology")[1]
                 row["T_estimate"] = (
-                    float(raw_family_losses["topology"].detach()) * execution["family_probability"]
+                    float(raw_family_losses["topology"].detach()) * topology_probability
                     if "topology" in raw_family_losses else None
                 )
                 row["T_importance_contribution"] = (
@@ -2377,7 +2431,9 @@ def run_post_training(
                     if "topology" in raw_family_losses else None
                 )
                 row["coherence_semantics"] = "training_estimate_full_evaluation_required"
-                with (store.run_dir / "metrics/fast_lagrangian_updates.jsonl").open("a") as handle:
+                execution_log = ("execution_strategy_updates" if execution_runtime is not None
+                                 else "fast_lagrangian_updates")
+                with (store.run_dir / f"metrics/{execution_log}.jsonl").open("a") as handle:
                     handle.write(json.dumps(_json_safe({
                         "epoch": epoch, "step": global_step + 1,
                         "execution": execution, "T_estimate": row["T_estimate"],
@@ -2407,6 +2463,21 @@ def run_post_training(
         if scalarizer is not None and (global_step + 1) % steps_per_epoch == 0:
             scalarizer.step()
         row["update_seconds"] = perf_counter() - step_started
+        if execution_runtime is not None:
+            if not row.get("update_accepted", True):
+                raise FloatingPointError("execution strategy refuses to advance a rejected update")
+            execution_runtime.accept(
+                global_step, epoch, row["update_seconds"], row.get("field_violation"),
+            )
+            if (global_step + 1) % steps_per_epoch == 0 and epoch % 10 == 0:
+                from .execution_strategy.audit import fixed_train_probe
+
+                audit = fixed_train_probe(
+                    model, execution_probe_batches, families, banks, config, execution_runtime, epoch,
+                )
+                audit["step"] = global_step + 1
+                with (store.run_dir / "metrics/execution_strategy_audits.jsonl").open("a") as handle:
+                    handle.write(json.dumps(audit, allow_nan=False) + "\n")
         del data_loss
         row["total"] = row["data_update_weight"] * row["data_loss"] + row[
             "coherence_update_weight"
@@ -2711,6 +2782,11 @@ def _post_checkpoint_payload(
             payload["lpc_ordered_reference_sha256"] = policy.lpc_ordered_reference_sha256
     if "fast_lagrangian" in config["optimization"]:
         payload["fast_lagrangian_implementation"] = implementation_binding()
+    if policy is not None and hasattr(policy, "execution_runtime"):
+        from .execution_strategy.runtime import implementation_binding as strategy_binding
+
+        payload["execution_strategy"] = policy.execution_runtime.state_dict()
+        payload["execution_strategy_implementation"] = strategy_binding()
     if hasattr(train_dataset, "training_subset_manifest"):
         payload["training_subset_sha256"] = train_dataset.training_subset_manifest["sha256"]
     return add_training_aux_state(payload, model)

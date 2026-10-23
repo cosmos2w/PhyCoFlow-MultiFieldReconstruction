@@ -35,6 +35,7 @@ class FiltrationWorkUnit:
     component: str
     direction: str
     field: str | None
+    descriptor_index: int | None
     group_index: int | None
     line_index: int | None
     line_weight: float
@@ -49,6 +50,16 @@ class FiltrationChoice:
     label: str
     indices: tuple[int, ...]
     inclusion_probabilities: tuple[float, ...]
+
+
+@dataclass(frozen=True)
+class FiltrationSupport:
+    """Exact finite support and first/second-order inclusion probabilities."""
+
+    choices: tuple[FiltrationChoice, ...]
+    choice_probabilities: tuple[float, ...]
+    inclusion_probabilities: tuple[float, ...]
+    joint_inclusion_probabilities: tuple[tuple[float, ...], ...]
 
 
 @dataclass(frozen=True)
@@ -133,12 +144,13 @@ def _work_units(objective) -> tuple[FiltrationWorkUnit, ...]:
         if direction not in {"sublevel", "superlevel"}:
             raise ValueError(f"unsupported persistence direction: {direction!r}")
         if objective.weights.get("self.persistence", 0.0) > 0:
-            for field in objective.self_fields:
+            for field, descriptor_index in zip(objective.self_fields, objective.self_ids):
                 records.append(
                     {
                         "component": "self",
                         "direction": direction,
                         "field": field,
+                        "descriptor_index": descriptor_index,
                         "group_index": None,
                         "line_index": None,
                         "line_weight": 1.0,
@@ -156,6 +168,7 @@ def _work_units(objective) -> tuple[FiltrationWorkUnit, ...]:
                             "component": "mutual",
                             "direction": direction,
                             "field": None,
+                            "descriptor_index": None,
                             "group_index": group_index,
                             "line_index": line_index,
                             "line_weight": line_weight,
@@ -183,7 +196,9 @@ def _filtration_values(objective, fields: torch.Tensor, unit: FiltrationWorkUnit
     """Build one selected raster using the existing objective's fixed geometry."""
     sign = 1.0 if unit.direction == "sublevel" else -1.0
     if unit.component == "self":
-        return sign * fields[:, objective.self_fields.index(unit.field)]
+        if unit.descriptor_index is None:
+            raise ValueError("self filtration is missing its descriptor index")
+        return sign * fields[:, unit.descriptor_index]
 
     group = objective.groups[unit.group_index]
     direction = getattr(objective, f"line_directions_{unit.group_index}")[unit.line_index].to(
@@ -196,19 +211,20 @@ def _filtration_values(objective, fields: torch.Tensor, unit: FiltrationWorkUnit
 
 
 class TopologyFiltrationSampler:
-    """Sample P3 or S2 complete filtrations with a private, resumable RNG.
+    """Sample complete filtrations with a private, resumable RNG.
 
-    ``objective`` is an existing ``PersistenceTopologyObjective``. The sampled
-    modes deliberately accept only the Run-11 profile of two self fields, one
-    mutual group with one line, and both polarities. ``full`` is provided for
-    direct comparison and leaves the legacy objective available as the oracle.
+    Historical ``p3`` and ``s2`` modes retain their Run-11 support. The opt-in
+    ``polarity`` mode samples one complete polarity stratum and supports
+    arbitrary configured self fields, mutual groups, and positive line counts.
+    ``full`` provides a direct comparison against the legacy objective oracle.
     """
 
-    STATE_VERSION = 1
+    STATE_VERSION = 2
+    PROVIDER_ID = "topology.complete_filtration.v1"
 
     def __init__(self, objective, strategy: str = "p3", *, seed: int = 0):
-        if strategy not in {"full", "p3", "s2"}:
-            raise ValueError("strategy must be 'full', 'p3', or 's2'")
+        if strategy not in {"full", "p3", "s2", "polarity"}:
+            raise ValueError("strategy must be 'full', 'p3', 's2', or 'polarity'")
         if isinstance(seed, bool) or int(seed) != seed or not 0 <= int(seed) < 2**63:
             raise ValueError("seed must be an integer in [0, 2**63)")
         self.objective = objective
@@ -217,8 +233,10 @@ class TopologyFiltrationSampler:
         self._fingerprint = _objective_fingerprint(objective)
         self._generator = torch.Generator(device="cpu")
         self._generator.manual_seed(int(seed))
-        if strategy != "full":
+        if strategy in {"p3", "s2"}:
             self._validate_run11_profile()
+        elif strategy == "polarity":
+            self._validate_polarity_profile()
         self._choices = self._enumerate_choices()
         self._choice_keys = {
             (choice.indices, choice.inclusion_probabilities): choice for choice in self._choices
@@ -250,6 +268,18 @@ class TopologyFiltrationSampler:
         ):
             raise ValueError("P3/S2 require exactly three complete filtrations per polarity")
 
+    def _validate_polarity_profile(self) -> None:
+        if len(self.objective.directions) != 2 or set(self.objective.directions) != {
+            "sublevel",
+            "superlevel",
+        }:
+            raise ValueError("polarity sampling requires both sublevel and superlevel directions")
+        if not self.units:
+            raise ValueError("polarity sampling requires at least one positive-weight work unit")
+        per_direction = Counter(unit.direction for unit in self.units)
+        if per_direction["sublevel"] != per_direction["superlevel"]:
+            raise ValueError("polarity sampling requires equal complete support in both directions")
+
     def _enumerate_choices(self) -> tuple[FiltrationChoice, ...]:
         if self.strategy == "full":
             indices = tuple(unit.index for unit in self.units)
@@ -265,6 +295,17 @@ class TopologyFiltrationSampler:
                 for direction in ("sublevel", "superlevel")
             )
 
+        if self.strategy == "polarity":
+            return tuple(
+                FiltrationChoice(
+                    "polarity",
+                    direction,
+                    tuple(unit.index for unit in self.units if unit.direction == direction),
+                    (0.5,) * sum(unit.direction == direction for unit in self.units),
+                )
+                for direction in ("sublevel", "superlevel")
+            )
+
         self_units = [unit for unit in self.units if unit.component == "self"]
         mutual_units = [unit for unit in self.units if unit.component == "mutual"]
         choices = []
@@ -275,12 +316,60 @@ class TopologyFiltrationSampler:
                     0.25 if self.units[index].component == "self" else 0.5 for index in selected
                 )
                 label = "+".join(self.units[index].identity for index in selected)
-                choices.append(FiltrationChoice("s2", label, selected, probabilities))
+                choices.append(
+                    FiltrationChoice(
+                        "s2",
+                        label,
+                        selected,
+                        probabilities,
+                    )
+                )
         return tuple(choices)
 
     def enumerate_choices(self) -> tuple[FiltrationChoice, ...]:
         """Return all exact support points for oracle expectation checks."""
         return self._choices
+
+    def support_summary(self) -> FiltrationSupport:
+        """Return exact support masses and marginal/pairwise unit inclusion rates.
+
+        Pairwise rates retain correlations in the discrete design; they are not
+        reconstructed from products of marginal probabilities.
+        """
+        count = len(self.units)
+        if not self._choices:
+            raise ValueError("sampler support must contain at least one choice")
+        masses = (1.0 / len(self._choices),) * len(self._choices)
+        if not masses or any(probability <= 0 for probability in masses):
+            raise ValueError("sampler support must contain only positive-probability choices")
+        if abs(sum(masses) - 1.0) > 1e-12:
+            raise ValueError("sampler support probabilities must sum to one")
+
+        inclusion = [0.0] * count
+        joint = [[0.0] * count for _ in range(count)]
+        for choice, mass in zip(self._choices, masses):
+            selected = set(choice.indices)
+            if len(selected) != len(choice.indices) or any(
+                index < 0 or index >= count for index in selected
+            ):
+                raise ValueError("sampler choice contains invalid or duplicate unit indices")
+            if len(choice.inclusion_probabilities) != len(choice.indices):
+                raise ValueError("sampler choice has mismatched unit probabilities")
+            for index in selected:
+                inclusion[index] += mass
+            for left in selected:
+                for right in selected:
+                    joint[left][right] += mass
+        for choice in self._choices:
+            for index, probability in zip(choice.indices, choice.inclusion_probabilities):
+                if abs(probability - inclusion[index]) > 1e-12:
+                    raise ValueError("choice probability disagrees with exact support marginal")
+        return FiltrationSupport(
+            choices=self._choices,
+            choice_probabilities=masses,
+            inclusion_probabilities=tuple(inclusion),
+            joint_inclusion_probabilities=tuple(tuple(row) for row in joint),
+        )
 
     def draw(self) -> FiltrationChoice:
         """Draw one choice without consuming or changing PyTorch's global RNG."""
@@ -301,7 +390,17 @@ class TopologyFiltrationSampler:
     def load_state_dict(self, state: Mapping) -> None:
         if not isinstance(state, Mapping):
             raise TypeError("sampler state must be a mapping")
-        if state.get("version") != self.STATE_VERSION:
+        state_version = state.get("version")
+        if state_version == 1:
+            legacy_descriptor_mapping = tuple(self.objective.self_ids) == tuple(
+                range(len(self.objective.self_fields))
+            )
+            if self.strategy not in {"full", "p3", "s2"} or not legacy_descriptor_mapping:
+                raise ValueError(
+                    "legacy v1 sampler state requires identity descriptor mapping and strategy "
+                    "full/p3/s2; reset to create version-2 state for the corrected mapping"
+                )
+        elif state_version != self.STATE_VERSION:
             raise ValueError("unsupported topology sampler state version")
         if state.get("strategy") != self.strategy:
             raise ValueError("topology sampler strategy changed across resume")

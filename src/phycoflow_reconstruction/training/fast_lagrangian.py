@@ -11,6 +11,44 @@ from pathlib import Path
 import torch
 
 
+def family_execution(execution, family_name):
+    """Resolve a family decision at the common dispatch seam.
+
+    Legacy mappings are translated here; generalized policies carry explicit
+    family identities and provider contracts rather than special trainer cases.
+    """
+    if execution is None:
+        return True, 1.0, None
+    if "family_probabilities" in execution:
+        probability = float(execution["family_probabilities"].get(family_name, 1.0))
+        included = execution["family_inclusions"].get(family_name, True)
+        within = execution.get("within_family", {}).get(family_name)
+        return included, probability, within
+    if family_name != "topology":
+        return True, 1.0, None
+    within = None
+    if execution["estimator"] != "full":
+        within = {"provider_id": "topology.complete_filtration.v1",
+                  "estimator": execution["estimator"], "seed": execution["topology_seed"]}
+    return execution["topology_included"], float(execution["family_probability"]), within
+
+
+def family_callable(family, within):
+    if not within or within.get("estimator", "full") == "full":
+        return family
+    if within.get("provider_id") != "topology.complete_filtration.v1":
+        raise ValueError("unregistered within-family execution provider")
+    from ..coherence.families.topology.filtration_sampling import sampled_family_forward
+
+    def call(generated, reference, **kwargs):
+        return sampled_family_forward(
+            family, generated, reference, **kwargs,
+            strategy=within["estimator"], seed=within["seed"],
+        )
+
+    return call
+
+
 def validate_fast_lagrangian(config):
     opt = config["optimization"]
     if "fast_lagrangian" not in opt:
