@@ -9,12 +9,16 @@ Its only output is one compact campaign-owned JSON file.
 from __future__ import annotations
 
 import argparse
+import errno
+import fcntl
 import hashlib
 import json
 import math
 import os
 import runpy
+import stat
 import sys
+import time
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -55,6 +59,7 @@ GROUP_SIZE = 32
 MAX_SAMPLES = 128
 VALIDATION_SEED = 2027
 GOAL2_FORMAL_ARM = "G2-O"
+CONTROLLER_RECEIPT_WAIT_SECONDS = 5.0
 GOAL2_ORDERED_SETTINGS = {"dual_lr": 0.01, "denominator_floor": 1.0e-8}
 GOAL2_ORDERED_FAMILIES = ("global_distribution", "cross_spectrum", "topology")
 CHECKPOINT_NAMES = ("best", "last", "epoch_050", "epoch_075", "epoch_100")
@@ -105,7 +110,15 @@ class EvaluationError(RuntimeError):
     """Raised when a campaign input does not satisfy the evaluation contract."""
 
 
-def _validate_device_admission(root: Path, device_name: str) -> None:
+def _validate_device_admission(
+    root: Path,
+    device_name: str,
+    *,
+    run_path: Path | None = None,
+    arm: str | None = None,
+    action: str | None = None,
+    source_stage: str | None = None,
+) -> None:
     if device_name not in {"cpu", "cuda:0"}:
         raise EvaluationError("use cpu or the explicitly reserved logical cuda:0")
     if device_name == "cuda:0" and (
@@ -114,6 +127,264 @@ def _validate_device_admission(root: Path, device_name: str) -> None:
         or os.environ.get("PHYCOFLOW_CAMPAIGN_GPU") != os.environ.get("CUDA_VISIBLE_DEVICES")
     ):
         raise EvaluationError("CUDA evaluation requires the campaign admission/lock wrapper")
+    if run_path is None:
+        if any(value is not None for value in (arm, action, source_stage)):
+            raise EvaluationError("controller action binding requires its campaign run path")
+        return
+    if arm is None or action is None or source_stage is None:
+        raise EvaluationError("controller action binding requires arm, action, and source stage")
+    _validate_controller_admission(
+        root,
+        run_path,
+        arm,
+        action=action,
+        source_stage=source_stage,
+        device_name=device_name,
+    )
+
+
+def _proc_commandline(pid: int) -> list[str]:
+    try:
+        return [
+            item.decode(errors="replace")
+            for item in Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+            if item
+        ]
+    except OSError:
+        return []
+
+
+def _controller_entry_matches(pid: int) -> bool:
+    entry = "scripts/posttraining/fast_lagrangian_campaign.py"
+    return any(argument.replace("\\", "/").endswith(entry) for argument in _proc_commandline(pid))
+
+
+def _controller_command_matches(
+    pid: int,
+    root: Path,
+    run_dir: Path,
+    arm: str,
+    action: str,
+    gpu: int,
+) -> bool:
+    """Verify that the live parent invoked the matching explicit campaign action."""
+    argv = _proc_commandline(pid)
+    script = (REPO_ROOT / "scripts/posttraining/fast_lagrangian_campaign.py").resolve()
+    try:
+        controller_cwd = Path(f"/proc/{pid}/cwd").resolve(strict=True)
+    except OSError:
+        return False
+    script_index = None
+    for index, argument in enumerate(argv):
+        candidate = Path(argument)
+        if not candidate.is_absolute():
+            candidate = controller_cwd / candidate
+        try:
+            if candidate.resolve(strict=True) == script:
+                script_index = index
+                break
+        except OSError:
+            continue
+    if script_index not in {0, 1}:
+        return False
+    args = argv[script_index + 1 :]
+    if "--root" not in args:
+        return False
+    root_index = args.index("--root")
+    if root_index + 1 >= len(args) or args[root_index + 1] != str(root):
+        return False
+
+    expected_command = {
+        "evaluate-full-abt-validation": "evaluate",
+        "evaluate-native-maps": "maps",
+        "evaluate-goal2-residual-probe": "residual",
+    }.get(action)
+    if expected_command is None:
+        return False
+    command_index = root_index + 2
+    if command_index >= len(args) or args[command_index] != expected_command:
+        return False
+    if "--execute" not in args[command_index + 1 :]:
+        return False
+    command_args = args[command_index + 1 :]
+    if "--run" not in command_args:
+        return False
+    run_index = command_args.index("--run")
+    if run_index + 1 >= len(command_args) or command_args[run_index + 1] != str(run_dir):
+        return False
+    if expected_command == "evaluate":
+        if command_index + 1 >= len(args) or args[command_index + 1] != arm:
+            return False
+        if "--gpu" not in command_args:
+            return False
+        gpu_index = command_args.index("--gpu")
+        if gpu_index + 1 >= len(command_args) or command_args[gpu_index + 1] != str(gpu):
+            return False
+    else:
+        # Native maps and the residual probe are fixed to physical GPU 0 by
+        # their campaign entrypoints, whose CLI intentionally has no --gpu.
+        if gpu != 0:
+            return False
+    return True
+
+
+def _lock_is_held_without_mutation(path: Path) -> bool:
+    """Probe an existing lifetime lock without creating or writing its file."""
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return False
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
+        return False
+    try:
+        descriptor = os.open(
+            path,
+            os.O_RDWR | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+    except OSError:
+        return False
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_uid != os.getuid()
+            or (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino)
+        ):
+            return False
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as error:
+            if error.errno in (errno.EACCES, errno.EAGAIN):
+                return True
+            raise
+        else:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            return False
+    finally:
+        os.close(descriptor)
+
+
+def _validate_controller_admission(
+    root: Path,
+    run_path: Path,
+    arm: str,
+    *,
+    action: str,
+    source_stage: str,
+    device_name: str,
+) -> None:
+    """Require the inner evaluator to be the exact child admitted by the campaign CLI."""
+    from scripts.posttraining import fast_lagrangian_campaign as campaign
+
+    root = root.resolve(strict=True)
+    run_dir = run_path.resolve(strict=True)
+    runs_root = (root / "runs").resolve(strict=True)
+    if (
+        not run_dir.is_relative_to(runs_root)
+        or len(run_dir.relative_to(runs_root).parts) != 2
+        or run_dir.relative_to(runs_root).parts[0] != arm
+    ):
+        raise EvaluationError("inner evaluation run is outside its admitted campaign arm")
+    if (
+        os.environ.get("PHYCOFLOW_CAMPAIGN_ADMITTED") != str(root)
+        or os.environ.get("PHYCOFLOW_CAMPAIGN_SOURCE_STAGE") != source_stage
+    ):
+        raise EvaluationError("inner campaign evaluation requires the matching controller admission")
+
+    visible_gpu = os.environ.get("CUDA_VISIBLE_DEVICES")
+    campaign_gpu = os.environ.get("PHYCOFLOW_CAMPAIGN_GPU")
+    if visible_gpu not in {"0", "1", "2"} or campaign_gpu != visible_gpu:
+        raise EvaluationError("inner campaign evaluation requires the matching physical-GPU admission")
+    gpu = int(visible_gpu)
+
+    try:
+        manifest = campaign._campaign_manifest(root)
+        expected_source_binding = campaign._stage_source_digest(root, manifest, source_stage)
+        expected_config = campaign._config_path(manifest, arm).resolve(strict=True)
+    except (campaign.CampaignError, OSError, KeyError, TypeError, ValueError) as error:
+        raise EvaluationError(f"campaign controller binding could not be verified: {error}") from error
+
+    active_path = campaign._gpu_active_path(root, gpu)
+    current_pid = os.getpid()
+    deadline = time.monotonic() + CONTROLLER_RECEIPT_WAIT_SECONDS
+    record = None
+    while time.monotonic() < deadline:
+        try:
+            metadata = active_path.lstat()
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
+                raise EvaluationError("campaign active-process receipt is not a user-owned regular file")
+            candidate = _read_json(active_path)
+        except FileNotFoundError:
+            candidate = None
+        except (OSError, json.JSONDecodeError) as error:
+            raise EvaluationError(f"campaign active-process receipt is unreadable: {error}") from error
+        if isinstance(candidate, Mapping) and candidate.get("pid") == current_pid:
+            record = candidate
+            break
+        time.sleep(0.05)
+    if record is None:
+        raise EvaluationError("this process has no matching active campaign controller receipt")
+
+    coordinator_pid = record.get("coordinator_pid")
+    command = record.get("command")
+    if not isinstance(command, list) or any(not isinstance(value, str) for value in command):
+        raise EvaluationError("campaign active-process receipt has no command binding")
+    command_args = command
+    evaluator_script = str(REPO_ROOT / "scripts/posttraining/fast_lagrangian_evaluate.py")
+    expected_flag = {
+        "evaluate-full-abt-validation": None,
+        "evaluate-native-maps": "--native-maps",
+        "evaluate-goal2-residual-probe": "--goal2-residual-probe",
+    }.get(action, "unsupported")
+    if expected_flag == "unsupported":
+        raise EvaluationError("campaign action is not an admitted evaluator entrypoint")
+    command_map = {}
+    for index, argument in enumerate(command_args[:-1]):
+        if argument.startswith("--"):
+            command_map[argument] = command_args[index + 1]
+    has_expected_mode = (
+        "--native-maps" in command_args
+        if expected_flag == "--native-maps"
+        else "--goal2-residual-probe" in command_args
+        if expected_flag == "--goal2-residual-probe"
+        else "--native-maps" not in command_args
+        and "--goal2-residual-probe" not in command_args
+    )
+    if (
+        record.get("action") != action
+        or record.get("arm") != arm
+        or Path(str(record.get("run", ""))).resolve() != run_dir
+        or Path(str(record.get("config", ""))).resolve() != expected_config
+        or isinstance(record.get("gpu_index"), bool)
+        or not isinstance(record.get("gpu_index"), int)
+        or record.get("gpu_index") != gpu
+        or not isinstance(record.get("gpu_uuid"), str)
+        or not record.get("gpu_uuid")
+        or record.get("source_stage") != source_stage
+        or record.get("source_binding_sha256") != expected_source_binding
+        or evaluator_script not in command_args
+        or command_map.get("--campaign-root") != str(root)
+        or command_map.get("--run") != str(run_dir)
+        or command_map.get("--device") != device_name
+        or not has_expected_mode
+    ):
+        raise EvaluationError("active campaign receipt does not bind this exact evaluator action")
+
+    if (
+        isinstance(coordinator_pid, bool)
+        or not isinstance(coordinator_pid, int)
+        or coordinator_pid <= 1
+        or campaign._proc_parent_pid(current_pid) != coordinator_pid
+        or not campaign._pid_is_alive(coordinator_pid)
+        or not _controller_entry_matches(coordinator_pid)
+        or not _controller_command_matches(
+            coordinator_pid, root, run_dir, arm, action, gpu
+        )
+        or not campaign._pid_matches(current_pid, str(expected_config), str(run_dir))
+        or not campaign._campaign_process_matches_gpu(current_pid, root, gpu)
+        or not _lock_is_held_without_mutation(campaign._gpu_lock_path(root, gpu))
+    ):
+        raise EvaluationError("campaign evaluator is not the live child of the locked controller")
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -811,8 +1082,20 @@ def extract_native_maps_campaign(
     *,
     device_name: str = "cuda:0",
 ) -> str:
+    root, outer_run, outer_arm = _validate_campaign_run(campaign_root, run_path)
+    if outer_arm != "G1-C":
+        raise EvaluationError("native maps use the campaign-owned G1-C run as their outer binding")
+    _validate_device_admission(
+        root,
+        device_name,
+        run_path=outer_run,
+        arm=outer_arm,
+        action="evaluate-native-maps",
+        source_stage="goal1",
+    )
     root, _selected_run = _validate_native_maps_runs(campaign_root, run_path)
-    _validate_device_admission(root, device_name)
+    if _selected_run != outer_run:
+        raise EvaluationError("native-map outer run changed during admission validation")
     if (
         device_name != "cuda:0"
         or os.environ.get("CUDA_VISIBLE_DEVICES") != "0"
@@ -840,7 +1123,14 @@ def run_goal2_residual_probe_campaign(
     root, selected_run, selected_arm = _validate_campaign_run(campaign_root, run_path)
     if selected_arm != "G1-C":
         raise EvaluationError("Goal-2 residual probe requires the campaign-owned G1-C outer run")
-    _validate_device_admission(root, device_name)
+    _validate_device_admission(
+        root,
+        device_name,
+        run_path=selected_run,
+        arm=selected_arm,
+        action="evaluate-goal2-residual-probe",
+        source_stage="goal2",
+    )
     if (
         device_name != "cuda:0"
         or os.environ.get("CUDA_VISIBLE_DEVICES") != "0"
@@ -1060,6 +1350,14 @@ def evaluate_campaign_run(
         raise EvaluationError(f"unsupported checkpoint selection {checkpoint_name!r}")
     root, run_dir, arm = _validate_campaign_run(campaign_root, run_path)
     source_stage = _validate_evaluation_source_stage(root, arm)
+    _validate_device_admission(
+        root,
+        device_name,
+        run_path=run_dir,
+        arm=arm,
+        action="evaluate-full-abt-validation",
+        source_stage=source_stage["stage"],
+    )
     config, manifest, checkpoint_path, checkpoint_sha256 = _load_run_inputs(
         run_dir, checkpoint_name
     )
@@ -1088,7 +1386,6 @@ def evaluate_campaign_run(
     from phycoflow_reconstruction.training.source import load_source_model, source_hashes
     from phycoflow_reconstruction.training.update_budget import post_training_steps_per_epoch
 
-    _validate_device_admission(root, device_name)
     device = torch.device(device_name)
     if device.type == "cuda" and not torch.cuda.is_available():
         raise EvaluationError("the reserved CUDA device is unavailable")

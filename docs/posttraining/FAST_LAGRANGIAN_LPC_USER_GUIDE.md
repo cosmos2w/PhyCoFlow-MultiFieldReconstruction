@@ -10,6 +10,8 @@ Use a completed, immutable, original pretrained SOURCE. These turbulent-combusti
 
 All defaults are 100 reporting epochs. A reporting epoch here is 38 batches of 32, not a full TRAIN dataset pass. Evaluation always runs the full existing descriptors; training P3 samples complete filtrations with the established weights. The randomized-family profile is retained in the study evidence but is not another portable default because of its late routine-panel B regression.
 
+SOURCE bounds use the full descriptors on the existing eight TRAIN calibration batches and two draws, rather than all TRAIN snapshots. Ordered A/B bounds have zero added slack; the endpoint budget remains +5%. These empirical training constraints do not guarantee validation or population feasibility.
+
 ## Environment and new storage
 
 Run from your repository checkout. Activate the environment containing the repository's tested dependencies; this machine calls it `phycoflow_env`. Supply your own absolute SOURCE path. The commands below prepare a separate user study; they do not launch anything until the explicit foreground training command.

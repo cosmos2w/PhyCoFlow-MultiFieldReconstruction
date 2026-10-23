@@ -135,6 +135,13 @@ def _validate_supported_config(config: Mapping[str, Any], manifest: Mapping[str,
         raise PortableEvaluationError("resolved post-training inference must use raw live weights")
     if config.get("rollout") != {"steps": 2, "solver": "euler"}:
         raise PortableEvaluationError("supported inference requires exactly two Euler rollout steps")
+    generation_steps = evaluation.get("generation_steps")
+    if (
+        isinstance(generation_steps, bool)
+        or not isinstance(generation_steps, int)
+        or generation_steps != 2
+    ):
+        raise PortableEvaluationError("supported evaluation requires exactly two generation steps")
     multitask = config.get("optimization", {}).get("multitask", {})
     external = multitask.get("external_policy", {})
     if external.get("method") != "lagrangian":

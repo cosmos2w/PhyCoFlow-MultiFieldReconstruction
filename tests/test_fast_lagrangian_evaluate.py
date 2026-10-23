@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
+import os
 
 import pytest
 import torch
@@ -43,8 +45,11 @@ from scripts.posttraining.fast_lagrangian_evaluate import (
     _validate_max_samples,
 )
 
+_REAL_PROC_COMMANDLINE = EVALUATOR._proc_commandline
+_REAL_CONTROLLER_ENTRY_MATCHES = EVALUATOR._controller_entry_matches
 
-def test_cuda_evaluation_requires_one_authorized_physical_gpu_and_campaign_token(tmp_path, monkeypatch):
+
+def test_cuda_device_selection_requires_matching_physical_gpu_environment(tmp_path, monkeypatch):
     root = tmp_path / "LPCAccel_fixture"
     monkeypatch.delenv("PHYCOFLOW_CAMPAIGN_ADMITTED", raising=False)
     _validate_device_admission(root, "cpu")
@@ -65,6 +70,331 @@ def test_cuda_evaluation_requires_one_authorized_physical_gpu_and_campaign_token
         _validate_device_admission(root, "cuda:0")
     with pytest.raises(EvaluationError, match="explicitly reserved"):
         _validate_device_admission(root, "cuda:1")
+
+
+def _controller_receipt_fixture(
+    tmp_path,
+    monkeypatch,
+    *,
+    action="evaluate-full-abt-validation",
+    arm="G1-S",
+    source_stage="goal1",
+    mode_flag=None,
+    lock_held=True,
+):
+    root = tmp_path / "LPCAccel_controller_fixture"
+    run = root / "runs" / arm / "run-controller"
+    run.mkdir(parents=True)
+    config = root / "configs" / f"{arm}.yaml"
+    config.parent.mkdir(parents=True)
+    config.write_text("fixture: true\n", encoding="utf-8")
+    manifests = root / "manifests"
+    manifests.mkdir()
+    active = manifests / "active.json"
+    lock = manifests / "gpu.lock"
+    lock.write_text("fixture lock inode\n", encoding="utf-8")
+    controller_pid = os.getppid()
+    evaluator_command = CAMPAIGN._with_short_multiprocessing_tmp(
+        [
+            str(CAMPAIGN.PYTHON),
+            str(EVALUATOR.REPO_ROOT / "scripts/posttraining/fast_lagrangian_evaluate.py"),
+            "--campaign-root",
+            str(root),
+            "--run",
+            str(run),
+        ]
+    )
+    if mode_flag is not None:
+        evaluator_command.append(mode_flag)
+    evaluator_command.extend(("--device", "cuda:0"))
+    parent_subcommand = {
+        "evaluate-full-abt-validation": "evaluate",
+        "evaluate-native-maps": "maps",
+        "evaluate-goal2-residual-probe": "residual",
+    }[action]
+    controller_command = [
+        str(CAMPAIGN.PYTHON),
+        str(EVALUATOR.REPO_ROOT / "scripts/posttraining/fast_lagrangian_campaign.py"),
+        "--root",
+        str(root),
+        parent_subcommand,
+    ]
+    if parent_subcommand == "evaluate":
+        controller_command.append(arm)
+    if parent_subcommand == "evaluate":
+        controller_command.extend(
+            (
+                "--run",
+                str(run),
+                "--checkpoint",
+                "best",
+                "--max-samples",
+                "128",
+                "--gpu",
+                "0",
+                "--execute",
+            )
+        )
+    else:
+        controller_command.extend(("--run", str(run), "--execute"))
+    record = {
+        "action": action,
+        "arm": arm,
+        "pid": os.getpid(),
+        "coordinator_pid": controller_pid,
+        "config": str(config),
+        "run": str(run),
+        "gpu_index": 0,
+        "gpu_uuid": "GPU-fixture-0",
+        "source_stage": source_stage,
+        "source_binding_sha256": f"binding-{source_stage}",
+        "command": evaluator_command,
+    }
+    active.write_text(json.dumps(record), encoding="utf-8")
+    monkeypatch.setenv("PHYCOFLOW_CAMPAIGN_ADMITTED", str(root.resolve()))
+    monkeypatch.setenv("PHYCOFLOW_CAMPAIGN_SOURCE_STAGE", source_stage)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
+    monkeypatch.setenv("PHYCOFLOW_CAMPAIGN_GPU", "0")
+    monkeypatch.setattr(CAMPAIGN, "_campaign_manifest", lambda _root: {"root": str(root)})
+    monkeypatch.setattr(
+        CAMPAIGN,
+        "_stage_source_digest",
+        lambda _root, _manifest, stage: f"binding-{stage}",
+    )
+    monkeypatch.setattr(CAMPAIGN, "_config_path", lambda _manifest, _arm: config)
+    monkeypatch.setattr(CAMPAIGN, "_gpu_active_path", lambda _root, _gpu: active)
+    monkeypatch.setattr(CAMPAIGN, "_gpu_lock_path", lambda _root, _gpu: lock)
+    monkeypatch.setattr(
+        CAMPAIGN,
+        "_proc_parent_pid",
+        lambda pid: controller_pid if pid == os.getpid() else None,
+    )
+    monkeypatch.setattr(CAMPAIGN, "_pid_is_alive", lambda pid: pid == controller_pid)
+    monkeypatch.setattr(EVALUATOR, "_controller_entry_matches", lambda _pid: True)
+    monkeypatch.setattr(
+        EVALUATOR,
+        "_proc_commandline",
+        lambda _pid: controller_command,
+    )
+    monkeypatch.setattr(CAMPAIGN, "_pid_matches", lambda pid, *_args: pid == os.getpid())
+    monkeypatch.setattr(CAMPAIGN, "_campaign_process_matches_gpu", lambda *_args: True)
+    monkeypatch.setattr(EVALUATOR, "_lock_is_held_without_mutation", lambda _path: lock_held)
+    return root, run, record, active
+
+
+@pytest.mark.parametrize(
+    ("action", "arm", "source_stage", "mode_flag"),
+    [
+        ("evaluate-full-abt-validation", "G1-S", "goal1", None),
+        ("evaluate-native-maps", "G1-C", "goal1", "--native-maps"),
+        (
+            "evaluate-goal2-residual-probe",
+            "G1-C",
+            "goal2",
+            "--goal2-residual-probe",
+        ),
+    ],
+)
+def test_campaign_inner_evaluator_requires_controller_child_and_held_gpu_lock(
+    tmp_path, monkeypatch, action, arm, source_stage, mode_flag
+):
+    root, run, record, _active = _controller_receipt_fixture(
+        tmp_path,
+        monkeypatch,
+        action=action,
+        arm=arm,
+        source_stage=source_stage,
+        mode_flag=mode_flag,
+    )
+    assert record["command"][1] == "-c"
+    assert "multiprocessing.current_process()._config['tempdir'] = short_tmp" in record["command"][2]
+    assert record["command"][3] == str(
+        EVALUATOR.REPO_ROOT / "scripts/posttraining/fast_lagrangian_evaluate.py"
+    )
+    _validate_device_admission(
+        root,
+        "cuda:0",
+        run_path=run,
+        arm=arm,
+        action=action,
+        source_stage=source_stage,
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("action", "launch"),
+        ("run", "/another/run"),
+        ("config", "/another/config.yaml"),
+        ("source_stage", "goal2"),
+        ("source_binding_sha256", "unbound"),
+        ("gpu_index", 1),
+        ("gpu_index", False),
+    ],
+)
+def test_campaign_inner_evaluator_rejects_mismatched_active_receipt(
+    tmp_path, monkeypatch, field, value
+):
+    root, run, record, active = _controller_receipt_fixture(tmp_path, monkeypatch)
+    record[field] = value
+    active.write_text(json.dumps(record), encoding="utf-8")
+    with pytest.raises(EvaluationError, match="active campaign receipt"):
+        _validate_device_admission(
+            root,
+            "cuda:0",
+            run_path=run,
+            arm="G1-S",
+            action="evaluate-full-abt-validation",
+            source_stage="goal1",
+        )
+
+
+@pytest.mark.parametrize(
+    ("index", "value"),
+    [(4, "launch"), (5, "G1-C"), (3, "/another/root"), (7, "/another/run"), (13, "1")],
+)
+def test_campaign_inner_evaluator_rejects_wrong_live_controller_command(
+    tmp_path, monkeypatch, index, value
+):
+    root, run, _record, _active = _controller_receipt_fixture(tmp_path, monkeypatch)
+    controller_pid = os.getppid()
+    command = [
+        str(CAMPAIGN.PYTHON),
+        str(EVALUATOR.REPO_ROOT / "scripts/posttraining/fast_lagrangian_campaign.py"),
+        "--root",
+        str(root),
+        "evaluate",
+        "G1-S",
+        "--run",
+        str(run),
+        "--checkpoint",
+        "best",
+        "--max-samples",
+        "128",
+        "--gpu",
+        "0",
+        "--execute",
+    ]
+    command[index] = value
+    monkeypatch.setattr(
+        EVALUATOR,
+        "_proc_commandline",
+        lambda pid: command if pid == controller_pid else [],
+    )
+    with pytest.raises(EvaluationError, match="live child of the locked controller"):
+        _validate_device_admission(
+            root,
+            "cuda:0",
+            run_path=run,
+            arm="G1-S",
+            action="evaluate-full-abt-validation",
+            source_stage="goal1",
+        )
+
+
+def test_campaign_controller_command_accepts_repo_relative_script_path(tmp_path, monkeypatch):
+    root = tmp_path / "campaign"
+    run = root / "runs/G2-O/run-relative"
+    run.mkdir(parents=True)
+    command = [
+        str(CAMPAIGN.PYTHON),
+        "scripts/posttraining/fast_lagrangian_campaign.py",
+        "--root",
+        str(root),
+        "evaluate",
+        "G2-O",
+        "--run",
+        str(run),
+        "--checkpoint",
+        "best",
+        "--max-samples",
+        "128",
+        "--gpu",
+        "0",
+        "--execute",
+    ]
+    monkeypatch.setattr(EVALUATOR, "_proc_commandline", lambda _pid: command)
+    assert EVALUATOR._controller_command_matches(
+        os.getpid(), root, run, "G2-O", "evaluate-full-abt-validation", 0
+    )
+    wrapped = [command[0], "-c", "bootstrap", *command[1:]]
+    monkeypatch.setattr(EVALUATOR, "_proc_commandline", lambda _pid: wrapped)
+    assert not EVALUATOR._controller_command_matches(
+        os.getpid(), root, run, "G2-O", "evaluate-full-abt-validation", 0
+    )
+
+
+def test_campaign_inner_evaluator_rejects_non_campaign_parent_process(tmp_path, monkeypatch):
+    root, run, record, active = _controller_receipt_fixture(tmp_path, monkeypatch)
+    record["command"][-1] = "cpu"
+    active.write_text(json.dumps(record), encoding="utf-8")
+    monkeypatch.setattr(EVALUATOR, "_proc_commandline", _REAL_PROC_COMMANDLINE)
+    monkeypatch.setattr(
+        EVALUATOR, "_controller_entry_matches", _REAL_CONTROLLER_ENTRY_MATCHES
+    )
+    with pytest.raises(EvaluationError, match="live child of the locked controller"):
+        _validate_device_admission(
+            root,
+            "cpu",
+            run_path=run,
+            arm="G1-S",
+            action="evaluate-full-abt-validation",
+            source_stage="goal1",
+        )
+
+
+@pytest.mark.parametrize("device_name", ("cpu", "cuda:0"))
+def test_campaign_inner_evaluator_rejects_environment_only_invocation(
+    tmp_path, monkeypatch, device_name
+):
+    root, run, _record, active = _controller_receipt_fixture(tmp_path, monkeypatch)
+    active.unlink()
+    ticks = iter((0.0, EVALUATOR.CONTROLLER_RECEIPT_WAIT_SECONDS + 1.0))
+    monkeypatch.setattr(EVALUATOR.time, "monotonic", lambda: next(ticks))
+    with pytest.raises(EvaluationError, match="no matching active campaign controller receipt"):
+        _validate_device_admission(
+            root,
+            device_name,
+            run_path=run,
+            arm="G1-S",
+            action="evaluate-full-abt-validation",
+            source_stage="goal1",
+        )
+
+
+def test_lock_probe_is_read_only_and_does_not_create_missing_lock(tmp_path):
+    missing = tmp_path / "missing.lock"
+    assert EVALUATOR._lock_is_held_without_mutation(missing) is False
+    assert not missing.exists()
+
+    lock_path = tmp_path / "held.lock"
+    lock_path.write_text("unchanged\n", encoding="utf-8")
+    descriptor = os.open(lock_path, os.O_RDWR)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        assert EVALUATOR._lock_is_held_without_mutation(lock_path) is True
+        assert lock_path.read_text(encoding="utf-8") == "unchanged\n"
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+    assert EVALUATOR._lock_is_held_without_mutation(lock_path) is False
+    assert lock_path.read_text(encoding="utf-8") == "unchanged\n"
+
+
+def test_campaign_inner_evaluator_rejects_an_unheld_lifetime_lock(tmp_path, monkeypatch):
+    root, run, _record, _active = _controller_receipt_fixture(
+        tmp_path, monkeypatch, lock_held=False
+    )
+    with pytest.raises(EvaluationError, match="live child of the locked controller"):
+        _validate_device_admission(
+            root,
+            "cuda:0",
+            run_path=run,
+            arm="G1-S",
+            action="evaluate-full-abt-validation",
+            source_stage="goal1",
+        )
 
 
 def test_evaluation_identity_is_bound_and_output_names_are_immutable(tmp_path):
@@ -269,7 +599,9 @@ def test_goal2_residual_entry_rejects_nonzero_physical_gpu(tmp_path, monkeypatch
     root = tmp_path / "campaign"
     run = root / "runs/G1-C/run-c"
     monkeypatch.setattr(EVALUATOR, "_validate_campaign_run", lambda *_args: (root, run, "G1-C"))
-    monkeypatch.setattr(EVALUATOR, "_validate_device_admission", lambda *_args: None)
+    monkeypatch.setattr(
+        EVALUATOR, "_validate_device_admission", lambda *_args, **_kwargs: None
+    )
     monkeypatch.setenv("PHYCOFLOW_CAMPAIGN_ADMITTED", str(root))
     monkeypatch.setenv("PHYCOFLOW_CAMPAIGN_GPU", "1")
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1")

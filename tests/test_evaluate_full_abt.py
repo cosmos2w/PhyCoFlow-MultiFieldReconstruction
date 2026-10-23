@@ -20,7 +20,7 @@ def _supported_config():
             "model": {"model_ema_eval": False},
             "rollout": {"steps": 2, "solver": "euler"},
             "optimization": {"multitask": {"external_policy": {"method": "lagrangian"}}},
-            "evaluation": {"split": "validation"},
+            "evaluation": {"split": "validation", "generation_steps": 2},
             "coherence": {
                 "compute_budget": {"point_count": 16, "query_policy": "fixed_shared"},
                 "families": {name: {} for name in PORTABLE.EXPECTED_FAMILIES},
@@ -38,6 +38,8 @@ def _supported_config():
         (("dataset", "include_temporal_derivative"), True, "temporal_derivative"),
         (("model", "model_ema_eval"), True, "raw live weights"),
         (("rollout", "steps"), 4, "two Euler"),
+        (("evaluation", "generation_steps"), 4, "two generation steps"),
+        (("evaluation", "generation_steps"), None, "two generation steps"),
         (("output", "experiment_name"), "_LPCAccel/study/G1-C", "historical"),
     ],
 )
@@ -270,10 +272,26 @@ def _small_full_families():
     }
 
 
-def test_portable_cli_full_abt_end_to_end_cpu_on_synthetic_run(tmp_path, capsys):
+def test_portable_cli_full_abt_end_to_end_cpu_on_synthetic_run(
+    tmp_path, capsys, monkeypatch
+):
     pytest.importorskip("gudhi")
     pytest.importorskip("cooper")
     from helpers.coherence import _base_config, _post_config
+
+    # Exercise the real compact HDF5 source and collator without forking a
+    # persistent DataLoader worker from a torch-initialized pytest process.
+    from phycoflow_reconstruction.data import training_batches
+
+    real_data_loader = torch.utils.data.DataLoader
+
+    def synchronous_data_loader(*args, **kwargs):
+        kwargs["num_workers"] = 0
+        kwargs["persistent_workers"] = False
+        kwargs.pop("prefetch_factor", None)
+        return real_data_loader(*args, **kwargs)
+
+    monkeypatch.setattr(training_batches, "DataLoader", synchronous_data_loader)
 
     from phycoflow_reconstruction.training.base_training import run_base_training
     from phycoflow_reconstruction.training.post_training import run_post_training
