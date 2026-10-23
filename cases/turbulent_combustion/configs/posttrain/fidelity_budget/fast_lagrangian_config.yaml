@@ -7,4 +7,7 @@ optimization:
     family_probability: 1.0
     coefficient_interval: 1
     seed: 700211
+checkpointing:
+  epochs: [50, 75, 100]
+  validation_every_epochs: 10
 output: {experiment_name: posttrain_fast_lagrangian_config}

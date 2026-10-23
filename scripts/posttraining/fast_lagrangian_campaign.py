@@ -3247,15 +3247,44 @@ def evaluate(
     execute: bool = False,
 ) -> str:
     manifest = _campaign_manifest(root)
-    if arm.startswith("G2"):
-        raise CampaignError("Goal 2 has no implemented LPC-ordered runner and remains gated")
+    if arm.startswith("G2") and arm != GOAL2_FORMAL_ARM:
+        raise CampaignError("only the authorized G2-O lineage supports full A/B/T evaluation")
     gpu = _validate_gpu_for_arm(arm, gpu, enforce_assignment=False)
-    if arm not in manifest.get("configs", {}):
+    if arm not in manifest.get("configs", {}) and arm not in manifest.get("goal2_configs", {}):
         raise CampaignError(f"unknown or unprepared arm {arm!r}")
     if arm in manifest.get("excluded_arms", {}):
         raise CampaignError(
             f"{arm} is excluded by its TRAIN-only pretest: {manifest['excluded_arms'][arm]}"
         )
+    if arm == GOAL2_FORMAL_ARM:
+        if checkpoint not in {"best", "last"}:
+            raise CampaignError("G2-O selected/final validation supports only best and last checkpoints")
+        if max_samples != 128:
+            raise CampaignError("G2-O selected/final full validation requires the uniform 128-sample panel")
+        _goal2_formal_gate(manifest)
+        info = _validate_arm(manifest, arm)
+        campaign_root = Path(manifest["root"]).resolve(strict=True)
+        run_dir = run_dir.resolve(strict=True)
+        runs = _run_dirs(campaign_root, arm)
+        if len(runs) != 1 or runs[0].resolve(strict=True) != run_dir:
+            raise CampaignError("G2-O evaluation requires its unique campaign-owned lineage")
+        run_record = _run_record(run_dir)
+        child_manifest = _read_json(run_dir / "run_manifest.json")
+        if (
+            not run_dir.is_relative_to((campaign_root / "runs").resolve(strict=True))
+            or run_record.get("status") != "completed"
+            or run_record.get("completed_epochs") != float(MAX_G1_EPOCHS)
+            or run_record.get("completed_updates") != 3800
+            or run_record.get("steps_per_epoch") != 38
+            or run_record.get("configured_steps") != 3800
+            or child_manifest.get("run_id") != run_dir.name
+            or child_manifest.get("experiment_name")
+            != f"_LPCAccel/{manifest['campaign_id']}/{GOAL2_FORMAL_ARM}"
+            or _read_yaml(run_dir / "resolved_config.yaml") != _read_yaml(info["config"])
+            or child_manifest.get("source_immutable_verified") is not True
+            or child_manifest.get("source_hashes") != child_manifest.get("source_hashes_after")
+        ):
+            raise CampaignError("G2-O evaluation requires the complete immutable prepared 100-epoch run")
     if isinstance(max_samples, bool) or max_samples not in (32, 64, 96, 128):
         raise CampaignError("validation sample count must be 32, 64, 96, or 128")
     if max_seconds is not None and (
@@ -3271,6 +3300,7 @@ def evaluate(
     if run_manifest.get("experiment_name") != f"_LPCAccel/{manifest['campaign_id']}/{arm}":
         raise CampaignError("evaluation run belongs to another campaign arm")
     # Reuse the full evaluator without generating presentation duplicates.
+    source_stage = _source_stage_for_arm(arm)
     command = [
         str(PYTHON),
         str(REPO_ROOT / "scripts/posttraining/fast_lagrangian_evaluate.py"),
@@ -3287,7 +3317,7 @@ def evaluate(
     ]
     command = _with_short_multiprocessing_tmp(command)
     rendered = _rendered_command(
-        Path(manifest["root"]), command, gpu, source_stage="goal1"
+        Path(manifest["root"]), command, gpu, source_stage=source_stage
     )
     if not execute:
         return rendered
@@ -3320,7 +3350,7 @@ def evaluate(
         evaluation_reserve_seconds=reserve_hours * 3600,
         run=run_dir,
         gpu=gpu,
-        source_stage="goal1",
+        source_stage=source_stage,
     )
     return f"evaluated {arm} checkpoint {checkpoint} with full A/B/T on the evenly spaced validation panel"
 

@@ -35,6 +35,9 @@ def test_portable_profile_uses_explicit_source_and_dense_fixed_protocol(tmp_path
     assert topology["filtration"]["dimensions"] == [0, 1]
     assert topology["filtration"]["directions"] == ["sublevel", "superlevel"]
     assert cfg["model"]["model_ema_eval"] is False
+    assert cfg["checkpointing"]["every_epochs"] == 5
+    assert cfg["checkpointing"]["epochs"] == [50, 75, 100]
+    assert cfg["checkpointing"]["validation_every_epochs"] == 10
     if name == "fast_lagrangian_config":
         assert mt["coherence_aggregation"] == {"method": "torchjd_config"}
         assert mt["family_scalarization"]["method"] == "none"

@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import runpy
 import sys
@@ -53,6 +54,9 @@ sys.path.insert(0, str(SOURCE_PATH))
 GROUP_SIZE = 32
 MAX_SAMPLES = 128
 VALIDATION_SEED = 2027
+GOAL2_FORMAL_ARM = "G2-O"
+GOAL2_ORDERED_SETTINGS = {"dual_lr": 0.01, "denominator_floor": 1.0e-8}
+GOAL2_ORDERED_FAMILIES = ("global_distribution", "cross_spectrum", "topology")
 CHECKPOINT_NAMES = ("best", "last", "epoch_050", "epoch_075", "epoch_100")
 NATIVE_MAP_APPROVAL_FILES = {
     "extractor": (
@@ -496,6 +500,218 @@ def _validate_experiment_binding(config, manifest, root: Path, arm: str) -> None
         raise EvaluationError("run config/manifest belongs to another campaign arm")
 
 
+def _validate_evaluation_source_stage(root: Path, arm: str) -> dict[str, Any]:
+    from scripts.posttraining import fast_lagrangian_campaign as campaign
+
+    root = root.resolve(strict=True)
+    stage = "goal2" if arm == GOAL2_FORMAL_ARM else "goal1"
+    if (
+        os.environ.get("PHYCOFLOW_CAMPAIGN_SOURCE_STAGE") != stage
+        or os.environ.get("PHYCOFLOW_CAMPAIGN_ADMITTED") != str(root)
+    ):
+        raise EvaluationError(f"{arm} evaluation requires the campaign's {stage} source-stage wrapper")
+    try:
+        campaign_manifest = campaign._campaign_manifest(root)
+        expected_source = campaign._stage_source_root(root, campaign_manifest, stage).resolve(strict=True)
+        expected_binding = campaign._stage_source_digest(root, campaign_manifest, stage)
+    except (campaign.CampaignError, OSError, KeyError, TypeError, ValueError) as error:
+        raise EvaluationError(f"campaign {stage} source binding failed: {error}") from error
+    if SOURCE_PATH.resolve(strict=True) != expected_source:
+        raise EvaluationError(f"{arm} evaluator imported the wrong {stage} numerical source tree")
+    return {
+        "manifest": campaign_manifest,
+        "stage": stage,
+        "source_root": str(expected_source),
+        "source_binding_sha256": expected_binding,
+    }
+
+
+def _validate_goal2_ordered_reference(
+    config: Mapping[str, Any],
+    run_manifest: Mapping[str, Any],
+    ordered_report: Mapping[str, Any],
+    fidelity_report: Mapping[str, Any],
+) -> dict[str, Any]:
+    optimization = config.get("optimization")
+    if not isinstance(optimization, Mapping):
+        raise EvaluationError("G2-O config has no optimization profile")
+    multitask = optimization.get("multitask")
+    source_hashes = run_manifest.get("source_hashes")
+    if not isinstance(multitask, Mapping) or not isinstance(source_hashes, Mapping):
+        raise EvaluationError("G2-O config or run manifest lacks ordered source bindings")
+    settings = optimization.get("lpc_ordered")
+    expected_source_sha = source_hashes.get("checkpoint")
+    fidelity_settings = multitask.get("fidelity_budget")
+    if not isinstance(fidelity_settings, Mapping):
+        raise EvaluationError("G2-O config lacks its endpoint-fidelity reference profile")
+    try:
+        from phycoflow_reconstruction.training.fidelity_budget import FidelityBudget
+        from phycoflow_reconstruction.training.lpc_ordered import LPCOrderedReference
+
+        if settings != GOAL2_ORDERED_SETTINGS or ordered_report.get("settings") != settings:
+            raise EvaluationError("G2-O LPC-ordered settings differ from the prepared profile")
+        if (
+            ordered_report.get("source_checkpoint_sha256") != expected_source_sha
+            or not isinstance(expected_source_sha, str)
+            or len(expected_source_sha) != 64
+        ):
+            raise EvaluationError("G2-O ordered reference is not bound to its prepared SOURCE checkpoint")
+        if fidelity_report.get("settings") != fidelity_settings:
+            raise EvaluationError("G2-O fidelity reference settings differ from the prepared config")
+        ordered_reference = LPCOrderedReference.from_state_dict(ordered_report["reference"])
+        fidelity_reference = FidelityBudget.from_state_dict(fidelity_report["reference"])
+    except EvaluationError:
+        raise
+    except (KeyError, TypeError, ValueError, OverflowError) as error:
+        raise EvaluationError(f"G2-O ordered/fidelity reference is malformed: {error}") from error
+    if (
+        ordered_reference.source_sha256 != expected_source_sha
+        or ordered_reference.denominator_floor != GOAL2_ORDERED_SETTINGS["denominator_floor"]
+        or fidelity_reference.relative_increase != 0.05
+        or fidelity_reference.absolute_allowance != 0.0
+    ):
+        raise EvaluationError("G2-O reference source or +5% fidelity contract changed")
+    means = ordered_report["reference"]["means"]
+    if not math.isclose(
+        math.fsum(float(means[name]) for name in GOAL2_ORDERED_FAMILIES),
+        fidelity_reference.c0,
+        rel_tol=2.0e-7,
+        abs_tol=1.0e-12,
+    ):
+        raise EvaluationError("G2-O ordered SOURCE family means no longer sum to fidelity C0")
+    return {
+        "reference": ordered_reference.state_dict(),
+        "reference_sha256": None,
+        "fidelity_reference": fidelity_reference.state_dict(),
+        "source_checkpoint_sha256": expected_source_sha,
+    }
+
+
+def _validate_goal2_ordered_checkpoint(
+    checkpoint: Mapping[str, Any],
+    config: Mapping[str, Any],
+    run_manifest: Mapping[str, Any],
+    ordered_binding: Mapping[str, Any],
+    ordered_reference_sha256: str,
+) -> None:
+    try:
+        from phycoflow_reconstruction.training.lpc_ordered import (
+            LPCOrderedReference,
+            LPCOrderedState,
+            implementation_binding,
+        )
+
+        global_step = checkpoint.get("global_step")
+        ordered_state = checkpoint["lpc_ordered_state"]
+        if (
+            isinstance(global_step, bool)
+            or not isinstance(global_step, int)
+            or global_step < 1
+            or checkpoint.get("lpc_ordered_reference_sha256") != ordered_reference_sha256
+            or checkpoint.get("lpc_ordered_implementation") != implementation_binding()
+            or checkpoint.get("source_hashes") != run_manifest.get("source_hashes")
+            or checkpoint.get("config_sha256") != run_manifest.get("config_sha256")
+        ):
+            raise EvaluationError("G2-O checkpoint is not bound to the ordered SOURCE/config implementation")
+        reference = LPCOrderedReference.from_state_dict(ordered_binding["reference"])
+        state = LPCOrderedState(
+            reference,
+            dual_lr=float(config["optimization"]["lpc_ordered"]["dual_lr"]),
+            device="cpu",
+        )
+        state.load_state_dict(ordered_state)
+        if state.completed_updates != global_step:
+            raise EvaluationError("G2-O ordered checkpoint cursor differs from accepted model updates")
+        external = checkpoint.get("external_policy")
+        if (
+            not isinstance(external, Mapping)
+            or external.get("reference") != ordered_binding["fidelity_reference"]
+            or external.get("settings")
+            != config["optimization"]["multitask"].get("external_policy")
+            or external.get("completed_updates") != global_step
+        ):
+            raise EvaluationError("G2-O checkpoint external fidelity state differs from its SOURCE reference")
+    except EvaluationError:
+        raise
+    except (KeyError, TypeError, ValueError, OverflowError) as error:
+        raise EvaluationError(f"G2-O ordered checkpoint state is malformed: {error}") from error
+
+
+def _validate_goal2_campaign_binding(
+    root: Path,
+    run_dir: Path,
+    config: Mapping[str, Any],
+    run_manifest: Mapping[str, Any],
+    source_stage: Mapping[str, Any],
+) -> dict[str, Any]:
+    from scripts.posttraining import fast_lagrangian_campaign as campaign
+
+    root = root.resolve(strict=True)
+    run_dir = run_dir.resolve(strict=True)
+    campaign_manifest = source_stage["manifest"]
+    if (
+        campaign_manifest.get("campaign_id") != root.name
+        or Path(campaign_manifest.get("root", "")).resolve(strict=True) != root
+    ):
+        raise EvaluationError("G2-O campaign manifest identity differs from its data root")
+    try:
+        campaign._goal2_formal_gate(campaign_manifest)
+        prepared = campaign._validate_arm(campaign_manifest, GOAL2_FORMAL_ARM)
+        prepared_config = campaign._read_yaml(prepared["config"])
+        lineages = campaign._run_dirs(root, GOAL2_FORMAL_ARM)
+        goal1_runs = campaign._goal1_residual_runs_complete(root)
+    except (campaign.CampaignError, OSError, KeyError, TypeError, ValueError) as error:
+        raise EvaluationError(f"G2-O formal campaign binding failed: {error}") from error
+    if config != prepared_config:
+        raise EvaluationError("G2-O resolved config differs from the exact prepared ordered profile")
+    if len(lineages) != 1 or lineages[0].resolve(strict=True) != run_dir:
+        raise EvaluationError("G2-O full validation requires its unique campaign-owned lineage")
+    runs_root = (root / "runs").resolve(strict=True)
+    if not run_dir.is_relative_to(runs_root) or run_dir.stat().st_uid != os.getuid():
+        raise EvaluationError("G2-O lineage escapes the owned campaign runs directory")
+    g1s = goal1_runs.get("G1-S")
+    if g1s is None:
+        raise EvaluationError("G2-O SOURCE binding lacks its completed G1-S anchor")
+    g1s_manifest = campaign._read_json(Path(g1s) / "run_manifest.json")
+    record = campaign._run_record(run_dir)
+    child_status = campaign._read_json(run_dir / "status.json")
+    if (
+        record.get("status") != "completed"
+        or record.get("completed_epochs") != 100.0
+        or record.get("completed_updates") != 3800
+        or record.get("steps_per_epoch") != 38
+        or record.get("configured_steps") != 3800
+        or child_status.get("source_immutable_verified") is not True
+        or run_manifest.get("run_id") != run_dir.name
+        or run_manifest.get("experiment_name")
+        != f"_LPCAccel/{root.name}/{GOAL2_FORMAL_ARM}"
+        or run_manifest.get("last_checkpoint_epoch") != 100.0
+        or run_manifest.get("last_checkpoint_step") != 3800
+        or run_manifest.get("source_immutable_verified") is not True
+        or run_manifest.get("source_hashes") != run_manifest.get("source_hashes_after")
+        or run_manifest.get("source_hashes") != g1s_manifest.get("source_hashes")
+    ):
+        raise EvaluationError("G2-O run is incomplete or its SOURCE immutability binding changed")
+
+    ordered_path = run_dir / "artifacts/lpc_ordered_reference.json"
+    fidelity_path = run_dir / "artifacts/fidelity_budget_reference.json"
+    if not ordered_path.is_file() or not fidelity_path.is_file():
+        raise EvaluationError("G2-O run is missing its ordered or endpoint-fidelity SOURCE reference")
+    ordered_binding = _validate_goal2_ordered_reference(
+        config,
+        run_manifest,
+        _read_json(ordered_path),
+        _read_json(fidelity_path),
+    )
+    ordered_binding["reference_sha256"] = _sha256(ordered_path)
+    ordered_binding["fidelity_reference_sha256"] = _sha256(fidelity_path)
+    return {
+        "source_stage": "goal2",
+        "source_binding_sha256": source_stage["source_binding_sha256"],
+        "ordered_reference": ordered_binding,
+    }
+
+
 def _native_map_approval_binding(root: Path) -> dict[str, Any]:
     binding: dict[str, Any] = {"schema_version": 1}
     for key, (relative_path, expected_sha256) in NATIVE_MAP_APPROVAL_FILES.items():
@@ -843,10 +1059,18 @@ def evaluate_campaign_run(
     if checkpoint_name not in CHECKPOINT_NAMES:
         raise EvaluationError(f"unsupported checkpoint selection {checkpoint_name!r}")
     root, run_dir, arm = _validate_campaign_run(campaign_root, run_path)
+    source_stage = _validate_evaluation_source_stage(root, arm)
     config, manifest, checkpoint_path, checkpoint_sha256 = _load_run_inputs(
         run_dir, checkpoint_name
     )
     _validate_experiment_binding(config, manifest, root, arm)
+    if arm.startswith("G2") and arm != GOAL2_FORMAL_ARM:
+        raise EvaluationError("only the authorized G2-O formal lineage supports full A/B/T evaluation")
+    goal2_binding = (
+        _validate_goal2_campaign_binding(root, run_dir, config, manifest, source_stage)
+        if arm == GOAL2_FORMAL_ARM
+        else None
+    )
     # This is a hard-coded validation-only evaluator; there is no TEST override.
     if config.get("evaluation", {}).get("split", "validation") != "validation":
         raise EvaluationError("campaign evaluation requires evaluation.split='validation'")
@@ -874,6 +1098,10 @@ def evaluate_campaign_run(
     actual_source_hashes = source_hashes(config)
     if manifest.get("source_hashes") != actual_source_hashes:
         raise EvaluationError("current SOURCE hashes differ from the campaign run manifest")
+    if goal2_binding is not None and actual_source_hashes.get("checkpoint") != (
+        goal2_binding["ordered_reference"]["source_checkpoint_sha256"]
+    ):
+        raise EvaluationError("G2-O current SOURCE checkpoint differs from the ordered family means")
 
     model, train_dataset, source_metadata = load_source_model(config, device)
     validation_dataset = None
@@ -954,6 +1182,16 @@ def evaluate_campaign_run(
         checkpoint = load_project_checkpoint(checkpoint_path)
         if checkpoint.get("config_sha256") != manifest["config_sha256"]:
             raise EvaluationError("requested checkpoint is not bound to this resolved config")
+        if goal2_binding is not None:
+            _validate_goal2_ordered_checkpoint(
+                checkpoint,
+                config,
+                manifest,
+                goal2_binding["ordered_reference"],
+                goal2_binding["ordered_reference"]["reference_sha256"],
+            )
+            if checkpoint_name == "last" and int(checkpoint.get("global_step", -1)) != 3800:
+                raise EvaluationError("G2-O final checkpoint is not the completed 3800-update state")
         if checkpoint.get("source_hashes") != actual_source_hashes:
             raise EvaluationError(
                 "selected checkpoint SOURCE hashes differ from current SOURCE artifacts"
@@ -1061,6 +1299,8 @@ def evaluate_campaign_run(
             ),
             "campaign_root": str(root),
             "arm": arm,
+            "source_stage": source_stage["stage"],
+            "source_binding_sha256": source_stage["source_binding_sha256"],
             "run": str(run_dir),
             "checkpoint": checkpoint_name,
             "checkpoint_path": str(checkpoint_path),
@@ -1076,6 +1316,9 @@ def evaluate_campaign_run(
                 "metadata": source_metadata,
             },
             "config_sha256": manifest["config_sha256"],
+            "ordered_training_binding": (
+                goal2_binding["ordered_reference"] if goal2_binding is not None else None
+            ),
             "dataset": {
                 "path": str(Path(config["dataset"]["path"]).resolve()),
                 "split": "validation",

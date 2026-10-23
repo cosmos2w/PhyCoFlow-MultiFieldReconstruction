@@ -251,6 +251,66 @@ def test_evaluation_command_is_validation_only_and_never_selects_test(tmp_path, 
     assert "--eval-set test" not in command
 
 
+def test_goal2_full128_evaluation_uses_authorized_goal2_source_stage(tmp_path, monkeypatch):
+    root = tmp_path / "campaign"
+    run = root / "runs/G2-O/run-1"
+    run.mkdir(parents=True)
+    prepared = root / "configs/G2-O.yaml"
+    prepared.parent.mkdir(parents=True)
+    config = {
+        "stage": "post_training",
+        "optimization": {"epochs": 100, "lpc_ordered": MODULE.GOAL2_ORDERED_SETTINGS},
+        "output": {"experiment_name": "_LPCAccel/campaign/G2-O"},
+    }
+    prepared.write_text(yaml.safe_dump(config), encoding="utf-8")
+    (run / "resolved_config.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
+    (run / "run_manifest.json").write_text(
+        json.dumps(
+            {
+                "run_id": "run-1",
+                "experiment_name": "_LPCAccel/campaign/G2-O",
+                "source_immutable_verified": True,
+                "source_hashes": {"checkpoint": "source"},
+                "source_hashes_after": {"checkpoint": "source"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    manifest = {
+        "root": str(root),
+        "campaign_id": "campaign",
+        "configs": {},
+        "goal2_configs": {"G2-O": {"path": str(prepared), "sha256": "prepared"}},
+        "gates": {"goal2_authorized": True},
+    }
+    monkeypatch.setattr(MODULE, "_campaign_manifest", lambda _root: manifest)
+    monkeypatch.setattr(MODULE, "_goal2_formal_gate", lambda _manifest: {"status": "ready"})
+    monkeypatch.setattr(MODULE, "_validate_arm", lambda *_args: {"config": prepared})
+    monkeypatch.setattr(MODULE, "_run_dirs", lambda *_args: [run])
+    monkeypatch.setattr(
+        MODULE,
+        "_run_record",
+        lambda _run: {
+            "status": "completed",
+            "completed_epochs": 100.0,
+            "completed_updates": 3800,
+            "steps_per_epoch": 38,
+            "configured_steps": 3800,
+        },
+    )
+
+    command = MODULE.evaluate(root, "G2-O", run, checkpoint="best", max_samples=128, gpu=0)
+
+    assert "--max-samples 128" in command
+    assert "--checkpoint best" in command
+    assert "CUDA_VISIBLE_DEVICES=0" in command
+    assert "PHYCOFLOW_CAMPAIGN_SOURCE_STAGE=goal2" in command
+    with pytest.raises(MODULE.CampaignError, match="128-sample"):
+        MODULE.evaluate(root, "G2-O", run, max_samples=64, gpu=0)
+    with pytest.raises(MODULE.CampaignError, match="best and last"):
+        MODULE.evaluate(root, "G2-O", run, checkpoint="epoch_050", max_samples=128, gpu=0)
+
+
 def test_evaluation_reserve_counts_every_completed_and_active_evaluation(tmp_path):
     root = tmp_path / "campaign"
     (root / "manifests").mkdir(parents=True)

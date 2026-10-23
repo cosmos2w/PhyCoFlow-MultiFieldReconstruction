@@ -43,4 +43,7 @@ coherence:
   family_balance: {mode: none, gradient_diagnostics_every_epochs: 0}
 runtime: {device: cuda:0, plot_every_steps: 1000}
 evaluation: {preview: {enabled: false}}
+checkpointing:
+  epochs: [50, 75, 100]
+  validation_every_epochs: 10
 output: {experiment_name: posttrain_fast_lagrangian_scalar}

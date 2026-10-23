@@ -5,6 +5,7 @@ import json
 
 import pytest
 import torch
+import yaml
 from torch import nn
 
 from phycoflow_reconstruction.coherence import build_coherence_family
@@ -18,6 +19,12 @@ from phycoflow_reconstruction.contracts import (
 )
 from phycoflow_reconstruction.data.normalization import FieldNormalizer
 from phycoflow_reconstruction.data.sensor_protocols import SensorProtocol, build_observation_batch
+from phycoflow_reconstruction.training.fidelity_budget import FidelityBudget
+from phycoflow_reconstruction.training.lpc_ordered import (
+    LPCOrderedReference,
+    LPCOrderedState,
+    implementation_binding,
+)
 from scripts.posttraining import fast_lagrangian_campaign as CAMPAIGN
 from scripts.posttraining import fast_lagrangian_evaluate as EVALUATOR
 from scripts.posttraining.fast_lagrangian_evaluate import (
@@ -284,6 +291,221 @@ def test_campaign_stage_bootstrap_selects_the_goal1_snapshot_before_project_impo
     monkeypatch.setattr(CAMPAIGN, "_stage_source_root", lambda *_args: snapshot_src)
 
     assert EVALUATOR._campaign_source_path() == snapshot_src
+
+
+def test_evaluation_source_stage_keeps_goal1_on_its_frozen_snapshot(tmp_path, monkeypatch):
+    root = tmp_path / "campaign"
+    root.mkdir()
+    snapshot_src = root / "source_snapshots/goal1_c073eba/src"
+    snapshot_src.mkdir(parents=True)
+    monkeypatch.setenv("PHYCOFLOW_CAMPAIGN_SOURCE_STAGE", "goal1")
+    monkeypatch.setenv("PHYCOFLOW_CAMPAIGN_ADMITTED", str(root.resolve()))
+    monkeypatch.setattr(EVALUATOR, "SOURCE_PATH", snapshot_src)
+    monkeypatch.setattr(CAMPAIGN, "_campaign_manifest", lambda _root: {"root": str(root.resolve())})
+    monkeypatch.setattr(CAMPAIGN, "_stage_source_root", lambda *_args: snapshot_src)
+    monkeypatch.setattr(CAMPAIGN, "_stage_source_digest", lambda *_args: "frozen-goal1-binding")
+
+    binding = EVALUATOR._validate_evaluation_source_stage(root, "G1-S")
+
+    assert binding["stage"] == "goal1"
+    assert binding["source_root"] == str(snapshot_src)
+    assert binding["source_binding_sha256"] == "frozen-goal1-binding"
+
+
+def _goal2_evaluation_binding_fixture(tmp_path, monkeypatch):
+    root = tmp_path / "campaign"
+    prepared_path = root / "configs/G2-O.yaml"
+    run = root / "runs/G2-O/run-1"
+    g1s = root / "runs/G1-S/run-s"
+    source_root = root / "current-source/src"
+    for directory in (prepared_path.parent, run / "artifacts", g1s, source_root):
+        directory.mkdir(parents=True, exist_ok=True)
+
+    source_hashes = {
+        "checkpoint": "a" * 64,
+        "resolved_config": "b" * 64,
+        "run_manifest": "c" * 64,
+    }
+    fidelity_settings = {
+        "metric": "endpoint_mse_model_units",
+        "relative_increase": 0.05,
+        "absolute_allowance": 0.0,
+        "denominator_floor": 1.0e-8,
+        "calibration_batches": 8,
+        "calibration_draws": 2,
+        "calibration_seed": 700103,
+    }
+    config = {
+        "optimization": {
+            "lpc_ordered": dict(EVALUATOR.GOAL2_ORDERED_SETTINGS),
+            "multitask": {
+                "fidelity_budget": fidelity_settings,
+                "external_policy": {"method": "lagrangian", "objective_scale": "source_mean"},
+            },
+        }
+    }
+    prepared_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    (run / "resolved_config.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
+    (run / "status.json").write_text(
+        json.dumps({"status": "completed", "source_immutable_verified": True}), encoding="utf-8"
+    )
+    run_manifest = {
+        "run_id": "run-1",
+        "experiment_name": "_LPCAccel/campaign/G2-O",
+        "last_checkpoint_epoch": 100.0,
+        "last_checkpoint_step": 3800,
+        "source_immutable_verified": True,
+        "source_hashes": source_hashes,
+        "source_hashes_after": source_hashes,
+    }
+    (run / "run_manifest.json").write_text(json.dumps(run_manifest), encoding="utf-8")
+    (g1s / "run_manifest.json").write_text(json.dumps({"source_hashes": source_hashes}), encoding="utf-8")
+
+    means = {"global_distribution": 1.25, "cross_spectrum": 2.5, "topology": 3.75}
+    ordered_reference = LPCOrderedReference.from_means(
+        means,
+        source_sha256=source_hashes["checkpoint"],
+        denominator_floor=EVALUATOR.GOAL2_ORDERED_SETTINGS["denominator_floor"],
+    )
+    ordered_report = {
+        "reference": ordered_reference.state_dict(),
+        "settings": dict(EVALUATOR.GOAL2_ORDERED_SETTINGS),
+        "source_checkpoint_sha256": source_hashes["checkpoint"],
+        "calibration": "same full-descriptor SOURCE TRAIN draws as fidelity/C0; no extra forward",
+    }
+    (run / "artifacts/lpc_ordered_reference.json").write_text(
+        json.dumps(ordered_report), encoding="utf-8"
+    )
+    fidelity_reference = FidelityBudget.from_reference(
+        ("field",),
+        (0.5,),
+        sum(means.values()),
+        relative_increase=0.05,
+        absolute_allowance=0.0,
+        denominator_floor=1.0e-8,
+    )
+    (run / "artifacts/fidelity_budget_reference.json").write_text(
+        json.dumps({"settings": fidelity_settings, "reference": fidelity_reference.state_dict()}),
+        encoding="utf-8",
+    )
+
+    campaign_manifest = {
+        "root": str(root.resolve()),
+        "campaign_id": root.name,
+        "goal2_configs": {},
+    }
+    monkeypatch.setenv("PHYCOFLOW_CAMPAIGN_SOURCE_STAGE", "goal2")
+    monkeypatch.setenv("PHYCOFLOW_CAMPAIGN_ADMITTED", str(root.resolve()))
+    monkeypatch.setattr(EVALUATOR, "SOURCE_PATH", source_root)
+    monkeypatch.setattr(CAMPAIGN, "_campaign_manifest", lambda _root: campaign_manifest)
+    monkeypatch.setattr(CAMPAIGN, "_stage_source_root", lambda *_args: source_root)
+    monkeypatch.setattr(CAMPAIGN, "_stage_source_digest", lambda *_args: "current-goal2-binding")
+    monkeypatch.setattr(CAMPAIGN, "_goal2_formal_gate", lambda _manifest: {"status": "ready"})
+    monkeypatch.setattr(CAMPAIGN, "_validate_arm", lambda *_args: {"config": prepared_path})
+    monkeypatch.setattr(CAMPAIGN, "_run_dirs", lambda *_args: [run])
+    monkeypatch.setattr(CAMPAIGN, "_goal1_residual_runs_complete", lambda _root: {"G1-S": g1s})
+    monkeypatch.setattr(
+        CAMPAIGN,
+        "_run_record",
+        lambda _run: {
+            "status": "completed",
+            "completed_epochs": 100.0,
+            "completed_updates": 3800,
+            "steps_per_epoch": 38,
+            "configured_steps": 3800,
+        },
+    )
+    return root, run, config, run_manifest, campaign_manifest
+
+
+def test_goal2_evaluator_binds_prepared_source_profile_and_ordered_reference(tmp_path, monkeypatch):
+    root, run, config, run_manifest, _campaign_manifest = _goal2_evaluation_binding_fixture(
+        tmp_path, monkeypatch
+    )
+    source_stage = EVALUATOR._validate_evaluation_source_stage(root, "G2-O")
+    binding = EVALUATOR._validate_goal2_campaign_binding(
+        root, run, config, run_manifest, source_stage
+    )
+
+    assert binding["source_stage"] == "goal2"
+    assert binding["source_binding_sha256"] == "current-goal2-binding"
+    assert len(binding["ordered_reference"]["reference_sha256"]) == 64
+    assert binding["ordered_reference"]["reference"]["source_sha256"] == "a" * 64
+
+
+def test_goal2_evaluator_rejects_changed_source_and_ordered_mean_bindings(tmp_path, monkeypatch):
+    root, run, config, run_manifest, _campaign_manifest = _goal2_evaluation_binding_fixture(
+        tmp_path, monkeypatch
+    )
+    source_stage = EVALUATOR._validate_evaluation_source_stage(root, "G2-O")
+    wrong_profile = yaml.safe_load(yaml.safe_dump(config))
+    wrong_profile["optimization"]["lpc_ordered"]["dual_lr"] = 0.02
+    ordered_report = json.loads((run / "artifacts/lpc_ordered_reference.json").read_text())
+    fidelity_report = json.loads((run / "artifacts/fidelity_budget_reference.json").read_text())
+    with pytest.raises(EvaluationError, match="settings differ"):
+        EVALUATOR._validate_goal2_ordered_reference(
+            wrong_profile, run_manifest, ordered_report, fidelity_report
+        )
+
+    changed_run_manifest = {**run_manifest, "source_hashes": {"checkpoint": "d" * 64}}
+    with pytest.raises(EvaluationError, match="SOURCE immutability"):
+        EVALUATOR._validate_goal2_campaign_binding(
+            root, run, config, changed_run_manifest, source_stage
+        )
+
+    changed_means = {**ordered_report["reference"]["means"], "topology": 4.75}
+    ordered_report["reference"] = LPCOrderedReference.from_means(
+        changed_means,
+        source_sha256="a" * 64,
+        denominator_floor=EVALUATOR.GOAL2_ORDERED_SETTINGS["denominator_floor"],
+    ).state_dict()
+    with pytest.raises(EvaluationError, match="sum to fidelity C0"):
+        EVALUATOR._validate_goal2_ordered_reference(
+            config, run_manifest, ordered_report, fidelity_report
+        )
+
+
+def test_goal2_evaluator_binds_checkpoint_to_ordered_and_endpoint_references():
+    source_hashes = {"checkpoint": "a" * 64, "resolved_config": "b" * 64}
+    means = {"global_distribution": 1.0, "cross_spectrum": 2.0, "topology": 3.0}
+    reference = LPCOrderedReference.from_means(means, source_sha256=source_hashes["checkpoint"])
+    state = LPCOrderedState(reference, dual_lr=0.01)
+    ordered_state = state.state_dict()
+    ordered_state["completed_updates"] = 3800
+    fidelity = FidelityBudget.from_reference(("field",), (0.5,), 6.0).state_dict()
+    config = {
+        "optimization": {
+            "lpc_ordered": dict(EVALUATOR.GOAL2_ORDERED_SETTINGS),
+            "multitask": {"external_policy": {"method": "lagrangian"}},
+        }
+    }
+    run_manifest = {"source_hashes": source_hashes, "config_sha256": "config-digest"}
+    binding = {"reference": reference.state_dict(), "fidelity_reference": fidelity}
+    checkpoint = {
+        "global_step": 3800,
+        "config_sha256": "config-digest",
+        "source_hashes": source_hashes,
+        "lpc_ordered_reference_sha256": "reference-digest",
+        "lpc_ordered_implementation": implementation_binding(),
+        "lpc_ordered_state": ordered_state,
+        "external_policy": {
+            "reference": fidelity,
+            "settings": config["optimization"]["multitask"]["external_policy"],
+            "completed_updates": 3800,
+        },
+    }
+
+    EVALUATOR._validate_goal2_ordered_checkpoint(
+        checkpoint, config, run_manifest, binding, "reference-digest"
+    )
+    with pytest.raises(EvaluationError, match="ordered SOURCE/config implementation"):
+        EVALUATOR._validate_goal2_ordered_checkpoint(
+            {**checkpoint, "lpc_ordered_reference_sha256": "changed"},
+            config,
+            run_manifest,
+            binding,
+            "reference-digest",
+        )
 
 
 def test_validation_selection_gates_and_uniform_group_boundaries():
