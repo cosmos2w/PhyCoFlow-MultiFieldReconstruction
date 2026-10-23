@@ -1,6 +1,12 @@
 # Fast Lagrangian refinement and LPC ordering: bounded execution report
 
-Campaign date: 2026-10-22 (America/New_York). Branch: `cosmos2w/fast-lagrangian-lpc`. This report distinguishes completed implementation/pretests/short runs from the unlaunched 100-epoch quality study. No long run or launch-capable waiter is authorized by this report.
+Campaign date: 2026-10-22 (America/New_York). Branch: `cosmos2w/fast-lagrangian-lpc`. This report retains the completed short-run evidence and is being extended for the 2026-10-23 continuation. The user now authorizes three SOURCE-initialized 100-epoch Goal-1 arms on physical GPUs 1/2/0, followed by the gated Goal-2 diagnostic and at most one supported 100-epoch ordered arm on GPU 0. Long-run results remain pending until measured; the earlier no-long-launch restriction is superseded for this bounded continuation.
+
+## Authorized continuation — 2026-10-23
+
+The user now authorizes G1-C/G1-S/G1-R for 100 fresh SOURCE-initialized epochs on physical GPUs 1/2/0 respectively, followed by Goal 2 only after all three finish and are assessed. Physical GPU 0 becomes the main working device afterward. All three devices were verified idle. The scientific Python source and prepared configuration hashes remain unchanged. Per-device lifetime locks, short shared admission locking, cross-device arm/orphan checks, conservative interrupted-exposure accounting, and combined live GPU-time accounting support the concurrent launch. The continuation campaign/evaluator suite passed all 39 focused tests.
+
+Readiness is applied from `manifests/goal1_readiness.authorized_20261023.json`, linked to the explicit user authorization receipt. Per-arm maximum runtime allowances are twice the matched ten-epoch projections, with two GPU hours reserved for Goal 2, at least one for evaluation/diagnostic work, and bounded shutdown margins inside the 16-hour combined cap. The 100-epoch study uses the existing first-32 full-descriptor validation every ten epochs; the final uniform-128 audit stays distinct. Per-check visibility timing is monitored externally with observation intervals. Concurrent long-run time-to-quality is observational across physical devices and shared CPU/storage; the prior single-GPU timings remain the matched idle-hardware latency evidence. Long-run outcomes are pending until measured; the short-run results below are retained as stage-one evidence.
 
 ## Answer and current evidence boundary
 
@@ -19,7 +25,7 @@ long_run_stability: untested
 
 Periodic ConFIG coefficient extraction reconstructs the pinned full-width FP64 TorchJD oracle, retaining coefficient signs. Reusing those coefficients on fresh current gradients failed the small P3 staleness probe at both tested cadences. T4/G1-P are therefore excluded. No stale parameter gradient or direction is used by the implementation. This mechanism is unsupported for the selected estimator in this campaign.
 
-The matched 100-epoch Goal-1 learning histories are **not executed**, because the user prohibited launching or queueing long runs. Quality retention through 100 epochs, a mature 60–100 epoch window, and matched time-to-quality are consequently unestablished. Goal 2 remains gated behind those results: neither the real-model residual-gradient diagnostic nor an ordered-refinement training experiment has been executed. The residual helper has numerical unit coverage only.
+The matched 100-epoch Goal-1 learning histories were unexecuted at the end of the short study. The user explicitly authorized their execution on 2026-10-23, followed by Goal 2. Until the three runs finish and their complete evidence is assessed, 100-epoch quality retention, the mature 60–100 epoch window, and matched time-to-quality remain pending. The real-model residual-gradient diagnostic and any ordered-refinement training stay gated until then; the residual helper currently has numerical unit coverage only.
 
 **TEST exception:** one readiness attempt mistakenly called the existing dataset validator. Its structural probe read one final HDF5 scalar in the TEST frame range. No TEST model evaluation, metric, selection, or estimator tuning was performed. The scalar value was not retained. The incident is recorded in `manifests/test_access_exception.json`, and subsequent validation is config-only. This campaign cannot be described as having zero TEST access.
 

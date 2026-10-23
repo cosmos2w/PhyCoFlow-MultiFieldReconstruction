@@ -26,9 +26,33 @@ from scripts.posttraining.fast_lagrangian_evaluate import (
     _slice_batch,
     _summarize_groups,
     _uniform_validation_indices,
+    _validate_device_admission,
     _validate_experiment_binding,
     _validate_max_samples,
 )
+
+
+def test_cuda_evaluation_requires_one_authorized_physical_gpu_and_campaign_token(tmp_path, monkeypatch):
+    root = tmp_path / "LPCAccel_fixture"
+    monkeypatch.delenv("PHYCOFLOW_CAMPAIGN_ADMITTED", raising=False)
+    _validate_device_admission(root, "cpu")
+    with pytest.raises(EvaluationError, match="admission"):
+        _validate_device_admission(root, "cuda:0")
+    monkeypatch.setenv("PHYCOFLOW_CAMPAIGN_ADMITTED", str(root))
+    for physical in ("0", "1", "2"):
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", physical)
+        monkeypatch.setenv("PHYCOFLOW_CAMPAIGN_GPU", physical)
+        _validate_device_admission(root, "cuda:0")
+    for invalid in ("", "3", "0,1", "-1"):
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", invalid)
+        with pytest.raises(EvaluationError, match="admission"):
+            _validate_device_admission(root, "cuda:0")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
+    monkeypatch.setenv("PHYCOFLOW_CAMPAIGN_GPU", "1")
+    with pytest.raises(EvaluationError, match="admission"):
+        _validate_device_admission(root, "cuda:0")
+    with pytest.raises(EvaluationError, match="explicitly reserved"):
+        _validate_device_admission(root, "cuda:1")
 
 
 def test_evaluation_identity_is_bound_and_output_names_are_immutable(tmp_path):

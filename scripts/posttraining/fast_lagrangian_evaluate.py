@@ -37,6 +37,17 @@ class EvaluationError(RuntimeError):
     """Raised when a campaign input does not satisfy the evaluation contract."""
 
 
+def _validate_device_admission(root: Path, device_name: str) -> None:
+    if device_name not in {"cpu", "cuda:0"}:
+        raise EvaluationError("use cpu or the explicitly reserved logical cuda:0")
+    if device_name == "cuda:0" and (
+        os.environ.get("PHYCOFLOW_CAMPAIGN_ADMITTED") != str(root)
+        or os.environ.get("CUDA_VISIBLE_DEVICES") not in {"0", "1", "2"}
+        or os.environ.get("PHYCOFLOW_CAMPAIGN_GPU") != os.environ.get("CUDA_VISIBLE_DEVICES")
+    ):
+        raise EvaluationError("CUDA evaluation requires the campaign admission/lock wrapper")
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--campaign-root", type=Path, required=True)
@@ -527,14 +538,8 @@ def evaluate_campaign_run(
     from phycoflow_reconstruction.training.source import load_source_model, source_hashes
     from phycoflow_reconstruction.training.update_budget import post_training_steps_per_epoch
 
-    if device_name not in {"cpu", "cuda:0"}:
-        raise EvaluationError("use cpu or the explicitly reserved logical cuda:0")
+    _validate_device_admission(root, device_name)
     device = torch.device(device_name)
-    if device.type == "cuda" and (
-        os.environ.get("PHYCOFLOW_CAMPAIGN_ADMITTED") != str(root)
-        or os.environ.get("CUDA_VISIBLE_DEVICES") != "1"
-    ):
-        raise EvaluationError("CUDA evaluation requires the campaign admission/lock wrapper")
     if device.type == "cuda" and not torch.cuda.is_available():
         raise EvaluationError("the reserved CUDA device is unavailable")
     from phycoflow_reconstruction.training.post_training import _configure_persistence_workers
@@ -724,6 +729,10 @@ def evaluate_campaign_run(
         payload = {
             "schema_version": 1,
             "evaluated_at_utc": evaluated_at.isoformat(),
+            "device": device_name,
+            "physical_gpu": (
+                int(os.environ["CUDA_VISIBLE_DEVICES"]) if device.type == "cuda" else None
+            ),
             "campaign_root": str(root),
             "arm": arm,
             "run": str(run_dir),

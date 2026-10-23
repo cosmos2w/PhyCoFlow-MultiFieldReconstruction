@@ -239,14 +239,16 @@ def test_campaign_launch_prints_existing_runner_command_without_execution(tmp_pa
     monkeypatch.setattr(
         MODULE.subprocess, "Popen", lambda *_args, **_kwargs: pytest.fail("unexpected launch")
     )
-    command = MODULE.launch(root, "T0", execute=False)
-    assert "CUDA_VISIBLE_DEVICES=1" in command
+    command = MODULE.launch(root, "T0", gpu=2, execute=False)
+    assert "CUDA_VISIBLE_DEVICES=2" in command
+    assert "PHYCOFLOW_CAMPAIGN_GPU=2" in command
     assert "post-train" in command
     assert "--config" in command and str(config_path) in command
     assert "KEOPS_CACHE_FOLDER" in command and "PHYCOFLOW_TOPOLOGY_WORKERS" in command
     assert "runpy.run_path" in command
     assert "sys.path.insert(0, os.path.dirname(os.path.abspath(script)))" in command
     assert MODULE._environment(root)["PHYCOFLOW_CAMPAIGN_ADMITTED"] == str(root.resolve())
+    assert MODULE._environment(root, 2)["PHYCOFLOW_CAMPAIGN_GPU"] == "2"
 
 
 def test_pretest_exclusions_block_periodic_arms(tmp_path):
@@ -303,6 +305,7 @@ def _runner_manifest(root: Path, arm: str = "T0") -> dict:
         "root": str(root),
         "campaign_id": root.name,
         "selected_topology_estimator": None,
+        "gates": {"timing_passed": False, "goal1_authorized": False},
         "configs": {
             arm: {
                 "path": str(config_path),
@@ -313,16 +316,30 @@ def _runner_manifest(root: Path, arm: str = "T0") -> dict:
 
 
 def _mock_runner_prerequisites(monkeypatch, root: Path, lock_checks=None):
-    monkeypatch.setattr(MODULE, "status", lambda _root: {"gpu_seconds_charged": 0.0})
+    monkeypatch.setattr(
+        MODULE,
+        "_status_data",
+        lambda _manifest: {
+            "gpu_seconds_charged": 0.0,
+            "reported_gpu_hours": 0.0,
+            "active_processes": [],
+            "process_seconds_by_arm": {},
+            "runs": {},
+            "training_epochs_charged": 0.0,
+            "timing_epochs_charged": 0.0,
+            "timing_profile_count": 0,
+        },
+    )
     monkeypatch.setattr(MODULE, "_run_dirs", lambda _root, _arm: [])
     monkeypatch.setattr(MODULE, "_prepare_keops_build_folder", lambda *_args: root / "caches/keops")
 
-    def check_idle():
+    def check_idle(gpu=1):
         if lock_checks is not None:
-            assert MODULE._try_campaign_lock(root / "manifests/active_process.lock") is None
+            assert MODULE._try_campaign_lock(MODULE._gpu_lock_path(root, gpu)) is None
             lock_checks.append(True)
+        return {"index": gpu, "uuid": f"GPU-{gpu}"}
 
-    monkeypatch.setattr(MODULE, "_ensure_gpu1_idle", check_idle)
+    monkeypatch.setattr(MODULE, "_ensure_gpu_idle", check_idle)
 
 
 def test_execute_runner_reuses_stale_lock_inode_and_charges_no_evaluation_epochs(
@@ -375,7 +392,7 @@ def test_execute_runner_reuses_stale_lock_inode_and_charges_no_evaluation_epochs
     )
 
     assert output.read_text(encoding="utf-8") == str(root.resolve())
-    assert lock_checks == [True]
+    assert lock_checks == [True, True]
     assert lock_path.exists() and lock_path.stat().st_ino == original_inode
     assert "pid=" in lock_path.read_text(encoding="utf-8")
     assert not active_path.exists()
@@ -399,7 +416,7 @@ def test_execute_runner_rejects_concurrent_flock_without_starting_child(tmp_path
         lambda *_args, **_kwargs: pytest.fail("runner launched while flock was held"),
     )
     try:
-        with pytest.raises(MODULE.CampaignError, match="holds the campaign lock"):
+        with pytest.raises(MODULE.CampaignError, match="physical GPU 1 already has an active"):
             MODULE._execute_runner(
                 manifest,
                 "T0",
@@ -470,12 +487,13 @@ def test_evaluation_execute_uses_shared_runner_with_run_binding_and_cap(tmp_path
     assert kwargs["evaluation_reserve_seconds"] == 3600.0
 
 
-def test_stop_waits_for_campaign_child_exit_and_coordinator_unlock(tmp_path, monkeypatch):
+@pytest.mark.parametrize("gpu", [0, 1, 2])
+def test_stop_waits_for_campaign_child_exit_and_coordinator_unlock(tmp_path, monkeypatch, gpu):
     root = tmp_path / "campaign"
     manifests = root / "manifests"
     manifests.mkdir(parents=True)
-    active_path = manifests / "active_process.json"
-    lock_path = manifests / "active_process.lock"
+    active_path = MODULE._gpu_active_path(root, gpu)
+    lock_path = MODULE._gpu_lock_path(root, gpu)
     coordinator_released = threading.Event()
     coordinator_ready = threading.Event()
     selected_pid = 42321
@@ -489,6 +507,7 @@ def test_stop_waits_for_campaign_child_exit_and_coordinator_unlock(tmp_path, mon
                     "coordinator_pid": os.getpid(),
                     "config": "/campaign/configs/G1-S.yaml",
                     "run": "/campaign/runs/G1-S/run-1",
+                    "gpu_index": gpu,
                 }
             ),
             encoding="utf-8",
@@ -512,7 +531,7 @@ def test_stop_waits_for_campaign_child_exit_and_coordinator_unlock(tmp_path, mon
         threading.Timer(0.03, coordinator_released.set).start()
 
     monkeypatch.setattr(MODULE.os, "killpg", signal_campaign)
-    result = MODULE.stop(root, timeout_seconds=1.0)
+    result = MODULE.stop(root, gpu=gpu, timeout_seconds=1.0)
     thread.join(timeout=1.0)
     assert not thread.is_alive()
     assert "coordinator released the lock" in result
@@ -539,8 +558,373 @@ def test_stop_reports_bounded_failure_when_owned_process_does_not_exit(tmp_path,
     monkeypatch.setattr(MODULE, "_pid_matches", lambda *_args: True)
     monkeypatch.setattr(MODULE, "_pid_is_alive", lambda _pid: True)
     monkeypatch.setattr(MODULE.os, "killpg", lambda *_args: None)
+    original_sleep = MODULE.time.sleep
+
+    def check_wait_does_not_hold_admission(seconds):
+        assert MODULE._campaign_lock_available(MODULE._admission_lock_path(root))
+        original_sleep(seconds)
+
+    monkeypatch.setattr(MODULE.time, "sleep", check_wait_does_not_hold_admission)
     try:
         with pytest.raises(MODULE.CampaignError, match="stop timed out after 0.02s"):
             MODULE.stop(root, timeout_seconds=0.02)
     finally:
         MODULE._release_campaign_lock(held_lock)
+
+
+def test_stop_clears_a_dead_coordinator_receipt_only_after_child_exit(tmp_path, monkeypatch):
+    root = tmp_path / "campaign"
+    manifests = root / "manifests"
+    manifests.mkdir(parents=True)
+    active_path = MODULE._gpu_active_path(root, 2)
+    active_path.write_text(
+        json.dumps(
+            {
+                "pid": 42323,
+                "gpu_index": 2,
+                "config": "/campaign/config.yaml",
+                "run": None,
+                "action": "launch",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(MODULE, "_campaign_manifest", lambda _root: {"root": str(root)})
+    monkeypatch.setattr(MODULE, "_pid_matches", lambda *_args: False)
+    monkeypatch.setattr(MODULE, "_pid_is_alive", lambda _pid: False)
+    result = MODULE.stop(root, gpu=2, timeout_seconds=0.1)
+    assert "orphaned campaign process 42323 exited" in result
+    assert not active_path.exists()
+
+
+def test_physical_gpu_parser_and_g1_assignment_are_explicit():
+    assert [MODULE._parse_gpu(value) for value in ("0", "1", "2", "physical0", "physical1", "physical2")] == [0, 1, 2, 0, 1, 2]
+    assert MODULE._validate_gpu_for_arm("G1-C", 1) == 1
+    assert MODULE._validate_gpu_for_arm("G1-S", 2) == 2
+    assert MODULE._validate_gpu_for_arm("G1-R", 0) == 0
+    with pytest.raises(MODULE.CampaignError, match="assigned to physical GPU 2"):
+        MODULE._validate_gpu_for_arm("G1-S", 1)
+    # Evaluation can be explicitly sent to any idle physical GPU.
+    assert MODULE._validate_gpu_for_arm("G1-S", 1, enforce_assignment=False) == 1
+    launch_args = MODULE.build_parser().parse_args(["launch", "G1-S", "--gpu", "physical2"])
+    stop_args = MODULE.build_parser().parse_args(["stop", "--gpu", "0"])
+    assert launch_args.gpu == 2
+    assert stop_args.gpu == 0
+
+
+def test_physical_gpu_locks_are_independent_and_same_gpu_is_exclusive(tmp_path):
+    root = tmp_path / "campaign"
+    (root / "manifests").mkdir(parents=True)
+    gpu1 = MODULE._acquire_gpu_lock(root, 1)
+    gpu2 = MODULE._acquire_gpu_lock(root, 2)
+    try:
+        with pytest.raises(MODULE.CampaignError, match="physical GPU 1 already has"):
+            MODULE._acquire_gpu_lock(root, 1)
+        assert not MODULE._campaign_lock_available(MODULE._gpu_lock_path(root, 1))
+        assert not MODULE._campaign_lock_available(MODULE._gpu_lock_path(root, 2))
+    finally:
+        MODULE._release_campaign_lock(gpu2)
+        MODULE._release_campaign_lock(gpu1)
+    assert MODULE._campaign_lock_available(MODULE._gpu_lock_path(root, 1))
+    assert MODULE._campaign_lock_available(MODULE._gpu_lock_path(root, 2))
+
+
+def test_admission_lock_has_a_bounded_wait_and_keeps_inode(tmp_path):
+    root = tmp_path / "campaign"
+    (root / "manifests").mkdir(parents=True)
+    lock_path = MODULE._admission_lock_path(root)
+    held = MODULE._acquire_admission_lock(root)
+    inode = lock_path.stat().st_ino
+    started = MODULE.time.monotonic()
+    try:
+        with pytest.raises(MODULE.CampaignError, match="stayed busy for 0.03s"):
+            MODULE._acquire_admission_lock(root, timeout_seconds=0.03)
+    finally:
+        MODULE._release_campaign_lock(held)
+    assert MODULE.time.monotonic() - started < 0.5
+    assert lock_path.stat().st_ino == inode
+
+
+def test_unrepresented_admitted_child_is_rejected_as_an_orphan(tmp_path):
+    import subprocess
+
+    root = tmp_path / "campaign"
+    (root / "manifests").mkdir(parents=True)
+    env = dict(os.environ)
+    env["PHYCOFLOW_CAMPAIGN_ADMITTED"] = str(root.resolve())
+    child = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import time; time.sleep(30)",
+            str(MODULE.CASE_DIR / "run.py"),
+        ],
+        cwd=MODULE.REPO_ROOT,
+        env=env,
+    )
+    try:
+        with pytest.raises(MODULE.CampaignError, match="without a matching per-GPU owner"):
+            MODULE._reject_active_or_orphaned_process(root)
+    finally:
+        child.terminate()
+        child.wait(timeout=5)
+
+
+def test_idle_gpu_check_queries_the_selected_physical_index(monkeypatch):
+    calls = []
+    answers = iter(["GPU-two, 0, 0\n", "\n"])
+
+    def check_output(command, **kwargs):
+        calls.append(command)
+        return next(answers)
+
+    monkeypatch.setattr(MODULE.subprocess, "check_output", check_output)
+    snapshot = MODULE._ensure_gpu_idle(2)
+    assert snapshot["index"] == 2
+    assert snapshot["uuid"] == "GPU-two"
+    assert calls[0][2] == "2"
+
+
+def _write_active(root: Path, gpu: int, arm: str, *, pid: int = 2147483000) -> object:
+    lock = MODULE._acquire_gpu_lock(root, gpu)
+    record = {
+        "arm": arm,
+        "action": "launch",
+        "pid": pid,
+        "coordinator_pid": os.getpid(),
+        "gpu_index": gpu,
+        "gpu_uuid": f"GPU-{gpu}",
+        "config": str(root / "configs" / f"{arm}.yaml"),
+        "started_monotonic_ns": MODULE.time.monotonic_ns() - 2_000_000_000,
+        "watchdog_seconds": 7200.0,
+    }
+    MODULE._atomic_json(MODULE._gpu_active_path(root, gpu), record)
+    return lock
+
+
+def test_an_active_arm_blocks_duplicate_on_another_gpu_but_other_arm_can_run(
+    tmp_path, monkeypatch
+):
+    import subprocess
+
+    root = tmp_path / "campaign"
+    manifest = _runner_manifest(root)
+    (root / "configs/G1-C.yaml").write_text("optimization: {epochs: 100}\n")
+    held = _write_active(root, 1, "T0")
+    real_status_data = MODULE._status_data
+    _mock_runner_prerequisites(monkeypatch, root)
+    monkeypatch.setattr(MODULE, "_status_data", real_status_data)
+    try:
+        with pytest.raises(MODULE.CampaignError, match="T0 already has an active process"):
+            MODULE._execute_runner(
+                manifest,
+                "T0",
+                "launch",
+                [sys.executable, "-c", "pass"],
+                reserve_gpu_seconds=0.0,
+                gpu=2,
+            )
+
+        outputs = []
+        monkeypatch.setattr(MODULE.subprocess, "Popen", subprocess.Popen)
+        other_manifest = dict(manifest)
+        other_manifest["selected_topology_estimator"] = "p3"
+        other_manifest["configs"] = dict(manifest["configs"])
+        other_manifest["configs"]["T1"] = manifest["configs"]["T0"]
+        outputs.append(
+            MODULE._execute_runner(
+                other_manifest,
+                "T1",
+                "launch",
+                [sys.executable, "-c", "pass"],
+                reserve_gpu_seconds=0.0,
+                gpu=2,
+            )
+        )
+        assert outputs == [None]
+        row = json.loads((root / "manifests/launch_ledger.jsonl").read_text().splitlines()[0])
+        assert row["gpu_index"] == 2
+        assert row["gpu_uuid"] == "GPU-2"
+        assert row["coordinator_pid"] == os.getpid()
+    finally:
+        MODULE._gpu_active_path(root, 1).unlink(missing_ok=True)
+        MODULE._release_campaign_lock(held)
+
+
+def test_active_process_time_is_counted_once_across_ledger_and_run_receipt(tmp_path, monkeypatch):
+    root = tmp_path / "campaign"
+    manifest = _runner_manifest(root)
+    ledger = root / "manifests/launch_ledger.jsonl"
+    ledger.write_text(json.dumps({"arm": "T0", "elapsed_seconds": 100.0, "epochs_charged": 4}) + "\n")
+    MODULE._atomic_json(
+        MODULE._gpu_active_path(root, 0),
+        {
+            "arm": "T0",
+            "gpu_index": 0,
+            "pid": 999999,
+            "started_monotonic_ns": MODULE.time.monotonic_ns() - 10_000_000_000,
+        },
+    )
+    monkeypatch.setattr(
+        MODULE,
+        "_run_dirs",
+        lambda _root, _arm: [root / "runs/T0/run"],
+    )
+    monkeypatch.setattr(
+        MODULE,
+        "_run_record",
+        lambda _run: {"completed_epochs": 4.0, "post_training_seconds": 50.0},
+    )
+    current = MODULE._status_data(manifest)
+    assert 109.0 <= current["process_seconds_by_arm"]["T0"] <= 111.0
+    assert current["training_epochs_charged"] == 4.0
+    assert current["active_processes"][0]["gpu_index"] == 0
+
+
+def test_evaluation_time_does_not_consume_goal1_training_quota(tmp_path):
+    root = tmp_path / "campaign"
+    manifest = _runner_manifest(root, "G1-C")
+    (root / "manifests/launch_ledger.jsonl").write_text(
+        json.dumps(
+            {
+                "arm": "G1-C",
+                "action": "evaluate-full-abt-validation",
+                "elapsed_seconds": 3600.0,
+                "epochs_charged": 0.0,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    MODULE._atomic_json(
+        MODULE._gpu_active_path(root, 0),
+        {
+            "arm": "G1-C",
+            "action": "evaluate-full-abt-validation",
+            "gpu_index": 0,
+            "pid": 999999,
+            "started_monotonic_ns": MODULE.time.monotonic_ns() - 100_000_000_000,
+        },
+    )
+    manifest["gate_evidence"] = {
+        "goal1": {"approved_arms": ["G1-C"], "runtime_quotas_hours_by_arm": {"G1-C": 2.0}}
+    }
+    current = MODULE._status_data(manifest)
+    assert current["campaign_process_seconds_by_arm"]["G1-C"] == 3600.0
+    assert current["training_process_seconds_by_arm"].get("G1-C", 0.0) == 0.0
+    assert MODULE._goal1_remaining_hours(manifest, current_status=current) == 2.0
+
+
+def test_goal1_authorization_records_individual_two_x_quotas_and_reserves(tmp_path, monkeypatch):
+    root = tmp_path / "campaign"
+    manifests = root / "manifests"
+    manifests.mkdir(parents=True)
+    timing_path = manifests / "timing.json"
+    timing_path.write_text(json.dumps({"profiles": ["T1", "T2", "T3"]}), encoding="utf-8")
+    timing_record = {
+        "path": str(timing_path),
+        "sha256": hashlib.sha256(timing_path.read_bytes()).hexdigest(),
+    }
+    evidence_path = manifests / "goal1.json"
+    evidence_path.write_text(
+        json.dumps(
+            {
+                "goal1_ready": True,
+                "evaluation_reserve_hours": 0.25,
+                "selected_topology_estimator": "p3",
+                "approved_arms": ["G1-C", "G1-S", "G1-R"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    manifest = {
+        "root": str(root),
+        "campaign_id": "campaign",
+        "selected_topology_estimator": "p3",
+        "gates": {"timing_passed": True, "goal1_authorized": False},
+        "gate_evidence": {"timing": timing_record},
+    }
+    current = {
+        "reported_gpu_hours": 1.1128,
+        "campaign_process_seconds_by_arm": {"T1": 360.0, "T2": 720.0, "T3": 180.0},
+        "trainer_reported_seconds_by_arm": {},
+        "runs": {arm: [{"completed_epochs": 10.0}] for arm in ("T1", "T2", "T3")},
+    }
+    monkeypatch.setattr(MODULE, "_campaign_manifest", lambda _root: manifest)
+    monkeypatch.setattr(MODULE, "status", lambda _root: current)
+    result = MODULE.authorize(root, "goal1", evidence_path)
+    gate = result["gate_evidence"]["goal1"]
+    assert gate["projected_hours_by_arm"] == {"G1-C": 1.0, "G1-S": 2.0, "G1-R": 0.5}
+    assert gate["runtime_quotas_hours_by_arm"] == {"G1-C": 2.0, "G1-S": 4.0, "G1-R": 1.0}
+    assert gate["protected_evaluation_reserve_hours"] == 1.0
+    assert gate["goal2_gpu_hours_reserved"] == 2.0
+    assert gate["watchdog_shutdown_reserve_hours"] == 450.0 / 3600
+    assert gate["budget_check"]["reported_gpu_hours_at_authorization"] == 1.1128
+    assert gate["budget_check"]["protected_future_gpu_hours"] == 10.125
+    assert 1.1128 + gate["budget_check"]["protected_future_gpu_hours"] < MODULE.MAX_GPU_SECONDS / 3600
+
+
+def test_goal1_watchdogs_never_exceed_the_per_arm_quota_with_concurrent_gpu_owners(tmp_path):
+    root = tmp_path / "campaign"
+    (root / "manifests").mkdir(parents=True)
+    manifest = {
+        "root": str(root),
+        "gate_evidence": {
+            "goal1": {
+                "approved_arms": ["G1-C", "G1-S", "G1-R"],
+                "runtime_quotas_hours_by_arm": {arm: 2.0 for arm in ("G1-C", "G1-S", "G1-R")},
+                "evaluation_reserve_hours": 1.0,
+            }
+        },
+    }
+    allocations = []
+    current = {
+        "gpu_seconds_charged": 180.0,
+        "process_seconds_by_arm": {},
+        "active_processes": [],
+    }
+    for arm, gpu in (("G1-C", 1), ("G1-S", 2), ("G1-R", 0)):
+        allocation = MODULE._watchdog_seconds(
+            manifest,
+            arm,
+            "launch",
+            current,
+            reserve_gpu_seconds=0.0,
+            max_seconds=None,
+            evaluation_reserve_seconds=None,
+        )
+        allocations.append(allocation)
+        current["gpu_seconds_charged"] += 1.0
+        current["process_seconds_by_arm"][arm] = 1.0
+        current["active_processes"].append(
+            {
+                "arm": arm,
+                "gpu_index": gpu,
+                "action": "launch",
+                "elapsed_seconds": 1.0,
+                "watchdog_seconds": allocation,
+            }
+        )
+    assert allocations == [7200.0, 7200.0, 7200.0]
+    assert sum(allocations) <= 6 * 3600
+
+
+def test_completed_goal1_arm_releases_its_unused_runtime_quota():
+    manifest = {
+        "root": "/campaign",
+        "gate_evidence": {
+            "goal1": {
+                "approved_arms": ["G1-C", "G1-S"],
+                "runtime_quotas_hours_by_arm": {"G1-C": 2.0, "G1-S": 3.0},
+            }
+        },
+    }
+    current = {
+        "process_seconds_by_arm": {"G1-C": 500.0, "G1-S": 36000.0},
+        "training_process_seconds_by_arm": {"G1-C": 500.0, "G1-S": 3600.0},
+        "runs": {
+            "G1-C": [{"completed_epochs": 100.0}],
+            "G1-S": [{"completed_epochs": 50.0}],
+        },
+    }
+    assert MODULE._goal1_remaining_hours(manifest, current_status=current) == 2.0
