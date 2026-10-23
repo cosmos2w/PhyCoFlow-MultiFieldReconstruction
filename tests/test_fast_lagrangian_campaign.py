@@ -1500,7 +1500,7 @@ def _goal2_smoke_recovery_fixture(tmp_path, monkeypatch, observed_end):
     monkeypatch.setattr(
         MODULE,
         "_goal2_smoke_recovery_verification",
-        lambda *_args: {"status": "verified"},
+        lambda *_args: {"status": "verified", "details": recovery_details},
     )
     launch_row = {
         "arm": MODULE.GOAL2_SMOKE_ARM,
@@ -1536,17 +1536,71 @@ def _goal2_smoke_recovery_fixture(tmp_path, monkeypatch, observed_end):
         "checkpoint_receipt_sha256": checkpoint_receipt["sha256"],
     }
     (manifests / "stop_requests.jsonl").write_text(json.dumps(stop_row) + "\n", encoding="utf-8")
+    analysis = root / "analysis/goal2_smoke_pre_resume"
+    analysis.mkdir(parents=True)
+    metrics = {}
+    rows_by_name = {
+        "lpc_ordered_updates": [
+            {"step": step, "ordered": {"accepted_update": step}} for step in range(1, 47)
+        ],
+        "fast_lagrangian_updates": [{"step": step} for step in range(1, 47)],
+        "lr_warmup_updates": [{"step": step} for step in range(1, 47)],
+        "history": [{"epoch": 1.0, "completed_updates": 19.5, "epoch_complete": True}],
+    }
+    filenames = {
+        "lpc_ordered_updates": "lpc_ordered_updates.jsonl",
+        "fast_lagrangian_updates": "fast_lagrangian_updates.jsonl",
+        "lr_warmup_updates": "lr_warmup_updates.jsonl",
+        "history": "history.jsonl",
+    }
+    for name, rows in rows_by_name.items():
+        path = analysis / filenames[name]
+        path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+        metrics[name] = {
+            "path": str(path),
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "complete_rows": len(rows),
+            "last_complete_step": 38 if name == "history" else 46,
+        }
+    inventory_path = root / MODULE.GOAL2_SMOKE_INTERRUPTION_INVENTORY
+    inventory_path.write_text(
+        json.dumps(
+            {
+                "status": "stopped_before_resume",
+                "run": str(run.resolve()),
+                "pre_stop_epoch1_receipt": checkpoint_receipt["path"],
+                "metrics": metrics,
+                "discarded_accepted_steps_after_checkpoint": 8,
+                "possible_additional_inflight_update_upper_bound": 1,
+                "conservative_first_segment_epochs_charged": 2,
+            }
+        ),
+        encoding="utf-8",
+    )
+    recovery_details = {
+        "interruption_inventory_path": str(inventory_path.resolve()),
+        "interruption_inventory_sha256": hashlib.sha256(inventory_path.read_bytes()).hexdigest(),
+        "observed_pre_interrupt_accepted_step": 46,
+        "atomic_recovery_checkpoint_epoch": 1.0,
+        "progress_metadata_reported_epoch": 0.0 if observed_end == 0.0 else observed_end,
+        "discarded_durable_accepted_updates": 8,
+        "possible_additional_inflight_update_upper_bound": 1,
+        "first_ordered_row_bitwise_identical": True,
+        "all_preserved_tail_sampler_decisions_identical": True,
+        "index_rng_matches_exact_38_update_advance": True,
+    }
     return root, run, manifest
 
 
 def test_goal2_recovery_gate_preserves_fractional_interrupted_tail_and_safe_charge(
     tmp_path, monkeypatch
 ):
-    root, _run, manifest = _goal2_smoke_recovery_fixture(tmp_path, monkeypatch, 1.375)
+    observed_end = 46 / 38
+    root, _run, manifest = _goal2_smoke_recovery_fixture(tmp_path, monkeypatch, observed_end)
 
     receipt = MODULE._goal2_smoke_recovery_receipt(root, manifest)
 
-    assert receipt["observed_first_segment_end_epoch"] == 1.375
+    assert receipt["observed_first_segment_end_epoch"] == observed_end
     assert receipt["epochs_charged"] == 3.0
     assert receipt["checkpoint_receipt"]["checkpoint_sha256"] == "checkpoint-digest"
     assert receipt["recovery_verification"]["status"] == "verified"
@@ -1558,7 +1612,30 @@ def test_goal2_recovery_gate_rejects_missing_epoch1_or_full_epoch2_tail(
 ):
     root, _run, manifest = _goal2_smoke_recovery_fixture(tmp_path, monkeypatch, observed_end)
 
-    with pytest.raises(MODULE.CampaignError, match="observed epoch-one tail"):
+    with pytest.raises(MODULE.CampaignError, match="progress"):
+        MODULE._goal2_smoke_recovery_receipt(root, manifest)
+
+
+def test_goal2_recovery_gate_accepts_zero_reported_progress_only_with_atomic_e1_tail_proof(
+    tmp_path, monkeypatch
+):
+    root, _run, manifest = _goal2_smoke_recovery_fixture(tmp_path, monkeypatch, 0.0)
+
+    receipt = MODULE._goal2_smoke_recovery_receipt(root, manifest)
+
+    assert receipt["observed_first_segment_end_epoch"] == 0.0
+    assert receipt["interruption_inventory"]["atomic_recovery_checkpoint_epoch"] == 1.0
+    assert receipt["interruption_inventory"]["observed_pre_interrupt_accepted_step"] == 46
+
+
+def test_goal2_recovery_gate_rejects_zero_progress_if_interruption_inventory_changes(
+    tmp_path, monkeypatch
+):
+    root, _run, manifest = _goal2_smoke_recovery_fixture(tmp_path, monkeypatch, 0.0)
+    inventory_path = root / MODULE.GOAL2_SMOKE_INTERRUPTION_INVENTORY
+    inventory_path.write_text(inventory_path.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+
+    with pytest.raises(MODULE.CampaignError, match="interruption inventory"):
         MODULE._goal2_smoke_recovery_receipt(root, manifest)
 
 

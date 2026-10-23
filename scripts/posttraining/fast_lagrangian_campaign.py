@@ -100,6 +100,7 @@ GOAL2_FORMAL_ARM = "G2-O"
 GOAL2_SMOKE_ARM = "recovery_smoke2ep"
 GOAL2_SMOKE_EPOCH1_RECEIPT = "manifests/goal2_smoke_epoch1_checkpoint.json"
 GOAL2_SMOKE_RECOVERY_VERIFICATION = "manifests/goal2_smoke_recovery_verification.json"
+GOAL2_SMOKE_INTERRUPTION_INVENTORY = "analysis/goal2_smoke_pre_resume/interruption_inventory.json"
 GOAL2_FORMAL_READINESS_STATUS = "goal2_formal_readiness_assessed"
 GOAL2_MIN_RESIDUAL_FRACTION = 0.1
 GOAL2_MAX_ORTHOGONALITY_ERROR = 1.0e-6
@@ -1782,6 +1783,104 @@ def _goal2_smoke_recovery_verification(
         "sha256": _sha256(verification_path),
         "status": "verified",
         "first_resumed_step": 39,
+        "details": dict(details),
+    }
+
+
+def _goal2_smoke_interruption_inventory(
+    root: Path,
+    run: Path,
+    checkpoint_receipt: Mapping[str, Any],
+    recovery_details: Mapping[str, Any],
+    ledger_reported_epoch: float,
+) -> dict[str, Any]:
+    root = root.resolve(strict=True)
+    inventory_path = root / GOAL2_SMOKE_INTERRUPTION_INVENTORY
+    try:
+        inventory_path = inventory_path.resolve(strict=True)
+    except OSError as error:
+        raise CampaignError("Goal-2 smoke interruption inventory is missing") from error
+    observed_step = recovery_details.get("observed_pre_interrupt_accepted_step")
+    if isinstance(observed_step, bool) or not isinstance(observed_step, int):
+        raise CampaignError("Goal-2 smoke interruption inventory has no accepted-update cursor")
+    progress_epoch = recovery_details.get("progress_metadata_reported_epoch")
+    if (
+        isinstance(progress_epoch, bool)
+        or not isinstance(progress_epoch, (int, float))
+        or not math.isfinite(float(progress_epoch))
+    ):
+        raise CampaignError("Goal-2 smoke interruption inventory has no finite progress cursor")
+    inventory = _read_json(inventory_path)
+    if (
+        not inventory_path.is_relative_to(root)
+        or recovery_details.get("interruption_inventory_path") != str(inventory_path)
+        or recovery_details.get("interruption_inventory_sha256") != _sha256(inventory_path)
+        or recovery_details.get("atomic_recovery_checkpoint_epoch") != 1.0
+        or progress_epoch not in {0.0, ledger_reported_epoch}
+        or recovery_details.get("discarded_durable_accepted_updates") != observed_step - 38
+        or recovery_details.get("possible_additional_inflight_update_upper_bound") != 1
+        or recovery_details.get("first_ordered_row_bitwise_identical") is not True
+        or recovery_details.get("all_preserved_tail_sampler_decisions_identical") is not True
+        or recovery_details.get("index_rng_matches_exact_38_update_advance") is not True
+        or inventory.get("status") != "stopped_before_resume"
+        or inventory.get("run") != str(run.resolve(strict=True))
+        or inventory.get("pre_stop_epoch1_receipt") != checkpoint_receipt["path"]
+        or inventory.get("discarded_accepted_steps_after_checkpoint") != observed_step - 38
+        or inventory.get("possible_additional_inflight_update_upper_bound") != 1
+        or inventory.get("conservative_first_segment_epochs_charged")
+        != GOAL2_RECOVERY_SMOKE_EPOCHS
+        or not 39 <= observed_step <= GOAL2_RECOVERY_SMOKE_EPOCHS * 38
+    ):
+        raise CampaignError("Goal-2 smoke interruption inventory does not prove a stale-progress epoch-one stop")
+
+    metrics = inventory.get("metrics")
+    if not isinstance(metrics, Mapping):
+        raise CampaignError("Goal-2 smoke interruption inventory has no metric-log inventory")
+    expected_logs = {
+        "lpc_ordered_updates": ("lpc_ordered_updates.jsonl", observed_step),
+        "fast_lagrangian_updates": ("fast_lagrangian_updates.jsonl", observed_step),
+        "lr_warmup_updates": ("lr_warmup_updates.jsonl", observed_step),
+        "history": ("history.jsonl", 38),
+    }
+    for name, (filename, expected_last_step) in expected_logs.items():
+        record = metrics.get(name)
+        expected_path = root / "analysis/goal2_smoke_pre_resume" / filename
+        if (
+            not isinstance(record, Mapping)
+            or record.get("path") != str(expected_path)
+            or not expected_path.is_file()
+            or record.get("sha256") != _sha256(expected_path)
+            or record.get("last_complete_step") != expected_last_step
+        ):
+            raise CampaignError(f"Goal-2 smoke interruption inventory changed its {name} log binding")
+        try:
+            rows = [
+                json.loads(line)
+                for line in expected_path.read_text(encoding="utf-8").splitlines()
+            ]
+        except (OSError, json.JSONDecodeError) as error:
+            raise CampaignError(f"Goal-2 smoke interruption {name} log is incomplete") from error
+        expected_count = 1 if name == "history" else expected_last_step
+        if len(rows) != expected_count or record.get("complete_rows") != expected_count:
+            raise CampaignError(f"Goal-2 smoke interruption {name} row count does not match its receipt")
+        if name == "history":
+            if rows[0].get("epoch") != 1.0 or rows[0].get("epoch_complete") is not True:
+                raise CampaignError("Goal-2 smoke history log does not end at the atomic epoch-one checkpoint")
+        else:
+            steps = [row.get("step") for row in rows]
+            if steps != list(range(1, expected_last_step + 1)):
+                raise CampaignError(f"Goal-2 smoke {name} tail is not a contiguous accepted-update sequence")
+            if name == "lpc_ordered_updates" and any(
+                row.get("ordered", {}).get("accepted_update") != step
+                for row, step in zip(rows, steps, strict=True)
+            ):
+                raise CampaignError("Goal-2 ordered update tail contains a missing or repeated accepted cursor")
+    return {
+        "path": str(inventory_path),
+        "sha256": _sha256(inventory_path),
+        "observed_pre_interrupt_accepted_step": observed_step,
+        "atomic_recovery_checkpoint_epoch": 1.0,
+        "progress_metadata_reported_epoch": progress_epoch,
     }
 
 
@@ -1835,8 +1934,8 @@ def _goal2_smoke_recovery_receipt(
     ):
         raise CampaignError("Goal-2 recovery ledger does not prove a conservative SIGINT/resume sequence")
     first_end = float(first.get("segment_end_epoch", -1))
-    if not math.isfinite(first_end) or not 1.0 <= first_end < 2.0:
-        raise CampaignError("Goal-2 interrupted segment did not preserve its observed epoch-one tail")
+    if not math.isfinite(first_end):
+        raise CampaignError("Goal-2 interrupted segment has no finite reported progress cursor")
     checkpoint_receipt = _goal2_smoke_epoch1_checkpoint_receipt(root, manifest, run)
     stop_rows = [
         row
@@ -1853,6 +1952,20 @@ def _goal2_smoke_recovery_receipt(
     recovery_verification = _goal2_smoke_recovery_verification(
         root, manifest, run, checkpoint_receipt
     )
+    inventory_receipt = _goal2_smoke_interruption_inventory(
+        root,
+        run,
+        checkpoint_receipt,
+        recovery_verification["details"],
+        first_end,
+    )
+    progress_epoch = inventory_receipt["progress_metadata_reported_epoch"]
+    nominal_tail = 1.0 <= first_end < 2.0 and float(progress_epoch) == first_end
+    stale_progress_tail = first_end == 0.0 and float(progress_epoch) == 0.0
+    if not nominal_tail and not stale_progress_tail:
+        raise CampaignError(
+            "Goal-2 interrupted segment progress is outside epoch one and has no bound stale-progress reconciliation"
+        )
     charged = sum(float(row.get("epochs_charged", 0.0)) for row in rows)
     if charged != GOAL2_RECOVERY_SMOKE_EPOCH_BUDGET:
         raise CampaignError("Goal-2 recovery smoke exceeded its three-epoch conservative exposure cap")
@@ -1865,6 +1978,7 @@ def _goal2_smoke_recovery_receipt(
         "stop_request": stop_rows[0],
         "checkpoint_receipt": checkpoint_receipt,
         "recovery_verification": recovery_verification,
+        "interruption_inventory": inventory_receipt,
         "observed_first_segment_end_epoch": first_end,
         "epochs_charged": charged,
         "completed_epochs": 2,
