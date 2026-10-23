@@ -56,3 +56,26 @@ This parser reads retained artifacts and writes `analysis/quality_history.json`,
 Native checks preserve completion UTC, controller `command_elapsed_seconds`, active process time, wall time from the first training command, and both `task_profile_acquisition_seconds` and `allocated_profile_acquisition_seconds`. Each task's measured profile acquisition is shown on each run for traceability and allocated to the strategy arm's cold time only; do not sum the repeated task-level value across arms. Dense and fixed-heuristic arms do not require the execution-plan profiles. The campaign ledger still charges all profile attempts to the global resource budget. The current evaluator stores paired group means rather than raw per-entry accumulators, so reported numerators are explicitly reconstructed from those means and frozen counts. Component diagnostics retain their original metric paths and are not summed into family totals.
 
 The report builder writes `reports/COST_AWARE_LAGRANGIAN_REPORT.md`, three PDF masters, and compact `analysis/decision_cost_quality.json`, `.csv`, and `mature_window_metrics.csv` records. It reports training, profile acquisition, recorded pre-admission estimates, and final evaluation costs separately. Portable uniform and disjoint audit results remain supplementary to the scheduled native histories. A reviewed interpretation is displayed only when all mandatory horizons are complete and its recorded quality-history and ledger hashes match; an incomplete or changed evidence set cannot carry forward an old conclusion.
+
+## Bounded recovery audit
+
+The campaign predeclares one D/strategy recovery check at the rolling epoch-2 checkpoint (accepted cursor 76). The CPU-only `scripts/posttraining/audit_cost_aware_recovery.py` helper captures a byte-for-byte checkpoint copy and the subsequent logged updates 77/78, which use decision cursors 76/77. It opens no dataset and does not stop, resume or launch a process. Set `RUN` to that exact strategy child and invoke capture while `last.pt` is still at 76 and both update rows are complete:
+
+```bash
+AUDIT=scripts/posttraining/audit_cost_aware_recovery.py
+CUDA_VISIBLE_DEVICES='' python "$AUDIT" capture --run-dir "$RUN" --output "$CAMPAIGN_ROOT/analysis/recovery_probe_capture.json"
+```
+
+After the supported runner `stop` command has terminated the owned child and its ledger entry is terminal, confirm that `last.pt` is still byte-identical to the captured checkpoint:
+
+```bash
+CUDA_VISIBLE_DEVICES='' python "$AUDIT" confirm-stopped --run-dir "$RUN" --capture "$CAMPAIGN_ROOT/analysis/recovery_probe_capture.json" --output "$CAMPAIGN_ROOT/analysis/recovery_probe_stopped.json"
+```
+
+Resume the same child with the supported runner command above. Once that resume attempt has a terminal ledger record, compare the replayed diagnostics and immutable identities:
+
+```bash
+CUDA_VISIBLE_DEVICES='' python "$AUDIT" compare --run-dir "$RUN" --capture "$CAMPAIGN_ROOT/analysis/recovery_probe_capture.json" --stop-receipt "$CAMPAIGN_ROOT/analysis/recovery_probe_stopped.json" --output "$CAMPAIGN_ROOT/analysis/recovery_probe_result.json"
+```
+
+The helper refuses to overwrite receipts or checkpoint copies. It rejects an advanced capture boundary or changed binding and cannot treat uninterrupted training as recovery. Numerical diagnostics use the predeclared relative tolerance `1e-6` and absolute tolerance `1e-10`; execution identities are exact. Preserve failed receipts and deviations. This two-update measurement does not certify bitwise CUDA reproducibility or future adapters that consume global Python/NumPy randomness.
