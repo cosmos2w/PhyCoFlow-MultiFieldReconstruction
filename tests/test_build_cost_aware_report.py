@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 from pathlib import Path
 
@@ -408,6 +409,101 @@ def test_runtime_policy_summary_links_actual_strategy_coverage_and_keeps_missing
     missing_rendered = "\n".join(report._runtime_policy_table_lines(missing_inputs))
     assert "Pending: `analysis/runtime_policy_summary.json` is absent." in missing_rendered
     assert "G / strategy | pending: schema 1 summary is unavailable" in missing_rendered
+
+
+def _optional_pair_decision_inputs(tmp_path: Path, *, missing_epoch: int | None = None) -> dict:
+    root = tmp_path / "campaign"
+    analysis = root / "analysis"
+    manifests = root / "manifests"
+    tasks_dir = root / "tasks"
+    analysis.mkdir(parents=True)
+    manifests.mkdir()
+    tasks_dir.mkdir()
+    source_path = manifests / "science_source_binding_v1.json"
+    source_path.write_text('{"frozen":"binding"}\n', encoding="utf-8")
+    source_sha = hashlib.sha256(source_path.read_bytes()).hexdigest()
+    ledger_path = manifests / "campaign_runner_ledger.jsonl"
+    ledger_prefix = b'{"action":"launch","task_id":"G"}\n'
+    ledger_path.write_bytes(ledger_prefix + b'{"action":"evaluate","task_id":"D"}\n')
+    decision_path = analysis / "optional_pair_decision.json"
+    receipt = {
+        "schema_version": 1,
+        "status": "omitted_budget",
+        "source_binding_sha256": source_sha,
+        "ledger_prefix_bytes": len(ledger_prefix),
+        "ledger_prefix_sha256": hashlib.sha256(ledger_prefix).hexdigest(),
+        "mandatory_science_epochs": 600,
+        "available_seconds": 900.0,
+        "required_seconds": 1500.0,
+        "closeout_reserve_seconds": 3600,
+        "reason": "The remaining budget is below the required paired transfer run cost.",
+    }
+    decision_path.write_text(json.dumps(receipt), encoding="utf-8")
+    inventory = _inventory()
+    inventory["tasks"]["X"] = {
+        "role": "optional",
+        "arms": ["dense", "strategy"],
+        "horizon": 100,
+        "frozen_task_config": {"dataset": {"field_names": ["f1", "f2", "f3", "f4", "f5"]}},
+    }
+    (tasks_dir / "task_inventory.json").write_text(json.dumps(inventory), encoding="utf-8")
+    history_tasks = _history_for_run(_complete_run(missing_epoch=missing_epoch))["tasks"]
+    history_tasks["X"] = {"arms": {"dense": {"runs": []}, "strategy": {"runs": []}}}
+    history = {"tasks": history_tasks}
+    history_path = analysis / "quality_history.json"
+    history_path.write_text(json.dumps(history), encoding="utf-8")
+    return report._load_inputs(root)
+
+
+def test_valid_optional_pair_budget_omission_is_terminal_and_keeps_x_rows_empty(tmp_path: Path) -> None:
+    inputs = _optional_pair_decision_inputs(tmp_path)
+    summary = inputs["optional_pair_decision_summary"]
+    assert summary["status"] == "omitted_budget"
+    assert summary["validated"] is True
+    assert summary["mandatory_science_complete"] is True
+    assert summary["available_seconds"] == 900.0
+    assert summary["required_seconds"] == 1500.0
+    assert summary["closeout_reserve_seconds"] == 3600.0
+    assert "not run: resource gate; physical transfer is unestablished" in report._optional_pair_decision_text(inputs)
+    assert "[validated resource decision](../analysis/optional_pair_decision.json)" in report._optional_pair_decision_text(inputs)
+
+    _write_analysis_tables_for_optional_decision(inputs)
+    compact = json.loads((inputs["root"] / "analysis/decision_cost_quality.json").read_text(encoding="utf-8"))
+    assert compact["optional_pair_decision"]["status"] == "omitted_budget"
+    x_rows = [row for row in compact["records"] if row["task_id"] == "X"]
+    assert [(row["arm"], row["arm_evidence_status"], row["run_id"]) for row in x_rows] == [
+        ("dense", "pending_run", None),
+        ("strategy", "pending_run", None),
+    ]
+    evidence_text = "\n".join(report._study_dimension_lines(inputs, []))
+    assert "not run: resource gate; physical transfer is unestablished" in evidence_text
+    assert "900.0 s available versus 1500.0 s required" in evidence_text
+
+
+def _write_analysis_tables_for_optional_decision(inputs: dict) -> None:
+    report._write_analysis_tables(inputs, [])
+
+
+def test_optional_pair_decision_with_stale_ledger_prefix_stays_pending(tmp_path: Path) -> None:
+    inputs = _optional_pair_decision_inputs(tmp_path)
+    ledger_path = inputs["root"] / "manifests/campaign_runner_ledger.jsonl"
+    current = ledger_path.read_bytes()
+    ledger_path.write_bytes(b"X" + current[1:])
+
+    summary = report._optional_pair_decision_summary(inputs)
+    assert summary["status"] == "pending"
+    assert summary["validated"] is False
+    assert "campaign ledger prefix SHA-256 is stale" in summary["validation_errors"]
+    assert report._optional_pair_decision_text({**inputs, "optional_pair_decision_summary": summary}) is None
+
+
+def test_optional_pair_decision_before_all_mandatory_horizons_stays_pending(tmp_path: Path) -> None:
+    inputs = _optional_pair_decision_inputs(tmp_path, missing_epoch=90)
+
+    summary = inputs["optional_pair_decision_summary"]
+    assert summary["status"] == "pending"
+    assert summary["mandatory_science_complete"] is False
+    assert "not all six mandatory 100-epoch histories and assessments are complete" in summary["validation_errors"]
 
 
 def test_machine_tables_preserve_cost_split_censoring_and_raw_target_excursions(tmp_path: Path) -> None:

@@ -168,6 +168,13 @@ def _load_inputs(root: Path, history_path: Path | None = None) -> dict[str, Any]
         runtime_policy_summary_error = "runtime policy summary is invalid JSON"
     components_path = root / "analysis" / "quality_components.csv"
     fast_report_path = root / "manifests" / "FAST_LAGRANGIAN_LPC_REPORT_at_6021c62.md"
+    optional_pair_decision_path = root / "analysis" / "optional_pair_decision.json"
+    optional_pair_decision_error = None
+    try:
+        optional_pair_decision = _read_json(optional_pair_decision_path)
+    except ReportBuildError:
+        optional_pair_decision = None
+        optional_pair_decision_error = "optional-pair resource decision is invalid JSON"
     revisions = {
         "warm_reference": _read_json(
             root / "analysis" / "profiles_warm_reference_v1" / "revision.json"
@@ -179,7 +186,7 @@ def _load_inputs(root: Path, history_path: Path | None = None) -> dict[str, Any]
             root / "analysis" / "first_science_contract_check.json"
         ),
     }
-    return {
+    inputs = {
         "root": root,
         "inventory": inventory,
         "history": history,
@@ -205,10 +212,15 @@ def _load_inputs(root: Path, history_path: Path | None = None) -> dict[str, Any]
         "runtime_policy_summary": runtime_policy_summary,
         "runtime_policy_summary_path": runtime_policy_summary_path,
         "runtime_policy_summary_error": runtime_policy_summary_error,
+        "optional_pair_decision": optional_pair_decision,
+        "optional_pair_decision_path": optional_pair_decision_path,
+        "optional_pair_decision_error": optional_pair_decision_error,
         "components_path": components_path,
         "fast_report_path": fast_report_path,
         "revisions": revisions,
     }
+    inputs["optional_pair_decision_summary"] = _optional_pair_decision_summary(inputs)
+    return inputs
 
 
 def _attempts(ledger_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -483,6 +495,155 @@ def _all_mandatory_complete(inputs: dict[str, Any]) -> tuple[bool, list[dict[str
             records.append({"task_id": task_id, "arm": arm, **status})
             complete = complete and status["status"] == "complete"
     return complete, records
+
+
+def _optional_pair_decision_summary(inputs: dict[str, Any]) -> dict[str, Any]:
+    """Validate a terminal X-pair budget omission against current campaign evidence."""
+    root = inputs["root"]
+    receipt = inputs.get("optional_pair_decision")
+    path = inputs.get("optional_pair_decision_path", root / "analysis" / "optional_pair_decision.json")
+    receipt_sha = _sha256(path) if isinstance(path, Path) else None
+    errors: list[str] = []
+    if inputs.get("optional_pair_decision_error"):
+        errors.append(str(inputs["optional_pair_decision_error"]))
+    if not isinstance(receipt, dict):
+        errors.append("no optional-pair resource decision receipt")
+        receipt = {}
+
+    if type(receipt.get("schema_version")) is not int or receipt.get("schema_version") != 1:
+        errors.append("receipt schema_version is not 1")
+    if receipt.get("status") != "omitted_budget":
+        errors.append("receipt status is not omitted_budget")
+    if receipt.get("mandatory_science_epochs") != 600 or type(receipt.get("mandatory_science_epochs")) is not int:
+        errors.append("receipt mandatory_science_epochs is not 600")
+
+    source_path = root / "manifests" / "science_source_binding_v1.json"
+    current_source_sha = _sha256(source_path)
+    receipt_source_sha = receipt.get("source_binding_sha256")
+    if (
+        not isinstance(receipt_source_sha, str)
+        or len(receipt_source_sha) != 64
+        or any(character not in "0123456789abcdef" for character in receipt_source_sha.lower())
+        or current_source_sha is None
+        or receipt_source_sha.lower() != current_source_sha
+    ):
+        errors.append("receipt source_binding_sha256 is missing or stale")
+
+    ledger_path = root / "manifests" / "campaign_runner_ledger.jsonl"
+    prefix_bytes = receipt.get("ledger_prefix_bytes")
+    prefix_sha = receipt.get("ledger_prefix_sha256")
+    if type(prefix_bytes) is not int or prefix_bytes <= 0:
+        errors.append("receipt ledger_prefix_bytes is not a positive integer")
+    elif (
+        not isinstance(prefix_sha, str)
+        or len(prefix_sha) != 64
+        or any(character not in "0123456789abcdef" for character in prefix_sha.lower())
+    ):
+        errors.append("receipt ledger_prefix_sha256 is invalid")
+    elif not ledger_path.is_file() or ledger_path.is_symlink():
+        errors.append("current campaign ledger is missing or is a symlink")
+    else:
+        try:
+            ledger_bytes = ledger_path.read_bytes()
+        except OSError:
+            errors.append("current campaign ledger cannot be read")
+        else:
+            if len(ledger_bytes) < prefix_bytes:
+                errors.append("campaign ledger is shorter than the recorded prefix")
+            elif hashlib.sha256(ledger_bytes[:prefix_bytes]).hexdigest() != prefix_sha.lower():
+                errors.append("campaign ledger prefix SHA-256 is stale")
+
+    available = _number(receipt.get("available_seconds"))
+    required = _number(receipt.get("required_seconds"))
+    if available is None or required is None or available < 0 or required < 0 or not available < required:
+        errors.append("receipt available_seconds and required_seconds do not prove available < required")
+    reserve = _number(receipt.get("closeout_reserve_seconds"))
+    if reserve != 3600.0:
+        errors.append("receipt closeout_reserve_seconds is not 3600")
+    reason = receipt.get("reason")
+    if not isinstance(reason, str) or not reason.strip():
+        errors.append("receipt reason is missing")
+
+    required_arms = _mandatory_arms(inputs)
+    expected_arms = {
+        "G": {"dense", "heuristic", "strategy"},
+        "D": {"dense", "heuristic", "strategy"},
+    }
+    inventory_tasks = (inputs.get("inventory") or {}).get("tasks", {})
+    frozen_mandatory_scope = (
+        set(required_arms) == set(expected_arms)
+        and all(set(required_arms[task_id]) == arms for task_id, arms in expected_arms.items())
+        and isinstance(inventory_tasks, dict)
+        and all(
+            isinstance(inventory_tasks.get(task_id), dict)
+            and inventory_tasks[task_id].get("horizon") == 100
+            for task_id in expected_arms
+        )
+    )
+    mandatory_complete, _mandatory_records = _all_mandatory_complete(inputs)
+    mandatory_complete = mandatory_complete and frozen_mandatory_scope
+    if not frozen_mandatory_scope:
+        errors.append("current inventory does not declare exactly G/D with three 100-epoch mandatory arms each")
+    if not mandatory_complete:
+        errors.append("not all six mandatory 100-epoch histories and assessments are complete")
+    x_history = (inputs.get("history") or {}).get("tasks", {}).get("X", {})
+    x_arms = x_history.get("arms", {}) if isinstance(x_history, dict) else {}
+    x_has_runs = isinstance(x_arms, dict) and any(
+        isinstance(arm_record, dict) and bool(arm_record.get("runs"))
+        for arm_record in x_arms.values()
+    )
+    x_has_training_ledger_rows = any(
+        isinstance(row, dict)
+        and row.get("task_id") == "X"
+        and row.get("action") in {"launch", "resume"}
+        for row in inputs.get("ledger_rows", [])
+    )
+    if x_has_runs or x_has_training_ledger_rows:
+        errors.append("X training evidence exists, so the pair cannot be classified as omitted")
+
+    validated = not errors
+    relative_path = _rel(path, root) if isinstance(path, Path) else "analysis/optional_pair_decision.json"
+    return {
+        "status": "omitted_budget" if validated else "pending",
+        "validated": validated,
+        "detail": (
+            "predeclared optional-pair budget gate validated"
+            if validated
+            else "; ".join(errors)
+        ),
+        "receipt_path": relative_path,
+        "receipt_sha256": receipt_sha,
+        "source_binding_sha256": receipt_source_sha if isinstance(receipt_source_sha, str) else None,
+        "ledger_prefix_bytes": prefix_bytes if type(prefix_bytes) is int else None,
+        "ledger_prefix_sha256": prefix_sha if isinstance(prefix_sha, str) else None,
+        "mandatory_science_epochs": (
+            receipt.get("mandatory_science_epochs")
+            if type(receipt.get("mandatory_science_epochs")) is int
+            else None
+        ),
+        "available_seconds": available,
+        "required_seconds": required,
+        "closeout_reserve_seconds": reserve,
+        "reason": reason.strip() if isinstance(reason, str) else None,
+        "mandatory_science_complete": mandatory_complete,
+        "validation_errors": errors,
+    }
+
+
+def _optional_pair_decision_text(inputs: dict[str, Any]) -> str | None:
+    decision = inputs.get("optional_pair_decision_summary")
+    if not isinstance(decision, dict) or decision.get("status") != "omitted_budget":
+        return None
+    path = decision.get("receipt_path", "analysis/optional_pair_decision.json")
+    available = _fmt(decision.get("available_seconds"), 1)
+    required = _fmt(decision.get("required_seconds"), 1)
+    reserve = _fmt(decision.get("closeout_reserve_seconds"), 1)
+    reason = _safe_text(decision.get("reason"))
+    return (
+        f"The optional X dense/strategy pair was not run: resource gate; physical transfer is unestablished. "
+        f"After all six mandatory 100-epoch histories, the receipt recorded {available} s available versus {required} s required, including the {reserve} s closeout reserve; reason: {reason} "
+        f"([validated resource decision](../{path}), SHA-256 `{decision.get('receipt_sha256')}`)."
+    )
 
 
 def _final_interpretation_state(
@@ -1669,6 +1830,11 @@ def _write_analysis_tables(inputs: dict[str, Any], attempts: list[dict[str, Any]
         "source_history": _rel(inputs["history_path"], root),
         "source_history_sha256": _sha256(inputs["history_path"]),
         "recovery_probe": {"status": recovery_status, "detail": recovery_detail},
+        "optional_pair_decision": inputs.get("optional_pair_decision_summary", {
+            "status": "pending",
+            "validated": False,
+            "detail": "optional-pair resource decision has not been validated",
+        }),
         "records": records,
     }
     json_path = analysis / "decision_cost_quality.json"
@@ -2284,7 +2450,20 @@ def _write_maturity_figure(inputs: dict[str, Any], path: Path) -> None:
             if present_arms != {"dense", "strategy"}:
                 x_family_ax.text(0.02, 0.02, "Optional X pair incomplete; transfer pending", transform=x_family_ax.transAxes, fontsize=6.5)
         else:
-            heat_ax.text(0.01, -0.20, "Optional X transfer is omitted because the analyzer has no X run evidence.", transform=heat_ax.transAxes, fontsize=7)
+            decision = inputs.get("optional_pair_decision_summary", {})
+            if isinstance(decision, dict) and decision.get("status") == "omitted_budget":
+                heat_ax.text(
+                    0.01,
+                    -0.20,
+                    "X not run: resource gate; physical transfer unestablished. "
+                    f"Available {_fmt(decision.get('available_seconds'), 0)} s; "
+                    f"required {_fmt(decision.get('required_seconds'), 0)} s, including "
+                    f"reserve {_fmt(decision.get('closeout_reserve_seconds'), 0)} s.",
+                    transform=heat_ax.transAxes,
+                    fontsize=7,
+                )
+            else:
+                heat_ax.text(0.01, -0.20, "Optional X transfer is omitted because the analyzer has no X run evidence.", transform=heat_ax.transAxes, fontsize=7)
         fig.text(0.01, 0.005, "A window is green only when all scheduled checks are complete and every pooled additive, family, and endpoint risk is within its frozen limit; gray cells are pending/right-censored.", fontsize=7)
         pdf.savefig(fig, bbox_inches="tight")
         plt.close(fig)
@@ -2594,11 +2773,14 @@ def _study_dimension_lines(inputs: dict[str, Any], arm_records: list[dict[str, A
         else "pending all three mandatory D 100-epoch model histories"
     )
     x_rows = {row.get("arm"): row for row in records if row.get("task_id") == "X"}
+    omitted_x = _optional_pair_decision_text(inputs)
     x_complete = all(
         x_rows.get(arm, {}).get("arm_evidence_status") == "complete"
         for arm in ("dense", "strategy")
     )
-    if x_complete:
+    if omitted_x is not None:
+        x_scope = omitted_x
+    elif x_complete:
         x_scope = "optional X dense/strategy physical-transfer pair complete; paired quality review remains separate"
     elif x_rows:
         x_scope = "optional X physical-transfer pair is incomplete; transfer is not established"
@@ -2758,10 +2940,29 @@ def _make_report(inputs: dict[str, Any], attempts: list[dict[str, Any]], complet
             _profile_proxy_erratum_text(inputs),
         ]
     )
+    optional_pair_scope = _optional_pair_decision_text(inputs)
+    frozen_scope_paragraph = (
+        "The frozen mandatory set is G and D, each with dense, heuristic, and strategy arms at a 100-epoch horizon. X’s cost forecast is plan-only. "
+        + optional_pair_scope
+        + " A partial or single-arm X history does not establish transfer. A missing, failed, interrupted, under-horizon, multiple-lineage, or time-ambiguous run is not promoted to a completed result."
+        if optional_pair_scope is not None
+        else "The frozen mandatory set is G and D, each with dense, heuristic, and strategy arms at a 100-epoch horizon. X’s cost forecast is plan-only: the optional dense+strategy transfer pair remains gated until all six mandatory arms complete and the remaining budget permits it. A partial or single-arm X history does not establish transfer. A missing, failed, interrupted, under-horizon, multiple-lineage, or time-ambiguous run is not promoted to a completed result."
+    )
+    figure3_label = (
+        "Figure 3. Mature-window confirmation and retention; optional X pair not run under the validated resource gate."
+        if optional_pair_scope is not None
+        else "Figure 3. Mature-window confirmation and retention with optional X transfer when run evidence exists."
+    )
+    figure3_caption = (
+        "Figure 3. Mature windows use the frozen 40-epoch interval `(e-40,e]` and are marked complete only when every scheduled check is present; retention and confirmation are copied from the assessor-native output. X not run: resource gate; physical transfer unestablished. "
+        + optional_pair_scope
+        if optional_pair_scope is not None
+        else "Figure 3. Mature windows use the frozen 40-epoch interval `(e-40,e]` and are marked complete only when every scheduled check is present; retention and confirmation are copied from the assessor-native output. X histories are exploratory until both predeclared arms are present; the cost plan alone is not transfer evidence."
+    )
     lines.extend(
         [
             "",
-            "The frozen mandatory set is G and D, each with dense, heuristic, and strategy arms at a 100-epoch horizon. X’s cost forecast is plan-only: the optional dense+strategy transfer pair remains gated until all six mandatory arms complete and the remaining budget permits it. A partial or single-arm X history does not establish transfer. A missing, failed, interrupted, under-horizon, multiple-lineage, or time-ambiguous run is not promoted to a completed result.",
+            frozen_scope_paragraph,
             "",
             "## Cost and quality evidence",
             "",
@@ -2777,8 +2978,8 @@ def _make_report(inputs: dict[str, Any], attempts: list[dict[str, Any]], complet
             f"![Figure 2. Complete native scheduled quality histories for G and D, including endpoint aggregate and fields, A/B/T, and paired self/mutual diagnostics.]({figure_names[1]})",
             "Figure 2. Each task’s first page compares the same additive coherence ratio against epoch and numeric accounted cold check-completion hours; these clocks stop at each native check and include profile allocation split into measured and recorded estimated amounts in the companion table. Terminal command charges include later closeout and are reported separately in the cost table. Lower panels show A/B/T and endpoint aggregate plus all five endpoint-field model-unit MSE ratios against epoch. Additional pages show positively weighted direct self/mutual component leaves separately: their values are pooled only on the same canonical path as sum(child)/sum(SOURCE) across four fixed 32-snapshot groups, with B independently computed in each; this is a source-weighted mean, not a 128-snapshot covariance claim. Zero-weight diagnostics remain in the raw component CSV, no distinct metric paths or aliases are combined, and self/mutual paths are not summed. Every history point is a primary native scheduled validation check paired to validation SOURCE; no epoch-0 completion time is imputed. Calendar wall completion times are separate in the machine-readable table, and duplicate rows and disagreements remain in analyzer provenance. Final portable evaluations are endpoint audits only and cannot replace scheduled histories or mature-window completion times.",
             "",
-            f"![Figure 3. Mature-window confirmation and retention with optional X transfer when run evidence exists.]({figure_names[2]})",
-            "Figure 3. Mature windows use the frozen 40-epoch interval `(e-40,e]` and are marked complete only when every scheduled check is present; retention and confirmation are copied from the assessor-native output. X histories are exploratory until both predeclared arms are present; the cost plan alone is not transfer evidence.",
+            f"![{figure3_label}]({figure_names[2]})",
+            figure3_caption,
             "",
             "### Resource accounting",
             "",
@@ -2870,6 +3071,7 @@ def _make_report(inputs: dict[str, Any], attempts: list[dict[str, Any]], complet
         inputs["history_path"],
         inputs["root"] / "analysis" / "final_interpretation.json",
         inputs["runtime_policy_summary_path"],
+        inputs["optional_pair_decision_path"],
         inputs["root"] / "analysis" / "quality_history.csv",
         inputs["root"] / "analysis" / "quality_components.csv",
         inputs["root"] / "analysis" / "decision_cost_quality.json",
