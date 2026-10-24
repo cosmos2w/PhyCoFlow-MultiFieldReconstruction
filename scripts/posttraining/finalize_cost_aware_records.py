@@ -116,6 +116,19 @@ def _atomic_write_text(path: Path, text: str) -> None:
 def _write_json_owned(path: Path, value: dict[str, Any], schema: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     _owned_output_preflight(path, schema, str(value["root"]))
+    if path.is_file():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise FinalizeError(f"cannot compare existing owned output {path}: {error}") from error
+        if (
+            isinstance(existing, dict)
+            and {key: item for key, item in existing.items() if key != "generated_at_utc"}
+            == {key: item for key, item in value.items() if key != "generated_at_utc"}
+        ):
+            # Keep content-addressed references to this artifact stable when
+            # only the generator invocation timestamp would otherwise change.
+            return
     _atomic_write_text(path, json.dumps(value, indent=2, sort_keys=True, allow_nan=False) + "\n")
 
 
@@ -541,10 +554,9 @@ def write_aggregates(root: Path, records: dict[str, Any]) -> list[Path]:
         path = analysis / filename
         _write_json_owned(path, records[filename], schema)
         written.append(path)
-    _atomic_write_text(
-        plan_path,
-        "".join(json.dumps(row, sort_keys=True, allow_nan=False) + "\n" for row in plan_record["rows"]),
-    )
+    plan_text = "".join(json.dumps(row, sort_keys=True, allow_nan=False) + "\n" for row in plan_record["rows"])
+    if not plan_path.is_file() or plan_path.read_text(encoding="utf-8") != plan_text:
+        _atomic_write_text(plan_path, plan_text)
     written.append(plan_path)
     return written
 

@@ -2355,6 +2355,7 @@ def _write_maturity_figure(inputs: dict[str, Any], path: Path) -> None:
     x_present = _x_task_present(inputs)
     with PdfPages(path) as pdf:
         fig = plt.figure(figsize=(14.2, 7.2 if x_present else 5.4), constrained_layout=True)
+        fig.get_layout_engine().set(rect=(0.0, 0.14, 1.0, 0.86))
         if x_present:
             grid = fig.add_gridspec(1, 2, width_ratios=(1.12, 1.0))
             heat_ax = fig.add_subplot(grid[0, 0])
@@ -2402,10 +2403,14 @@ def _write_maturity_figure(inputs: dict[str, Any], path: Path) -> None:
             confirm = confirmation.get("status", "pending")
             if confirmation.get("confirmation_epoch") is not None:
                 confirm += f" E{confirmation['confirmation_epoch']}"
-            retained = retention.get("status", "pending")
+            retained = retention.get("status")
+            if retained is None:
+                retained = "retention unestablished" if confirm == "right_censored" else "retention pending"
+            else:
+                retained = "retention " + str(retained).replace("_", " ")
             if retention.get("through_observed_end_epoch") is not None:
                 retained += f" to E{retention['through_observed_end_epoch']}"
-            heat_ax.text(len(endpoints) + 0.06, y, f"{confirm}; {retained}", va="center", fontsize=6.2)
+            heat_ax.text(len(endpoints) + 0.06, y, f"{confirm.replace('_', ' ')}; {retained}", va="center", fontsize=6.2)
         heat_ax.grid(axis="x", alpha=0.1)
         heat_ax.spines["left"].set_visible(False)
         heat_ax.spines["bottom"].set_visible(False)
@@ -2452,19 +2457,18 @@ def _write_maturity_figure(inputs: dict[str, Any], path: Path) -> None:
         else:
             decision = inputs.get("optional_pair_decision_summary", {})
             if isinstance(decision, dict) and decision.get("status") == "omitted_budget":
-                heat_ax.text(
+                fig.text(
                     0.01,
-                    -0.20,
+                    0.06,
                     "X not run: resource gate; physical transfer unestablished. "
                     f"Available {_fmt(decision.get('available_seconds'), 0)} s; "
                     f"required {_fmt(decision.get('required_seconds'), 0)} s, including "
                     f"reserve {_fmt(decision.get('closeout_reserve_seconds'), 0)} s.",
-                    transform=heat_ax.transAxes,
                     fontsize=7,
                 )
             else:
-                heat_ax.text(0.01, -0.20, "Optional X transfer is omitted because the analyzer has no X run evidence.", transform=heat_ax.transAxes, fontsize=7)
-        fig.text(0.01, 0.005, "A window is green only when all scheduled checks are complete and every pooled additive, family, and endpoint risk is within its frozen limit; gray cells are pending/right-censored.", fontsize=7)
+                fig.text(0.01, 0.06, "Optional X transfer is omitted because the analyzer has no X run evidence.", fontsize=7)
+        fig.text(0.01, 0.015, "A window is green only when all scheduled checks are complete and every pooled additive, family, and endpoint risk is within its frozen limit; gray cells are pending/right-censored.", fontsize=7)
         pdf.savefig(fig, bbox_inches="tight")
         plt.close(fig)
 

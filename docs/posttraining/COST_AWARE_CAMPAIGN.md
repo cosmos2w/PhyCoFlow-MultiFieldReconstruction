@@ -48,6 +48,7 @@ Build the campaign history from retained metadata and existing validation artifa
 
 ```bash
 CUDA_VISIBLE_DEVICES='' python scripts/posttraining/analyze_cost_aware_campaign.py --root "$CAMPAIGN_ROOT"
+CUDA_VISIBLE_DEVICES='' python scripts/posttraining/finalize_cost_aware_records.py --root "$CAMPAIGN_ROOT"
 CUDA_VISIBLE_DEVICES='' python scripts/posttraining/build_cost_aware_report.py --root "$CAMPAIGN_ROOT"
 CUDA_VISIBLE_DEVICES='' python scripts/posttraining/finalize_cost_aware_records.py --root "$CAMPAIGN_ROOT" --repository-report
 ```

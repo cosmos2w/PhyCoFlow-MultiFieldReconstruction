@@ -92,6 +92,33 @@ def test_profile_compaction_excludes_support_points_and_raw_vectors() -> None:
     assert "gradient_vector" not in measurement
 
 
+def test_owned_json_writer_preserves_bytes_when_only_generation_time_changes(tmp_path: Path) -> None:
+    path = tmp_path / "owned.json"
+    first = {
+        "schema": "test-owned.v1",
+        "root": "campaign",
+        "generated_at_utc": "2026-10-24T01:00:00Z",
+        "payload": {"profile_sha256": "abc123", "nested": {"generated_at_utc": "stable"}},
+    }
+    finalize._write_json_owned(path, first, "test-owned.v1")
+    original_bytes = path.read_bytes()
+    original_sha256 = finalize._sha256(path)
+
+    rerendered = {**first, "generated_at_utc": "2026-10-24T02:00:00Z"}
+    finalize._write_json_owned(path, rerendered, "test-owned.v1")
+    assert path.read_bytes() == original_bytes
+    assert finalize._sha256(path) == original_sha256
+    assert json.loads(path.read_text(encoding="utf-8"))["generated_at_utc"] == first["generated_at_utc"]
+
+    changed_data = {
+        **rerendered,
+        "payload": {"profile_sha256": "def456", "nested": {"generated_at_utc": "stable"}},
+    }
+    finalize._write_json_owned(path, changed_data, "test-owned.v1")
+    assert path.read_bytes() != original_bytes
+    assert json.loads(path.read_text(encoding="utf-8")) == changed_data
+
+
 def test_aggregate_outputs_have_compact_profiles_and_separate_readiness_estimates(tmp_path: Path) -> None:
     root = tmp_path / "campaign"
     for directory in ("analysis", "manifests", "plans", "profiles", "tasks"):
