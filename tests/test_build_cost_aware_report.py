@@ -478,6 +478,8 @@ def test_valid_optional_pair_budget_omission_is_terminal_and_keeps_x_rows_empty(
     evidence_text = "\n".join(report._study_dimension_lines(inputs, []))
     assert "not run: resource gate; physical transfer is unestablished" in evidence_text
     assert "900.0 s available versus 1500.0 s required" in evidence_text
+    assert "| X / dense | not run: resource gate |" in "\n".join(report._portable_audit_table_lines(inputs))
+    assert "| X / strategy | not run: resource gate |" in "\n".join(report._runtime_policy_table_lines(inputs))
 
 
 def _write_analysis_tables_for_optional_decision(inputs: dict) -> None:

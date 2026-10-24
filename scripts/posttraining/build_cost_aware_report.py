@@ -761,7 +761,9 @@ def _runtime_policy_table_lines(inputs: dict[str, Any]) -> list[str]:
     table_rows = []
     for task_id in task_ids:
         row: dict[str, Any] = {"task_id": task_id, "status": "pending", "record": {}}
-        if schema_detail is not None:
+        if task_id == "X" and inputs.get("optional_pair_decision_summary", {}).get("status") == "omitted_budget":
+            row["status"] = "not run: resource gate"
+        elif schema_detail is not None:
             row["status"] = "pending: " + schema_detail
         else:
             candidates = records_by_task.get(task_id, [])
@@ -2667,8 +2669,11 @@ def _portable_audit_table_lines(inputs: dict[str, Any]) -> list[str]:
                         continue
                     audits.extend((run, item, label) for item in evaluations if isinstance(item, dict))
             if not audits:
+                omitted = str(task_id) == "X" and inputs.get("optional_pair_decision_summary", {}).get("status") == "omitted_budget"
+                audit_status = "not run: resource gate" if omitted else "pending"
+                audit_scope = "not applicable: X pair omitted" if omitted else "pending full A+B+T validation audit"
                 lines.append(
-                    f"| {task_id} / {arm} | pending | not recorded | pending | pending full A+B+T validation audit (128 snapshots; 4 groups of 32; 4096 points; six topology filtrations) | not recorded | not recorded | not recorded | not recorded | not recorded | not recorded | not recorded |"
+                    f"| {task_id} / {arm} | {audit_status} | not recorded | {audit_status} | {audit_scope} (128 snapshots; 4 groups of 32; 4096 points; six topology filtrations) | not recorded | not recorded | not recorded | not recorded | not recorded | not recorded | not recorded |"
                 )
                 continue
             for run, evaluation, collection_label in audits:
