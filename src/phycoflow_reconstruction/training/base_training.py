@@ -193,6 +193,14 @@ def run_base_training(
         store=store,
         steps_per_epoch=steps_per_epoch,
     )
+    reconstruction_panel = None
+    if config.get("evaluation", {}).get("reconstruction_panel") is not None:
+        from .reconstruction_panel import TrainingReconstructionPanel
+
+        reconstruction_panel = TrainingReconstructionPanel(
+            config, model=model, store=store, steps_per_epoch=steps_per_epoch, device=device
+        )
+        checkpoint_manager.panel_evaluator = reconstruction_panel
     telemetry = BenchmarkTelemetry.from_config(
         config,
         store.run_dir,
@@ -328,6 +336,8 @@ def run_base_training(
         fallback_metric=float(row["total"]),
         force=True,
     )
+    if reconstruction_panel is not None:
+        reconstruction_panel.close()
     if saved is None:
         raise RuntimeError("final checkpoint save was unexpectedly disabled")
     last_checkpoint, saved_best_checkpoint = saved
