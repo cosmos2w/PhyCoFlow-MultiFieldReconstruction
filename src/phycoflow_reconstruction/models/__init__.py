@@ -98,7 +98,7 @@ def _register_defaults() -> None:
         metadata={
             "family": "grid_generative",
             "license": "project-local clean-room",
-            "upstream_reference": "https://github.com/jhhuangchloe/DiffusionPDE",
+            "upstream_reference": "https://github.com/generativepde/DiffusionPDE",
             "stages": ("base_training",),
         },
     )
@@ -177,6 +177,7 @@ def build_model(config: Mapping[str, Any], data_spec: DataSpec, physics_provider
             "sensor_order",
         },
         "diffusion_pde": {
+            "formulation",
             "backbone",
             "hidden_channels",
             "base_channels",
@@ -187,6 +188,9 @@ def build_model(config: Mapping[str, Any], data_spec: DataSpec, physics_provider
             "attention_heads",
             "dropout",
             "training_timesteps",
+            "sigma_data", "sigma_min", "sigma_max", "rho", "p_mean", "p_std",
+            "high_noise_fraction", "train_microbatch_size", "precision",
+            "model_ema_enabled", "model_ema_decay", "model_ema_eval",
         },
         "latent_fm": {"latent_channels", "stage", "stage1_checkpoint"},
         "pointcloud_ffm": {
@@ -303,6 +307,14 @@ def build_model(config: Mapping[str, Any], data_spec: DataSpec, physics_provider
             kwargs[key] = tuple(int(v) for v in kwargs[key])
     if name == "pinn":
         kwargs["physics_provider"] = physics_provider
+    if name == "diffusion_pde":
+        formulation = kwargs.pop("formulation", "ddpm")
+        if formulation == "edm":
+            from .generative.edm import EDMDiffusionPDEModel
+
+            return EDMDiffusionPDEModel(**common, **kwargs)
+        if formulation != "ddpm":
+            raise ValueError("diffusion_pde formulation must be ddpm or edm")
     if name == "gl_rbf_cq" and "physical_field_transform" in kwargs:
         from .compatibility.physical_gl_rbf_cq import PhysicalGLRbfCQ
 

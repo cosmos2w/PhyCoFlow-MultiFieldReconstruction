@@ -12,7 +12,7 @@ This document describes the mathematical contract implemented by `phycoflow_reco
 | `mimonet` | deterministic operator | masked field MSE | two sparse sensor branches, multiplicative fusion, coordinate trunk |
 | `senseiver` | deterministic point | masked field MSE | latent sparse attention |
 | `geofno` | grid operator | masked field MSE | optional `neuraloperator` dependency |
-| `diffusion_pde` | grid generative | noise-prediction MSE | deterministic DDIM-style sampling |
+| `diffusion_pde` | grid generative | legacy noise MSE or conditional EDM weighted denoising | DDIM or EDM Heun sampling |
 | `latent_fm` | latent generative | autoencoder / latent flow | Stage 1 prerequisite, Stage 2 source |
 | `pointcloud_ffm` | point rectified flow | velocity MSE | `gl_rbf_enh` or optional FNO backbone |
 | `gl_rbf_cq` | point rectified flow | velocity MSE | cached-K/V, EMA, coherence-ready |
@@ -392,6 +392,12 @@ Current drawbacks:
 - The U-Net requires complete two-dimensional grids and substantially more memory; spatial attention is quadratic in the cell count at each selected level and should remain confined to coarse resolutions.
 - The training loss conditions on value/mask channels but does not explicitly clamp the noisy training state at sensors, whereas inference clamps after each DDIM update.
 - `reconstruct` returns one draw and no stacked ensemble, so the advertised stochastic capability does not currently produce uncertainty samples for the common evaluator.
+
+#### Conditional EDM for fresh training
+
+`formulation: edm` selects a separate conditional EDM implementation through the same `ObservationBatch`, `training_loss`, `differentiable_reconstruct`, and `reconstruct` interfaces. Missing `formulation` continues to mean `ddpm`, preserving strict loading and evaluation of historical checkpoints. See [the EDM training recipe](diffusion_pde_edm.md) for the numerical objective, explicit departures from upstream, memory measurements, validation selection and fresh-training commands.
+
+The EDM path uses input/skip/output preconditioning, log-normal noise, a sigma-weighted clean-field objective, multiscale sparse value/mask conditioning, padded/cropped odd grids, and a rho-spaced Heun sampler. Known point observations constrain the clean estimate; intermediate noisy states remain noisy. The common training lifecycle supplies whole-sample microbatch accumulation and resumable EMA, and a fixed multi-frame/multi-seed reconstruction panel selects checkpoints independently of the denoising loss. This is a conditional adaptation of the original method and does not inject case-specific PDE residuals into the generic model.
 
 ### 4.2 Two-stage latent flow matching
 

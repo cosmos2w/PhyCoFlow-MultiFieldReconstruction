@@ -148,6 +148,27 @@ def test_diffusion_unet_config_is_validated_without_model_construction():
         validate_config(config)
 
 
+@pytest.mark.parametrize("value", [0, 1.5, True])
+def test_edm_config_rejects_invalid_microbatch_size(value):
+    config = _base_config()
+    config["model"] = {"name": "diffusion_pde", "formulation": "edm",
+                       "train_microbatch_size": value}
+    with pytest.raises(ValueError, match="positive integer"):
+        validate_config(config)
+
+
+def test_edm_config_rejects_one_step_heun_and_legacy_noise_settings():
+    config = _base_config()
+    config["model"] = {"name": "diffusion_pde", "formulation": "edm"}
+    config["evaluation"] = {"generation_steps": 1}
+    with pytest.raises(ValueError, match="generation_steps >= 2"):
+        validate_config(config)
+    config["evaluation"]["generation_steps"] = 32
+    config["model"]["training_timesteps"] = 1000
+    with pytest.raises(ValueError, match="does not use"):
+        validate_config(config)
+
+
 def test_base_sections_reject_misspelled_or_invalid_nested_values():
     config = _base_config()
     config["optimization"]["learning_rate"] = 1e-3

@@ -141,7 +141,9 @@ class PeriodicCheckpointManager:
         fidelity_improved = False
         epoch = self._epoch(global_step)
         panel_due = (force or self.validation_every_epochs is None or
-                     (epoch is not None and epoch % int(self.validation_every_epochs) == 0))
+                     (epoch is not None and epoch % int(self.validation_every_epochs) == 0)
+                     or (self.selection_metric == "reconstruction_mse"
+                         and self.save_epoch_one and epoch == 1))
         if self.selection_metric == "topology_with_fidelity" and not panel_due:
             eligible_for_best = False
         elif self.selection_metric == "topology_with_fidelity":
@@ -161,8 +163,9 @@ class PeriodicCheckpointManager:
             with (self.store.run_dir / "metrics" / "topology_validation.jsonl").open("a") as handle:
                 handle.write(json.dumps({"step": global_step, **panel_report}) + "\n")
         elif self.selection_metric == "reconstruction_mse":
-            if self.panel_evaluator is not None and panel_due:
-                reconstruction_report = self.panel_evaluator(global_step)
+            if self.panel_evaluator is not None:
+                # A single-frame preview must never replace the configured panel.
+                reconstruction_report = self.panel_evaluator(global_step) if panel_due else None
             if reconstruction_report is not None:
                 metric_name = "fixed_validation_reconstruction_mse"
                 metric_value = float(reconstruction_report["metrics"]["mse_normalized"])

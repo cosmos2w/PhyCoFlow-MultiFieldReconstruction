@@ -407,6 +407,7 @@ class TrainingMonitor:
         if figure is not None:
             temporary = self.plot_path.with_name(f".{self.plot_path.name}.tmp")
             figure.savefig(temporary, dpi=180, format="png")
+            figure.savefig(self.plot_path.with_suffix(".pdf"))
             plt.close(figure)
             os.replace(temporary, self.plot_path)
         optimization_figure = self._build_optimization_figure(plt)

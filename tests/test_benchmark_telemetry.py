@@ -134,3 +134,25 @@ def test_benchmark_telemetry_is_noop_when_disabled(tmp_path):
     telemetry.finish_step()
     telemetry.close()
     assert not (tmp_path / "metrics").exists()
+
+
+def test_benchmark_telemetry_preserves_history_and_discards_uncheckpointed_future(tmp_path):
+    def create():
+        return BenchmarkTelemetry(tmp_path, enabled=True, device=torch.device("cpu"),
+            steps_per_epoch=1, parameter_count=1, trainable_parameter_count=1)
+    initial = create()
+    for step in (0, 1, 2):
+        initial.start_step(step)
+        initial.finish_step()
+        initial.finish_epoch(step + 1)
+    initial.close()
+    resumed = create()
+    # Resume from epoch 2; replace the uncheckpointed third epoch.
+    resumed.start_step(2)
+    resumed.finish_step()
+    resumed.finish_epoch(3)
+    resumed.close()
+    payload = json.loads((tmp_path / "metrics/benchmark_telemetry.json").read_text())
+    assert [row["global_step"] for row in payload["steps"]] == [0, 1, 2]
+    assert [row["epoch"] for row in payload["epochs"]] == [1, 2, 3]
+    assert payload["steps"][:2] == initial.steps[:2]
