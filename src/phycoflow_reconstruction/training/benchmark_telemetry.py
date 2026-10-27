@@ -49,6 +49,15 @@ class BenchmarkTelemetry:
         self.sample_steps = max(0, int(sample_steps))
         self.steps: list[dict[str, Any]] = []
         self.epochs: list[dict[str, Any]] = []
+        history_path = self.metrics_dir / "benchmark_telemetry.json"
+        if self.enabled and history_path.is_file():
+            history = json.loads(history_path.read_text(encoding="utf-8"))
+            for key in ("steps_per_epoch", "parameter_count", "trainable_parameter_count"):
+                if int(history[key]) != getattr(self, key):
+                    raise ValueError(f"resumed benchmark telemetry disagrees on {key}")
+            self.steps = list(history["steps"])
+            self.epochs = list(history["epochs"])
+        self._history_reconciled = False
         self._step: dict[str, Any] | None = None
         self._epoch: dict[str, Any] | None = None
         self._last_step_end: float | None = None
@@ -96,6 +105,12 @@ class BenchmarkTelemetry:
     def start_step(self, global_step: int) -> None:
         if not self.enabled:
             return
+        if not self._history_reconciled:
+            # A crash can leave telemetry newer than the recoverable checkpoint.
+            self.steps = [row for row in self.steps if int(row["global_step"]) < global_step]
+            self.epochs = [row for row in self.epochs
+                           if int(row["epoch"]) * self.steps_per_epoch <= global_step]
+            self._history_reconciled = True
         now = perf_counter()
         if self._epoch is None:
             self.start_epoch((int(global_step) // self.steps_per_epoch) + 1)

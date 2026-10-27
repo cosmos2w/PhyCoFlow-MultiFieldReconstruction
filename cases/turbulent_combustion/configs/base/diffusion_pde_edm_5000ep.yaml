@@ -1,0 +1,71 @@
+# Fresh formal training. Do not resume a legacy epsilon/DDIM checkpoint.
+defaults:
+  - ../../../../configs/defaults/base_training.yaml
+  - ../dataset.yaml
+  - ../sensors/T_only_random_192_384.yaml
+  - ../../../../configs/models/diffusion_pde_edm.yaml
+
+stage: base_training
+case: turbulent_combustion
+
+model:
+  # GPU2 optimizer probes qualify this 2 x 64 effective-batch execution.
+  train_microbatch_size: 64
+  precision: bf16
+
+dataset:
+  normalization: mean_std
+  normalization_stats_path: configs/normalization/train_mean_std.json
+
+optimization:
+  epochs: 5000
+  batch_size: 128
+  lr: 1.0e-4
+  weight_decay: 1.0e-6
+  grad_clip: 1.0
+  backward_loss_scale: 1.0
+
+runtime:
+  seed: 42
+  device: cuda:2
+  deterministic: true
+  num_workers: 4
+  data_strategy: async_cpu
+  progress: true
+  plot_every_steps: 10
+
+evaluation:
+  split: validation
+  max_samples: 20
+  query_points: null
+  generation_steps: 32
+  seed: 2027
+  preview:
+    enabled: true
+    loss_every_epochs: 10
+    reconstruct_every_epochs: 100
+    split: validation
+    sample_index: 0
+    query_points: null
+    generation_steps: 32
+    seed: 2027
+    keep_history: true
+  reconstruction_panel:
+    sample_indices: [0, 250, 500, 750]
+    seeds: [2027, 2028]
+    generation_steps: 32
+
+checkpointing:
+  enabled: true
+  every_epochs: 10
+  validation_every_epochs: 50
+  selection_metric: reconstruction_mse
+  epochs: [100, 500, 1000, 2000, 5000]
+  save_epoch_one: true
+
+benchmark_telemetry:
+  enabled: true
+  sample_steps: 5
+
+output:
+  experiment_name: tc_diffusion_pde_5000ep

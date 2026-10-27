@@ -94,7 +94,8 @@ class _TimeResidualBlock(nn.Module):
         hidden = self.conv1(F.silu(self.norm1(inputs)))
         hidden = hidden + self.time_projection(F.silu(time_embedding))[:, :, None, None]
         hidden = self.conv2(self.dropout(F.silu(self.norm2(hidden))))
-        return self.skip(inputs) + hidden
+        result = self.skip(inputs) + hidden
+        return result * getattr(self, "residual_scale", 1.0)
 
 
 class _SpatialAttention(nn.Module):

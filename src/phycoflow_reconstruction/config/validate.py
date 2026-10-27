@@ -201,6 +201,7 @@ def _validate_common_sections(config: Mapping[str, Any]) -> None:
             "preview",
             "sample_selection",
             "native_topology",
+            "reconstruction_panel",
         },
         "evaluation",
     )
@@ -288,8 +289,8 @@ def _validate_common_sections(config: Mapping[str, Any]) -> None:
         interval = checkpointing["validation_every_epochs"]
         if isinstance(interval, bool) or int(interval) != interval or int(interval) < 1:
             raise ValueError("checkpointing.validation_every_epochs must be a positive integer")
-        if checkpointing.get("selection_metric") != "topology_with_fidelity":
-            raise ValueError("validation_every_epochs currently requires topology_with_fidelity")
+        if checkpointing.get("selection_metric") not in {"topology_with_fidelity", "reconstruction_mse"}:
+            raise ValueError("validation_every_epochs requires topology_with_fidelity or reconstruction_mse")
     if "epochs" in checkpointing:
         epochs = checkpointing["epochs"]
         if (
@@ -320,6 +321,25 @@ def _validate_common_sections(config: Mapping[str, Any]) -> None:
         and external_policy is None
     ):
         raise ValueError("reconstruction_mse checkpoint selection requires preview.enabled=true")
+
+    panel = evaluation.get("reconstruction_panel")
+    if panel is not None:
+        if not isinstance(panel, Mapping):
+            raise TypeError("evaluation.reconstruction_panel must be a mapping")
+        _reject_unknown(panel, {"sample_indices", "seeds", "generation_steps"},
+                        "evaluation.reconstruction_panel")
+        if config.get("stage") != "base_training":
+            raise ValueError("evaluation.reconstruction_panel currently requires base_training")
+        if checkpointing.get("selection_metric") != "reconstruction_mse":
+            raise ValueError("reconstruction_panel requires selection_metric=reconstruction_mse")
+        for key in ("sample_indices", "seeds"):
+            values = panel.get(key)
+            if (not isinstance(values, (list, tuple)) or not values
+                or any(isinstance(x, bool) or not isinstance(x, int) or x < 0 for x in values)
+                or len(set(values)) != len(values)):
+                raise ValueError(f"reconstruction_panel.{key} must be unique non-negative integers")
+        if int(panel.get("generation_steps", evaluation.get("generation_steps", 32))) < 1:
+            raise ValueError("reconstruction_panel.generation_steps must be positive")
 
     telemetry = config.get("benchmark_telemetry", {})
     if not isinstance(telemetry, Mapping):
@@ -1649,7 +1669,54 @@ def validate_config(config: Mapping[str, Any]) -> None:
         if backbone == "gl_rbf_enh" and model.get("gather_mode", "topk_rbf") != "topk_rbf":
             raise ValueError("new GL_rbf_ENH supports only gather_mode=topk_rbf")
     elif model_name == "diffusion_pde":
-        backbone = str(model.get("backbone", "plain_cnn")).lower()
+        formulation = model.get("formulation", "ddpm")
+        if formulation not in {"ddpm", "edm"}:
+            raise ValueError("diffusion_pde formulation must be ddpm or edm")
+        edm_keys = {
+            "sigma_data", "sigma_min", "sigma_max", "rho", "p_mean", "p_std",
+            "high_noise_fraction", "train_microbatch_size", "precision",
+            "model_ema_enabled", "model_ema_decay", "model_ema_eval",
+        }
+        if formulation == "ddpm" and edm_keys.intersection(model):
+            raise ValueError("EDM model settings require formulation=edm")
+        if formulation == "edm":
+            if config["observations"].get("protocol") == "structured_block_mean":
+                raise ValueError("EDM currently requires point observations, not block means")
+            if model.get("backbone", "conditional_unet") != "conditional_unet":
+                raise ValueError("EDM requires backbone=conditional_unet")
+            if {"hidden_channels", "training_timesteps"}.intersection(model):
+                raise ValueError("EDM does not use hidden_channels or training_timesteps")
+            for key, default in (("sigma_data", 1.0), ("sigma_min", 0.002), ("sigma_max", 80.0),
+                                 ("rho", 7.0), ("p_std", 1.2)):
+                value = float(model.get(key, default))
+                if not math.isfinite(value) or value <= 0:
+                    raise ValueError(f"model.{key} must be finite and positive")
+            if float(model.get("sigma_min", 0.002)) >= float(model.get("sigma_max", 80.0)):
+                raise ValueError("EDM sigma_min must be below sigma_max")
+            if not math.isfinite(float(model.get("p_mean", -0.5))):
+                raise ValueError("EDM p_mean must be finite")
+            if not 0 <= float(model.get("high_noise_fraction", 0.0)) <= 1:
+                raise ValueError("EDM high_noise_fraction must be in [0, 1]")
+            microbatch = model.get("train_microbatch_size", 32)
+            if isinstance(microbatch, bool) or not isinstance(microbatch, int) or microbatch < 1:
+                raise ValueError("EDM train_microbatch_size must be a positive integer")
+            if model.get("precision", "fp32") not in {"fp32", "bf16"}:
+                raise ValueError("EDM precision must be fp32 or bf16")
+            for key in ("model_ema_enabled", "model_ema_eval"):
+                if key in model and not isinstance(model[key], bool):
+                    raise TypeError(f"model.{key} must be boolean")
+            if not 0 <= float(model.get("model_ema_decay", 0.999)) < 1:
+                raise ValueError("EDM model_ema_decay must be in [0, 1)")
+            if config.get("optimization", {}).get("adaptive_backward_scaling", False):
+                raise ValueError("EDM microbatch backward does not use adaptive_backward_scaling")
+            if float(config.get("optimization", {}).get("backward_loss_scale", 1.0)) != 1:
+                raise ValueError("EDM microbatch backward requires backward_loss_scale=1")
+            evaluation = config.get("evaluation", {})
+            for settings in (evaluation, evaluation.get("preview", {}),
+                             evaluation.get("reconstruction_panel", {})):
+                if int(settings.get("generation_steps", evaluation.get("generation_steps", 32))) < 2:
+                    raise ValueError("EDM Heun sampling requires generation_steps >= 2")
+        backbone = str(model.get("backbone", "conditional_unet" if formulation == "edm" else "plain_cnn")).lower()
         if backbone not in {"plain_cnn", "conditional_unet"}:
             raise ValueError("diffusion_pde backbone must be plain_cnn or conditional_unet")
         if int(model.get("training_timesteps", 1000)) < 2:

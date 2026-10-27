@@ -48,6 +48,27 @@ class _FidelityPreview(_Preview):
         return None
 
 
+def test_reconstruction_panel_is_authoritative_between_validation_epochs(tmp_path):
+    config = {"stage": "base_training", "checkpointing": {
+        "every_epochs": 1, "validation_every_epochs": 2,
+        "selection_metric": "reconstruction_mse", "save_epoch_one": True}}
+    store = RunStore.create(tmp_path, "reconstruction_panel", config)
+    manager = PeriodicCheckpointManager(config, store=store, steps_per_epoch=1)
+    model = torch.nn.Linear(1, 1)
+    calls = []
+    def panel(step):
+        calls.append(step)
+        return {"metrics": {"mse_normalized": 10. - step}}
+    manager.panel_evaluator = panel
+    for step in (1, 2, 3):
+        manager.save({"model": model.state_dict()}, model=model, preview=_FidelityPreview(),
+                     global_step=step, fallback_metric=0.)
+    assert calls == [1, 2]
+    # The much smaller single-preview MSE at epoch 3 cannot select a checkpoint.
+    assert store.load_checkpoint("best")["global_step"] == 2
+    assert manager.last_best_checked is False
+
+
 def test_step_recovery_cadence_does_not_trigger_extra_topology_validation(tmp_path):
     config = {'stage': 'post_training', 'checkpointing': {'every_epochs': 1,
         'every_steps': 3, 'validation_every_epochs': 1, 'selection_metric': 'topology_with_fidelity'}}
