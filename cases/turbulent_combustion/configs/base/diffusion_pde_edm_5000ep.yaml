@@ -1,4 +1,4 @@
-# Fresh training proposal. Do not resume a legacy epsilon/DDIM checkpoint.
+# Fresh formal training. Do not resume a legacy epsilon/DDIM checkpoint.
 defaults:
   - ../../../../configs/defaults/base_training.yaml
   - ../dataset.yaml
@@ -58,7 +58,7 @@ evaluation:
 checkpointing:
   enabled: true
   every_epochs: 10
-  validation_every_epochs: 10
+  validation_every_epochs: 50
   selection_metric: reconstruction_mse
   epochs: [100, 500, 1000, 2000, 5000]
   save_epoch_one: true
@@ -68,4 +68,4 @@ benchmark_telemetry:
   sample_steps: 5
 
 output:
-  experiment_name: tc_diffusion_pde_edm_5000ep
+  experiment_name: tc_diffusion_pde_5000ep
