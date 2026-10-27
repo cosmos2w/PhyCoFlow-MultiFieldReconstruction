@@ -36,7 +36,7 @@ Noise validation and reconstruction validation are different evidence. `loss_his
 
 ## Proposed combustion recipe
 
-Use [diffusion_pde_edm_5000ep.yaml](../cases/turbulent_combustion/configs/base/diffusion_pde_edm_5000ep.yaml). The long run is a proposal; bounded qualification is not completion of this recipe.
+Use [diffusion_pde_edm_5000ep.yaml](../cases/turbulent_combustion/configs/base/diffusion_pde_edm_5000ep.yaml). The user authorized a fresh formal run targeting 5000 epochs, saved under `cases/turbulent_combustion/runs/tc_diffusion_pde_5000ep/`. Bounded qualification is not completion of this recipe. The formal launch has no 100-epoch execution cap; subsequent inspection is manual.
 
 | Setting | Proposed value | Relation to mature project runs |
 |---|---|---|
@@ -47,7 +47,7 @@ Use [diffusion_pde_edm_5000ep.yaml](../cases/turbulent_combustion/configs/base/d
 | GPU execution | BF16, two microbatches of 64 on physical GPU2 | Measured full-grid optimizer probes; no query subsampling |
 | Optimizer | AdamW, LR 1e-4, weight decay 1e-6, clip 1 | Same mature project baseline settings |
 | Reproducibility/loading | Seed 42, deterministic cuDNN, four workers, async CPU | Same project conventions |
-| Recovery and selection | Save epoch 1, every 10 epochs; fixed reconstruction panel every 10 epochs | Adds generation-based selection and EMA |
+| Recovery and selection | Save epoch 1, every 10 epochs; fixed reconstruction panel every 50 epochs, plus the retained epoch-1 initialization | Adds generation-based selection and EMA |
 | Milestones | 100, 500, 1000, 2000, 5000 epochs | Same retained milestones |
 | Sampling | 32-step Heun during monitoring | Must be qualified for fidelity; not copied from other models' 4-step setting |
 
@@ -61,11 +61,10 @@ CUDA_VISIBLE_DEVICES=2 \
   /home/wanglz/miniconda3/envs/phycoflow_env/bin/python \
   cases/turbulent_combustion/run.py train-base \
   --config configs/base/diffusion_pde_edm_5000ep.yaml \
-  --override runtime.device=cuda:0 \
-  --max-steps 6300
+  --override runtime.device=cuda:0
 ```
 
-The first command caps execution at 100 epochs (63 optimizer updates per epoch for the current 8000-frame split and batch 128), retaining the proposed 5000-epoch configuration. Review panel and fieldwise curves at that point before any continuation. Resume only the new EDM run using the same resolved settings, omit `--max-steps`, and add `--resume /absolute/path/to/the/new/run` to continue toward its configured horizon. Do not pass the historical DDPM run as the resume path. Formal readiness requires complete generation-validation history, per-field fidelity across the validation panel, seed stability, and convergence evidence; a few successful epochs establish execution and resume functionality only.
+The command targets all 5000 epochs (63 optimizer updates per epoch for the current 8000-frame split and batch 128). The expensive four-frame/two-seed reconstruction panel runs every 50 epochs, with the existing epoch-1 initialization retained; cheap single-frame denoising validation and recovery saves remain every 10 epochs, and full reconstruction previews remain every 100 epochs. Resume only the new EDM run using the same resolved settings and add `--resume /absolute/path/to/the/new/run`. Do not pass the historical DDPM run as the resume path. Formal readiness requires complete generation-validation history, per-field fidelity across the validation panel, seed stability, and convergence evidence; startup alone does not establish quality. No external monitor or automatic follow-up is requested for this launch.
 
 ## Bounded GPU2 qualification, 2026-10-27
 
@@ -77,7 +76,7 @@ The fresh three-epoch test completed 189 optimizer updates, with a trainer resta
 | 2 | 0.6142 | 1.4649 |
 | 3 | 0.5207 | 1.1960 |
 
-For a separate epoch-3, frame-8000/seed-2027 sensitivity check, conditioned FP32 reconstruction MSE was 1.1356 and no-condition MSE was 2.2803. Removing all conditions is outside the training protocol, so this demonstrates condition dependence rather than a controlled architectural ablation. BF16 MSE for that same generated example was 1.1366, and mean squared BF16/FP32 prediction difference was 1.82e-5. This is a limited numerical check, not a general precision-fidelity guarantee. The training-mean predictor's MSE on that frame was 0.9629: generation quality is not yet qualified, and the short run cannot justify a mature accuracy claim. The 100-epoch gate above is therefore part of the proposed recipe.
+For a separate epoch-3, frame-8000/seed-2027 sensitivity check, conditioned FP32 reconstruction MSE was 1.1356 and no-condition MSE was 2.2803. Removing all conditions is outside the training protocol, so this demonstrates condition dependence rather than a controlled architectural ablation. BF16 MSE for that same generated example was 1.1366, and mean squared BF16/FP32 prediction difference was 1.82e-5. This is a limited numerical check, not a general precision-fidelity guarantee. The training-mean predictor's MSE on that frame was 0.9629: generation quality was not qualified by the short run. The user subsequently authorized the 5000-epoch formal run with manual inspection.
 
 Legacy epoch-500 DDPM weights still strict-load and reproduce the archived physical prediction with maximum absolute difference zero. Nine original-run checkpoints, histories, configuration and preview artifacts were hash-verified unchanged. No TEST evaluation or 5000-epoch training was performed. Focused numerical, interface, configuration, checkpoint, monitoring and telemetry tests passed (124 tests in total).
 
