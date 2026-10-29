@@ -4,6 +4,10 @@
 
 > <strong style="color: #d1242f;">🔴 Recommended starting recipe: dense Lagrangian fidelity feedback, with family ConFIG when using all three families.</strong> [Configure it for your own data](#62-choose-scalarization-gradient-balancing-and-fidelity-feedback).
 
+> **Development and reference status:** The model choices in [§5.2](#52-select-a-model) describe available interfaces and reference configurations; they do not establish an accuracy ranking or efficacy on your dataset. The new `fast_lagrangian`, `lpc_ordered`, and `execution_strategy` methods remain [experimental development/testing routes](docs/posttraining/FAST_LAGRANGIAN_LPC_USER_GUIDE.md). The EDM DiffusionPDE workflow also needs fresh training and case-specific evaluation.
+
+> **Existing checkpoints:** Base and post-trained models retain their loading contract with their original resolved model configuration, normalization and dataset contract, including saved EMA state where required. Legacy DiffusionPDE weights cannot be upgraded into EDM weights; retrain for the EDM profile. Loading a model for evaluation does not guarantee exact training continuation: resume also verifies optimizer/controller state and, for the new opt-in methods, implementation bindings.
+
 PhyCoFlow reconstructs complete physical states from sparse, multi-field measurements. The primary research workflow studies whether data-driven physical-coherence post-training improves the coherence of a reconstructed state while preserving the immutable source checkpoint and the supervised data contract.
 
 Start with [coherence post-training](#6-coherence-post-training) to configure a method for your own data, supply your trained SOURCE, and launch or resume a child run. The [strategy guide](docs/Posttraining_Strategies.md) provides detailed compatibility rules and worked examples; the [topology-only guide](TOPOLOGY_POSTTRAINING.md) covers native-grid topology workflows.
