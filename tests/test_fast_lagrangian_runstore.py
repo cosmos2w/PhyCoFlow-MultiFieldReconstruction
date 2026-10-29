@@ -96,15 +96,28 @@ def test_empty_fast_settings_enforce_binding_and_resume_with_matching_code(toy_p
 
 
 @pytest.mark.parametrize("fast_setting", ["absent", "none"])
-def test_legacy_nonfast_resume_does_not_require_fast_binding(toy_post_config, fast_setting):
+@pytest.mark.parametrize("execution_setting", ["absent", "none", "disabled"])
+def test_legacy_nonfast_resume_does_not_require_fast_binding(
+    toy_post_config, fast_setting, execution_setting,
+):
     post, case = toy_post_config
     if fast_setting == "none":
         post["optimization"]["fast_lagrangian"] = None
+    if execution_setting == "none":
+        post["optimization"]["execution_strategy"] = None
+    elif execution_setting == "disabled":
+        post["optimization"]["execution_strategy"] = {"enabled": False}
     child = run_post_training(post, case_dir=case, max_steps=1)
     store = RunStore.resume(child, post)
     saved = store.load_checkpoint("last")
+    assert "execution_strategy" not in saved
+    assert "execution_strategy_implementation" not in saved
+    assert not (child / "artifacts/execution_strategy.json").exists()
     saved.pop("fast_lagrangian_implementation", None)
     store.save_checkpoint("last", saved)
 
     assert run_post_training(post, case_dir=case, resume=child, max_steps=1) == child
-    assert store.load_checkpoint("last")["global_step"] == saved["global_step"] + 1
+    resumed = store.load_checkpoint("last")
+    assert resumed["global_step"] == saved["global_step"] + 1
+    assert "execution_strategy" not in resumed
+    assert "execution_strategy_implementation" not in resumed

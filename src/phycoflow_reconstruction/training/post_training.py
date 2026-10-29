@@ -1566,6 +1566,8 @@ def run_post_training(
     external_settings = (multitask or {}).get("external_policy")
     fast_settings = config["optimization"].get("fast_lagrangian", {})
     strategy_settings = config["optimization"].get("execution_strategy", {})
+    if strategy_settings is None:
+        strategy_settings = {}
     ordered_settings = config["optimization"].get("lpc_ordered")
     policy = None
     scalarizer = (
