@@ -76,3 +76,6 @@ local-experiments/
 
 # Optional historical source retained only for local compatibility checks.
 LegacyCoherence/
+
+# Local planning, research notes and post-processing materials.
+/UpdatePlans/

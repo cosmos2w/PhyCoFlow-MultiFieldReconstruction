@@ -1,8 +1,0 @@
-{
-  "deeponet": "tc_deeponet_5000ep/20260829T125329Z_2ebc837b",
-  "diffusion_pde": "tc_diffusion_pde_5000ep/20261027T222333Z_187a0271",
-  "geofno": "tc_geofno_5000ep/20260829T125402Z_6d14630d",
-  "mimonet": "tc_mimonet_point_index_256t_5000ep_gpu0/20260926T142133Z_fe61af39",
-  "senseiver": "tc_senseiver_5000ep/20260828T190145Z_fea0fc25",
-  "gl_rbf_cq": "tc_gl_rbf_cq_cached_kv_5000ep/20260826T212231Z_7b68c461"
-}
