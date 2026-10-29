@@ -1755,6 +1755,7 @@ class ConditionalPointHybridLocalGlobalRBFCQ(ConditionalPointHybridLocalGlobalRB
         cq_time_film_zero_init: bool = True,
         cq_measurement_support_mode: str = "none",
         cq_measurement_support_normalize: bool = True,
+        cq_support_bandwidth: float = 0.05,
     ) -> None:
         if cq_readout_mode not in ("full", "lowrank"):
             raise ValueError(
@@ -1783,8 +1784,15 @@ class ConditionalPointHybridLocalGlobalRBFCQ(ConditionalPointHybridLocalGlobalRB
             raise ValueError("cq_time_embed_dim must be at least 2.")
         if cq_time_max_period <= 0:
             raise ValueError("cq_time_max_period must be positive.")
-        if cq_measurement_support_mode not in ("none", "rbf_value_support"):
-            raise ValueError("cq_measurement_support_mode must be 'none' or 'rbf_value_support'.")
+        if cq_measurement_support_mode not in (
+            "none", "rbf_value_support", "rbf_value_coverage"
+        ):
+            raise ValueError(
+                "cq_measurement_support_mode must be 'none', 'rbf_value_support' "
+                "or 'rbf_value_coverage'."
+            )
+        if not math.isfinite(cq_support_bandwidth) or cq_support_bandwidth <= 0:
+            raise ValueError("cq_support_bandwidth must be finite and positive.")
 
         # Build the unchanged F0 condition/global/local core first. The inherited
         # query modules are then removed and replaced, leaving GL_rbf_ENH untouched.
@@ -1839,10 +1847,20 @@ class ConditionalPointHybridLocalGlobalRBFCQ(ConditionalPointHybridLocalGlobalRB
         self.cq_time_max_period = float(cq_time_max_period)
         self.cq_time_film_zero_init = bool(cq_time_film_zero_init)
         self.cq_measurement_support_mode = str(cq_measurement_support_mode)
-        self.cq_measurement_support_normalize = bool(cq_measurement_support_normalize)
+        self.cq_geometric_coverage_enabled = (
+            self.cq_measurement_support_mode == "rbf_value_coverage"
+        )
+        # Coverage magnitudes are meaningful; the legacy normalization switch
+        # applies only to the original measurement/relative-field-share pair.
+        self.cq_measurement_support_normalize = (
+            bool(cq_measurement_support_normalize) and not self.cq_geometric_coverage_enabled
+        )
+        self.cq_support_bandwidth = float(cq_support_bandwidth)
         self.cq_timestep_film_enabled = self.cq_time_conditioning == "sinusoidal_film"
-        self.cq_measurement_support_enabled = (
-            self.cq_measurement_support_mode == "rbf_value_support"
+        self.cq_measurement_support_enabled = self.cq_measurement_support_mode != "none"
+        self.cq_measurement_support_width = (
+            (4 if self.cq_geometric_coverage_enabled else 2) * self.n_fields
+            if self.cq_measurement_support_enabled else 0
         )
         self.hidden_dim = int(hidden_dim)
         self.cond_dim = int(cond_dim)
@@ -1887,7 +1905,7 @@ class ConditionalPointHybridLocalGlobalRBFCQ(ConditionalPointHybridLocalGlobalRB
             if self.cq_time_film_zero_init:
                 nn.init.zeros_(self.cq_timestep_film.weight)
                 nn.init.zeros_(self.cq_timestep_film.bias)
-        raw_feature_dim = 2 * self.n_fields if self.cq_measurement_support_enabled else 0
+        raw_feature_dim = self.cq_measurement_support_width
         if self.cq_measurement_support_enabled and self.cq_measurement_support_normalize:
             self.cq_measurement_support_norm = nn.LayerNorm(raw_feature_dim)
         if self.cq_fusion_mode == "additive":
@@ -1902,7 +1920,9 @@ class ConditionalPointHybridLocalGlobalRBFCQ(ConditionalPointHybridLocalGlobalRB
             self.cq_local_scale = nn.Parameter(torch.tensor(float(cq_local_scale_init)))
             self.cq_readout_scale = nn.Parameter(torch.tensor(float(cq_readout_scale_init)))
             fusion_dim = self.cq_query_dim + raw_feature_dim
-            self.cq_fusion_norm = nn.LayerNorm(fusion_dim)
+            self.cq_fusion_norm = nn.LayerNorm(
+                self.cq_query_dim if self.cq_geometric_coverage_enabled else fusion_dim
+            )
             self.cq_head = nn.Sequential(
                 nn.Linear(fusion_dim, self.cq_query_dim),
                 nn.GELU(),
@@ -1915,7 +1935,9 @@ class ConditionalPointHybridLocalGlobalRBFCQ(ConditionalPointHybridLocalGlobalRB
         else:
             fusion_dim = 2 * self.cq_query_dim + self.cond_dim + raw_feature_dim
             self.cq_readout_scale = nn.Parameter(torch.tensor(float(cq_readout_scale_init)))
-            self.cq_fusion_norm = nn.LayerNorm(fusion_dim)
+            self.cq_fusion_norm = nn.LayerNorm(
+                fusion_dim - raw_feature_dim if self.cq_geometric_coverage_enabled else fusion_dim
+            )
             self.cq_head = nn.Sequential(
                 nn.Linear(fusion_dim, self.cq_query_dim),
                 nn.GELU(),
@@ -1999,6 +2021,10 @@ class ConditionalPointHybridLocalGlobalRBFCQ(ConditionalPointHybridLocalGlobalRB
         """Build [normalized raw measurement, soft support] from existing Top-K geometry."""
         if not self.cq_measurement_support_enabled:
             raise RuntimeError("CQ measurement/support shortcut is disabled.")
+        if self.cq_geometric_coverage_enabled:
+            return self._cq_value_coverage_from_geometry(
+                topk_d2, topk_idx, topk_valid, condition_context
+            )
         values = batched_gather_3d(condition_context["raw_obs_values"], topk_idx).squeeze(-1)
         field_ids = batched_gather_2d(condition_context["raw_obs_field_ids"], topk_idx)
         sigma = (
@@ -2022,6 +2048,55 @@ class ConditionalPointHybridLocalGlobalRBFCQ(ConditionalPointHybridLocalGlobalRB
         measurement = numerator / support.clamp_min(1e-6)
         measurement = torch.where(support > 0, measurement, torch.zeros_like(measurement))
         return torch.cat([measurement, support], dim=-1)
+
+    def _cq_value_coverage_from_geometry(
+        self,
+        topk_d2: torch.Tensor,
+        topk_idx: torch.Tensor,
+        topk_valid: torch.Tensor,
+        condition_context: Mapping[str, torch.Tensor],
+    ) -> torch.Tensor:
+        """Return fieldwise [value, coverage, kernel mass, global availability].
+
+        Geometry statistics describe the existing shared Top-K candidate set,
+        not a separate per-field neighbor search. No [B,Q,K,F] tensor is built.
+        Interpolation uses the learned sigma; coverage uses a fixed bandwidth.
+        """
+        values = batched_gather_3d(condition_context["raw_obs_values"], topk_idx).squeeze(-1)
+        field_ids = batched_gather_2d(condition_context["raw_obs_field_ids"], topk_idx)
+        # Invalid slots may carry sentinel field IDs or nonfinite padded values.
+        field_ids = field_ids.masked_fill(~topk_valid, 0).long()
+        values = values.masked_fill(~topk_valid, 0)
+        distances = topk_d2.masked_fill(~topk_valid, 0)
+        shape = (*topk_d2.shape[:2], self.n_fields)
+
+        sigma = (
+            torch.exp(self.log_rbf_sigma).clamp_min(1e-6)
+            if self.learnable_rbf_sigma else self.rbf_sigma
+        )
+        logits = (-distances / (2 * sigma**2 + 1e-12)).masked_fill(~topk_valid, -torch.inf)
+        # Stable per-field softmax: distant fields must retain their measured
+        # amplitudes even when another field has much closer observations.
+        maxima = logits.new_full(shape, -torch.inf).scatter_reduce(
+            2, field_ids, logits, reduce="amax", include_self=True
+        )
+        maxima = maxima.masked_fill(~torch.isfinite(maxima), 0)
+        weights = (logits - maxima.gather(2, field_ids)).exp()
+        denominator = weights.new_zeros(shape).scatter_add(2, field_ids, weights)
+        numerator = weights.new_zeros(shape).scatter_add(2, field_ids, weights * values)
+        # A nonempty field has a weight of one at its maximum; empty fields
+        # have a zero numerator and denominator and map to a finite zero value.
+        measurement = numerator / denominator.clamp_min(1)
+
+        kernels = torch.exp(-distances / (2 * self.cq_support_bandwidth**2))
+        kernels = kernels.masked_fill(~topk_valid, 0)
+        coverage = kernels.new_zeros(shape).scatter_reduce(
+            2, field_ids, kernels, reduce="amax", include_self=True
+        )
+        mass = kernels.new_zeros(shape).scatter_add(2, field_ids, kernels)
+        mass = mass.log1p() / math.log1p(self.gather_topk)
+        availability = condition_context["field_availability"][:, None, :].expand(shape)
+        return torch.cat([measurement, coverage, mass, availability], dim=-1)
 
     def _cq_uncached_local_and_raw(
         self,
@@ -2129,6 +2204,12 @@ class ConditionalPointHybridLocalGlobalRBFCQ(ConditionalPointHybridLocalGlobalRB
         if self.cq_measurement_support_enabled:
             context["raw_obs_values"] = obs_values
             context["raw_obs_field_ids"] = obs_field_ids
+        if self.cq_geometric_coverage_enabled:
+            available = obs_values.new_zeros(obs_values.shape[0], self.n_fields).scatter_add(
+                1, obs_field_ids.masked_fill(~obs_mask.bool(), 0).long(),
+                obs_mask.to(obs_values.dtype)
+            )
+            context["field_availability"] = (available > 0).to(obs_values.dtype)
         if self.cq_readout_mode == "lowrank":
             keys, values = self.cq_latent_readout.project_latents(context["latents"])
             context["cq_latent_k"] = keys
@@ -2233,7 +2314,7 @@ class ConditionalPointHybridLocalGlobalRBFCQ(ConditionalPointHybridLocalGlobalRB
             self.cq_query_dim,
         )
         raw_cache = (
-            coords.new_empty(coords.shape[0], coords.shape[1], 2 * self.n_fields)
+            coords.new_empty(coords.shape[0], coords.shape[1], self.cq_measurement_support_width)
             if self.cq_measurement_support_enabled
             else None
         )
@@ -2358,13 +2439,17 @@ class ConditionalPointHybridLocalGlobalRBFCQ(ConditionalPointHybridLocalGlobalRB
                 + self.cq_local_scale * self.cq_local_proj(local_cond)
                 + self.cq_readout_scale * query_global_q
             )
+        if self.cq_geometric_coverage_enabled:
+            head_input = self.cq_fusion_norm(head_input)
         if self.cq_measurement_support_enabled:
             if raw_features is None:
                 raise RuntimeError("CQ measurement/support features were not constructed.")
             if self.cq_measurement_support_normalize:
                 raw_features = self.cq_measurement_support_norm(raw_features)
             head_input = torch.cat([head_input, raw_features], dim=-1)
-        residual = self.cq_head(self.cq_fusion_norm(head_input))
+        residual = self.cq_head(
+            head_input if self.cq_geometric_coverage_enabled else self.cq_fusion_norm(head_input)
+        )
         if self.gather_mode == "topk_rbf_glres":
             return self.cq_coarse_scale * self._predict_cq_coarse(point_q, global_q) + residual
         return residual
@@ -2425,7 +2510,7 @@ class ConditionalPointHybridLocalGlobalRBFCQ(ConditionalPointHybridLocalGlobalRB
         )
         total_parameters = sum(parameter.numel() for parameter in self.parameters())
         point_input_dim = self.coord_feat_dim + self.n_fields + 1
-        raw_feature_dim = 2 * self.n_fields if self.cq_measurement_support_enabled else 0
+        raw_feature_dim = self.cq_measurement_support_width
         fusion_dim = (
             self.cq_query_dim + raw_feature_dim
             if self.cq_fusion_mode == "additive"
@@ -2479,6 +2564,9 @@ class ConditionalPointHybridLocalGlobalRBFCQ(ConditionalPointHybridLocalGlobalRB
             "measurement_support_mode": self.cq_measurement_support_mode,
             "measurement_support_normalize": self.cq_measurement_support_normalize,
             "measurement_support_width": raw_feature_dim,
+            "support_bandwidth": (
+                self.cq_support_bandwidth if self.cq_geometric_coverage_enabled else None
+            ),
             "condition_attention_execution": self.condition_attention_execution,
             "sensor_attention_padding_mode": self.sensor_attention_padding_mode,
             "sensor_attention_buckets": list(self.sensor_attention_buckets),

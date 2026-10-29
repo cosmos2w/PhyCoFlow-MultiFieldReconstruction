@@ -1,5 +1,5 @@
-# Canonical portable GL-RBF/CQ model settings.  Keep serialized names and
-# values stable: existing case checkpoints consume this state contract.
+# Canonical GL-RBF/CQ settings for new runs. Historical resolved configurations
+# retain their explicit rbf_value_support mode and checkpoint state contract.
 
 # Model family and architecture settings.
 model:
@@ -74,9 +74,11 @@ model:
   cq_time_max_period: 10000.0
   cq_time_film_zero_init: true
 
-  # CQ observation-value support.
-  cq_measurement_support_mode: rbf_value_support  # choices: none | rbf_value_support
-  cq_measurement_support_normalize: true
+  # Fieldwise value interpolation, geometric coverage, kernel mass, availability.
+  # Legacy mode: rbf_value_support (normalized relative field share).
+  cq_measurement_support_mode: rbf_value_coverage  # choices: none | rbf_value_support | rbf_value_coverage
+  cq_support_bandwidth: 0.05  # fixed bandwidth in normalized coordinate units
+  cq_measurement_support_normalize: false  # legacy-only switch; coverage preserves raw magnitudes
 
   # Exponential moving-average lifecycle.
   model_ema_enabled: true

@@ -274,6 +274,7 @@ def build_model(config: Mapping[str, Any], data_spec: DataSpec, physics_provider
             "cq_time_film_zero_init",
             "cq_measurement_support_mode",
             "cq_measurement_support_normalize",
+            "cq_support_bandwidth",
             "model_ema_enabled",
             "model_ema_decay",
             "model_ema_eval",
