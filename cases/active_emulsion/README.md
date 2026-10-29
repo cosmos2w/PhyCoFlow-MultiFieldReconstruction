@@ -35,6 +35,4 @@ your dataset and compute budget.
 | `evaluation/checkpoint_status.json` | Checkpoint eligibility |
 | `checkpoints/last.pt` | Model, optimizer, and recovery state |
 
-The [shared guide](../../TOPOLOGY_POSTTRAINING.md) covers the objective,
-installation, execution controls, and segmented recovery. Cluster profiles,
-checkpoint import adapters, and historical campaign reports are local artifacts.
+The [topology reference](../../src/phycoflow_reconstruction/coherence/families/topology/README.md) explains the persistence objective. [Shared post-training defaults](../../configs/defaults/topology_post_training.yaml) define execution and fidelity settings. Cluster profiles, checkpoint import adapters, and historical campaign reports are local artifacts.

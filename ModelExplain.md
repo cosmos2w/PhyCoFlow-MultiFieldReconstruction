@@ -114,7 +114,7 @@ The [portable three-family GL-RBF/CQ profile](cases/turbulent_combustion/configs
 
 The [completed-run example](docs/examples/abc_co_posttraining/README.md) reports the selected checkpoint and matched validation/test results. It records improved distribution and topology agreement alongside a test cross-spectrum regression and mixed per-field reconstruction quality, which are outcomes of this profile rather than properties guaranteed by its objective.
 
-The older A/B/C and `ABC_balanced` files remain valid historical profiles. For example, the older C file has family weight 0.01, reference-quantile Betti curves, and smoothing sigma 0.8; the sliced-persistence C term above has family weight 1.0 and no threshold-sampled Betti loss. The standalone topology-only native-grid recipe instead uses `gradient_balance: topology_regularized`, as documented in [`TOPOLOGY_POSTTRAINING.md`](TOPOLOGY_POSTTRAINING.md). It is a different optimizer contract from three-family A+B+C training.
+The older A/B/C and `ABC_balanced` files remain valid historical profiles. For example, the older C file has family weight 0.01, reference-quantile Betti curves, and smoothing sigma 0.8; the sliced-persistence C term above has family weight 1.0 and no threshold-sampled Betti loss. The standalone topology-only native-grid recipe instead uses `gradient_balance: topology_regularized`, as documented in [shared topology defaults](configs/defaults/topology_post_training.yaml). It is a different optimizer contract from three-family A+B+C training.
 
 ### 0.4 End-to-end code path
 

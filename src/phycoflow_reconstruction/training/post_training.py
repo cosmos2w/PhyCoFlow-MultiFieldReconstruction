@@ -18,6 +18,7 @@ import warnings
 from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import asdict
+from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
 from typing import Any
@@ -48,6 +49,12 @@ from .coherence_calibration import (
 from .common import (
     iter_unique_batch_indices,
     sensor_protocol_from_config,
+)
+from .fast_lagrangian import (
+    family_callable,
+    family_execution,
+    implementation_binding,
+    training_execution,
 )
 from .fidelity_budget import ExternalPolicy, FidelityBudget, field_error_sums, field_mse
 from .gradient_balance import data_only_update
@@ -247,6 +254,7 @@ def _coherence_objective(
     step_context: dict | None = None,
     family_losses: dict[str, torch.Tensor] | None = None,
     endpoint_context: dict | None = None,
+    execution: Mapping[str, Any] | None = None,
 ) -> tuple[FamilyResult, tuple[str, ...]]:
     compute = config["coherence"]["compute_budget"]
     selected = _slice_batch(batch, int(compute["batch_size"]))
@@ -343,6 +351,9 @@ def _coherence_objective(
     scalar_loss = prediction.sum() * 0.0
     per_sample_parts = []
     for family_name, family_module in families.items():
+        included, probability, within = family_execution(execution, family_name)
+        if not included:
+            continue
         family_bank = banks.get(family_name)
         if family_module.target_use == "paired_supervised":
             if selected.target_fields is None:
@@ -377,7 +388,8 @@ def _coherence_objective(
                 query_ids if isinstance(query_ids, torch.Tensor) else None,
                 bank_rows=bank_rows,
             )
-        result = family_module(
+        family_call = family_callable(family_module, within)
+        result = family_call(
             prediction,
             reference,
             coordinates=selected.query_coords,
@@ -392,14 +404,15 @@ def _coherence_objective(
             },
         )
         family_results[family_name] = result
+        inclusion_scale = 1.0 / probability
         if family_losses is not None:
-            family_losses[family_name] = result.scalar_loss
+            family_losses[family_name] = inclusion_scale * result.scalar_loss
         component_results.update(result.component_results)
         weight = float(getattr(family_module, "family_weight", 1.0))
         calibration_scale = float((family_scales or {}).get(family_name, 1.0))
-        scalar_loss = scalar_loss + weight * calibration_scale * result.scalar_loss
+        scalar_loss = scalar_loss + weight * calibration_scale * inclusion_scale * result.scalar_loss
         if result.per_sample_cost is not None:
-            per_sample_parts.append(weight * calibration_scale * result.per_sample_cost)
+            per_sample_parts.append(weight * calibration_scale * inclusion_scale * result.per_sample_cost)
         reference_ids_all.extend(reference_ids)
     per_sample = (
         torch.stack(per_sample_parts).sum(dim=0) if len(per_sample_parts) == len(families) else None
@@ -414,10 +427,12 @@ def _coherence_objective(
                 name: {
                     "weight": float(getattr(families[name], "family_weight", 1.0)),
                     "calibration_scale": float((family_scales or {}).get(name, 1.0)),
+                    "family_inclusion_probability": family_execution(execution, name)[1],
                     "scalar_loss": result.scalar_loss.detach(),
                     "weighted_contribution": (
                         float(getattr(families[name], "family_weight", 1.0))
                         * float((family_scales or {}).get(name, 1.0))
+                        / family_execution(execution, name)[1]
                         * result.scalar_loss.detach()
                     ),
                     **result.diagnostics,
@@ -652,7 +667,8 @@ def _family_scalar_report(result: FamilyResult) -> dict[str, float]:
         payload[f"coherence_family/{name}/raw"] = raw
         payload[f"coherence_family/{name}/outer_weight"] = outer
         payload[f"coherence_family/{name}/calibration_scale"] = scale
-        payload[f"coherence_family/{name}/weighted_contribution"] = outer * scale * raw
+        probability = float(diagnostics.get("family_inclusion_probability", 1.0))
+        payload[f"coherence_family/{name}/weighted_contribution"] = outer * scale * raw / probability
     return payload
 
 
@@ -673,6 +689,7 @@ def _component_history_report(
         family_name = path.split(".", 1)[0]
         family_diagnostics = family_diagnostics_by_name.get(family_name, {})
         outer = float(family_diagnostics.get("weight", 1.0))
+        outer /= float(family_diagnostics.get("family_inclusion_probability", 1.0))
         calibration = float(family_diagnostics.get("calibration_scale", 1.0))
         diagnostics = family_diagnostics.get("components", {}).get(path, {})
         raw_value = diagnostics.get("raw_scalar_loss")
@@ -912,7 +929,9 @@ def _calibrate_family_balance(
     }
 
 
-def _calibrate_fidelity_budget(model, dataset, families, banks, config, family_scales, device):
+def _calibrate_fidelity_budget(
+    model, dataset, families, banks, config, family_scales, device, *, family_means=None
+):
     """Measure pooled SOURCE risks and scientific scale on fixed TRAIN draws.
 
     This runs on the original live model before optimization. Family calibration
@@ -937,6 +956,7 @@ def _calibrate_fidelity_budget(model, dataset, families, banks, config, family_s
     )
     sums = counts = None
     scientific_sum, samples = 0.0, 0
+    family_sums = {name: 0.0 for name in families} if family_means is not None else None
     started = perf_counter()
     try:
         post_training_mode(model, config)
@@ -959,6 +979,11 @@ def _calibrate_fidelity_budget(model, dataset, families, banks, config, family_s
                     counts = valid if counts is None else counts + valid
                     size = endpoint["prediction"].shape[0]
                     scientific_sum += float(result.scalar_loss) * size
+                    if family_sums is not None:
+                        for name in families:
+                            family_sums[name] += float(
+                                result.diagnostics["families"][name]["weighted_contribution"]
+                            ) * size
                     samples += size
                     del endpoint, result
     finally:
@@ -970,6 +995,8 @@ def _calibrate_fidelity_budget(model, dataset, families, banks, config, family_s
         np.random.set_state(numpy_rng)
     if sums is None or samples == 0:
         raise ValueError("SOURCE fidelity calibration requires nonempty TRAIN batches")
+    if family_means is not None:
+        family_means.update({name: total / samples for name, total in family_sums.items()})
     reference = FidelityBudget.from_reference(
         dataset.field_names, sums / counts, scientific_sum / samples,
         relative_increase=float(settings.get("relative_increase", 0.05)),
@@ -1126,6 +1153,15 @@ def _evaluate(
     normalizer=None,
     family_scales: Mapping[str, float] | None = None,
 ) -> dict[str, Any]:
+    if config.get("evaluation", {}).get("group_size") is not None:
+        from ..evaluation.fixed_groups import evaluate_fixed_groups
+
+        grouped = evaluate_fixed_groups(
+            _evaluate, model, complete_batch, comparison_batch, family, bank,
+            field_names, config, normalizer=normalizer, family_scales=family_scales,
+        )
+        grouped.update(_evaluation_completion_clock())
+        return grouped
     target = comparison_batch.target_fields
     if target is None:
         raise ValueError("evaluation requires dense targets for metrics")
@@ -1320,6 +1356,7 @@ def _evaluate(
             }
     return {
         **metrics,
+        **_evaluation_completion_clock(),
         "native_topology": native_topology,
         "inference": {
             "seconds": inference_seconds,
@@ -1337,6 +1374,16 @@ def _evaluate(
         "generation_seed": evaluation_seed,
         "generation_steps": int(evaluation.get("generation_steps", 2)),
         "evaluation_weight_source": "configured_evaluation_weights",
+    }
+
+
+def _evaluation_completion_clock():
+    origin = os.environ.get("PHYCOFLOW_COMMAND_STARTED_MONOTONIC")
+    if origin is None:
+        return {}
+    return {
+        "evaluation_completed_utc": datetime.now(timezone.utc).isoformat(),
+        "command_elapsed_seconds": perf_counter() - float(origin),
     }
 
 
@@ -1454,10 +1501,13 @@ def run_post_training(
     resume: str | Path | None = None,
 ) -> Path:
     """Create or resume one immutable child post-training run."""
-    if "multitask" in config["optimization"] or config["optimization"].get("gradient_balance") in {
-        "component_constrained",
-        "topology_regularized",
-    }:
+    if (
+        "multitask" in config["optimization"]
+        or config["optimization"].get("lpc_ordered") is not None
+        or config["optimization"].get("gradient_balance") in {
+            "component_constrained", "topology_regularized",
+        }
+    ):
         # Direct Python callers use the same method and geometry validation as the CLI.
         from ..config.validate import validate_config
 
@@ -1514,6 +1564,11 @@ def run_post_training(
     )
     multitask = config["optimization"].get("multitask")
     external_settings = (multitask or {}).get("external_policy")
+    fast_settings = config["optimization"].get("fast_lagrangian", {})
+    strategy_settings = config["optimization"].get("execution_strategy", {})
+    if strategy_settings is None:
+        strategy_settings = {}
+    ordered_settings = config["optimization"].get("lpc_ordered")
     policy = None
     scalarizer = (
         FamilyScalarizer(multitask.get("family_scalarization", {}))
@@ -1540,6 +1595,23 @@ def run_post_training(
     else:
         store = RunStore.resume(resume, config)
         checkpoint = store.load_checkpoint("last")
+        if (
+            config["optimization"].get("fast_lagrangian") is not None
+            and checkpoint.get("fast_lagrangian_implementation") != implementation_binding()
+        ):
+            raise ValueError("fast Lagrangian implementation changed; start a fresh arm")
+        if strategy_settings.get("enabled", False):
+            from .execution_strategy.runtime import implementation_binding as strategy_binding
+
+            if checkpoint.get("execution_strategy_implementation") != strategy_binding():
+                raise ValueError("execution strategy implementation changed; start a fresh arm")
+        if ordered_settings is not None:
+            from .lpc_ordered import implementation_binding as ordered_implementation_binding
+
+            if checkpoint.get("lpc_ordered_implementation") != ordered_implementation_binding():
+                raise ValueError("LPC-ordered implementation changed; start a fresh arm")
+        elif "lpc_ordered_state" in checkpoint:
+            raise ValueError("an ordered checkpoint cannot resume as the summed objective")
         load_model_state_strict(model, checkpoint["model"])
         load_training_aux_state(model, checkpoint)
         optimizer.load_state_dict(checkpoint["optimizer"])
@@ -1652,8 +1724,10 @@ def run_post_training(
     family_scales = {name: float(calibration["resolved_scales"][name]) for name in families}
     if external_settings is not None:
         if checkpoint is None:
+            ordered_means = {} if ordered_settings is not None else None
             reference, reference_report = _calibrate_fidelity_budget(
-                model, train_dataset, families, banks, config, family_scales, device
+                model, train_dataset, families, banks, config, family_scales, device,
+                family_means=ordered_means,
             )
             store.write_json("artifacts/fidelity_budget_reference.json", reference_report)
             policy = ExternalPolicy(external_settings, reference, device)
@@ -1661,7 +1735,66 @@ def run_post_training(
             saved_policy = checkpoint["external_policy"]
             reference = FidelityBudget.from_state_dict(saved_policy["reference"])
             policy = ExternalPolicy(external_settings, reference, device)
+        if int(fast_settings.get("coefficient_interval", 1)) > 1:
+            from .periodic_config import PeriodicConfigState
+
+            policy.periodic_config = PeriodicConfigState(
+                interval=int(fast_settings["coefficient_interval"]),
+                compatibility_key=json.dumps(fast_settings, sort_keys=True),
+            )
+        if checkpoint is not None:
             policy.load_state_dict(saved_policy)
+        if ordered_settings is not None:
+            from .lpc_ordered import LPCOrderedReference, LPCOrderedState
+
+            ordered_path = store.run_dir / "artifacts/lpc_ordered_reference.json"
+            if checkpoint is None:
+                ordered_reference = LPCOrderedReference.from_means(
+                    ordered_means,
+                    source_sha256=source_hashes_before["checkpoint"],
+                    denominator_floor=float(ordered_settings.get("denominator_floor", 1e-8)),
+                )
+                store.write_json("artifacts/lpc_ordered_reference.json", {
+                    "reference": ordered_reference.state_dict(),
+                    "settings": dict(ordered_settings),
+                    "source_checkpoint_sha256": source_hashes_before["checkpoint"],
+                    "calibration": "same full-descriptor SOURCE TRAIN draws as fidelity/C0; no extra forward",
+                })
+            else:
+                if file_sha256(ordered_path) != checkpoint.get("lpc_ordered_reference_sha256"):
+                    raise ValueError("ordered recovery reference artifact changed")
+                ordered_report = json.loads(ordered_path.read_text())
+                if (
+                    ordered_report["settings"] != dict(ordered_settings)
+                    or ordered_report["source_checkpoint_sha256"] != source_hashes_before["checkpoint"]
+                ):
+                    raise ValueError("ordered recovery reference/source settings changed")
+                ordered_reference = LPCOrderedReference.from_state_dict(ordered_report["reference"])
+            policy.lpc_ordered = LPCOrderedState(
+                ordered_reference,
+                dual_lr=float(ordered_settings.get("dual_lr", 0.01)),
+                device=device,
+            )
+            policy.lpc_ordered_reference_sha256 = file_sha256(ordered_path)
+            if checkpoint is not None:
+                policy.lpc_ordered.load_state_dict(checkpoint["lpc_ordered_state"])
+                if policy.lpc_ordered.completed_updates != start_step:
+                    raise ValueError("ordered recovery dual cursor differs from accepted model updates")
+                if policy.completed_updates != start_step:
+                    raise ValueError("ordered recovery field dual cursor differs from model updates")
+    execution_runtime = None
+    if strategy_settings.get("enabled", False):
+        from .execution_strategy.runtime import ExecutionRuntime
+
+        execution_runtime = ExecutionRuntime(
+            config, state=None if checkpoint is None else checkpoint["execution_strategy"],
+            start_step=start_step,
+            steps_per_epoch=post_training_steps_per_epoch(config, len(train_dataset)),
+        )
+        execution_runtime.bind_reference(reference)
+        policy.execution_runtime = execution_runtime
+        if checkpoint is None:
+            store.write_json("artifacts/execution_strategy.json", strategy_settings)
     controller = None
     if constrained:
         if "topology_components" not in calibration:
@@ -1811,6 +1944,24 @@ def run_post_training(
         raise ValueError("optimization.train_fraction must lie in (0,1]")
     steps_per_epoch = post_training_steps_per_epoch(config, len(train_dataset))
     configured_steps = epochs * steps_per_epoch
+    execution_probe_batches = []
+    if execution_runtime is not None:
+        from .execution_strategy.audit import preserve_rng_and_modes
+
+        with preserve_rng_and_modes(model):
+            probe_source = build_training_batch_source(
+                train_dataset,
+                iter_unique_batch_indices(
+                    len(train_dataset), 2, batch_size,
+                    generator=torch.Generator().manual_seed(700313),
+                ),
+                config, query_points=int(config["coherence"]["compute_budget"]["point_count"]),
+                device=device, start_step=0,
+            )
+            try:
+                execution_probe_batches = list(probe_source)
+            finally:
+                probe_source.close()
     final_step = (
         min(configured_steps, start_step + max_steps) if max_steps is not None else configured_steps
     )
@@ -2008,6 +2159,8 @@ def run_post_training(
             rollout_generator = torch.Generator(device=device).manual_seed(
                 seed + 1_000_003 + global_step
             )
+            execution = (execution_runtime.decision(global_step) if execution_runtime is not None
+                         else training_execution(config, global_step))
             result, reference_ids = _coherence_objective(
                 model,
                 batch,
@@ -2022,6 +2175,7 @@ def run_post_training(
                 step_context=step_context,
                 family_losses=raw_family_losses,
                 endpoint_context=endpoint_context,
+                execution=execution,
             )
             for name, loss in retention_losses.items():
                 # Retention has the same sparse cadence as the shared rollout.
@@ -2036,7 +2190,14 @@ def run_post_training(
                 row["data_loss"] = float(data_loss.detach().cpu())
             coherence_loss = result.scalar_loss
             coherence_objectives = None
-            if scalarizer is not None and coherence_active:
+            if execution is not None and any(
+                family_execution(execution, name)[1] != 1.0 for name in families
+            ):
+                # The scalar route can omit T entirely; do not feed a dummy
+                # zero task to the scalarizer or internal ConFIG.
+                coherence_loss = result.scalar_loss
+                row["family_scalarization"] = {"method": "fixed_sum", "sampled": True}
+            elif scalarizer is not None and coherence_active:
                 family_objective, scalarization = scalarizer(
                     raw_family_losses,
                     scales=family_scales,
@@ -2090,6 +2251,18 @@ def run_post_training(
             row["data_update_weight"] = data_update_weight
             row["coherence_update_weight"] = coherence_update_weight
             if policy is not None:
+                ordered = getattr(policy, "lpc_ordered", None)
+                if ordered is not None:
+                    ordered_losses = {
+                        name: raw_family_losses[name]
+                        * float(getattr(families[name], "family_weight", 1.0))
+                        * family_scales[name]
+                        for name in ("global_distribution", "cross_spectrum", "topology")
+                    }
+                    coherence_loss = ordered.primary(
+                        ordered_losses, objective_scale=policy.reference.objective_scale
+                    )
+                    row["ordered_primary_surrogate"] = float(coherence_loss.detach().cpu())
                 risks = field_mse(
                     endpoint_context["prediction"], endpoint_context["target"],
                     endpoint_context["mask"],
@@ -2102,10 +2275,58 @@ def run_post_training(
                         name: coherence_objectives[name]
                         for name in ("global_distribution", "cross_spectrum", "topology")
                     }
-                    gradient = policy.update_with_coherence_aggregation(
-                        model, optimizer, families_abt, risks,
-                        config["optimization"].get("grad_clip"), coherence_aggregator,
-                    )
+                    periodic = getattr(policy, "periodic_config", None)
+                    reuse_audit = None
+                    force_refresh = False
+                    if (
+                        periodic is not None and not periodic.refresh_due
+                        and global_step % (10 * steps_per_epoch) == 1
+                    ):
+                        from .gradient_balance import _flat_gradient
+                        from .periodic_config import extract_config_coefficients
+
+                        parameters = [p for p in model.parameters() if p.requires_grad]
+                        matrix = torch.stack([
+                            _flat_gradient(loss, parameters) for loss in families_abt.values()
+                        ]).double()
+                        recovered = extract_config_coefficients(matrix)
+                        reused = matrix.T @ matrix.new_tensor(periodic.coefficients)
+                        cosine = float(torch.nn.functional.cosine_similarity(
+                            reused, recovered.oracle_direction, dim=0
+                        ))
+                        force_refresh = not math.isfinite(cosine) or cosine < 0.9
+                        reuse_audit = {
+                            "age": periodic.age, "cosine": cosine,
+                            "fresh_products": (matrix @ recovered.oracle_direction).cpu().tolist(),
+                            "reuse_products": (matrix @ reused).cpu().tolist(),
+                            "forced_refresh": force_refresh,
+                            "extra_family_traversals": 3,
+                        }
+                        del matrix, recovered, reused, parameters
+                    if periodic is not None and not periodic.refresh_due and not force_refresh:
+                        surrogate = periodic.reuse_objective(families_abt, scale=1.0)
+                        gradient = policy.update(
+                            model, optimizer, surrogate, risks,
+                            config["optimization"].get("grad_clip"),
+                        )
+                        gradient.update(
+                            update_mode="periodic_config_reuse",
+                            coefficient_age=periodic.age,
+                            family_gradient_evaluations=0,
+                            gradient_traversal_counts={"scalar_with_dense_fidelity": 1},
+                        )
+                        periodic.advance()
+                    else:
+                        policy.force_periodic_refresh = force_refresh
+                        try:
+                            gradient = policy.update_with_coherence_aggregation(
+                                model, optimizer, families_abt, risks,
+                                config["optimization"].get("grad_clip"), coherence_aggregator,
+                            )
+                        finally:
+                            policy.force_periodic_refresh = False
+                    if reuse_audit is not None:
+                        gradient["coefficient_staleness_audit"] = reuse_audit
                     del families_abt
                 else:
                     gradient = policy.update(
@@ -2113,6 +2334,11 @@ def run_post_training(
                         coherence_loss if coherence_objectives is None else coherence_objectives,
                         risks, config["optimization"].get("grad_clip"),
                     )
+                if ordered is not None:
+                    if not gradient.get("update_accepted", False):
+                        raise RuntimeError("ordered dual action requires an accepted model update")
+                    gradient["lpc_ordered"] = ordered.accept(ordered_losses)
+                    del ordered_losses
                 row["data_loss"] = (
                     gradient["endpoint_data_loss"] if "endpoint_data_loss" in gradient
                     else float(risks.detach().mean())
@@ -2183,6 +2409,43 @@ def run_post_training(
                 **_family_scalar_report(result),
                 **gradient,
             )
+            if "lpc_ordered" in gradient:
+                row["objective_semantics"] = "T_over_T0_with_dense_A_B_and_endpoint_constraints"
+                with (store.run_dir / "metrics/lpc_ordered_updates.jsonl").open("a") as handle:
+                    handle.write(json.dumps(_json_safe({
+                        "epoch": epoch, "step": global_step + 1,
+                        "raw_coherence_sum": row["coherence_loss"],
+                        "primary_scalar": gradient["primary_scalar"],
+                        "scaled_primary_scalar": gradient["scaled_primary_scalar"],
+                        "optimized_scalar": gradient["optimized_scalar"],
+                        "ordered": gradient["lpc_ordered"],
+                        "field_risk": gradient["field_risk"],
+                        "multipliers_before": gradient["multipliers_before"],
+                        "multipliers_after": gradient["multipliers_after"],
+                        "update_accepted": gradient["update_accepted"],
+                    }), allow_nan=False) + "\n")
+            if execution is not None:
+                row["execution_strategy" if execution_runtime is not None else "fast_lagrangian"] = execution
+                topology_probability = family_execution(execution, "topology")[1]
+                row["T_estimate"] = (
+                    float(raw_family_losses["topology"].detach()) * topology_probability
+                    if "topology" in raw_family_losses else None
+                )
+                row["T_importance_contribution"] = (
+                    float(raw_family_losses["topology"].detach())
+                    if "topology" in raw_family_losses else None
+                )
+                row["coherence_semantics"] = "training_estimate_full_evaluation_required"
+                execution_log = ("execution_strategy_updates" if execution_runtime is not None
+                                 else "fast_lagrangian_updates")
+                with (store.run_dir / f"metrics/{execution_log}.jsonl").open("a") as handle:
+                    handle.write(json.dumps(_json_safe({
+                        "epoch": epoch, "step": global_step + 1,
+                        "execution": execution, "T_estimate": row["T_estimate"],
+                        "T_importance_contribution": row["T_importance_contribution"],
+                        "families": result.diagnostics["families"],
+                        "gradient": gradient,
+                    }), allow_nan=False) + "\n")
             last_coherence_loss = row["coherence_loss"]
             # The final report needs a scalar, not a retained rollout graph.
             # Release it before the next rollout or large validation panel.
@@ -2205,6 +2468,21 @@ def run_post_training(
         if scalarizer is not None and (global_step + 1) % steps_per_epoch == 0:
             scalarizer.step()
         row["update_seconds"] = perf_counter() - step_started
+        if execution_runtime is not None:
+            if not row.get("update_accepted", True):
+                raise FloatingPointError("execution strategy refuses to advance a rejected update")
+            execution_runtime.accept(
+                global_step, epoch, row["update_seconds"], row.get("field_violation"),
+            )
+            if (global_step + 1) % steps_per_epoch == 0 and epoch % 10 == 0:
+                from .execution_strategy.audit import fixed_train_probe
+
+                audit = fixed_train_probe(
+                    model, execution_probe_batches, families, banks, config, execution_runtime, epoch,
+                )
+                audit["step"] = global_step + 1
+                with (store.run_dir / "metrics/execution_strategy_audits.jsonl").open("a") as handle:
+                    handle.write(json.dumps(audit, allow_nan=False) + "\n")
         del data_loss
         row["total"] = row["data_update_weight"] * row["data_loss"] + row[
             "coherence_update_weight"
@@ -2216,7 +2494,7 @@ def run_post_training(
             # whose derivative equals that direction. Retain scientific A/B/T
             # metrics and leave the scalar-objective history empty for it.
             row["total"] = row.get("optimized_scalar")
-            if coherence_aggregator is not None:
+            if coherence_aggregator is not None and "optimized_scalar" not in row:
                 row["total_semantics"] = "parameter_direction_without_scalar_objective"
         elif constrained:
             row["total"] = row.get("regularized_loss_before", row["balanced_topology_before"])
@@ -2501,6 +2779,19 @@ def _post_checkpoint_payload(
         payload["family_scalarizer"] = scalarizer.state_dict()
     if policy is not None:
         payload["external_policy"] = policy.state_dict()
+        if hasattr(policy, "lpc_ordered"):
+            from .lpc_ordered import implementation_binding as ordered_implementation_binding
+
+            payload["lpc_ordered_state"] = policy.lpc_ordered.state_dict()
+            payload["lpc_ordered_implementation"] = ordered_implementation_binding()
+            payload["lpc_ordered_reference_sha256"] = policy.lpc_ordered_reference_sha256
+    if "fast_lagrangian" in config["optimization"]:
+        payload["fast_lagrangian_implementation"] = implementation_binding()
+    if policy is not None and hasattr(policy, "execution_runtime"):
+        from .execution_strategy.runtime import implementation_binding as strategy_binding
+
+        payload["execution_strategy"] = policy.execution_runtime.state_dict()
+        payload["execution_strategy_implementation"] = strategy_binding()
     if hasattr(train_dataset, "training_subset_manifest"):
         payload["training_subset_sha256"] = train_dataset.training_subset_manifest["sha256"]
     return add_training_aux_state(payload, model)

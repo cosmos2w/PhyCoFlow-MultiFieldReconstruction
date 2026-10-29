@@ -1,8 +1,9 @@
 # Topology coherence: efficient sliced persistence
 
 The current post-training method is `strategy: cubical_persistence` with
-`persistence.distance: sliced_wasserstein`. The active recipe and launcher are
-in [TOPOLOGY_POSTTRAINING.md](../../../../../TOPOLOGY_POSTTRAINING.md).
+`persistence.distance: sliced_wasserstein`. The [shared defaults](../../../../../configs/defaults/topology_post_training.yaml)
+and [active-emulsion case](../../../../../cases/active_emulsion/README.md)
+provide the post-training recipe and launch commands.
 
 ## Mathematical definition
 
