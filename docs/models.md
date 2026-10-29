@@ -515,6 +515,16 @@ $$
 
 The head fuses current-state/time features, query-to-latent readout, local RBF features, and the global latent mean. Distance and query-attention work are chunked to avoid allocating one global $Q\times M$ matrix.
 
+#### CQ measurement values and geometric coverage
+
+New runs composed from `configs/models/gl_rbf_cq.yaml` use `cq_measurement_support_mode: rbf_value_coverage`. Each query receives four fieldwise feature groups: normalized RBF-interpolated measurement, geometric coverage, local kernel mass, and global field availability. The measurement uses a stable fieldwise softmax with the model's interpolation bandwidth, so a distant field retains its observed value rather than being suppressed by closer observations of another field.
+
+Coverage is the maximum $\exp(-d_i^2/(2h^2))$ among the existing Top-K candidates of that field. Kernel mass is $\log(1+\sum_i \exp(-d_i^2/(2h^2)))/\log(1+K)$, with the configured gather budget $K$ as a fixed denominator. The reference bandwidth `cq_support_bandwidth` defaults to `0.05` in the supplied normalized coordinate units and is independent of the learnable interpolation bandwidth. Availability indicates whether the field has any valid observation in the entire sensor set. A globally available field with no local candidate therefore has zero local value/coverage/mass and availability one; a completely unobserved field has all four features zero. These are truncated-neighborhood geometry descriptors, not calibrated uncertainty estimates or a field-specific neighbor search.
+
+Coverage mode normalizes the learned main representation before appending these features. It does not apply LayerNorm to the raw measurement/coverage features or to the concatenated head input, preserving their magnitudes in single-field and multi-field tasks. `cq_measurement_support_normalize` applies only to the legacy mode. The implementation reuses the existing neighbor distances and indices, with no additional neighbor search or `[B,Q,K,F]` tensor, and supports query microbatching, inference feature caches, and differentiable rollout caches. The raw feature width is $4F$ instead of $2F$; for five fields, one FP32 full-grid cache of 40,300 queries grows by about 1.54 MiB per sample.
+
+Historical `rbf_value_support` configurations retain their original $2F$ measurement/relative-field-share calculation, normalization, parameter layout, and constructor defaults. Missing mode settings in historical low-level construction retain their previous behavior. Existing runs must be resumed or evaluated from their saved resolved configuration; canonical new-run defaults do not replace it. Coverage mode changes the head input and normalization shapes and requires a new model/run. Loading a legacy checkpoint into coverage mode fails strict loading rather than silently migrating weights. Improved reconstruction quality must be established by a controlled training comparison; the feature change alone does not establish a quality improvement.
+
 #### FNO flow backbone
 
 For a complete grid, the alternative velocity model applies an FNO to

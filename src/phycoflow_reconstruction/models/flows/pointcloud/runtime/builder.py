@@ -124,6 +124,7 @@ def build_pointcloud_model(
             cq_measurement_support_normalize=bool(
                 _get(resolved, "cq_measurement_support_normalize", True)
             ),
+            cq_support_bandwidth=float(_get(resolved, "cq_support_bandwidth", 0.05)),
         )
     else:
         query_latent_readout = bool(_get(resolved, "query_latent_readout", enhanced))

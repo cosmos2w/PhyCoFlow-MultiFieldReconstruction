@@ -1772,6 +1772,12 @@ def validate_config(config: Mapping[str, Any]) -> None:
                     "model attention level channels must be divisible by attention_heads"
                 )
     elif model_name == "gl_rbf_cq":
+        support_mode = model.get("cq_measurement_support_mode", "rbf_value_support")
+        if support_mode not in {"none", "rbf_value_support", "rbf_value_coverage"}:
+            raise ValueError("invalid gl_rbf_cq cq_measurement_support_mode")
+        support_bandwidth = float(model.get("cq_support_bandwidth", 0.05))
+        if not math.isfinite(support_bandwidth) or support_bandwidth <= 0:
+            raise ValueError("model.cq_support_bandwidth must be finite and positive")
         backbone = str(model.get("backbone", "GL_rbf_ENH_CQ")).lower()
         if backbone != "gl_rbf_enh_cq":
             raise ValueError("gl_rbf_cq requires backbone=GL_rbf_ENH_CQ")
