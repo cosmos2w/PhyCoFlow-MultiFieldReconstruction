@@ -1593,7 +1593,10 @@ def run_post_training(
     else:
         store = RunStore.resume(resume, config)
         checkpoint = store.load_checkpoint("last")
-        if fast_settings and checkpoint.get("fast_lagrangian_implementation") != implementation_binding():
+        if (
+            config["optimization"].get("fast_lagrangian") is not None
+            and checkpoint.get("fast_lagrangian_implementation") != implementation_binding()
+        ):
             raise ValueError("fast Lagrangian implementation changed; start a fresh arm")
         if strategy_settings.get("enabled", False):
             from .execution_strategy.runtime import implementation_binding as strategy_binding

@@ -45,6 +45,8 @@ def test_panel_averages_exact_group_scores_and_keeps_raw_identities():
             "sample_ids": list(complete.sample_ids),
             "query_ids": None,
             "inference": {"seconds": 1.0, "samples": len(complete.sample_ids)},
+            "generation_seed": config["evaluation"]["seed"],
+            "generation_steps": 2,
         }
 
     result = evaluate_fixed_groups(
@@ -64,6 +66,14 @@ def test_panel_averages_exact_group_scores_and_keeps_raw_identities():
     assert len(result["fixed_estimator_groups"]) == 4
     assert result["sample_ids"] == list(batch.sample_ids)
     assert result["inference"]["seconds"] == 4.0
+    assert result["generation_seed"] == 2027
+    assert isinstance(result["generation_seed"], int)
+    assert result["generation_steps"] == 2
+    assert isinstance(result["generation_steps"], int)
+    assert result["fixed_estimator_scope"]["generation_seeds"] == [seed for ids, seed in seen]
+    assert [group["generation_seed"] for group in result["fixed_estimator_groups"]] == [
+        seed for ids, seed in seen
+    ]
 
 
 def test_partial_covariance_group_is_rejected():
@@ -89,7 +99,7 @@ def test_metric_pooling_weights_valid_queries_and_recomputes_worst_field():
         valid,
     )
 
-    def evaluate(_model, complete, _comparison, *_args, **_kwargs):
+    def evaluate(_model, complete, _comparison, _family, _bank, _names, config, **_kwargs):
         high_group = complete.sample_ids[0] == "2"
         return {
             "mse_normalized": 100.0 if high_group else 10.0,
@@ -115,6 +125,7 @@ def test_metric_pooling_weights_valid_queries_and_recomputes_worst_field():
             "unobserved_entry_mse_normalized": 40.0 if high_group else 4.0,
             "inference": {"seconds": 1.0, "samples": 2},
             "sample_ids": list(complete.sample_ids),
+            "generation_seed": config["evaluation"]["seed"],
         }
 
     result = evaluate_fixed_groups(
@@ -145,3 +156,27 @@ def test_metric_pooling_weights_valid_queries_and_recomputes_worst_field():
     assert "unobserved_entry_mse_normalized" not in result
     assert result["fixed_estimator_groups"][0]["observed_entry_mse_normalized"] == 2.0
     assert result["fixed_estimator_groups"][1]["unobserved_entry_mse_normalized"] == 40.0
+    assert result["generation_seed"] == 2027
+    assert result["fixed_estimator_scope"]["generation_seeds"] == [2027, 102030]
+    assert result["fixed_estimator_scope"]["generation_seed_policy"] == (
+        "base_seed_plus_group_index_times_100003"
+    )
+
+
+@pytest.mark.parametrize(
+    ("identity", "values"),
+    [("generation_steps", (2, 3)), ("evaluation_weight_source", ("configured", "ema"))],
+)
+def test_inconsistent_shared_generation_identity_is_rejected(identity, values):
+    batch = Batch(torch.zeros(2), ("0", "1"), (), {}, torch.ones(2, 1, dtype=torch.bool))
+
+    def evaluate(_model, complete, *_args, **_kwargs):
+        return {
+            identity: values[int(complete.sample_ids[0])],
+            "inference": {"seconds": 1.0, "samples": 1},
+        }
+
+    with pytest.raises(ValueError, match=f"fixed group identity differs: {identity}"):
+        evaluate_fixed_groups(
+            evaluate, None, batch, batch, None, None, (), {"evaluation": {"group_size": 1}}
+        )

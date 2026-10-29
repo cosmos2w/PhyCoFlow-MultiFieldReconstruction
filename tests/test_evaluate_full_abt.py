@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from functools import partial
 from pathlib import Path
 
 import h5py
@@ -154,6 +155,12 @@ def test_campaign_source_staging_environment_is_refused_before_helper_import(mon
     monkeypatch.setenv("PHYCOFLOW_CAMPAIGN_SOURCE_STAGE", "goal1")
     with pytest.raises(PORTABLE.PortableEvaluationError, match="staging/admission"):
         PORTABLE.evaluate_run(tmp_path / "missing", _data_root=tmp_path, _require_mount=False)
+
+
+def test_cli_keeps_the_production_mount_requirement(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(PORTABLE, "DATA_ROOT", tmp_path)
+    assert PORTABLE.main(["--run", str(tmp_path / "missing")]) == 2
+    assert "mounted /data2 filesystem" in capsys.readouterr().err
 
 
 def test_child_lineage_verifier_rejects_checkpoint_binding_mismatches(tmp_path):
@@ -399,6 +406,13 @@ def test_portable_cli_full_abt_end_to_end_cpu_on_synthetic_run(
     post["runtime"].update(device="cpu", progress=False, plot_every_steps=1000)
     child = run_post_training(post, case_dir=case_dir, max_steps=1)
 
+    # Keep the real CLI and numerical evaluator; only replace the production
+    # storage policy with the existing private seam for this temporary fixture.
+    monkeypatch.setattr(
+        PORTABLE,
+        "evaluate_run",
+        partial(PORTABLE.evaluate_run, _data_root=tmp_path, _require_mount=False),
+    )
     assert PORTABLE.main(
         ["--run", str(child), "--checkpoint", "last", "--max-samples", "32"]
     ) == 0

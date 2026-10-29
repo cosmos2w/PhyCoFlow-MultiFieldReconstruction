@@ -19,6 +19,7 @@ _GROUP_ONLY_METRICS = {
     "observed_entry_mse_normalized",
     "unobserved_entry_mse_normalized",
 }
+_SHARED_IDENTITIES = {"generation_steps", "evaluation_weight_source"}
 
 
 def slice_observation_batch(batch, start, stop):
@@ -59,8 +60,10 @@ def evaluate_fixed_groups(
     It never computes one covariance on the concatenated panel. Query-wise MSE
     metrics are pooled by valid-query counts; per-sample metrics are averaged
     across equal-size groups. Group-only observed/unobserved MSEs remain in the
-    raw records. Non-numeric identities come from the first group in the legacy
-    summary, and all identities remain in ``fixed_estimator_groups``.
+    raw records. Generation seeds retain the first group's identity in the
+    legacy summary and the ordered group seeds in ``fixed_estimator_scope``.
+    Shared generation identities must agree across groups; every group's raw
+    identities remain in ``fixed_estimator_groups``.
     """
     size = config["evaluation"]["group_size"]
     count = len(complete.sample_ids)
@@ -83,12 +86,12 @@ def evaluate_fixed_groups(
     if any(value < 1 for value in valid_query_counts):
         raise ValueError("every fixed panel group must contain valid queries")
     groups = []
+    base_seed = int(config["evaluation"].get("seed", 2027))
+    generation_seeds = [base_seed + index * 100_003 for index in range(count // size)]
     for index, start in enumerate(range(0, count, size)):
         group_config = deepcopy(config)
         group_config["evaluation"].pop("group_size")
-        group_config["evaluation"]["seed"] = (
-            int(config["evaluation"].get("seed", 2027)) + index * 100_003
-        )
+        group_config["evaluation"]["seed"] = generation_seeds[index]
         groups.append(
             evaluate_one(
                 model,
@@ -105,6 +108,12 @@ def evaluate_fixed_groups(
 
     def pooled(values, key=None):
         first = values[0]
+        if key == "generation_seed":
+            return first
+        if key in _SHARED_IDENTITIES:
+            if any(value != first for value in values):
+                raise ValueError(f"fixed group identity differs: {key}")
+            return first
         if isinstance(first, Mapping):
             if any(set(value) != set(first) for value in values):
                 raise ValueError("fixed group metric schemas differ")
@@ -159,6 +168,8 @@ def evaluate_fixed_groups(
         "groups": len(groups),
         "covariance": "mean_of_exact_group_scores",
         "pooling": "query_weighted_mse_and_equal_sample_groups",
+        "generation_seed_policy": "base_seed_plus_group_index_times_100003",
+        "generation_seeds": generation_seeds,
     }
     result["inference"]["seconds"] = sum(group["inference"]["seconds"] for group in groups)
     result["inference"]["samples"] = count
