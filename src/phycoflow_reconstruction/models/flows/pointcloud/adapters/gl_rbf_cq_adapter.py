@@ -590,6 +590,24 @@ class GLRbfCQ(PortablePointCloudFFM):
         time: torch.Tensor,
     ) -> torch.Tensor:
         self._validate_batch(batch, require_target=False)
+        if not self.training and self.reconstruction_execution_mode == "cached_streamed":
+            # Match production query boundaries: cdist/top-k can choose different
+            # sensors near ties when called on the full field versus a chunk.
+            # Keep the condition graph live and shared across all query chunks.
+            context = self.model.prepare_condition_context(
+                batch.obs_coords, batch.obs_values, batch.obs_valid_mask, batch.obs_field_ids
+            )
+            size = self.reconstruction_query_chunk_size
+            return torch.cat(
+                [
+                    self.model.forward_query_chunk(
+                        time, state[:, start : start + size],
+                        batch.query_coords[:, start : start + size], context,
+                    )
+                    for start in range(0, state.shape[1], size)
+                ],
+                dim=1,
+            )
         return self.model(
             time,
             state,
