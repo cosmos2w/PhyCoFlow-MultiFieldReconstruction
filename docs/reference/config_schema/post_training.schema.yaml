@@ -17,7 +17,7 @@ notes:
   - Source dataset/model/observation sections may be inherited before validation.
   - Both post-training modes require objectives, rollout, observation_consistency, and trainable.
   - All data-driven families declare training_reference or paired_supervised target use.
-  - cross_spectrum and topology require a fixed_shared query policy.
+  - cross_spectrum, multiscale_spectrum and topology require a fixed_shared query policy.
   - Historical topology.strategy=spatial_self_mutual requires paired_supervised targets; components are self, anchor_self, and mutual.
   - Historical spatial topology supports physical levels, derived anchors and antialias_downsample; exact_betti is evaluation-only.
   - topology.strategy=cubical_persistence uses exact periodic cubical pairings and self/mutual persistent diagrams; requires the topology extra.
@@ -43,3 +43,7 @@ notes:
   - optimization.sampling=full_pass and training_subset select continuous shuffled coverage; steps_per_epoch changes reporting intervals without resetting sampling.
   - Shared topology optimizer/runtime defaults are in configs/defaults/topology_post_training.yaml; source_run must be explicitly supplied.
   - training_subset accepts strata_keys and trajectory_key/time_key/frame_key/split_key metadata mappings; default columns are trajectory_id/time/frame/split with no strata.
+  - multiscale_spectrum uses paired_supervised snapshot targets, fixed TRAIN geometry/scales, and matching coherence/evaluation query counts.
+  - Generative spectral objectives require independent differentiable conditional_draws and a generative source; objective defaults to paired_descriptor_mse.
+  - signed_band_energy_score requires almost_fair_alpha=1 when joint_energy_score_weight is positive; omitted alpha remains 0.95 for compatibility.
+  - Internal coherence_aggregation accepts multiscale_spectrum in place of cross_spectrum; fixed A/B/T lpc_ordered does not support it.

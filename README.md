@@ -877,3 +877,7 @@ git diff --check
 ```
 
 GPU smoke, long experiments, and formal benchmark regeneration are local acceptance activities rather than mandatory GitHub CI jobs. Report unavailable optional dependencies or hardware as explicit skips; do not weaken a contract test or commit generated outputs merely to make checks pass.
+
+The [`multiscale_spectrum` post-training family](docs/spectral_post_training.md) scores
+signed spatial bands and their joint dependence with independent conditional
+draws. It composes with distribution and topology through the shared trainer.

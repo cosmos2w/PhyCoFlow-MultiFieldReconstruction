@@ -110,3 +110,11 @@ Do not use descriptive schema files as a second, dead runtime authority. The ret
 ## Compatibility-sensitive values
 
 Treat these as serialized or scientific interfaces: model `name`, backbone identity, parameter prefixes, field order, normalization method/statistics, sensor protocol seed/count semantics, checkpoint selection, EMA policy, and coherence/physics definitions. GL-RBF/CQ aliases remain accepted by the builder; a cleanup must not silently rename them or change defaults.
+
+## Multiscale spectral coherence
+
+Merge [`configs/coherence/multiscale_spectrum.yaml`](../configs/coherence/multiscale_spectrum.yaml)
+into a case post-training config to select the fair signed-band and joint score.
+Set matching coherence/evaluation query counts and use a generative source.
+Geometry, TRAIN calibration, legacy defaults and composition constraints are
+documented in the [spectral post-training guide](spectral_post_training.md).
