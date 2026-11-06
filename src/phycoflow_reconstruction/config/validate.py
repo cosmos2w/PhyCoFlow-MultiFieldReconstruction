@@ -925,7 +925,7 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
         raise ValueError("coherence.compute_budget.query_policy is invalid")
 
     families = coherence.get("families", {})
-    supported_families = {"global_distribution", "cross_spectrum", "topology"}
+    supported_families = {"global_distribution", "cross_spectrum", "multiscale_spectrum", "topology"}
     if not isinstance(families, Mapping) or not families:
         raise ValueError("post-training coherence must configure at least one family")
     unknown_families = sorted(set(families) - supported_families)
@@ -936,10 +936,12 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
     ]
     if not enabled_families:
         raise ValueError("post-training coherence must enable at least one family")
-    if any(name in {"cross_spectrum", "topology"} for name in enabled_families) and (
-        query_policy != "fixed_shared"
-    ):
-        raise ValueError("cross_spectrum/topology coherence requires query_policy=fixed_shared")
+    if any(
+        name in {"cross_spectrum", "multiscale_spectrum", "topology"} for name in enabled_families
+    ) and query_policy != "fixed_shared":
+        raise ValueError(
+            "cross_spectrum/multiscale_spectrum/topology coherence requires query_policy=fixed_shared"
+        )
 
     common_family_keys = {
         "enabled",
@@ -954,6 +956,29 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
     for family_name, family in families.items():
         if not isinstance(family, Mapping):
             raise TypeError(f"coherence.families.{family_name} must be a mapping")
+        if family_name == "multiscale_spectrum":
+            from ..coherence.families.multiscale_spectrum.config import parse_multiscale_config
+
+            field_names = config.get("dataset", {}).get("field_names") or family.get("fields")
+            if not field_names:
+                raise ValueError("multiscale_spectrum requires explicit field names")
+            parse_multiscale_config(family, tuple(field_names))
+            if family.get("enabled", True) and config["optimization"].get("lpc_ordered") is not None:
+                raise ValueError(
+                    "multiscale_spectrum is not supported by the fixed A/B/T lpc_ordered policy"
+                )
+            _reject_unknown(
+                family.get("reference_bank", {}), reference_keys, "multiscale_spectrum.reference_bank"
+            )
+            evaluation_points = config.get("evaluation", {}).get("query_points")
+            if family.get("enabled", True) and evaluation_points is not None and int(
+                evaluation_points
+            ) != int(compute["point_count"]):
+                raise ValueError(
+                    "multiscale_spectrum fits one fixed geometry: evaluation.query_points "
+                    "must equal coherence.compute_budget.point_count"
+                )
+            continue
         extra_keys = {
             "global_distribution": set(),
             "cross_spectrum": {"pairs", "graph", "eps"},
@@ -1538,13 +1563,17 @@ def _validate_external_policy_contract(config: Mapping[str, Any]) -> None:
 
     if "coherence_aggregation" in multitask:
         families = config.get("coherence", {}).get("families", {})
-        for family_name in ("global_distribution", "cross_spectrum", "topology"):
-            family = families.get(family_name) if isinstance(families, Mapping) else None
-            if not isinstance(family, Mapping) or family.get("enabled", True) is not True:
-                raise ValueError(
-                    "coherence_aggregation requires enabled coherence families "
-                    "global_distribution, cross_spectrum, and topology"
-                )
+        enabled = {
+            name for name, family in families.items()
+            if isinstance(family, Mapping) and family.get("enabled", True) is True
+        }
+        if not {"global_distribution", "topology"}.issubset(enabled) or not (
+            {"cross_spectrum", "multiscale_spectrum"} & enabled
+        ):
+            raise ValueError(
+                "coherence_aggregation requires enabled coherence families "
+                "global_distribution, topology, and cross_spectrum or multiscale_spectrum"
+            )
 
     objectives = config["objectives"]
     for name in ("endpoint", "source_anchor"):
