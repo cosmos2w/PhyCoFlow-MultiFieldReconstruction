@@ -23,6 +23,7 @@ from ....contracts import (
 from ....data.normalization import FieldNormalizer
 from ...base import require_field_tensor
 from .betti_curves import betti_curves, gaussian_blur
+from .finite_primary import FinitePrimaryTopologyObjective
 from .geometry import build_raster_map, coordinate_digest, rasterize_fields
 from .persistence import persistence_source
 from .persistence_objective import PersistenceTopologyObjective
@@ -33,6 +34,11 @@ from .spatial_objective import SpatialTopologyObjective
 class TopologyFamily(nn.Module):
     family_name = "topology"
     version = "1"
+
+    @property
+    def needs_source_calibration(self) -> bool:
+        """Whether the new leaf scales still need frozen TRAIN/SOURCE fitting."""
+        return self.version == "4" and not bool(self.spatial_objective.calibrated)
 
     def __init__(
         self,
@@ -52,6 +58,11 @@ class TopologyFamily(nn.Module):
             "spatial_self_mutual": "2",
             "cubical_persistence": "3",
         }[self.strategy]
+        if (
+            self.strategy == "cubical_persistence"
+            and config.get("persistence", {}).get("definition", "legacy_v3") == "finite_primary_v1"
+        ):
+            self.version = "4"
         self.target_use = str(config.get("target_use", "paired_supervised"))
         self.units = str(config.get("units", "model_units"))
         self.family_weight = float(config.get("weight", 1.0))
@@ -90,6 +101,28 @@ class TopologyFamily(nn.Module):
             raise ValueError("topology geometry.periods requires periodic=true")
         self.allow_projected_collisions = bool(geometry.get("allow_projected_collisions", False))
         self.antialias_downsample = geometry.get("antialias_downsample", False)
+        self.native_masked = geometry.get("native_masked", False)
+        self.structured_indices = geometry.get("structured_indices")
+        if self.structured_indices is not None and (
+            not self.native_masked or not isinstance(self.structured_indices, str)
+        ):
+            raise ValueError(
+                "topology structured_indices requires native_masked and an auxiliary array name"
+            )
+        if not isinstance(self.native_masked, bool):
+            raise TypeError("topology geometry.native_masked must be boolean")
+        if self.native_masked:
+            if (
+                self.strategy != "cubical_persistence"
+                or self.periodic
+                or self.antialias_downsample
+                or float(config.get("filtration", {}).get("smoothing_sigma", 0.8)) != 0
+                or config.get("persistence", {}).get("descriptors")
+            ):
+                raise ValueError(
+                    "native_masked requires nonperiodic cubical persistence, zero smoothing, no downsampling or derived descriptors"
+                )
+            self.register_buffer("domain_mask", torch.empty(0, 0, dtype=torch.bool))
         if not isinstance(self.antialias_downsample, bool):
             raise TypeError("topology geometry.antialias_downsample must be boolean")
         if self.antialias_downsample and self.strategy == "betti_curves":
@@ -149,7 +182,12 @@ class TopologyFamily(nn.Module):
 
         self.spatial_objective = None
         if self.strategy == "cubical_persistence":
-            self.spatial_objective = PersistenceTopologyObjective(config, data_spec.field_names)
+            objective_type = (
+                FinitePrimaryTopologyObjective
+                if self.version == "4"
+                else PersistenceTopologyObjective
+            )
+            self.spatial_objective = objective_type(config, data_spec.field_names)
             self.component_weights = dict(self.spatial_objective.weights)
             self.spec = self.spatial_objective.spec
             return
@@ -232,13 +270,51 @@ class TopologyFamily(nn.Module):
         )
         self.spec.validate()
 
-    def _raster_map(self, coordinates: torch.Tensor) -> None:
+    @torch.no_grad()
+    def fit_calibration(self, prediction, reference, *, coordinates, provenance):
+        """Freeze raw leaf scales from a paired TRAIN/SOURCE batch, once."""
+        if self.version != "4":
+            raise ValueError("leaf calibration requires finite_primary_v1")
+        self.forward(
+            prediction,
+            reference,
+            coordinates=coordinates,
+            context={"_finite_primary_calibration": provenance},
+        )
+        return deepcopy(self.spatial_objective.calibration_record)
+
+    def fit_training_reference(self, dataset, *, query_indices, device=None) -> None:
+        """Freeze the native masked topology layout from training geometry only."""
+        if not self.native_masked:
+            return
+        if dataset.split_name != "train" or dataset.selection.split != "train":
+            raise ValueError("native topology geometry must be fitted on the training split")
+        sample = dataset[0]
+        if sample.valid_points is not None and not bool(sample.valid_points.all()):
+            raise ValueError(
+                "native_masked topology requires a compact all-valid provider; "
+                "full-grid invalid nodes are unsupported"
+            )
+        if self.structured_indices is None:
+            return
+        query = torch.as_tensor(query_indices, dtype=torch.long).cpu()
+        indices = sample.metadata.get("auxiliary", {})[self.structured_indices][query]
+        if device is not None:
+            self.to(device)
+        self._raster_map(
+            sample.coordinates[query][None].to(self.normalization_offset.device),
+            native_grid_indices=indices,
+        )
+
+    def _raster_map(self, coordinates: torch.Tensor, *, native_grid_indices=None) -> None:
         if coordinates.ndim != 3:
             raise ValueError("topology coordinates must have shape [B,N,D]")
         if not torch.equal(coordinates, coordinates[:1].expand_as(coordinates)):
             raise ValueError("topology requires identical coordinates for every sample")
         digest = coordinate_digest(coordinates[0])
         if not self.neighbor_indices.numel():
+            if self.structured_indices is not None and native_grid_indices is None:
+                raise ValueError("fit native topology geometry or load its artifact before scoring")
             mapping = build_raster_map(
                 coordinates[0],
                 grid_shape=self.grid_shape,
@@ -249,6 +325,8 @@ class TopologyFamily(nn.Module):
                 periods=self.periods,
                 allow_projected_collisions=self.allow_projected_collisions,
                 antialias_downsample=self.antialias_downsample,
+                native_masked=self.native_masked,
+                native_grid_indices=native_grid_indices,
             )
             self.neighbor_indices = mapping.neighbor_indices.to(coordinates.device)
             self.neighbor_weights = mapping.neighbor_weights.to(coordinates.device)
@@ -256,6 +334,8 @@ class TopologyFamily(nn.Module):
             self.geometry_sha256 = mapping.coordinate_sha256
             self.periods = mapping.periods
             self.geometry_diagnostics = dict(mapping.diagnostics)
+            if self.native_masked:
+                self.domain_mask = mapping.valid_mask.to(coordinates.device)
         elif digest != self.geometry_sha256:
             raise ValueError("topology coordinates changed after raster-map construction")
 
@@ -441,8 +521,18 @@ class TopologyFamily(nn.Module):
             )
         if self.spatial_objective is not None:
             with torch.autocast(device_type=generated.device.type, enabled=False):
+                if self.version == "4" and context and "_finite_primary_calibration" in context:
+                    self.spatial_objective.fit_calibration(
+                        generated_grid.float(),
+                        reference_grid.float(),
+                        valid_mask=self.domain_mask if self.native_masked else None,
+                        provenance=context["_finite_primary_calibration"],
+                    )
                 kwargs = (
-                    {"reference_cache": reference_cache}
+                    {
+                        "reference_cache": reference_cache,
+                        "valid_mask": self.domain_mask if self.native_masked else None,
+                    }
                     if self.strategy == "cubical_persistence"
                     else {}
                 )
@@ -530,8 +620,8 @@ class TopologyFamily(nn.Module):
         return {
             "family": self.family_name,
             "version": self.version,
-            "scientific_source": persistence_source()
-            if self.version == "3"
+            "scientific_source": persistence_source(finite_primary=self.version == "4")
+            if self.version in {"3", "4"}
             else dict(SOURCE_SNAPSHOT)
             if self.version == "2"
             else {
@@ -546,6 +636,11 @@ class TopologyFamily(nn.Module):
             "geometry_sha256": self.geometry_sha256,
             "periods": self.periods,
             "geometry_diagnostics": dict(self.geometry_diagnostics),
+            **(
+                {"calibration": deepcopy(self.spatial_objective.calibration_record)}
+                if self.version == "4"
+                else {}
+            ),
             "state_dict": self.state_dict(),
         }
 
@@ -558,14 +653,67 @@ class TopologyFamily(nn.Module):
             raise ValueError(
                 "topology family artifact scientific source mismatch; rebuild the artifact"
             )
-        if self.version == "3" and artifact.get("scientific_source") != persistence_source():
+        if self.version in {"3", "4"} and artifact.get("scientific_source") != persistence_source(
+            finite_primary=self.version == "4"
+        ):
             raise ValueError("persistence family source/backend mismatch; start a new experiment")
         state = artifact["state_dict"]
         device = self.normalization_offset.device
         self.neighbor_indices = state["neighbor_indices"].to(device)
         self.neighbor_weights = state["neighbor_weights"].to(device)
         self.grid_coordinates = state["grid_coordinates"].to(device)
+        if self.native_masked:
+            self.domain_mask = state["domain_mask"].to(device)
         self.geometry_sha256 = artifact.get("geometry_sha256")
         self.periods = artifact.get("periods", self.periods)
         self.geometry_diagnostics = dict(artifact.get("geometry_diagnostics", {}))
         self.load_state_dict(state, strict=True)
+        if self.version == "4":
+            calibration = artifact.get("calibration")
+            if bool(self.spatial_objective.calibrated) != (calibration is not None):
+                raise ValueError("finite_primary_v1 calibration artifact mismatch")
+            if calibration is not None:
+                objective = self.spatial_objective
+                try:
+                    source = calibration["provenance"]["source_checkpoint_sha256"]
+                    ids = calibration["provenance"]["sample_ids"]
+                    scales = torch.as_tensor(
+                        calibration["scales"], dtype=objective.leaf_scales.dtype
+                    )
+                    presence = torch.as_tensor(calibration["essential_present"], dtype=torch.bool)
+                    counts = torch.as_tensor(calibration["essential_counts"], dtype=torch.long)
+                    raw = torch.as_tensor(
+                        calibration["raw_mean"], dtype=objective.leaf_scales.dtype
+                    )
+                    floors = raw.new_tensor([objective.finite_floor, objective.essential_floor])
+                    valid = (
+                        calibration["definition"] == objective.definition
+                        and calibration["provenance"]["split"] == "train"
+                        and isinstance(ids, (list, tuple))
+                        and bool(ids)
+                        and isinstance(source, str)
+                        and len(source) == 64
+                        and all(c in "0123456789abcdef" for c in source)
+                        and calibration["units"] == [unit[1] for unit in objective.units]
+                        and calibration["dimensions"] == list(objective.dimensions)
+                        and calibration["point_normalization"]
+                        == (
+                            int(self.domain_mask.sum())
+                            if self.native_masked
+                            else math.prod(self.grid_shape)
+                        )
+                        and raw.shape == scales.shape == objective.leaf_scales.shape
+                        and torch.isfinite(raw).all()
+                        and bool((raw >= 0).all())
+                        and torch.equal(scales, torch.maximum(raw, floors))
+                        and torch.equal(scales, objective.leaf_scales.cpu())
+                        and torch.equal(presence, objective.essential_present.cpu())
+                        and torch.equal(counts, objective.essential_counts.cpu())
+                        and torch.equal(presence, counts > 0)
+                        and bool((counts >= 0).all())
+                    )
+                except (KeyError, TypeError, ValueError, RuntimeError):
+                    valid = False
+                if not valid:
+                    raise ValueError("finite_primary_v1 calibration artifact contents mismatch")
+            self.spatial_objective.calibration_record = deepcopy(calibration)

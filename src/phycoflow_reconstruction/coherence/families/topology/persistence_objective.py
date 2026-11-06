@@ -18,6 +18,8 @@ PERSISTENCE_COMPONENT_KEYS = {
     "mutual": {"enabled", "weight", "groups", "lines", "seed", "direction_floor", "offset_range"},
 }
 PERSISTENCE_KEYS = {
+    "definition",
+    "calibration",
     "projections",
     "essential_weight",
     "scale_floor",
@@ -27,6 +29,47 @@ PERSISTENCE_KEYS = {
     "spatial_mode",
     "max_assignment_size",
 }
+
+
+def validate_finite_primary_config(config: Mapping, fields: tuple[str, ...]) -> None:
+    """Validate the fixed version-4 bank before construction or resource allocation."""
+    settings = config.get("persistence", {})
+    calibration = settings.get("calibration")
+    if not isinstance(calibration, Mapping) or set(calibration) != {
+        "finite_floor",
+        "essential_floor",
+    }:
+        raise ValueError("finite_primary_v1 requires calibration finite_floor and essential_floor")
+    floors = (float(calibration["finite_floor"]), float(calibration["essential_floor"]))
+    if any(not math.isfinite(value) or value <= 0 for value in floors):
+        raise ValueError("finite_primary_v1 calibration floors must be positive and finite")
+    if settings.get("distance", "sliced_wasserstein") != "sliced_wasserstein":
+        raise ValueError("finite_primary_v1 requires sliced_wasserstein")
+    if "essential_weight" in settings:
+        raise ValueError("finite_primary_v1 fixes the finite/essential split to 0.9/0.1")
+    filtration = config.get("filtration", {})
+    dimensions = filtration.get("dimensions", (0, 1))
+    directions = filtration.get("directions", ("sublevel", "superlevel"))
+    if (
+        not isinstance(dimensions, (list, tuple))
+        or len(dimensions) != 2
+        or set(dimensions) != {0, 1}
+        or not isinstance(directions, (list, tuple))
+        or len(directions) != 2
+        or set(directions) != {"sublevel", "superlevel"}
+    ):
+        raise ValueError("finite_primary_v1 requires H0/H1 and both unary directions")
+    mutual = config.get("components", {}).get("mutual", {})
+    if mutual.get("enabled", False):
+        groups = mutual.get("groups", [fields])
+        if any(len(group) != 2 for group in groups):
+            raise ValueError("finite_primary_v1 requires pairs, not higher-order groups")
+        if mutual.get("lines", 3) != 3 or set(mutual) & {
+            "seed",
+            "direction_floor",
+            "offset_range",
+        }:
+            raise ValueError("finite_primary_v1 fixes its three lines and offsets")
 
 
 def validate_persistence_config(config: Mapping, field_names=None) -> None:
@@ -42,6 +85,11 @@ def validate_persistence_config(config: Mapping, field_names=None) -> None:
     settings = config.get("persistence", {})
     if set(settings) - PERSISTENCE_KEYS:
         raise ValueError("unknown topology.persistence keys")
+    definition = settings.get("definition", "legacy_v3")
+    if definition not in {"legacy_v3", "finite_primary_v1"}:
+        raise ValueError("unknown persistence.definition")
+    if definition == "legacy_v3" and "calibration" in settings:
+        raise ValueError("persistence.calibration requires finite_primary_v1")
     distance = settings.get("distance", "sliced_wasserstein")
     if distance not in {"sliced_wasserstein", "spatial_wasserstein"}:
         raise ValueError("unknown persistence.distance")
@@ -135,6 +183,8 @@ def validate_persistence_config(config: Mapping, field_names=None) -> None:
         )
         if not 0 < floor <= 1 or not math.isfinite(extent) or extent < 0:
             raise ValueError("mutual directions must be positive and offsets finite")
+    if definition == "finite_primary_v1":
+        validate_finite_primary_config(config, fields)
 
 
 class PersistenceTopologyObjective(nn.Module):
@@ -289,9 +339,15 @@ class PersistenceTopologyObjective(nn.Module):
         reference: torch.Tensor,
         *,
         reference_cache: dict | None = None,
+        valid_mask: torch.Tensor | None = None,
     ) -> FamilyResult:
         # Cache lifetime is one transactional update. The family validates the
         # original target and coordinate tensor identities/versions before reuse.
+        if reference_cache is not None:
+            mask_identity = (valid_mask, None if valid_mask is None else valid_mask._version)
+            cached_mask, cached_version = reference_cache.setdefault("mask_identity", mask_identity)
+            if cached_mask is not valid_mask or cached_version != mask_identity[1]:
+                raise ValueError("persistence reference cache domain mask changed")
         if reference_cache is not None and "signature" not in reference_cache:
             original, version = reference_cache.setdefault(
                 "reference_identity", (reference, reference._version)
@@ -301,8 +357,9 @@ class PersistenceTopologyObjective(nn.Module):
         prepared = None if reference_cache is None else reference_cache.get("prepared")
         if prepared is None:
             y = self._descriptor_fields(reference.detach())
-            mean = y.mean((-2, -1), keepdim=True)
-            scale = y.std((-2, -1), keepdim=True, unbiased=False).clamp_min(self.scale_floor)
+            support = y if valid_mask is None else y[..., valid_mask].unsqueeze(-2)
+            mean = support.mean((-2, -1), keepdim=True)
+            scale = support.std((-2, -1), keepdim=True, unbiased=False).clamp_min(self.scale_floor)
             target, _, _, _ = self._filtrations((y - mean) / scale)
             target_diagrams = cubical_diagrams(
                 target.flatten(0, 1),
@@ -310,6 +367,7 @@ class PersistenceTopologyObjective(nn.Module):
                 dimensions=self.dimensions,
                 locations=self.distance == "spatial_wasserstein",
                 cacheable=True,
+                valid_mask=valid_mask,
             )
             prepared = (mean, scale, target_diagrams, tuple(reference.shape), id(self))
             if reference_cache is not None:
@@ -325,6 +383,7 @@ class PersistenceTopologyObjective(nn.Module):
             periodic=self.periodic,
             dimensions=self.dimensions,
             locations=self.distance == "spatial_wasserstein",
+            valid_mask=valid_mask,
         )
         compare = (
             sliced_diagram_distance
@@ -342,6 +401,7 @@ class PersistenceTopologyObjective(nn.Module):
             }
         )
         terms = {name: [] for name in self.weights if self.weights[name] > 0}
+        point_normalization = h * w if valid_mask is None else int(valid_mask.sum())
         by_dimension = {f"{name}.h{d}": [] for name in terms for d in self.dimensions}
         batched_costs = None
         if self.distance == "sliced_wasserstein":
@@ -350,7 +410,7 @@ class PersistenceTopologyObjective(nn.Module):
                 [item[d] for item in target_diagrams for d in self.dimensions],
                 projections=self.projections,
                 essential_weight=self.essential_weight,
-                normalization=h * w,
+                normalization=point_normalization,
             ).reshape(n, batch, len(self.dimensions))
         for i, (label, weight) in enumerate(zip(labels, line_weights)):
             dim_costs = []
@@ -364,7 +424,7 @@ class PersistenceTopologyObjective(nn.Module):
                                 diagrams[i * batch + j][dim],
                                 target_diagrams[i * batch + j][dim],
                                 essential_weight=self.essential_weight,
-                                normalization=h * w,
+                                normalization=point_normalization,
                                 **distance_kwargs,
                             )
                             for j in range(batch)
@@ -404,7 +464,7 @@ class PersistenceTopologyObjective(nn.Module):
                 else None,
                 "finite_slice_approximation": True,
                 "essential_classes_included": True,
-                "point_normalization": h * w,
+                "point_normalization": point_normalization,
                 "descriptor_fields": self.fields,
                 "self_descriptor_fields": self.self_fields,
                 "diagram_distance": self.distance,
