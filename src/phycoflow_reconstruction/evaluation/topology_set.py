@@ -173,7 +173,7 @@ def render_topology_distance_distributions(
     *,
     title: str,
     subtitle: str,
-    ylabel: str = "Persistence distance / raster vertex",
+    ylabel: str = "Persistence distance (finite bars normalized by vertices)",
     y_limits: tuple[float, float] | None = None,
     dpi: int = 300,
 ) -> Path:
@@ -370,7 +370,12 @@ def render_topology_betti_curves(
                 reconstruction_curves = _aggregate_rows(
                     reconstruction[:, :, dimension, :], metadata, metric=metric, direction=direction
                 )
-                panel_errors.append(np.abs(reference_curves - reconstruction_curves).mean())
+                rows = [i for i, row in enumerate(metadata)
+                        if row["metric"] == metric and row["direction"] == direction]
+                # Line restrictions can err in opposite directions. Take absolute
+                # differences before averaging lines or samples.
+                panel_errors.append(np.abs(reference[:, rows, dimension, :] -
+                                           reconstruction[:, rows, dimension, :]).mean())
                 ref_mean = reference_curves.mean(axis=0)
                 pred_mean = reconstruction_curves.mean(axis=0)
                 ref_std = reference_curves.std(axis=0, ddof=1) if len(reference_curves) > 1 else np.zeros_like(ref_mean)
@@ -450,8 +455,9 @@ def render_configured_grid_topology(
     objective_distance: float | None = None,
     role: str | None = None,
     dpi: int = 300,
+    valid_mask: np.ndarray | None = None,
 ) -> Path:
-    """Render paired q50 masks and contour disagreement on the configured raster."""
+    """Render paired q50 masks with missing/excess on the declared raster support."""
     import matplotlib
 
     matplotlib.use("Agg")
@@ -469,8 +475,20 @@ def render_configured_grid_topology(
         raise ValueError("configured topology field labels do not align")
     if grid_coordinates.shape != (*reference_fields.shape[-2:], 2):
         raise ValueError("configured topology coordinates do not align with raster maps")
-    if not np.isfinite(reference_fields).all() or not np.isfinite(reconstruction_fields).all():
-        raise ValueError("configured topology maps must be finite")
+    x_axis, y_axis = grid_coordinates[0, :, 0], grid_coordinates[:, 0, 1]
+    dx, dy = np.diff(x_axis), np.diff(y_axis)
+    if (dx.size == 0 or dy.size == 0 or not np.isfinite(grid_coordinates).all()
+        or not np.allclose(grid_coordinates[..., 0], x_axis[None, :])
+        or not np.allclose(grid_coordinates[..., 1], y_axis[:, None])
+        or not (dx > 0).all() or not (dy > 0).all()
+        or not np.allclose(dx, dx[0], rtol=1e-4, atol=1e-7 * max(1., abs(x_axis[-1] - x_axis[0])))
+        or not np.allclose(dy, dy[0], rtol=1e-4, atol=1e-7 * max(1., abs(y_axis[-1] - y_axis[0])))):
+        raise ValueError("configured topology raster requires uniform increasing Cartesian coordinates")
+    valid = np.ones(reference_fields.shape[-2:], dtype=bool) if valid_mask is None else np.asarray(valid_mask, dtype=bool)
+    if valid.shape != reference_fields.shape[-2:] or not valid.any():
+        raise ValueError("valid_mask must match the raster and contain valid vertices")
+    if not np.isfinite(reference_fields[:, valid]).all() or not np.isfinite(reconstruction_fields[:, valid]).all():
+        raise ValueError("configured topology maps must be finite on valid support")
     if objective_distance is not None and (
         not np.isfinite(objective_distance) or objective_distance < 0.0
     ):
@@ -486,15 +504,19 @@ def render_configured_grid_topology(
     x_extent = (float(x.min()), float(x.max()))
     y_extent = (float(y.min()), float(y.max()))
     extent = (*x_extent, *y_extent)
-    panel_titles = ("Reference", "Reconstruction", "Mask disagreement")
+    panel_titles = ("Reference", "Reconstruction", "Missing / excess")
     for field_index, field_name in enumerate(field_names):
         ref = reference_fields[field_index]
         pred = reconstruction_fields[field_index]
-        level = float(np.quantile(ref, 0.5))
-        ref_mask = ref >= level
-        pred_mask = pred >= level
-        xor = np.logical_xor(ref_mask, pred_mask)
-        disagreement_pct = 100.0 * float(xor.mean())
+        level = float(np.quantile(ref[valid], 0.5))
+        ref_mask = (ref >= level) & valid
+        pred_mask = (pred >= level) & valid
+        missing = ref_mask & ~pred_mask & valid
+        excess = pred_mask & ~ref_mask & valid
+        disagreement = missing.astype(np.int8) + 2 * excess.astype(np.int8)
+        disagreement_pct = 100.0 * float((missing | excess).sum()) / int(valid.sum())
+        denominator = float(np.sum(ref[valid] ** 2))
+        relative_l2 = None if denominator == 0 else float(np.sqrt(np.sum((pred[valid] - ref[valid]) ** 2) / denominator))
         masks = (ref_mask, pred_mask)
         for panel in range(3):
             axis = axes[field_index, panel]
@@ -504,7 +526,7 @@ def render_configured_grid_topology(
                 color = REFERENCE_COLOR if panel == 0 else PREDICTION_COLOR
                 cmap = ListedColormap(("#F4F5F6", color))
                 axis.imshow(
-                    mask,
+                    np.ma.array(mask, mask=~valid),
                     origin="lower",
                     interpolation="nearest",
                     extent=extent,
@@ -515,23 +537,27 @@ def render_configured_grid_topology(
                 )
                 boundary = mask
                 if boundary.any() and not boundary.all():
-                    axis.contour(x, y, boundary.astype(np.float32), levels=(0.5,), colors=("#26323D",), linewidths=0.7)
+                    axis.contour(x, y, np.ma.array(boundary.astype(np.float32), mask=~valid), levels=(0.5,), colors=("#26323D",), linewidths=0.7, corner_mask=False)
             else:
                 axis.imshow(
-                    xor,
+                    np.ma.array(disagreement, mask=~valid),
                     origin="lower",
                     interpolation="nearest",
                     extent=extent,
-                    cmap=ListedColormap(("#F4F5F6", DISAGREEMENT_COLOR)),
+                    cmap=ListedColormap(("#F4F5F6", "#C5544D", "#486DAC")),
                     vmin=0,
-                    vmax=1,
+                    vmax=2,
                     aspect="equal",
                     alpha=0.82,
                 )
                 if ref_mask.any() and not ref_mask.all():
-                    axis.contour(x, y, ref_mask.astype(np.float32), levels=(0.5,), colors=(REFERENCE_COLOR,), linewidths=0.9, linestyles="solid")
+                    axis.contour(x, y, np.ma.array(ref_mask.astype(np.float32), mask=~valid), levels=(0.5,), colors=(REFERENCE_COLOR,), linewidths=0.9, linestyles="solid", corner_mask=False)
                 if pred_mask.any() and not pred_mask.all():
-                    axis.contour(x, y, pred_mask.astype(np.float32), levels=(0.5,), colors=(PREDICTION_COLOR,), linewidths=0.9, linestyles="dashed")
+                    axis.contour(x, y, np.ma.array(pred_mask.astype(np.float32), mask=~valid), levels=(0.5,), colors=(PREDICTION_COLOR,), linewidths=0.9, linestyles="dashed", corner_mask=False)
+            if panel == 1:
+                error_label = "error unavailable" if relative_l2 is None else f"relative $L_2$ {relative_l2:.3f}"
+                axis.text(0.98, 0.03, error_label, transform=axis.transAxes, ha="right", va="bottom",
+                          fontsize=7.2, bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.85})
             if field_index == 0:
                 axis.set_title(
                     panel_titles[panel],
@@ -565,19 +591,20 @@ def render_configured_grid_topology(
     handles = (
         Line2D([], [], color=REFERENCE_COLOR, linewidth=1.1, linestyle="solid", label="Reference boundary"),
         Line2D([], [], color=PREDICTION_COLOR, linewidth=1.1, linestyle="dashed", label="Reconstruction boundary"),
-        Line2D([], [], color=DISAGREEMENT_COLOR, linewidth=4.0, label="Mask disagreement"),
+        Line2D([], [], color="#C5544D", linewidth=4.0, label="Missing"),
+        Line2D([], [], color="#486DAC", linewidth=4.0, label="Excess"),
     )
-    figure.legend(handles=handles, loc="lower center", bbox_to_anchor=(0.5, 0.045), ncol=3, frameon=False, fontsize=7.8)
+    figure.legend(handles=handles, loc="lower center", bbox_to_anchor=(0.5, 0.045), ncol=4, frameon=False, fontsize=7.8)
     figure.text(
         0.01,
         0.985,
-        f"Configured topology raster · {reference_fields.shape[-2]}×{reference_fields.shape[-1]} · {units}",
+        f"Configured topology raster · {reference_fields.shape[-2]}×{reference_fields.shape[-1]} · {units} · equal valid raster vertices",
         ha="left", va="top", fontsize=11.4, fontweight="semibold", color="#1F2937",
     )
     if objective_distance is not None:
         figure.text(
             0.01, 0.948,
-            f"{role or sample_epoch} · sample {sample_id} · persistence distance / raster vertex={objective_distance:.5f}",
+            f"{role or sample_epoch} · sample {sample_id} · persistence distance={objective_distance:.5f} (finite bars / valid vertices)",
             ha="left", va="top", fontsize=8.0, color="#52606D",
         )
     figure.subplots_adjust(left=0.18, right=0.99, top=0.89, bottom=0.21, wspace=0.08, hspace=0.25)
@@ -629,6 +656,10 @@ class TopologySetAccumulator:
             "topology", settings, runtime.dataset.data_spec, runtime.dataset.normalizer
         ).to(runtime.device)
         family.eval()
+        if getattr(family, "version", None) == "4":
+            raise ValueError("legacy topology set renderer cannot score finite_primary_v1; use the frozen canonical family evaluator")
+        if getattr(family, "native_masked", False):
+            raise ValueError("legacy topology set Betti renderer does not support native masks")
         if getattr(family, "strategy", None) != "cubical_persistence":
             raise ValueError(
                 "set-level topology diagnostics currently require strategy=cubical_persistence"
@@ -889,20 +920,22 @@ class TopologySetAccumulator:
                     continue
                 row_key = f"{metric}|{direction}"
                 curve_statistics[row_key] = {}
-                ref_curves = reference_betti[:, rows].mean(axis=1)
-                pred_curves = reconstruction_betti[:, rows].mean(axis=1)
                 for dimension in range(2):
-                    ref_dim = ref_curves[:, dimension, :].astype(np.float64)
-                    pred_dim = pred_curves[:, dimension, :].astype(np.float64)
+                    ref_dim = reference_betti[:, rows, dimension, :].astype(np.float64)
+                    pred_dim = reconstruction_betti[:, rows, dimension, :].astype(np.float64)
                     abs_error = np.abs(pred_dim - ref_dim)
-                    curve_l1 = abs_error.sum(axis=1) / np.maximum(ref_dim.sum(axis=1), 1.0)
+                    curve_l1 = abs_error.sum(axis=-1) / np.maximum(ref_dim.sum(axis=-1), 1.0)
                     curve_statistics[row_key][f"h{dimension}"] = {
-                        "mean_absolute_count_error_by_quantile": abs_error.mean(axis=0).tolist(),
+                        "mean_absolute_count_error_by_quantile": abs_error.mean(axis=(0, 1)).tolist(),
                         "mean_absolute_count_error": float(abs_error.mean()),
                         "normalized_curve_l1_mean": float(curve_l1.mean()),
                         "normalized_curve_l1_standard_deviation": float(
-                            curve_l1.std(ddof=1) if len(curve_l1) > 1 else 0.0
+                            curve_l1.std(ddof=1) if curve_l1.size > 1 else 0.0
                         ),
+                        "per_line_mean_absolute_count_error": {
+                            str(self.filtration_metadata[row]["line_index"] if self.filtration_metadata[row]["line_index"] is not None else "self"):
+                            float(abs_error[:, index, :].mean()) for index, row in enumerate(rows)
+                        },
                     }
 
         # Select the median-scoring snapshot for the qualitative panel so the
@@ -949,7 +982,7 @@ class TopologySetAccumulator:
             figures["persistence_term_distributions"],
             title="Persistence distance by objective term",
             subtitle=subtitle,
-            ylabel=f"{_publication_label(distance_name)} distance / raster vertex",
+            ylabel=f"{_publication_label(distance_name)} distance (finite bars / vertices)",
         )
 
         render_topology_betti_curves(
@@ -1018,6 +1051,8 @@ class TopologySetAccumulator:
             reconstruction_betti=reconstruction_betti,
             grid_coordinates=self.grid_coordinates,
             representative_index=np.asarray(representative_index),
+            reference_fields=reference_maps[:, representative_fields],
+            reconstruction_fields=reconstruction_maps[:, representative_fields],
             representative_reference_fields=reference_maps[representative_index, representative_fields],
             representative_reconstruction_fields=reconstruction_maps[representative_index, representative_fields],
             representative_family_total=np.asarray(representative_metric),
@@ -1037,6 +1072,7 @@ class TopologySetAccumulator:
                 "reconstruction_betti",
                 "absolute_count_error",
                 "value",
+                "line_index",
             ))
             for sample_index, sample_id in enumerate(self.sample_ids):
                 for row_index, meta in enumerate(self.filtration_metadata):
@@ -1044,12 +1080,12 @@ class TopologySetAccumulator:
                         for quantile_index, quantile in enumerate(quantiles):
                             ref_count = int(reference_betti[sample_index, row_index, dimension, quantile_index])
                             pred_count = int(reconstruction_betti[sample_index, row_index, dimension, quantile_index])
-                            writer.writerow((sample_id, meta["kind"], meta["metric"], meta["direction"], f"h{dimension}", quantile, ref_count, pred_count, abs(pred_count - ref_count), ""))
+                            writer.writerow((sample_id, meta["kind"], meta["metric"], meta["direction"], f"h{dimension}", quantile, ref_count, pred_count, abs(pred_count - ref_count), "", meta["line_index"]))
                 for label, value in zip(objective_labels, objective_values[sample_index]):
-                    writer.writerow((sample_id, "persistence_distance", label, "", "", "", "", "", "", value))
-                writer.writerow((sample_id, "persistence_distance", "topology.component_weighted_total_before_outer_family_weight", "", "", "", "", "", "", family_values[sample_index]))
+                    writer.writerow((sample_id, "persistence_distance", label, "", "", "", "", "", "", value, ""))
+                writer.writerow((sample_id, "persistence_distance", "topology.component_weighted_total_before_outer_family_weight", "", "", "", "", "", "", family_values[sample_index], ""))
                 for label, value in zip(diagnostic_labels, diagnostic_values[sample_index]):
-                    writer.writerow((sample_id, "dimension_distance_diagnostic", label, "", "", "", "", "", "", value))
+                    writer.writerow((sample_id, "dimension_distance_diagnostic", label, "", "", "", "", "", "", value, ""))
 
         objective_statistics = {
             label: _finite_summary(objective_values[:, index])
@@ -1062,12 +1098,12 @@ class TopologySetAccumulator:
         if self.family.spatial_objective.distance == "sliced_wasserstein":
             distance_definition = (
                 "cubical persistence diagrams compared with finite-angle sliced-Wasserstein quadrature; "
-                "essential classes are weighted as configured and distances are normalized by raster vertex count"
+                "finite-bar distance is normalized by valid raster vertex count; weighted essential-birth distance is not divided by vertex count"
             )
         else:
             distance_definition = (
                 "cubical persistence diagrams compared with configured spatial-Wasserstein assignment; "
-                "essential classes and spatial terms are weighted as configured, with distance normalized by raster vertex count"
+                "finite-bar distance is normalized by valid raster vertex count; weighted essential-birth distance is not divided by vertex count"
             )
         report = {
             "family": "topology",
@@ -1132,12 +1168,12 @@ class TopologySetAccumulator:
                 "reference_quantiles": quantiles.tolist(),
                 "thresholds": "reference-filtration quantiles listed above; the persistence score itself integrates the full diagram",
                 "periodic_boundary": bool(self.family.periodic),
-                "aggregation": "per-snapshot exact counts; mutual curves average the fixed line restrictions for visualization; distance metrics preserve the configured line weights",
+                "aggregation": "per-snapshot exact counts; plotted mutual counts average fixed line restrictions; absolute errors are computed per line before averaging; persistence distances use configured line weights",
                 "statistics": curve_statistics,
             },
             "visualization_scale": "linear natural scale; statistical log/linear scale option does not apply",
             "representative_visualization": {
-                "policy": "stable median of per-snapshot component-weighted total before outer family weight",
+                "policy": "standalone representative: stable median of per-snapshot component-weighted total before outer family weight; do not compare across independently selected examples",
                 "sample_id": representative_id,
                 "component_weighted_total_before_outer_family_weight": representative_metric,
                 "level_set": "superlevel at the paired reference median for each configured self field",

@@ -14,14 +14,53 @@ from ..config import load_config
 from .checkpoint import evaluate_run
 
 
-def _relative_l2_error(estimate: np.ndarray, truth: np.ndarray) -> float | None:
+def _relative_l2_error(
+    estimate: np.ndarray, truth: np.ndarray, *, mask: np.ndarray | None = None,
+    weights: np.ndarray | None = None,
+) -> float | None:
+    """Fieldwise relative L2 on exactly the declared displayed support and measure."""
     estimate64 = np.asarray(estimate, dtype=np.float64)
     truth64 = np.asarray(truth, dtype=np.float64)
-    denominator = float(np.linalg.norm(truth64.ravel()))
-    if denominator == 0.0 or not np.isfinite(denominator):
+    if estimate64.shape != truth64.shape:
+        raise ValueError("prediction and reference shapes do not match")
+    support = np.ones(truth64.shape, dtype=bool) if mask is None else np.asarray(mask, dtype=bool)
+    measure = np.ones(truth64.shape, dtype=np.float64) if weights is None else np.asarray(weights, dtype=np.float64)
+    if support.shape != truth64.shape or measure.shape != truth64.shape:
+        raise ValueError("mask and weights must match plotted fields")
+    if not support.any() or not np.isfinite(measure[support]).all() or (measure[support] <= 0).any():
+        raise ValueError("displayed support requires finite positive weights")
+    if not np.isfinite(estimate64[support]).all() or not np.isfinite(truth64[support]).all():
+        raise ValueError("displayed predictions and references must be finite")
+    denominator = float(np.sum(measure[support] * truth64[support] ** 2))
+    if denominator <= 0.0 or not np.isfinite(denominator):
         return None
-    value = float(np.linalg.norm((estimate64 - truth64).ravel()) / denominator)
+    numerator = float(np.sum(measure[support] * (estimate64[support] - truth64[support]) ** 2))
+    value = float(np.sqrt(numerator / denominator))
     return value if np.isfinite(value) else None
+
+
+def _payload_support(payload, point_count: int) -> tuple[np.ndarray, np.ndarray, str]:
+    def vector(key, default):
+        if key not in payload.files:
+            return default
+        value = np.asarray(payload[key])
+        if value.shape == (1, point_count):
+            value = value[0]
+        if value.shape != (point_count,):
+            raise ValueError(f"{key} must have shape [N] or [1,N]")
+        return value
+
+    mask = vector("physical_mask", np.ones(point_count, dtype=bool)).astype(bool)
+    weights = vector("physical_weights", np.ones(point_count, dtype=np.float64)).astype(np.float64)
+    if not mask.any() or not np.isfinite(weights[mask]).all() or (weights[mask] <= 0).any():
+        raise ValueError("physical mask requires finite positive weights on its support")
+    if "physical_measure" in payload.files:
+        measure = str(np.asarray(payload["physical_measure"]).item())
+        if not measure:
+            raise ValueError("physical_measure must be nonempty")
+    else:
+        measure = "declared physical weights" if "physical_weights" in payload.files else "equal valid nodes"
+    return mask, weights, measure
 
 
 def _error_title(relative_l2: float | None) -> str:
@@ -128,6 +167,7 @@ def render_reconstruction_payload(
         obs_fields = np.asarray(payload["obs_field_ids"])[0]
         obs_valid = np.asarray(payload["obs_valid_mask"])[0].astype(bool)
         sample_id = str(payload["sample_id"])
+        physical_mask, physical_weights, measure_label = _payload_support(payload, prediction.shape[0])
 
     if prediction.shape != target.shape:
         raise ValueError("prediction and target shapes do not match")
@@ -140,8 +180,8 @@ def render_reconstruction_payload(
         raise ValueError("two coordinate labels are required for a 2D reconstruction")
     coordinate_suffix = " (normalized)" if coordinate_space == "normalized" else " (dataset units)"
     coordinate_labels = tuple(f"{label}{coordinate_suffix}" for label in coordinate_labels)
-    if not np.isfinite(prediction).all() or not np.isfinite(target).all():
-        raise ValueError("physical predictions and targets must be finite")
+    if not np.isfinite(prediction[physical_mask]).all() or not np.isfinite(target[physical_mask]).all():
+        raise ValueError("physical predictions and targets must be finite on displayed support")
     if prediction.shape[0] != math.prod(logical_shape):
         raise ValueError(
             "reconstruction visualization requires full-grid query points; "
@@ -193,15 +233,17 @@ def render_reconstruction_payload(
         axes[field_index, 2] = figure.add_subplot(grid[field_index, 3])
         error_colorbar_axes.append(figure.add_subplot(grid[field_index, 4]))
 
+    field_errors = {}
     for field_index, field_name in enumerate(field_names):
         truth = target[:, field_index]
         estimate = prediction[:, field_index]
         error = np.abs(estimate - truth)
-        relative_l2 = _relative_l2_error(estimate, truth)
-        low = float(min(truth.min(), estimate.min()))
-        high = float(max(truth.max(), estimate.max()))
+        relative_l2 = _relative_l2_error(estimate, truth, mask=physical_mask, weights=physical_weights)
+        field_errors[field_name] = relative_l2
+        low = float(min(truth[physical_mask].min(), estimate[physical_mask].min()))
+        high = float(max(truth[physical_mask].max(), estimate[physical_mask].max()))
         low, high = _nondegenerate_range(low, high)
-        error_high = max(float(error.max()), np.finfo(np.float64).eps)
+        error_high = max(float(error[physical_mask].max()), np.finfo(np.float64).eps)
         field_contour_levels = np.linspace(low, high, contour_levels)
         error_contour_levels = np.linspace(0.0, error_high, contour_levels)
         field_colorbar_ticks = np.linspace(low, high, 4)
@@ -210,21 +252,21 @@ def render_reconstruction_payload(
         error_norm = Normalize(vmin=0.0, vmax=error_high)
         panels = (
             (
-                truth.reshape(logical_shape),
+                np.ma.array(truth.reshape(logical_shape), mask=~physical_mask.reshape(logical_shape)),
                 "Ground truth",
                 "viridis",
                 field_contour_levels,
                 field_norm,
             ),
             (
-                estimate.reshape(logical_shape),
+                np.ma.array(estimate.reshape(logical_shape), mask=~physical_mask.reshape(logical_shape)),
                 "Reconstruction",
                 "viridis",
                 field_contour_levels,
                 field_norm,
             ),
             (
-                error.reshape(logical_shape),
+                np.ma.array(error.reshape(logical_shape), mask=~physical_mask.reshape(logical_shape)),
                 _error_title(relative_l2),
                 "magma",
                 error_contour_levels,
@@ -233,15 +275,27 @@ def render_reconstruction_payload(
         )
         for column_index, (values, panel_title, cmap, fill_levels, norm) in enumerate(panels):
             axis = axes[field_index, column_index]
-            axis.contourf(
-                x_grid,
-                y_grid,
-                values,
-                levels=fill_levels,
-                cmap=cmap,
-                norm=norm,
-                extend="max" if column_index == 2 else "both",
-            )
+            if physical_mask.all():
+                # Preserve the legacy full-grid rendering path exactly.
+                axis.contourf(
+                    x_grid,
+                    y_grid,
+                    values,
+                    levels=fill_levels,
+                    cmap=cmap,
+                    norm=norm,
+                    extend="max" if column_index == 2 else "both",
+                )
+            else:
+                # Show every valid node without filling cells across holes. The
+                # error uses exactly the points displayed by this collection.
+                axis.scatter(
+                    query_coords_physical[physical_mask, 0],
+                    query_coords_physical[physical_mask, 1],
+                    c=np.asarray(values.data).reshape(-1)[physical_mask],
+                    s=4, marker="s", cmap=cmap, norm=norm, linewidths=0,
+                    rasterized=True,
+                )
             axis.set_aspect("equal", adjustable="box")
             axis.set_xlim(float(x_grid.min()), float(x_grid.max()))
             axis.set_ylim(float(y_grid.min()), float(y_grid.max()))
@@ -251,10 +305,10 @@ def render_reconstruction_payload(
                     fontsize=title_fontsize, pad=4.0,
                 )
             if column_index == 2:
-                relative_label = "N/A" if relative_l2 is None else f"{relative_l2:.3f}"
+                relative_label = "error unavailable" if relative_l2 is None else f"relative $L_2$ {relative_l2:.3f}"
                 axis.text(
                     0.98, 0.96,
-                    f"relative $L_2$ {relative_label}",
+                    relative_label,
                     transform=axis.transAxes, ha="right", va="top",
                     color="white", fontsize=max(7.0, tick_fontsize - 0.4),
                     bbox={"facecolor": "#1A2530", "edgecolor": "none", "alpha": 0.76, "pad": 1.6},
@@ -318,7 +372,7 @@ def render_reconstruction_payload(
                 )
 
     figure.suptitle(
-        title or f"Sparse reconstruction — {sample_id}",
+        (title or f"Sparse reconstruction — {sample_id}") + f"\nSupport: {int(physical_mask.sum())}/{len(physical_mask)} nodes; measure: {measure_label}",
         fontsize=11.5 * font_scale,
     )
     # Constrained layout reserves dedicated colorbar columns, while equal physical
@@ -337,10 +391,21 @@ def render_reconstruction_payload(
             [colorbar_box.x0, parent_box.y0, colorbar_box.width, parent_box.height]
         )
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    figure.savefig(output_path, dpi=dpi, bbox_inches="tight")
-    figure.savefig(output_path.with_suffix(".pdf"), bbox_inches="tight")
+    if output_path.suffix.lower() == ".pdf":
+        figure.savefig(output_path.with_suffix(".png"), dpi=dpi, bbox_inches="tight")
+        figure.savefig(output_path, bbox_inches="tight")
+    else:
+        figure.savefig(output_path, dpi=dpi, bbox_inches="tight")
+        figure.savefig(output_path.with_suffix(".pdf"), bbox_inches="tight")
     figure.savefig(output_path.with_suffix(".svg"), bbox_inches="tight")
     plt.close(figure)
+    output_path.with_suffix(".metrics.json").write_text(json.dumps({
+        "schema_version": 1, "sample_id": sample_id, "payload": str(payload_path),
+        "coordinate_space": coordinate_space, "physical_measure": measure_label,
+        "valid_points": int(physical_mask.sum()), "total_points": int(physical_mask.size),
+        "error": "relative_l2_on_displayed_support", "field_units": dict(zip(field_names, units)),
+        "fieldwise_relative_l2": field_errors,
+    }, indent=2, allow_nan=False) + "\n", encoding="utf-8")
     return output_path
 
 

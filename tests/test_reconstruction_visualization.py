@@ -260,3 +260,90 @@ def test_cuda_memory_preflight_skips_cpu(tmp_path, monkeypatch):
         checkpoint="best",
         device_name=None,
     )
+
+
+def test_weighted_masked_payload_roundtrip_uses_displayed_support(tmp_path, monkeypatch):
+    source = _payload(tmp_path / "source.npz")
+    with np.load(source, allow_pickle=False) as saved:
+        arrays = {name: saved[name] for name in saved.files}
+    arrays["physical_mask"] = np.array([[True, True, False, True, True, True]])
+    arrays["physical_weights"] = np.array([[1., 2., 999., 3., 4., 5.]])
+    arrays["physical_measure"] = np.array("cell area")
+    arrays["prediction_physical"][0, 2, :] = np.nan
+    payload = tmp_path / "masked.npz"
+    np.savez_compressed(payload, **arrays)
+    plotted_nodes = []
+    original = plt.Axes.scatter
+
+    def capture(self, *args, **kwargs):
+        if "c" in kwargs:
+            plotted_nodes.append((np.asarray(args[0]), np.asarray(args[1]), np.asarray(kwargs["c"])))
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(plt.Axes, "scatter", capture)
+    output = tmp_path / "weighted.png"
+    visualization.render_reconstruction_payload(payload, output, dpi=72)
+    report = json.loads(output.with_suffix(".metrics.json").read_text())
+    valid = arrays["physical_mask"][0]
+    weights = arrays["physical_weights"][0, valid]
+    for field, field_index in (("u", 0), ("v", 1)):
+        pred = arrays["prediction_physical"][0, valid, field_index]
+        ref = arrays["target_physical"][0, valid, field_index]
+        expected = np.sqrt(np.sum(weights * (pred - ref) ** 2) / np.sum(weights * ref ** 2))
+        assert report["fieldwise_relative_l2"][field] == pytest.approx(expected)
+    assert report["physical_measure"] == "cell area" and report["valid_points"] == 5
+    assert len(plotted_nodes) == 6
+    expected_coords = arrays["query_coords_physical"][0, valid]
+    for x, y, colors in plotted_nodes:
+        np.testing.assert_array_equal(x, expected_coords[:, 0])
+        np.testing.assert_array_equal(y, expected_coords[:, 1])
+        assert len(colors) == len(expected_coords)
+    assert output.is_file() and output.with_suffix(".pdf").is_file()
+
+
+def test_weighted_error_rejects_bad_measure_and_handles_zero_reference():
+    truth = np.array([0., 0., 9.])
+    estimate = np.array([1., 1., 100.])
+    mask = np.array([True, True, False])
+    assert visualization._relative_l2_error(estimate, truth, mask=mask, weights=np.ones(3)) is None
+    with pytest.raises(ValueError, match="positive weights"):
+        visualization._relative_l2_error(estimate, truth, mask=mask, weights=np.array([1., 0., 1.]))
+
+
+def test_pdf_requested_also_writes_png_preview(tmp_path):
+    payload = _payload(tmp_path / "source.npz")
+    output = tmp_path / "figure.pdf"
+    assert visualization.render_reconstruction_payload(payload, output, dpi=72) == output
+    assert output.is_file() and output.with_suffix(".png").is_file()
+    assert output.with_suffix(".metrics.json").is_file()
+
+
+def test_isolated_valid_node_is_displayed_and_used_in_error(tmp_path, monkeypatch):
+    source = _payload(tmp_path / "source.npz")
+    with np.load(source, allow_pickle=False) as saved:
+        arrays = {name: saved[name] for name in saved.files}
+    arrays["physical_mask"] = np.asarray([[False, False, False, False, True, False]])
+    arrays["physical_weights"] = np.asarray([[0., 0., 0., 0., 3., 0.]])
+    arrays["obs_valid_mask"] = np.zeros_like(arrays["obs_valid_mask"])
+    payload = tmp_path / "isolated.npz"
+    np.savez_compressed(payload, **arrays)
+    nodes = []
+    original = plt.Axes.scatter
+
+    def capture(self, *args, **kwargs):
+        if "c" in kwargs:
+            nodes.append((np.asarray(args[0]), np.asarray(args[1]), np.asarray(kwargs["c"])))
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(plt.Axes, "scatter", capture)
+    output = tmp_path / "isolated.png"
+    visualization.render_reconstruction_payload(payload, output, dpi=72)
+    assert len(nodes) == 6
+    for x, y, value in nodes:
+        np.testing.assert_array_equal(x, [20.])
+        np.testing.assert_array_equal(y, [110.])
+        assert len(value) == 1
+    report = json.loads(output.with_suffix(".metrics.json").read_text())
+    truth = arrays["target_physical"][0, 4, 0]
+    pred = arrays["prediction_physical"][0, 4, 0]
+    assert report["fieldwise_relative_l2"]["u"] == pytest.approx(abs((pred - truth) / truth))

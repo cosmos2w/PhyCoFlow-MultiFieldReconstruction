@@ -167,7 +167,7 @@ def render_cross_band_error(
 
 def render_topology_diagrams(
     payload: dict[str, np.ndarray], report: dict[str, Any], output_dir: str | Path,
-    *, role: str, suffix: str = "",
+    *, role: str, suffix: str = "", sample_id: str | None = None,
 ) -> dict[str, Any]:
     """Plot exact diagrams for the payload's saved representative raster.
 
@@ -184,10 +184,23 @@ def render_topology_diagrams(
     objective = PersistenceTopologyObjective(settings, fields)
     if objective.weights.get("self.persistence", 0.0) <= 0:
         return {"skipped": "self persistence is disabled"}
+    sample_ids = [str(value) for value in payload["sample_ids"]]
     index = int(payload["representative_index"])
-    sample_id = str(payload["sample_ids"][index])
-    reference = torch.as_tensor(payload["representative_reference_fields"][None], dtype=torch.float32)
-    prediction = torch.as_tensor(payload["representative_reconstruction_fields"][None], dtype=torch.float32)
+    if sample_id is not None:
+        if sample_id not in sample_ids:
+            raise ValueError("matched topology sample is not in the saved payload")
+        index = sample_ids.index(sample_id)
+    sample_id = sample_ids[index]
+    if "reference_fields" in payload and "reconstruction_fields" in payload:
+        reference_values = payload["reference_fields"][index]
+        prediction_values = payload["reconstruction_fields"][index]
+    elif index == int(payload["representative_index"]):
+        reference_values = payload["representative_reference_fields"]
+        prediction_values = payload["representative_reconstruction_fields"]
+    else:
+        raise ValueError("saved legacy payload does not contain the requested matched raster")
+    reference = torch.as_tensor(reference_values[None], dtype=torch.float32)
+    prediction = torch.as_tensor(prediction_values[None], dtype=torch.float32)
     if reference.shape != prediction.shape or reference.shape[1] != len(fields):
         raise ValueError("representative topology fields do not align")
     target = objective._descriptor_fields(reference)
@@ -272,7 +285,7 @@ def render_topology_diagrams(
         handles, labels = axes[0, 0].get_legend_handles_labels()
         fig.legend(handles, labels, ncol=2, loc="lower center", frameon=False)
         fig.suptitle(
-            f"{role} · {field} persistence · {sample_id}\nself-persistence distance across fields={saved:.5f} / raster vertex",
+            f"{role} · {field} persistence · {sample_id}\nself-persistence distance across fields={saved:.5f} (finite bars / vertices)",
             fontsize=10.2,
         )
         fig.subplots_adjust(left=0.12, right=0.98, top=0.85, bottom=0.14, wspace=0.30, hspace=0.36)
@@ -334,6 +347,25 @@ def render_saved_coherence_explanatory(
     if "topology" in selected and (topology_dir / "metrics.npz").is_file():
         diagram_dir = topology_dir / "diagrams"
         topology_results = {}
+        # Deterministic and independent of prediction scores. Legacy payloads
+        # retain representative-only rendering if full rasters were not saved.
+        matched_sample = None
+        base_path, post_path = topology_dir / "metrics-base.npz", topology_dir / "metrics.npz"
+        if base_path.is_file() and post_path.is_file():
+            base_payload, post_payload = _load_payload(base_path), _load_payload(post_path)
+            if all("reference_fields" in item and "reconstruction_fields" in item
+                   for item in (base_payload, post_payload)):
+                shared = sorted(set(map(str, base_payload["sample_ids"])) & set(map(str, post_payload["sample_ids"])))
+                if not shared:
+                    raise ValueError("saved topology payloads have no matched samples")
+                matched_sample = shared[0]
+                base_ids = list(map(str, base_payload["sample_ids"]))
+                post_ids = list(map(str, post_payload["sample_ids"]))
+                if (not np.array_equal(base_payload["field_names"], post_payload["field_names"])
+                    or not np.array_equal(base_payload["grid_coordinates"], post_payload["grid_coordinates"])
+                    or not np.array_equal(base_payload["reference_fields"][base_ids.index(matched_sample)],
+                                          post_payload["reference_fields"][post_ids.index(matched_sample)])):
+                    raise ValueError("matched topology payloads differ in field labels, raster, or paired reference")
         for role, payload_name, report_name, suffix in (
             (
                 "Post-training" if (topology_dir / "metrics-base.npz").is_file() else "Evaluated run",
@@ -347,7 +379,7 @@ def render_saved_coherence_explanatory(
                 continue
             payload = _load_payload(payload_path)
             report = json.loads(report_path.read_text())
-            result = render_topology_diagrams(payload, report, diagram_dir, role=role, suffix=suffix)
+            result = render_topology_diagrams(payload, report, diagram_dir, role=role, suffix=suffix, sample_id=matched_sample)
             key = "post_training" if not suffix else "base"
             topology_results[key] = result
             if "figures" in result:
@@ -364,6 +396,10 @@ def render_saved_coherence_explanatory(
                     )
         if topology_results:
             summary["topology_diagrams"] = topology_results
+            summary["topology_diagrams"]["selection_policy"] = (
+                "lexicographically first shared sample, independent of scores" if matched_sample is not None
+                else "standalone saved representative; legacy payload may not contain matched rasters"
+            )
             if "base" in topology_results and "post_training" in topology_results:
                 summary["topology_diagrams"]["representative_samples_match"] = (
                     topology_results["base"].get("sample_id") == topology_results["post_training"].get("sample_id")

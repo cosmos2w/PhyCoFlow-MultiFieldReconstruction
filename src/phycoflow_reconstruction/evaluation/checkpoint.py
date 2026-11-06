@@ -83,6 +83,35 @@ def _uncertainty_metrics(samples: torch.Tensor | None, target: torch.Tensor) -> 
     }
 
 
+def physical_plot_contract(sample, query_indices: torch.Tensor) -> dict[str, np.ndarray]:
+    """Save the displayed support and optional case-declared quadrature.
+
+    Cases may provide a per-node ``auxiliary.physical_weights`` array. A
+    missing array means equal valid nodes; it never implies physical area.
+    """
+    indices = query_indices.detach().cpu().long()
+    mask = (
+        torch.ones(len(indices), dtype=torch.bool)
+        if sample.valid_points is None else sample.valid_points.detach().cpu()[indices]
+    )
+    result = {"physical_mask": mask.numpy()[None]}
+    weights = sample.metadata.get("auxiliary", {}).get("physical_weights")
+    if weights is not None:
+        weights = torch.as_tensor(weights).detach().cpu()
+        if weights.shape != sample.values.shape[:1]:
+            raise ValueError("physical_weights must have one value per native point")
+        weights = weights[indices]
+        if not torch.isfinite(weights[mask]).all() or not bool((weights[mask] > 0).all()):
+            raise ValueError("physical_weights must be finite and positive on the valid support")
+        result["physical_weights"] = weights.numpy()[None]
+    result["physical_measure"] = np.asarray(
+        sample.metadata.get("physical_measure", "case_supplied_weights")
+        if weights is not None else "equal_valid_nodes"
+    )
+    result["field_units"] = np.asarray(sample.metadata.get("field_units", ("unknown",) * len(sample.field_names)))
+    return result
+
+
 def load_evaluation_runtime(
     run_dir: str | Path,
     *,
@@ -268,6 +297,7 @@ def evaluate_run(
         logical_shape=np.asarray(dataset.data_spec.logical_shape, dtype=np.int64),
         field_names=np.asarray(dataset.field_names),
         sample_id=np.asarray(batch.sample_ids[0]),
+        **physical_plot_contract(samples[0], first_query_indices),
     )
     report["trace"] = {
         "run": str(run_dir.relative_to(case_dir)),

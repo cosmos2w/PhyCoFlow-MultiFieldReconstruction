@@ -215,3 +215,76 @@ def test_betti_curves_accept_dimension_specific_limits(tmp_path, monkeypatch):
 
     assert captured_limits == [(0.0, 4.0), (0.0, 140.0)]
     assert output.is_file()
+
+
+def test_opposing_line_errors_do_not_cancel_before_count_mae(tmp_path, monkeypatch):
+    from phycoflow_reconstruction.evaluation import topology_set
+
+    titles = []
+    original = topology_set._save_publication_figure
+    def capture(figure, output_path, *, dpi=300):
+        titles.extend(axis.get_title(loc="left") for axis in figure.axes)
+        return original(figure, output_path, dpi=dpi)
+    monkeypatch.setattr(topology_set, "_save_publication_figure", capture)
+    reference = np.ones((1, 2, 2, 2))
+    prediction = reference.copy()
+    prediction[:, 0, 0] += 1
+    prediction[:, 1, 0] -= 1
+    metadata = ({"metric": "mutual.u+v", "direction": "positive"},) * 2
+    topology_set.render_topology_betti_curves(reference, prediction, metadata,
+        ("mutual.u+v",), ("positive",), (0.25, 0.75), tmp_path / "lines.png",
+        title="Line error", subtitle="paired")
+    assert "count MAE=1.00" in titles[0]
+
+
+def test_configured_raster_separates_missing_and_excess(tmp_path, monkeypatch):
+    from phycoflow_reconstruction.evaluation import topology_set
+    labels = []
+    original = topology_set._save_publication_figure
+    def capture(figure, output_path, *, dpi=300):
+        labels.extend(text.get_text() for text in figure.legends[0].get_texts())
+        labels.extend(text.get_text() for axis in figure.axes for text in axis.texts)
+        return original(figure, output_path, dpi=dpi)
+    monkeypatch.setattr(topology_set, "_save_publication_figure", capture)
+    x, y = np.meshgrid(np.arange(4), np.arange(4))
+    reference = np.asarray([x + y], dtype=float)
+    prediction = np.flip(reference, axis=-1).copy()
+    mask = np.ones((4, 4), dtype=bool)
+    mask[1, 1] = False
+    topology_set.render_configured_grid_topology(reference, prediction, np.stack((x, y), axis=-1),
+        ("u",), "s", units="K", sample_epoch="source", output_path=tmp_path / "masks.png", valid_mask=mask)
+    assert "Missing" in labels and "Excess" in labels
+    assert any("relative $L_2$" in text for text in labels)
+
+
+def test_legacy_topology_set_rejects_finite_primary_definition():
+    from types import SimpleNamespace
+
+    import pytest
+
+    from phycoflow_reconstruction.contracts import DataSpec
+    from phycoflow_reconstruction.data.normalization import FieldNormalizer
+
+    settings = {"strategy": "cubical_persistence", "fields": ["u", "v"],
+                "geometry": {"grid_shape": [4, 4]},
+                "filtration": {"smoothing_sigma": 0},
+                "persistence": {"definition": "finite_primary_v1", "projections": 8,
+                                "calibration": {"finite_floor": 1e-3, "essential_floor": 1e-3}},
+                "components": {"self": {"enabled": True}, "mutual": {"enabled": False}}}
+    runtime = SimpleNamespace(config={"coherence": {"families": {"topology": settings}}},
+        dataset=SimpleNamespace(data_spec=DataSpec(("u", "v"), ("1", "1"), 2, (16,)),
+                                normalizer=FieldNormalizer.identity(2)), device=torch.device("cpu"))
+    with pytest.raises(ValueError, match="legacy topology set renderer cannot score finite_primary_v1"):
+        TopologySetAccumulator.build(runtime)
+
+
+def test_configured_topology_rejects_nonuniform_coordinates(tmp_path):
+    import pytest
+
+    from phycoflow_reconstruction.evaluation import topology_set
+
+    x, y = np.meshgrid(np.asarray([0., 1., 3., 4.]), np.arange(4.))
+    reference = np.asarray([x + y])
+    with pytest.raises(ValueError, match="uniform increasing Cartesian"):
+        topology_set.render_configured_grid_topology(reference, reference, np.stack((x, y), axis=-1),
+            ("u",), "sample", units="model units", sample_epoch="source", output_path=tmp_path / "bad.png")
