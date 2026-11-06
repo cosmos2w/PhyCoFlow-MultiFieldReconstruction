@@ -10,6 +10,7 @@ Only Markdown explanations are synchronized here. HDF5/PT payloads and links are
 | KS | `ks/ks.h5` | stored trajectories 80/10/10 |
 | Mass transport-fluid | `mass_transport_fluid/mass_transport_fluid_demo.h5` | future scaffold; current file is integration-only |
 | Active emulsion | `active_emulsion/generated/fields.h5` | physical snapshots with disjoint simulation splits |
+| CoastalBench | `coastal_bench/coastal_bench.h5` or prepared calendar crop | stored trajectory/day splits |
 
 Validate links and schemas from the project root:
 

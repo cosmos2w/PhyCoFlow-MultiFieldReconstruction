@@ -213,6 +213,21 @@ def test_multiscale_posttraining_fits_references_scores_draws_and_resumes(tmp_pa
     restored = torch.load(child / "artifacts" / "multiscale_spectrum_family.pt", weights_only=True)
     assert restored["calibration"]["sample_ids"] == artifact["calibration"]["sample_ids"]
 
+    from phycoflow_reconstruction.training.posttrain_rescore import restore_evaluation_panel
+
+    panel = restore_evaluation_panel(child, evaluation_overrides={}, device_name="cpu")
+    panel.load_checkpoint("last")
+    restored_metrics = panel.score()
+    assert energy_path in restored_metrics["coherence"]["components"]
+    calibration_path = child / "artifacts/coherence_calibration.json"
+    original_calibration = calibration_path.read_bytes()
+    calibration_path.write_text("{}")
+    try:
+        with pytest.raises(ValueError, match="calibration differs"):
+            restore_evaluation_panel(child, evaluation_overrides={}, device_name="cpu")
+    finally:
+        calibration_path.write_bytes(original_calibration)
+
     mismatch = copy.deepcopy(post)
     mismatch["evaluation"]["query_points"] = 8
     with pytest.raises(ValueError, match="evaluation.query_points"):
@@ -255,3 +270,25 @@ def test_reference_calibration_preserves_random_streams():
     assert actual[0] == before[2][0] and actual[2:] == before[2][2:]
     np.testing.assert_array_equal(actual[1], before[2][1])
     assert family.indices.numel() == 8
+
+
+def test_ordinary_topology_keeps_structured_grid_query_subsets():
+    from types import SimpleNamespace
+
+    from phycoflow_reconstruction.coherence.families.topology.family import TopologyFamily
+    from phycoflow_reconstruction.contracts import DataSpec
+    from phycoflow_reconstruction.data.normalization import FieldNormalizer
+    from phycoflow_reconstruction.training.coherence_sampling import _fit_training_references
+
+    family = TopologyFamily(
+        {"target_use": "paired_supervised", "fields": ["u", "v"]},
+        DataSpec(("u", "v"), ("1", "1"), 2, (4, 4)), FieldNormalizer.identity(2),
+    )
+    config = {"coherence": {"compute_budget": {"point_count": 8}},
+              "runtime": {}, "observations": {}}
+    dataset = SimpleNamespace(data_spec=DataSpec(("u", "v"), ("1", "1"), 2, (4, 4)))
+    _fit_training_references(
+        {"topology": family}, dataset, config, device=torch.device("cpu"),
+        structured_grid_required=True,
+    )
+    assert family.neighbor_indices.numel() == 0  # Ordinary raster fitting stays lazy.

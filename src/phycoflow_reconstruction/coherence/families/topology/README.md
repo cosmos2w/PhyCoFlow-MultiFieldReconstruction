@@ -52,3 +52,14 @@ a strategy retain the historical Betti-curve interpretation; every current
 recipe names sliced persistence explicitly. This preserves old scientific
 meaning while removing the old active-emulsion launch recipes from the current
 workflow.
+
+## Native masked ocean domains
+
+For the [CoastalBench case](../../../../../cases/coastal_bench/README.md),
+`geometry.native_masked: true` maps wet native vertices exactly to a cubical
+raster. `structured_indices` names the TRAIN sample's per-point native row/column
+array; the mapping and domain mask are frozen in the family artifact. Land is
+excluded at infinity. Finite-born classes killed only at excluded vertices are
+essential on the wet domain, and land receives zero gradient. The normalization
+counts wet vertices. This mode requires nonperiodic cubical persistence, zero
+smoothing, no downsampling and no derived descriptors.

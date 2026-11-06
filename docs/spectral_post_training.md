@@ -145,9 +145,10 @@ refinement, sensitivity to band/weight choices, and conditional learnability on 
 synthetic process with known observation-dependent uncertainty. Reserve an
 untouched final test panel for the final claim.
 
-This guide defines the reusable implementation and evaluation protocol. Local
-campaign results, run-specific recipes and exploratory reports are outside this
-change; the integration tests establish mechanics, not CoastalBench efficacy.
+The [portable CoastalBench workflow](../cases/coastal_bench/README.md) supplies
+case configs, preparation, evaluation and band-map commands. Local campaign
+results and exploratory reports remain outside this change; the integration
+tests establish mechanics, not CoastalBench efficacy.
 
 ## Verification
 
