@@ -46,6 +46,14 @@ from .coherence_calibration import (
     loss_gradients,
     resolve_family_scales,
 )
+from .coherence_sampling import (
+    _conditional_draw_count,
+    _conditional_draw_seed,
+    _family_context,
+    _fit_source_calibrations,
+    _fit_training_references,
+    _load_checkpoint_family_state,
+)
 from .common import (
     iter_unique_batch_indices,
     sensor_protocol_from_config,
@@ -277,6 +285,26 @@ def _coherence_objective(
     )
     if model.capabilities.structured_grid_required:
         prediction = _gather_prediction(prediction, complete, selected)
+    families = dict(family) if isinstance(family, Mapping) else {family.family_name: family}
+    conditional_draws = []
+    active_families = {
+        name: module for name, module in families.items() if family_execution(execution, name)[0]
+    }
+    for draw in range(1, _conditional_draw_count(active_families)):
+        draw_generator = torch.Generator(device=prediction.device).manual_seed(
+            _conditional_draw_seed(generator.initial_seed(), draw)
+        )
+        value = differentiable_reconstruction(
+            model,
+            model_batch,
+            steps=int(config["rollout"]["steps"]),
+            solver=config["rollout"]["solver"],
+            generator=draw_generator,
+            observation_config=dict(config["observation_consistency"]),
+        )
+        if model.capabilities.structured_grid_required:
+            value = _gather_prediction(value, complete, selected)
+        conditional_draws.append(value)
     if endpoint_context is not None:
         # Payload only: unlike the legacy component-controller context, this
         # never reconstructs a teacher or evaluates the live model again.
@@ -343,7 +371,6 @@ def _coherence_objective(
                 scale_reference=selected.target_fields,
                 variance_floor=float(term.get("variance_floor", 1e-8)),
             )
-    families = dict(family) if isinstance(family, Mapping) else {family.family_name: family}
     banks = dict(bank) if isinstance(bank, Mapping) else {name: bank for name in families}
     component_results = {}
     family_results: dict[str, FamilyResult] = {}
@@ -393,15 +420,19 @@ def _coherence_objective(
             prediction,
             reference,
             coordinates=selected.query_coords,
-            context={
-                "sample_ids": selected.sample_ids,
-                "reference_ids": reference_ids,
-                **(
-                    {"persistence_cache": step_context["persistence_cache"]}
-                    if step_context is not None
-                    else {}
-                ),
-            },
+            context=_family_context(
+                family_module,
+                {
+                    "sample_ids": selected.sample_ids,
+                    "reference_ids": reference_ids,
+                    **(
+                        {"persistence_cache": step_context["persistence_cache"]}
+                        if step_context is not None
+                        else {}
+                    ),
+                },
+                conditional_draws,
+            ),
         )
         family_results[family_name] = result
         inclusion_scale = 1.0 / probability
@@ -1222,6 +1253,15 @@ def _evaluate(
                 field_mse(prediction, target, comparison_batch.query_valid_mask).cpu().tolist(),
             ))
         families = dict(family) if isinstance(family, Mapping) else {family.family_name: family}
+        conditional_draws = []
+        for draw in range(1, _conditional_draw_count(families)):
+            draw_generator = torch.Generator(device=prediction.device).manual_seed(
+                _conditional_draw_seed(evaluation_seed, draw)
+            )
+            value = reconstruct(draw_generator)
+            if model.capabilities.structured_grid_required:
+                value = _gather_prediction(value, complete_batch, comparison_batch)
+            conditional_draws.append(value)
         banks = dict(bank) if isinstance(bank, Mapping) else {name: bank for name in families}
         family_payloads = {}
         combined_components = {}
@@ -1265,10 +1305,15 @@ def _evaluate(
                 prediction,
                 reference,
                 coordinates=comparison_batch.query_coords,
-                context={
-                    "sample_ids": comparison_batch.sample_ids,
-                    "reference_ids": reference_ids,
-                },
+                context=_family_context(
+                    family_module,
+                    {
+                        "sample_ids": comparison_batch.sample_ids,
+                        "reference_ids": reference_ids,
+                    },
+                    conditional_draws,
+                    report_detail=True,
+                ),
             )
             weight = float(getattr(family_module, "family_weight", 1.0))
             calibration_scale = float((family_scales or {}).get(family_name, 1.0))
@@ -1642,6 +1687,8 @@ def run_post_training(
         config["coherence"], train_dataset.data_spec, train_dataset.normalizer
     )
     families = {name: family.to(device) for name, family in families.items()}
+    if _conditional_draw_count(families) > 1 and not model.capabilities.generative:
+        raise ValueError("conditional-draw coherence objectives require a generative source model")
     banks: dict[str, ReferenceBank | None] = {}
     for family_name in families:
         artifact_name = (
@@ -1671,8 +1718,24 @@ def run_post_training(
             artifact = torch.load(path, map_location=device, weights_only=True)
             family.load_state_artifact(artifact)
             if checkpoint is not None and name in checkpoint.get("family_states", {}):
-                family.load_state_dict(checkpoint["family_states"][name])
+                _load_checkpoint_family_state(
+                    family, checkpoint["family_states"][name],
+                    source_checkpoint_sha256=source_hashes_before["checkpoint"],
+                )
+            elif (name == "topology" and family.version == "4") or getattr(
+                family, "mean_augmented", False
+            ):
+                raise ValueError("recovery checkpoint is missing frozen new-family state")
     else:
+        _fit_training_references(
+            families, train_dataset, config,
+            device=device,
+            structured_grid_required=model.capabilities.structured_grid_required,
+        )
+        _fit_source_calibrations(
+            families, model, train_dataset, config, device=device,
+            source_checkpoint_sha256=source_hashes_before["checkpoint"],
+        )
         family_paths = {
             name: store.save_artifact(f"{name}_family.pt", family.state_artifact())
             for name, family in families.items()
@@ -2155,7 +2218,14 @@ def run_post_training(
             step_context = {} if constrained else None
             endpoint_context = {} if policy is not None else None
             retention_losses: dict[str, torch.Tensor] = {}
-            raw_family_losses = {} if scalarizer is not None else None
+            diagnostic_every = int(config["coherence"].get("family_balance", {}).get(
+                "gradient_diagnostics_every_epochs", 0
+            ))
+            diagnostic_due = (
+                diagnostic_every > 0 and global_step % steps_per_epoch == 0
+                and epoch % diagnostic_every == 0
+            )
+            raw_family_losses = {} if scalarizer is not None or diagnostic_due else None
             rollout_generator = torch.Generator(device=device).manual_seed(
                 seed + 1_000_003 + global_step
             )
@@ -2219,16 +2289,7 @@ def run_post_training(
                     coherence_objectives = {
                         name: loss * every for name, loss in coherence_objectives.items()
                     }
-            diagnostic_every = int(
-                config["coherence"]
-                .get("family_balance", {})
-                .get("gradient_diagnostics_every_epochs", 0)
-            )
-            if (
-                diagnostic_every > 0
-                and global_step % steps_per_epoch == 0
-                and epoch % diagnostic_every == 0
-            ):
+            if diagnostic_due:
                 row["family_gradient_diagnostics"] = _sparse_family_gradient_diagnostics(
                     model,
                     batch,
@@ -2268,12 +2329,13 @@ def run_post_training(
                     endpoint_context["mask"],
                 )
                 if coherence_aggregator is not None:
-                    # This mapping defines three separate parameter gradients.
-                    # Keep A/B/T order explicit rather than the alphabetical
-                    # construction order of the coherence family modules.
+                    # Preserve historical A/B/T order and include every active family.
+                    family_order = (
+                        "global_distribution", "cross_spectrum", "multiscale_spectrum", "topology",
+                    )
                     families_abt = {
                         name: coherence_objectives[name]
-                        for name in ("global_distribution", "cross_spectrum", "topology")
+                        for name in family_order if name in coherence_objectives
                     }
                     periodic = getattr(policy, "periodic_config", None)
                     reuse_audit = None
@@ -2521,7 +2583,7 @@ def run_post_training(
             detail["measurement_position"] = "pre_model_step"
             detail["coherence_by_family"] = {
                 name: row.get(f"coherence_family/{name}/weighted_contribution")
-                for name in ("global_distribution", "cross_spectrum", "topology")
+                for name in families
             }
             with (store.run_dir / "metrics/lr_warmup_updates.jsonl").open("a") as handle:
                 handle.write(json.dumps(detail, allow_nan=False) + "\n")

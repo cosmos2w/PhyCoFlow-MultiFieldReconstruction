@@ -171,7 +171,7 @@ def _plot_preview(
             norm=Normalize(vmin=0.0, vmax=error_high), cmap="YlOrRd"
         )
 
-        if len(logical_shape) == 1:
+        if len(logical_shape) == 1 and coordinate_dim == 1:
             x = query_coords[:, 0]
             order = np.argsort(x)
             panels = ((truth, "Target"), (estimate, "Reconstruction"), (error, error_title))
@@ -220,7 +220,7 @@ def _plot_preview(
             if field_sensor_mask.any() and field_index == 0:
                 axes[field_index, 1].legend(frameon=False, fontsize=7.5, loc="best")
         else:
-            is_spatial = len(logical_shape) == 2 and coordinate_dim >= 2
+            is_spatial = coordinate_dim >= 2
             x = coordinate_grid[..., 0] if rectilinear and coordinate_grid is not None else query_coords[:, 0]
             y = coordinate_grid[..., 1] if rectilinear and coordinate_grid is not None else (
                 query_coords[:, 1] if coordinate_dim >= 2 else np.zeros_like(x)

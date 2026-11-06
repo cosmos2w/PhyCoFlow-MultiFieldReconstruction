@@ -1,0 +1,35 @@
+# Merge into a case post-training configuration. Fields default to all dataset fields.
+# The case must set a shared point count and the same evaluation.query_points.
+coherence:
+  compute_budget:
+    query_policy: fixed_shared
+  families:
+    multiscale_spectrum:
+      enabled: true
+      weight: 1.0
+      target_use: paired_supervised
+      units: model_units
+      reference_bank:
+        enabled: false
+      geometry:
+        operator: fem_p1
+        coordinate_scaling: raw_extent
+      bands:
+        count: 3
+      calibration:
+        samples: 128
+        seed: 1729
+        # Tolerance in normalized model units; replace with a per-field mapping
+        # when the case has different meaningful tolerances across fields.
+        field_unit_floor: 0.001
+      numerics:
+        dtype: float64
+      objective:
+        kind: signed_band_energy_score
+        score_definition_version: signed_spectral_mean_augmented_v4
+        mean_weight: 1.0
+        conditional_draws: 2
+        almost_fair_alpha: 1.0
+        projections: axes_and_pairs
+        joint_energy_score_weight: 0.25
+        coherence_crps_weight: 0.0
