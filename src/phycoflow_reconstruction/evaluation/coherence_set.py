@@ -31,7 +31,9 @@ from ..coherence.registry import build_coherence_family
 from ..data.training_batches import fixed_query_indices
 from .topology_set import TopologySetAccumulator
 
-SUPPORTED_COHERENCE_FAMILIES = ("global_distribution", "cross_spectrum", "topology")
+SUPPORTED_COHERENCE_FAMILIES = (
+    "global_distribution", "cross_spectrum", "multiscale_spectrum", "topology"
+)
 
 
 def _finite_summary(values: np.ndarray) -> dict[str, float | int | None]:
@@ -921,14 +923,20 @@ def _joint_probability_mass(
     pair: tuple[int, int],
     value_range: tuple[tuple[float, float], tuple[float, float]],
     bins: int,
+    weights: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     selected = np.asarray(values, dtype=np.float64)[:, pair]
     finite = np.isfinite(selected).all(axis=1)
+    if weights is not None:
+        weights = np.asarray(weights, dtype=np.float64)
+        if weights.shape != (selected.shape[0],) or not np.isfinite(weights).all() or np.any(weights < 0):
+            raise ValueError("joint-PDF weights must be finite, nonnegative, and aligned with values")
     histogram, x_edges, y_edges = np.histogram2d(
         selected[finite, 0],
         selected[finite, 1],
         bins=bins,
         range=value_range,
+        weights=None if weights is None else weights[finite],
     )
     total = float(histogram.sum())
     if total <= 0.0:
@@ -1099,6 +1107,9 @@ class GlobalDistributionAccumulator:
     extra_query_seed: int = 100045
     extra_generated: list[np.ndarray] = field(default_factory=list)
     extra_reference: list[np.ndarray] = field(default_factory=list)
+    extra_weights: list[np.ndarray] = field(default_factory=list)
+    extra_pair_occupations: list[dict[str, dict]] = field(default_factory=list)
+    measure_metadata: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def build(
@@ -1114,6 +1125,13 @@ class GlobalDistributionAccumulator:
         family = build_coherence_family(
             "global_distribution", settings, runtime.dataset.data_spec, runtime.dataset.normalizer
         ).to(runtime.device)
+        if family.weighted_measure:
+            receipt = getattr(runtime.dataset, "physical_measure_receipt", None)
+            weights = getattr(runtime.dataset, "physical_weights", None)
+            if (receipt is None) != (weights is None):
+                raise ValueError("weighted State evaluation needs both physical weights and their receipt")
+            if receipt is not None:
+                family.bind_measure_artifact(receipt, weights=weights)
         family.eval()
         coherence = runtime.config.get("coherence", {})
         compute = coherence.get("compute_budget", {}) if isinstance(coherence, Mapping) else {}
@@ -1148,6 +1166,18 @@ class GlobalDistributionAccumulator:
         component = self.family.components_by_key["mutual_pairwise_swd"]
         return tuple(tuple(int(value) for value in pair) for pair in component.pairs)
 
+    @property
+    def extra_pair_indices(self) -> tuple[tuple[int, int], ...]:
+        # Named-pair diagnostics are available even when mutual training is off.
+        if self.family.score_definition in {"marginal_mixed_mean_v2", "marginal_mixed_weighted_v3"}:
+            return tuple(combinations(self.family.field_ids, 2))
+        return self.pair_indices
+
+    @property
+    def extra_pair_labels(self) -> tuple[str, ...]:
+        names = tuple(self.data_spec.field_names)
+        return tuple(f"{names[left]}–{names[right]}" for left, right in self.extra_pair_indices)
+
     def _extra_arrays(self) -> tuple[np.ndarray, np.ndarray]:
         if not self.extra_view or not self.extra_generated or not self.extra_reference:
             raise ValueError("global-distribution extra-view samples are unavailable")
@@ -1158,11 +1188,17 @@ class GlobalDistributionAccumulator:
     ) -> dict[str, tuple[tuple[float, float], tuple[float, float]]]:
         """Return shared pair domains across this run and optional comparison runs."""
         accumulators = (self, *others)
-        if any(accumulator.pair_indices != self.pair_indices for accumulator in accumulators):
+        if any(accumulator.extra_pair_indices != self.extra_pair_indices for accumulator in accumulators):
             raise ValueError("global-distribution extra-view field pairs do not match")
-        arrays = [accumulator._extra_arrays() for accumulator in accumulators]
+        arrays = []
+        for accumulator in accumulators:
+            generated, reference = accumulator._extra_arrays()
+            if accumulator.extra_weights:
+                positive = np.concatenate(accumulator.extra_weights) > 0
+                generated, reference = generated[positive], reference[positive]
+            arrays.append((generated, reference))
         ranges = {}
-        for label, (left, right) in zip(self.pair_labels, self.pair_indices):
+        for label, (left, right) in zip(self.extra_pair_labels, self.extra_pair_indices):
             ranges[label] = (
                 _padded_finite_range(*(value[:, left] for pair in arrays for value in pair)),
                 _padded_finite_range(*(value[:, right] for pair in arrays for value in pair)),
@@ -1177,16 +1213,17 @@ class GlobalDistributionAccumulator:
     ) -> dict[str, tuple[float, float]]:
         """Return shared logarithmic density limits for matched run figures."""
         accumulators = (self, *others)
-        if any(accumulator.pair_indices != self.pair_indices for accumulator in accumulators):
+        if any(accumulator.extra_pair_indices != self.extra_pair_indices for accumulator in accumulators):
             raise ValueError("global-distribution extra-view field pairs do not match")
         limits = {}
-        for label, pair in zip(self.pair_labels, self.pair_indices):
+        for label, pair in zip(self.extra_pair_labels, self.extra_pair_indices):
             positive_parts = []
             for accumulator in accumulators:
                 generated, reference = accumulator._extra_arrays()
+                weights = np.concatenate(accumulator.extra_weights) if accumulator.extra_weights else None
                 for values in (generated, reference):
                     mass, x_edges, y_edges = _joint_probability_mass(
-                        values, pair, value_ranges[label], bins
+                        values, pair, value_ranges[label], bins, weights=weights
                     )
                     density = mass / (np.diff(x_edges)[:, None] * np.diff(y_edges)[None, :])
                     positive_parts.append(density[density > 0.0])
@@ -1222,14 +1259,15 @@ class GlobalDistributionAccumulator:
         generated_masses = []
         x_edges_all = []
         y_edges_all = []
-        for label, pair in zip(self.pair_labels, self.pair_indices):
+        pooled_weights = np.concatenate(self.extra_weights) if self.extra_weights else None
+        for label, pair in zip(self.extra_pair_labels, self.extra_pair_indices):
             if label not in ranges:
                 raise KeyError(f"missing shared joint-PDF range for {label}")
             reference_mass, x_edges, y_edges = _joint_probability_mass(
-                reference, pair, ranges[label], bins
+                reference, pair, ranges[label], bins, weights=pooled_weights
             )
             generated_mass, generated_x_edges, generated_y_edges = _joint_probability_mass(
-                generated, pair, ranges[label], bins
+                generated, pair, ranges[label], bins, weights=pooled_weights
             )
             if not np.array_equal(x_edges, generated_x_edges) or not np.array_equal(
                 y_edges, generated_y_edges
@@ -1282,7 +1320,7 @@ class GlobalDistributionAccumulator:
         payload_path = destination / f"{metrics_stem}.npz"
         np.savez_compressed(
             payload_path,
-            pair_labels=np.asarray(self.pair_labels),
+            pair_labels=np.asarray(self.extra_pair_labels),
             reference_probability_mass=np.stack(reference_masses),
             reconstruction_probability_mass=np.stack(generated_masses),
             x_edges=np.stack(x_edges_all),
@@ -1295,11 +1333,38 @@ class GlobalDistributionAccumulator:
             pooled_point_count=np.asarray(generated.shape[0]),
             units=np.asarray(self.family.units),
         )
+        pair_occupation_path = None
+        if self.extra_pair_occupations:
+            if len(self.extra_pair_occupations) != len(self.sample_ids):
+                raise ValueError("pair occupations must be available for every sample")
+            pair_keys = tuple(self.extra_pair_occupations[0])
+            if any(tuple(item) != pair_keys for item in self.extra_pair_occupations):
+                raise ValueError("pair occupation definitions changed within the panel")
+            keys = (
+                "raw_value_bounds", "generated_occupation", "reference_occupation",
+                "generated_own_rank_occupation", "reference_own_rank_occupation",
+            )
+            arrays = {
+                key: np.stack([
+                    np.stack([item[pair][key][0] for pair in pair_keys])
+                    for item in self.extra_pair_occupations
+                ])
+                for key in keys
+            }
+            pair_occupation_path = destination / f"pair_occupations{filename_suffix}.npz"
+            np.savez_compressed(
+                pair_occupation_path, **arrays, pair_names=np.asarray(pair_keys),
+                sample_ids=np.asarray(self.sample_ids), units=np.asarray(self.family.units),
+                rank_definition=np.asarray("endpoint_weighted_midrank_ties_share_rank"),
+            )
         report_path = destination / f"report{filename_suffix}.json"
         report = {
             "family": "global_distribution",
             "view": "pairwise_joint_probability_density",
-            "estimand": "pooled_equal_node_occupation_not_per_snapshot_loss",
+            "estimand": (
+                "pooled_equal_sample_self_normalized_physical_occupation_not_per_snapshot_loss"
+                if self.family.weighted_measure else "pooled_equal_node_occupation_not_per_snapshot_loss"
+            ),
             "split": split,
             "checkpoint": f"{checkpoint_label}.pt",
             "sample_count": len(self.sample_ids),
@@ -1316,6 +1381,12 @@ class GlobalDistributionAccumulator:
                 "normalization": "probability_mass_then_density_by_bin_area",
                 "range_policy": "shared_ground_truth_and_reconstruction_finite_extrema_with_2pct_padding",
             },
+            "sample_pair_occupations": {
+                "payload": None if pair_occupation_path is None else pair_occupation_path.name,
+                "estimand": "per_sample_raw_value_and_own_rank_occupation",
+                "rank_definition": "endpoint_weighted_midrank_ties_share_rank",
+                "bins_per_axis": 16,
+            },
             "jensen_shannon_divergence": {
                 "logarithm_base": 2,
                 "units": "bits",
@@ -1326,6 +1397,7 @@ class GlobalDistributionAccumulator:
             "artifacts": {
                 "metrics_csv": csv_path.name,
                 "metrics_payload": payload_path.name,
+                "pair_occupations_payload": None if pair_occupation_path is None else pair_occupation_path.name,
                 "figures": {label: path.name for label, path in figures.items()},
             },
         }
@@ -1337,6 +1409,7 @@ class GlobalDistributionAccumulator:
             "report": str(report_path),
             "metrics_csv": str(csv_path),
             "metrics_payload": str(payload_path),
+            "pair_occupations_payload": None if pair_occupation_path is None else str(pair_occupation_path),
             "figures": {label: str(path) for label, path in figures.items()},
             "jensen_shannon_divergence_bits": {
                 row["pair"]: row["jensen_shannon_divergence_bits"] for row in rows
@@ -1349,12 +1422,24 @@ class GlobalDistributionAccumulator:
         target: torch.Tensor,
         coordinates: torch.Tensor,
         sample_id: str,
+        *,
+        physical_weights: torch.Tensor | None = None,
+        measure_metadata: Mapping[str, Any] | None = None,
     ) -> None:
+        family_context: dict[str, Any] = {"sample_ids": [sample_id], "reference_ids": [sample_id]}
+        if physical_weights is not None:
+            family_context.update(generated_weights=physical_weights, reference_weights=physical_weights)
+        if measure_metadata is not None:
+            candidate = dict(measure_metadata)
+            if self.measure_metadata and candidate != self.measure_metadata:
+                raise ValueError("State evaluation measure metadata changed within the panel")
+            self.measure_metadata = candidate
+            family_context["measure_metadata"] = candidate
         result = self.family(
             prediction,
             target,
             coordinates=coordinates,
-            context={"sample_ids": [sample_id], "reference_ids": [sample_id]},
+            context=family_context,
         )
         paths = {
             "marginal": "global_distribution.self.marginal_w2",
@@ -1402,6 +1487,31 @@ class GlobalDistributionAccumulator:
             self.extra_reference.append(
                 reference[0, device_indices].detach().cpu().numpy().astype(np.float32)
             )
+            selected_context: dict[str, Any] = {}
+            if physical_weights is not None:
+                masses = torch.as_tensor(physical_weights, device=prediction.device)
+                if masses.ndim == 2 and masses.shape[0] == 1:
+                    masses = masses[0]
+                if masses.shape != (prediction.shape[1],):
+                    raise ValueError("physical_weights must align with the evaluated query points")
+                masses = masses[device_indices]
+                if not bool(masses.sum() > 0):
+                    raise ValueError("the selected diagnostic panel has no positive physical mass")
+                masses = masses / masses.sum()
+                self.extra_weights.append(masses.detach().cpu().numpy().astype(np.float64))
+                selected_context = {"generated_weights": masses, "reference_weights": masses}
+            if self.family.score_definition in {"marginal_mixed_mean_v2", "marginal_mixed_weighted_v3"}:
+                pair_values = self.family.pair_diagnostics(
+                    prediction[:, device_indices], target[:, device_indices],
+                    context=selected_context, bins=16,
+                )
+                self.extra_pair_occupations.append({
+                    name: {
+                        key: value.detach().cpu().numpy() if isinstance(value, torch.Tensor) else value
+                        for key, value in item.items()
+                    }
+                    for name, item in pair_values.items()
+                })
 
     def finalize(
         self,
@@ -1421,17 +1531,25 @@ class GlobalDistributionAccumulator:
             (self.marginal_total, self.pairwise_total, self.joint_total)
         )
         family_total = np.asarray(self.family_total, dtype=np.float64)[:, None]
+        mixed_mean = self.family.score_definition in {"marginal_mixed_mean_v2", "marginal_mixed_weighted_v3"}
+        joint_key = "joint_mixed_mean" if mixed_mean else "joint_top_tail"
+        joint_label = "Mixed projection mean" if mixed_mean else "Joint/top-tail"
         payload_path = destination / "metrics.npz"
         np.savez_compressed(
             payload_path,
             marginal_per_field=marginal,
             pairwise_per_field_pair=pairwise,
             joint_top_tail=joint,
+            # Historical consumers use joint_top_tail; the semantic key and
+            # definition disambiguate the newer all-directions mean.
+            **({"joint_mixed_mean": joint} if mixed_mean else {}),
             weighted_component_totals=component_totals,
             family_total=family_total,
             field_names=np.asarray(self.field_names),
             pair_labels=np.asarray(self.pair_labels),
-            component_names=np.asarray(("marginal", "pairwise", "joint_top_tail")),
+            component_names=np.asarray(("marginal", "pairwise", joint_key)),
+            score_definition=np.asarray(self.family.score_definition),
+            joint_definition=np.asarray(joint_key),
             sample_ids=np.asarray(self.sample_ids),
             split=np.asarray(split),
             units=np.asarray(self.family.units),
@@ -1446,8 +1564,8 @@ class GlobalDistributionAccumulator:
                     writer.writerow((sample_id, "marginal", name, marginal[row, column]))
                 for column, name in enumerate(self.pair_labels):
                     writer.writerow((sample_id, "pairwise", name, pairwise[row, column]))
-                writer.writerow((sample_id, "joint_top_tail", "all_fields", joint[row, 0]))
-                for column, name in enumerate(("marginal", "pairwise", "joint_top_tail")):
+                writer.writerow((sample_id, joint_key, "all_fields", joint[row, 0]))
+                for column, name in enumerate(("marginal", "pairwise", joint_key)):
                     writer.writerow(
                         (sample_id, name, "weighted_component_total", component_totals[row, column])
                     )
@@ -1476,7 +1594,7 @@ class GlobalDistributionAccumulator:
         )
 
         extra_output = None
-        if self.extra_view:
+        if self.extra_view and self.extra_pair_indices:
             extra_output = self.render_extra(
                 destination / "global_distribution_extra",
                 split=split,
@@ -1496,10 +1614,10 @@ class GlobalDistributionAccumulator:
         joint_plot = np.column_stack((joint[:, 0], component_totals[:, 2], family_total[:, 0]))
         render_coherence_distribution(
             joint_plot,
-            ("Joint/top-tail", "Joint total", "Family total"),
+            (joint_label, "Joint total", "Family total"),
             ("detail", "component_total", "family_total"),
             figures["joint_top_tail"],
-            title="Joint/top-tail distribution",
+            title=f"{joint_label} distribution",
             subtitle=subtitle,
             scale=scale,
         )
@@ -1513,10 +1631,10 @@ class GlobalDistributionAccumulator:
                 name: _finite_summary(pairwise[:, index])
                 for index, name in enumerate(self.pair_labels)
             },
-            "joint_top_tail": _finite_summary(joint[:, 0]),
+            joint_key: _finite_summary(joint[:, 0]),
             "weighted_component_totals": {
                 name: _finite_summary(component_totals[:, index])
-                for index, name in enumerate(("marginal", "pairwise", "joint_top_tail"))
+                for index, name in enumerate(("marginal", "pairwise", joint_key))
             },
             "family_total": _finite_summary(family_total[:, 0]),
         }
@@ -1524,6 +1642,12 @@ class GlobalDistributionAccumulator:
             "family": "global_distribution",
             "metric": "paired_reconstruction_to_ground_truth_squared_distribution_discrepancy",
             "score_definition": self.family.score_definition,
+            "joint_definition": joint_key,
+            "measure": (
+                {"kind": "fixed_separate_endpoint_physical_weights", "metadata": self.measure_metadata,
+                 "native_artifact": self.family.state_artifact().get("measure")}
+                if self.family.weighted_measure else {"kind": "equal_nodes"}
+            ),
             "component_availability": {
                 "marginal": "self_marginal_w2" in self.family.components_by_key
                 and self.family.component_weights.get("self_marginal_w2", 0) > 0,
@@ -2315,6 +2439,8 @@ def build_coherence_accumulators(
     extra_views: bool = False,
     evaluated_sample_count: int | None = None,
     cross_spectrum_aggregation: str = "training_aligned",
+    multiscale_artifact_path: str | Path | None = None,
+    topology_artifact_path: str | Path | None = None,
 ) -> dict[str, Any]:
     normalized = tuple(dict.fromkeys(str(name).strip().lower() for name in requested))
     unsupported = sorted(set(normalized) - set(SUPPORTED_COHERENCE_FAMILIES))
@@ -2336,6 +2462,20 @@ def build_coherence_accumulators(
                 runtime,
                 aggregation=cross_spectrum_aggregation,
             )
+        elif name == "multiscale_spectrum":
+            from .multiscale_set import MultiscaleSetAccumulator
+
+            accumulators[name] = MultiscaleSetAccumulator.build(
+                runtime, artifact_path=multiscale_artifact_path
+            )
         else:
-            accumulators[name] = TopologySetAccumulator.build(runtime)
+            topology = runtime.config.get("coherence", {}).get("families", {}).get("topology", {})
+            if topology.get("persistence", {}).get("definition") == "finite_primary_v1":
+                from .finite_primary_set import FinitePrimarySetAccumulator
+
+                accumulators[name] = FinitePrimarySetAccumulator.build(
+                    runtime, artifact_path=topology_artifact_path
+                )
+            else:
+                accumulators[name] = TopologySetAccumulator.build(runtime)
     return accumulators

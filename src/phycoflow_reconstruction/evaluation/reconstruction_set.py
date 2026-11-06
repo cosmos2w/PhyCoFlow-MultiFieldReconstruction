@@ -19,9 +19,13 @@ from tqdm.auto import tqdm
 
 from ..config import load_config
 from ..data.manifest import SensorManifest, build_batch_from_manifest, dataset_fingerprint
+from ..data.physical_measure import batch_measure_context, configure_physical_measure
 from ..data.sensor_protocols import build_observation_batch
+from ..training.coherence_sampling import _conditional_draw_seed
 from ..training.common import sensor_protocol_from_config
 from ..training.model_lifecycle import selected_evaluation_weight_context
+from ..training.post_training import _without_target
+from ..training.rollout import differentiable_reconstruction
 from ..training.run_store import file_sha256
 from ..training.source import source_checkpoint_path
 from .checkpoint import load_evaluation_runtime
@@ -176,6 +180,8 @@ def _merge_coherence_evaluation_override(
         compute_fields.update(("query_policy", "point_count", "query_seed"))
     if "cross_spectrum" in requested_families:
         compute_fields.update(("batch_size", "point_count", "query_seed"))
+    if "multiscale_spectrum" in requested_families:
+        compute_fields.update(("query_policy", "point_count", "query_seed"))
     if compute_fields:
         current_budget = current_coherence.get("compute_budget", {})
         merged_budget = deepcopy(merged.get("compute_budget", {}))
@@ -466,6 +472,10 @@ def _evaluate_reconstruction_set_once(
     output_dir_override: str | Path | None = None,
     coherence_config_override: dict[str, Any] | None = None,
     evaluation_seed_override: int | None = None,
+    multiscale_artifact_path: str | Path | None = None,
+    topology_artifact_path: str | Path | None = None,
+    sampling_config_override: dict[str, Any] | None = None,
+    physical_measure_override: str | None = None,
 ) -> _SetEvaluationResult:
     """Stream a complete split through one loaded model and plot field-wise error statistics."""
     run_dir = Path(run_dir).resolve()
@@ -501,6 +511,8 @@ def _evaluate_reconstruction_set_once(
     if evaluation_seed_override is not None:
         runtime.seed = int(evaluation_seed_override)
     dataset = runtime.dataset
+    if physical_measure_override is not None:
+        configure_physical_measure(dataset, physical_measure_override)
     evaluated_dataset_fingerprint = dataset_fingerprint(dataset.path)
     available_sample_count = len(dataset)
     if available_sample_count < 1:
@@ -516,6 +528,8 @@ def _evaluate_reconstruction_set_once(
         extra_views=extra_coherence_views,
         evaluated_sample_count=sample_count,
         cross_spectrum_aggregation=cross_spectrum_aggregation,
+        multiscale_artifact_path=multiscale_artifact_path,
+        topology_artifact_path=topology_artifact_path,
     )
     errors = np.full((sample_count, len(field_names)), np.nan, dtype=np.float64)
     sample_ids: list[str] = []
@@ -594,15 +608,31 @@ def _evaluate_reconstruction_set_once(
                     + "\n"
                 )
                 batch = batch.to(runtime.device)
+                inference_batch = _without_target(batch)
+                sampling_config = sampling_config_override or runtime.config
+                external = bool(
+                    sampling_config.get("optimization", {}).get("multitask", {}).get("external_policy")
+                )
+
+                def reconstruct(
+                    draw_generator, *, inference_batch=inference_batch, external=external,
+                    sampling_config=sampling_config,
+                ):
+                    if external:
+                        return differentiable_reconstruction(
+                            runtime.model, inference_batch, steps=runtime.generation_steps,
+                            solver=sampling_config["rollout"]["solver"], generator=draw_generator,
+                            observation_config=dict(sampling_config["observation_consistency"]),
+                        )
+                    return runtime.model.reconstruct(
+                        inference_batch, steps=runtime.generation_steps, generator=draw_generator
+                    ).prediction
+
                 if output_index == 0:
                     warmup_generator = torch.Generator(device=runtime.device).manual_seed(
                         runtime.seed
                     )
-                    runtime.model.reconstruct(
-                        batch,
-                        steps=runtime.generation_steps,
-                        generator=warmup_generator,
-                    )
+                    reconstruct(warmup_generator)
                     if runtime.device.type == "cuda":
                         torch.cuda.synchronize(runtime.device)
                         torch.cuda.reset_peak_memory_stats(runtime.device)
@@ -610,11 +640,14 @@ def _evaluate_reconstruction_set_once(
                     runtime.seed + sample_index
                 )
                 inference_started = perf_counter()
-                reconstruction = runtime.model.reconstruct(
-                    batch,
-                    steps=runtime.generation_steps,
-                    generator=generator,
-                )
+                prediction = reconstruct(generator)
+                additional_draws = []
+                draw_count = max((getattr(item, "draw_count", 1) for item in coherence.values()), default=1)
+                for draw in range(1, draw_count):
+                    draw_generator = torch.Generator(device=runtime.device).manual_seed(
+                        _conditional_draw_seed(runtime.seed + sample_index, draw)
+                    )
+                    additional_draws.append(reconstruct(draw_generator))
                 if runtime.device.type == "cuda":
                     torch.cuda.synchronize(runtime.device)
                 inference_seconds += perf_counter() - inference_started
@@ -623,7 +656,7 @@ def _evaluate_reconstruction_set_once(
                     raise ValueError("set evaluation requires dense targets")
                 sample_errors = (
                     _physical_relative_l2(
-                        reconstruction.prediction,
+                        prediction,
                         target,
                         dataset.normalizer,
                     )[0]
@@ -633,12 +666,25 @@ def _evaluate_reconstruction_set_once(
                 errors[output_index] = sample_errors
                 sample_ids.append(batch.sample_ids[0])
                 valid_query = batch.query_valid_mask[0]
-                for accumulator in coherence.values():
+                measure = batch_measure_context(batch)
+                for family_name, accumulator in coherence.items():
+                    kwargs = {}
+                    if family_name in {"multiscale_spectrum", "topology"} and hasattr(accumulator, "draw_count"):
+                        kwargs["conditional_draws"] = tuple(
+                            draw[:, valid_query] for draw in additional_draws[:accumulator.draw_count - 1]
+                        )
+                    elif family_name == "global_distribution":
+                        weights = measure.get("generated_weights")
+                        kwargs = {
+                            "physical_weights": None if weights is None else weights[:, valid_query],
+                            "measure_metadata": measure.get("measure_metadata"),
+                        }
                     accumulator.update(
-                        reconstruction.prediction[:, valid_query],
+                        prediction[:, valid_query],
                         target[:, valid_query],
                         batch.query_coords[:, valid_query],
                         batch.sample_ids[0],
+                        **kwargs,
                     )
                 writer.writerow((sample_index, batch.sample_ids[0], *sample_errors.tolist()))
                 if (output_index + 1) % 100 == 0:
@@ -715,6 +761,14 @@ def _evaluate_reconstruction_set_once(
             "weight_selection": weight_selection,
             "generation_steps": runtime.generation_steps,
             "generation_seed_policy": "base_seed_plus_split_relative_sample_index",
+            "multiscale_draw_seed_policy": (
+                "first draw uses sample seed; additional draws use conditional draw stride"
+                if "multiscale_spectrum" in coherence else None
+            ),
+            "conditional_draw_seed_policy": (
+                "first draw uses sample seed; additional draws use conditional draw stride"
+                if any(getattr(item, "draw_count", 1) > 1 for item in coherence.values()) else None
+            ),
             "sensor_manifest": _trace_path(manifest_path, run_dir),
             "sensor_manifest_sha256": file_sha256(manifest_path),
             "metrics_csv": _trace_path(csv_path, run_dir),
@@ -760,7 +814,8 @@ def _global_distribution_specs(
     with np.load(path, allow_pickle=False) as payload:
         marginal = np.asarray(payload["marginal_per_field"], dtype=np.float64)
         pairwise = np.asarray(payload["pairwise_per_field_pair"], dtype=np.float64)
-        joint = np.asarray(payload["joint_top_tail"], dtype=np.float64)
+        mean_bank = "joint_mixed_mean" in payload
+        joint = np.asarray(payload["joint_mixed_mean" if mean_bank else "joint_top_tail"], dtype=np.float64)
         component_totals = np.asarray(payload["weighted_component_totals"], dtype=np.float64)
         family_total = np.asarray(payload["family_total"], dtype=np.float64)
         field_names = tuple(str(value) for value in payload["field_names"])
@@ -782,10 +837,10 @@ def _global_distribution_specs(
         ),
         "joint_top_tail": (
             np.column_stack((joint[:, 0], component_totals[:, 2], family_total[:, 0])),
-            ("Joint/top-tail", "Joint total", "Family total"),
+            ("Joint mixed mean" if mean_bank else "Joint/top-tail", "Joint total", "Family total"),
             ("detail", "component_total", "family_total"),
             "joint_top_tail_distributions.png",
-            "Joint/top-tail distribution coherence",
+            "Joint mixed projection mean" if mean_bank else "Joint/top-tail distribution coherence",
         ),
     }
 
@@ -1258,7 +1313,118 @@ def _render_posttraining_comparison(
                 for label, limits in extra_ranges.items()
             }
 
-    if "topology" in coherence_families:
+    if "multiscale_spectrum" in coherence_families:
+        scale_dir = current.output_dir / "coherence" / "multiscale_spectrum"
+        base_dir = base.output_dir / "coherence" / "multiscale_spectrum"
+        current_report = json.loads((scale_dir / "report.json").read_text(encoding="utf-8"))
+        base_report = json.loads((base_dir / "report.json").read_text(encoding="utf-8"))
+        for key in ("artifact_sha256", "query_indices_sha256", "score_definition_version", "draw_count", "sample_ids"):
+            if base_report[key] != current_report[key]:
+                raise ValueError(f"base and post-training Scale {key} do not match")
+        with np.load(scale_dir / "metrics.npz", allow_pickle=False) as payload:
+            names = tuple(str(item) for item in payload["component_names"])
+            current_values = payload["component_values"].copy()
+        with np.load(base_dir / "metrics.npz", allow_pickle=False) as payload:
+            if tuple(str(item) for item in payload["component_names"]) != names:
+                raise ValueError("base and post-training Scale components do not match")
+            base_values = payload["component_values"].copy()
+        indices = [i for i, name in enumerate(names) if (
+            name == "family_total" or "signed_band_energy_score" in name
+            or "joint_spectral" in name or "paired_signed_band_distance" in name
+        )] or [len(names) - 1]
+        combined = np.concatenate((base_values[:, indices], current_values[:, indices]))
+        low = min(0.0, float(combined.min()) * 1.1)
+        high = max(float(combined.max()) * 1.1, np.finfo(np.float64).eps)
+        labels = [names[i].replace("multiscale_spectrum.", "") for i in indices]
+        roles = ["family_total" if names[i] == "family_total" else "detail" for i in indices]
+        for label, values, filename in (
+            ("Base source", base_values, "scale_distance_base.png"),
+            ("Post-training", current_values, "scale_distance.png"),
+        ):
+            render_coherence_distribution(
+                values[:, indices], labels, roles, scale_dir / filename,
+                title=f"{label} — {current.split} Scale",
+                subtitle=f"{len(values)} matched conditions; {current_report['draw_count']} draw(s)",
+                ylabel="Represented Scale discrepancy", scale="linear", value_limits=(low, high),
+            )
+        shutil.copy2(base_dir / "metrics.npz", scale_dir / "metrics_base.npz")
+        base_report["artifacts"] = {
+            "metrics_payload": "metrics_base.npz", "figure": "scale_distance_base.png"
+        }
+        (scale_dir / "report_base.json").write_text(
+            json.dumps(base_report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        artifacts["base"]["multiscale_spectrum"] = {
+            "figure": str((scale_dir / "scale_distance_base.png").relative_to(current.output_dir)),
+            "metrics_payload": str((scale_dir / "metrics_base.npz").relative_to(current.output_dir)),
+            "report": str((scale_dir / "report_base.json").relative_to(current.output_dir)),
+        }
+        artifacts["post_training"]["multiscale_spectrum"] = {
+            "figure": str((scale_dir / "scale_distance.png").relative_to(current.output_dir)),
+            "metrics_payload": str((scale_dir / "metrics.npz").relative_to(current.output_dir)),
+            "report": str((scale_dir / "report.json").relative_to(current.output_dir)),
+        }
+        matched_coherence_contracts["multiscale_spectrum"] = {
+            key: current_report[key] for key in (
+                "artifact_sha256", "query_indices_sha256", "score_definition_version", "draw_count"
+            )
+        }
+        shared_limits["multiscale_spectrum"] = [low, high]
+
+    finite_shape = (
+        "topology" in coherence_families
+        and getattr(getattr(current.coherence_accumulators["topology"], "family", None), "version", None) == "4"
+    )
+    if finite_shape:
+        shape_dir = current.output_dir / "coherence" / "topology"
+        base_dir = base.output_dir / "coherence" / "topology"
+        current_shape = json.loads((shape_dir / "report.json").read_text(encoding="utf-8"))
+        base_shape = json.loads((base_dir / "report.json").read_text(encoding="utf-8"))
+        for key in ("definition", "artifact_sha256", "query_indices_sha256", "geometry_sha256", "draw_count", "sample_ids", "component_names"):
+            if base_shape[key] != current_shape[key]:
+                raise ValueError(f"base and post-training finite Shape {key} do not match")
+        names = tuple(current_shape["component_names"])
+        index = names.index("family_total")
+        current_values = np.asarray(current_shape["mean_component_values"], dtype=np.float64)[:, [index]]
+        base_values = np.asarray(base_shape["mean_component_values"], dtype=np.float64)[:, [index]]
+        high = max(float(np.concatenate((current_values, base_values)).max()) * 1.1, np.finfo(np.float64).eps)
+        for label, values, filename in (
+            ("Base source", base_values, "finite_primary_distance_base.png"),
+            ("Post-training", current_values, "finite_primary_distance.png"),
+        ):
+            render_coherence_distribution(
+                values, ["finite-primary Shape"], ["family_total"], shape_dir / filename,
+                title=f"{label} — {current.split} Shape",
+                subtitle=f"{len(values)} matched conditions; mean of {current_shape['draw_count']} member(s)",
+                ylabel="Paired finite-primary distance", scale="linear", value_limits=(0, high),
+            )
+        shutil.copy2(base_dir / "metrics.npz", shape_dir / "metrics_base.npz")
+        shutil.copy2(base_dir / "representative_payload.npz", shape_dir / "representative_payload_base.npz")
+        shutil.copytree(base_dir / "filtrations", shape_dir / "filtrations_base", dirs_exist_ok=True)
+        base_shape["artifacts"] = {
+            "metrics_payload": "metrics_base.npz", "figure": "finite_primary_distance_base.png",
+            "representative_payload": "representative_payload_base.npz",
+            "filtrations": [name.replace("filtrations/", "filtrations_base/", 1) for name in base_shape["artifacts"]["filtrations"]],
+        }
+        (shape_dir / "report_base.json").write_text(json.dumps(base_shape, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        artifacts["base"]["topology"] = {
+            "figure": str((shape_dir / "finite_primary_distance_base.png").relative_to(current.output_dir)),
+            "metrics_payload": str((shape_dir / "metrics_base.npz").relative_to(current.output_dir)),
+            "report": str((shape_dir / "report_base.json").relative_to(current.output_dir)),
+        }
+        artifacts["post_training"]["topology"] = {
+            "figure": str((shape_dir / "finite_primary_distance.png").relative_to(current.output_dir)),
+            "metrics_payload": str((shape_dir / "metrics.npz").relative_to(current.output_dir)),
+            "report": str((shape_dir / "report.json").relative_to(current.output_dir)),
+        }
+        matched_coherence_contracts["topology"] = {
+            key: current_shape[key] for key in (
+                "definition", "artifact_sha256", "query_indices_sha256", "geometry_sha256", "draw_count"
+            )
+        }
+        shared_limits["topology"] = [0.0, high]
+
+    if "topology" in coherence_families and not finite_shape:
         base_topology_payload = base.output_dir / "coherence" / "topology" / "metrics.npz"
         current_topology_payload = current.output_dir / "coherence" / "topology" / "metrics.npz"
         base_topology, base_topology_report = _load_topology_comparison_data(
@@ -1814,7 +1980,7 @@ def evaluate_reconstruction_set(
         statistic_scale=statistic_scale,
     )
     if source is None:
-        if "topology" in families:
+        if "topology" in families and getattr(current.coherence_accumulators["topology"].family, "version", None) != "4":
             from .explanatory_coherence import render_saved_coherence_explanatory
 
             render_saved_coherence_explanatory(current.output_dir, families=families)
@@ -1841,6 +2007,18 @@ def evaluate_reconstruction_set(
             output_dir_override=Path(temporary_dir),
             coherence_config_override=run_config.get("coherence"),
             evaluation_seed_override=current.evaluation_seed,
+            multiscale_artifact_path=(
+                current.coherence_accumulators["multiscale_spectrum"].artifact_path
+                if "multiscale_spectrum" in current.coherence_accumulators else None
+            ),
+            topology_artifact_path=(
+                current.coherence_accumulators["topology"].artifact_path
+                if "topology" in current.coherence_accumulators
+                and getattr(current.coherence_accumulators["topology"].family, "version", None) == "4"
+                else None
+            ),
+            sampling_config_override=run_config if {"multiscale_spectrum", "topology"} & set(families) else None,
+            physical_measure_override=run_config.get("dataset", {}).get("physical_measure"),
         )
         _render_posttraining_comparison(
             current,
@@ -1848,8 +2026,14 @@ def evaluate_reconstruction_set(
             coherence_families=families,
             statistic_scale=statistic_scale,
         )
-        if {"cross_spectrum", "topology"} & set(families):
+        explanatory = tuple(
+            name for name in families if name == "cross_spectrum" or (
+                name == "topology"
+                and getattr(current.coherence_accumulators["topology"].family, "version", None) != "4"
+            )
+        )
+        if explanatory:
             from .explanatory_coherence import render_saved_coherence_explanatory
 
-            render_saved_coherence_explanatory(current.output_dir, families=families)
+            render_saved_coherence_explanatory(current.output_dir, families=explanatory)
     return current.figure_path

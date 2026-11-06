@@ -1,0 +1,5 @@
+# Reset this mapping between recursively merged stochastic and point profiles.
+coherence:
+  families:
+    multiscale_spectrum:
+      objective: null

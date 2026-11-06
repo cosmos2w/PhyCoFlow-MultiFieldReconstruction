@@ -67,10 +67,13 @@ def _load_case_config(
                     if source_config.get("case") != case_name:
                         raise ValueError("source run belongs to a different case")
                     model_ema_eval = config.get("model", {}).get("model_ema_eval")
+                    physical_measure = config.get("dataset", {}).get("physical_measure")
                     for key in ("dataset", "model", "observations"):
                         if key not in source_config:
                             raise ValueError(f"source run is missing inheritable section {key!r}")
                         config[key] = source_config[key]
+                    if physical_measure is not None:
+                        config["dataset"]["physical_measure"] = physical_measure
                     if model_ema_eval is not None:
                         config["model"]["model_ema_eval"] = model_ema_eval
                     source = config.setdefault("source", {})
@@ -81,6 +84,8 @@ def _load_case_config(
                         "observations": "source_run.resolved_config.yaml",
                         "post_training": "child_config",
                     }
+                    if physical_measure is not None:
+                        source["config_origins"]["dataset.physical_measure"] = "child_config"
                     if model_ema_eval is not None:
                         source["config_origins"]["model.model_ema_eval"] = "child_config"
                 elif config.get("source", {}).get("kind") == "legacy_demo50":
@@ -175,6 +180,20 @@ def run_case_cli(case_name: str, case_dir: str | Path) -> int:
         default="configured",
     )
 
+    native = subparsers.add_parser("evaluate-native-coherence")
+    native.add_argument("--run", type=Path, required=True)
+    native.add_argument("--checkpoint", default="last")
+    native.add_argument("--split", choices=("train", "validation", "test"), default="validation")
+    native.add_argument("--indices", type=Path, required=True, help="JSON list or panel manifest")
+    native.add_argument("--panel", default="selection_validation_positions")
+    native.add_argument("--endpoint-config", type=Path, required=True)
+    native.add_argument("--metric-bundle", type=Path)
+    native.add_argument("--draws", type=int, default=4)
+    native.add_argument("--seed", type=int, default=812711)
+    native.add_argument("--device")
+    native.add_argument("--risk-only", action="store_true")
+    native.add_argument("--output", type=Path, required=True)
+
     history_renderer = subparsers.add_parser("render-history")
     history_renderer.add_argument("--run", type=Path, required=True)
     history_renderer.add_argument("--output", type=Path)
@@ -204,10 +223,10 @@ def run_case_cli(case_name: str, case_dir: str | Path) -> int:
     visualizer.add_argument(
         "--eval-coherence",
         nargs="+",
-        choices=("global_distribution", "cross_spectrum", "topology"),
+        choices=("global_distribution", "cross_spectrum", "multiscale_spectrum", "topology"),
         help=(
             "also evaluate selected coherence families over --eval-set; "
-            "supports global_distribution, cross_spectrum, and topology"
+            "supports global_distribution, cross_spectrum, multiscale_spectrum, and topology"
         ),
     )
     visualizer.add_argument(
@@ -247,6 +266,31 @@ def run_case_cli(case_name: str, case_dir: str | Path) -> int:
     )
 
     args = parser.parse_args()
+    if args.command == "evaluate-native-coherence":
+        from .evaluation.checkpoint import load_evaluation_runtime
+        from .evaluation.native_coherence import infer_native_panel
+        from .evaluation.native_scoring import score_native_payloads
+        panels = json.loads(args.indices.read_text())
+        indices = panels[args.panel] if isinstance(panels, dict) else panels
+        endpoint = json.loads(args.endpoint_config.read_text())
+        endpoint = endpoint.get("effective_endpoint", endpoint)
+        runtime = load_evaluation_runtime(args.run, split=args.split, checkpoint=args.checkpoint,
+            sensor_config=None, generation_steps=endpoint["steps"], device_name=args.device,
+            include_temporal_derivative=False)
+        try:
+            manifest_path = infer_native_panel(runtime, runtime.dataset, indices, args.output,
+                endpoint, panel_seed_base=args.seed, draws=args.draws,
+                retain_payloads=not args.risk_only)
+        finally:
+            runtime.dataset.close()
+        if args.metric_bundle is not None and not args.risk_only:
+            manifest = json.loads(manifest_path.read_text())
+            score_native_payloads(args.metric_bundle,
+                [manifest_path.parent / row["payload"] for row in manifest["conditions"]],
+                manifest_path.parent / "coherence.json")
+        print(manifest_path)
+        return 0
+
     if args.command == "render-coherence-explanatory":
         from .evaluation.explanatory_coherence import render_saved_coherence_explanatory
 

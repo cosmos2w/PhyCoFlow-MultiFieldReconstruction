@@ -42,7 +42,9 @@ With positive joint weight, fixed geometry/scales, independent conditional draws
 
 `coherence_crps_weight: beta` optionally adds CRPS of `rho_bfg = G_bfg / sqrt((G_bff+delta_bf)(G_bgg+delta_bg))`. Fixed floors make gain invariance approximate only at power well above the floors. A positive weight requires two or more fields; one-field runs return a zero, unavailable diagnostic at weight zero. This auxiliary uses the same alpha as the signed-band score.
 
-Every draw keeps its gradient. Pairwise score storage is chunked; field-space and coefficient-space joint values and gradients are regression-tested against each other. Descriptor errors remain diagnostics for signed objectives. The joint term is registered only when enabled, preserving legacy component manifests.
+Every draw keeps its gradient. Projected-band and joint distances are computed directly from filtered coefficients using mass orthonormality and the same total-mass normalization. Differences are formed before projection, preserving the zero subgradient at coincidence without smoothing. Spatial band fields are synthesized for requested ensemble reports or nonlinear moment diagnostics. Field-space and coefficient-space values and all draw gradients are regression-tested. Descriptor errors remain diagnostics for signed objectives. The joint term is registered only when enabled, preserving legacy component manifests.
+
+For a deterministic model, `paired_signed_band_mean_distance` with definition `paired_signed_spectral_mean_v1` uses exactly one prediction. It sums the normalized, band-weighted projected point distances and `joint_distance_weight` times the joint signed-band/piece-mean point distance. Set a positive joint weight, positive `mean_weight`, and an explicit TRAIN task-unit floor. Its component paths are `paired_signed_band_distance.paired` and `paired_joint_spectral_mean_distance.paired`; signed Gram descriptors remain evaluation diagnostics. This paired point query makes no conditional-law or proper-score claim. The complete combustion example is [coherence_deterministic.yaml](../../../../../cases/turbulent_combustion/configs/posttrain/coherence_deterministic.yaml), with an explicit deterministic source distinct from the stochastic experiment source.
 
 ## Geometry and bands
 
@@ -68,7 +70,7 @@ The band fields and all Gram/moment descriptors remain insensitive to constant o
 
 ## Descriptor objectives
 
-- `paired_descriptor_mse`: `sum_c lambda_c mean_{descriptors in c} (Phi_c(Xhat) - Phi_c(Y))^2` per state. This is the deterministic objective, and also the single-draw ablation for flow models.
+- `paired_descriptor_mse`: `sum_c lambda_c mean_{descriptors in c} (Phi_c(Xhat) - Phi_c(Y))^2` per state. This is a deterministic descriptor objective and a single-draw ablation for flow models; the signed point objective above retains spatial arrangement and piece means.
 - `conditional_energy_score` (`conditional_draws: J >= 2`): `mean_j d_W(z_j, y) - sum_{j != l} d_W(z_j, z_l) / (2 J (J-1))`, where `d_W` is the weighted Euclidean norm with `W = lambda_c / d_c` per block. With `standardize_descriptors: true` each entry is further divided by that descriptor's variance across the training calibration states (floored at 1e-3 of its block's mean), so every descriptor counts in units of its natural spread rather than of its transform; well-matched, high-variance descriptors then stop dominating the distance.
   - The post-trainer draws the `J-1` extra reconstructions from the same target-free observations with independent latent noise, and they stay differentiable.
   - At coincident vectors the norm takes the zero subgradient; no smoothing is added.
@@ -128,7 +130,9 @@ path. V4 artifacts also bind SHA256 digests of the scientific package modules an
 the Torch, NumPy and SciPy versions; strict loading requires exact configuration
 and implementation/backend identity. V4 also records the full input field order
 and units, so loading a selected-field score against reordered channels is rejected.
-The v3 artifact contract remains unchanged.
+The v3 artifact contract remains unchanged. The paired mean-point definition also binds the input field contract and implementation/backend identity. Because source digests include the score implementation, a v4 artifact made before an implementation change is rejected; a controlled new artifact must be created from verified matching geometry and TRAIN calibration rather than weakening the check.
+
+`visualize-run --eval-coherence multiscale_spectrum` requires the run's frozen TRAIN family artifact and scores four independently seeded draws for conditional objectives. The deterministic point objective uses one prediction. For a SOURCE comparison, the child artifact is reused as the common Scale yardstick; incompatible geometry, configuration or artifact identity causes an explicit failure. This fixed-query report is not full-native evaluation unless its frozen artifact actually covers that support.
 
 ## Statistical background
 

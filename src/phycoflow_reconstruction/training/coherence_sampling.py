@@ -73,6 +73,10 @@ def _fit_training_references(
         if first.valid_points is not None and not bool(first.valid_points.all()):
             raise ValueError("coherence calibration requires compact all-valid nodes; full-grid invalid-point masks are unsupported")
     for name, family in families.items():
+        bind_measure = getattr(family, "bind_measure_artifact", None)
+        receipt = getattr(train_dataset, "physical_measure_receipt", None)
+        if callable(bind_measure) and getattr(family, "weighted_measure", False) and receipt is not None:
+            bind_measure(receipt, weights=train_dataset.physical_weights)
         fit = getattr(family, "fit_training_reference", None)
         if fit is None:
             continue
@@ -158,7 +162,7 @@ def _requires_frozen_checkpoint_state(family) -> bool:
     return (
         (family.family_name == "topology" and family.version == "4")
         or getattr(family, "mean_augmented", False)
-        or getattr(family, "score_definition", None) == "marginal_mixed_mean_v2"
+        or getattr(family, "score_definition", None) in {"marginal_mixed_mean_v2", "marginal_mixed_weighted_v3"}
     )
 
 

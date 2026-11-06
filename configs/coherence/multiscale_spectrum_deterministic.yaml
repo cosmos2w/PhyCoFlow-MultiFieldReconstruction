@@ -1,0 +1,33 @@
+# Standalone alternative for a deterministic adapter; do not merge on top of
+# the stochastic fragment because their objective keys have different meanings.
+# Supply case-specific fields, physical geometry and meaningful task-unit floors.
+coherence:
+  compute_budget:
+    query_policy: fixed_shared
+  families:
+    multiscale_spectrum:
+      enabled: true
+      weight: 1.0
+      target_use: paired_supervised
+      units: model_units
+      reference_bank:
+        enabled: false
+      geometry:
+        operator: fem_p1
+        coordinate_scaling: raw_extent
+      bands:
+        count: 3
+      calibration:
+        samples: 128
+        seed: 1729
+        # Example normalized-unit tolerance; each case must justify its floor.
+        field_unit_floor: 0.001
+      numerics:
+        dtype: float64
+      objective:
+        kind: paired_signed_band_mean_distance
+        score_definition_version: paired_signed_spectral_mean_v1
+        conditional_draws: 1
+        projections: axes_and_pairs
+        joint_distance_weight: 0.25
+        mean_weight: 1.0

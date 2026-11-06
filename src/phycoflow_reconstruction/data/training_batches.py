@@ -336,7 +336,7 @@ class ResidentH5BatchSource(nn.Module):
             query_generator = torch.Generator(device=self.device).manual_seed(
                 self.protocol.seed + 100_003 + global_step
             )
-            yield _assemble_random_batch(
+            batch = _assemble_random_batch(
                 values,
                 self.coordinates,
                 SensorProtocol(**{**self.protocol.to_dict(), "seed": self.protocol.seed + global_step}),
@@ -354,6 +354,8 @@ class ResidentH5BatchSource(nn.Module):
                 # contract checks after validating the first batch.
                 validate=offset == 0,
             )
+            from .physical_measure import attach_batch_measure
+            yield attach_batch_measure(self.dataset, batch)
 
     def close(self) -> None:
         self.fields = torch.empty(0, device=self.device)
@@ -473,6 +475,8 @@ class _CompactH5Dataset(Dataset):
                 },
             },
         )
+        from .physical_measure import attach_batch_measure
+        attach_batch_measure(self.dataset, batch)
         batch.validate()
         return [batch]
 

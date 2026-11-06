@@ -27,6 +27,7 @@ Physics-informed training and historical compatibility routes are available, but
 ## 0. Table of contents
 
 - [1. Start here](#1-start-here)
+  - [Current combustion post-training profile](#current-combustion-post-training-profile)
   - [1.1 First successful local run](#11-first-successful-local-run)
   - [1.2 Which command should I use?](#12-which-command-should-i-use)
 - [2. Repository architecture](#2-repository-architecture)
@@ -75,6 +76,27 @@ python -m pip install -e '.[dev,multitask,posttrain_constraints,plot]'
 
 `topology` adds GUDHI when using persistence losses; `keops` is needed only for source models configured with that neighbor backend. `plot` supports saved-run figures. The separate `posttrain` extra provides the older `conflictfree` ConFIG route; it is not a substitute for `multitask`. `operator` supplies GeoFNO/FNO backbones, and `legacy` supports the optional Demo50 neighbor-search path. Install the extras required by your selected source model and strategy.
 
+### Current combustion post-training profile
+
+The recommended complete [stochastic profile](cases/turbulent_combustion/configs/posttrain/coherence_current.yaml) enables exactly `global_distribution` (State), `multiscale_spectrum` (Scale), and `topology` (Shape); legacy `cross_spectrum` is explicitly disabled. State uses paired physical-area occupation, Scale uses the signed mean-augmented score with two independent conditional draws, and Shape uses paired persistence on a 32×128 physical-cell raster. The profile starts a fresh TorchJD ConFIG/Lagrangian controller from the recorded SOURCE and does not call the model's native training-loss path. It remains paired supervised training. These are method choices; their post-training learning benefit has not yet been established.
+
+For the local GPU 2 example, inspect the device UUID and processes first. Map the selected physical UUID to logical `cuda:0`, as specified by the profile:
+
+```bash
+nvidia-smi --query-gpu=index,uuid --format=csv,noheader
+nvidia-smi -i 2
+GPU_UUID="$(nvidia-smi -i 2 --query-gpu=uuid --format=csv,noheader)"
+export CUDA_VISIBLE_DEVICES="$GPU_UUID"
+export KEOPS_CACHE_FOLDER="$(mktemp -d /tmp/phycoflow-coherence-keops.XXXXXX)"
+
+python cases/turbulent_combustion/run.py validate \
+  --config configs/posttrain/coherence_current.yaml
+python cases/turbulent_combustion/run.py post-train \
+  --config configs/posttrain/coherence_current.yaml
+```
+
+The resolved profile inherits the recorded SOURCE model, sensor and normalization contract. Choose a new output lineage for a new SOURCE or method; resume only the same child. A separately named [deterministic profile](cases/turbulent_combustion/configs/posttrain/coherence_deterministic.yaml) uses one paired signed-band/mean point discrepancy and does not claim a conditional energy score. Historical `cross_spectrum` profiles remain available for replay. See the [strategy guide](docs/Posttraining_Strategies.md#current-state-scale-and-shape-profiles) for matching full-native evaluation and the [query definitions](docs/coherence_compute_enhancement.md).
+
 ### 1.1 First successful local run
 
 Datasets are intentionally local and are normally not committed. Link a payload into the canonical catalog without copying it, then validate it:
@@ -112,6 +134,7 @@ Every case exposes the same thin command-line interface through `cases/<case>/ru
 | Refine an immutable trained model | `post-train` | post-training config plus `source_run` |
 | Train a direct physics-informed model | `train-direct` | direct-physics config |
 | Produce numerical metrics for a run | `evaluate-run` | run directory and checkpoint |
+| Score matched full-native field risk and coherence | `evaluate-native-coherence` | checkpoint, frozen TRAIN metric bundle, endpoint and panel |
 | Rebuild training/coherence history figures | `render-history` | run directory |
 | Produce snapshot, set, and coherence figures | `visualize-run` | run directory and visualization options |
 | Refresh explanatory figures from saved set metrics | `render-coherence-explanatory` | run directory, split, checkpoint |
@@ -133,7 +156,7 @@ The reusable implementation is under `src/phycoflow_reconstruction/`:
 - `contracts.py` defines dataset, observation, reconstruction, loss, capability, coherence, and physics boundaries;
 - `data/` handles payload adapters, normalization, splits, manifests, and sensor protocols;
 - `models/` contains deterministic, generative, operator, flow, and isolated historical-compatibility adapters;
-- `coherence/` contains reference banks, family composition, observation consistency, and the global-distribution, cross-spectrum, and topology families;
+- `coherence/` contains reference banks, family composition, observation consistency, and the global-distribution, multiscale-spectrum, cross-spectrum, and topology families;
 - `training/` owns base training, coherence/physics post-training, direct physics, checkpoints, rollout, previews, and monitoring;
 - `evaluation/`, `physics/`, `config/`, and `cli.py` provide shared evaluation, case-independent physics interfaces, config composition, and command routing.
 
@@ -353,7 +376,7 @@ Post-training creates a child from your completed, immutable **SOURCE** run. Its
 
 ### 6.1 Prepare a portable configuration
 
-Keep reusable family definitions in `cases/<case>/configs/coherence/` and launch profiles in `cases/<case>/configs/posttrain/`. Commit reusable configuration with `source_run: null`; supply your local SOURCE at launch. Choose the fields, field pairs, query geometry and statistical targets appropriate to your own data. The available families are `global_distribution`, `cross_spectrum` and `topology`; they share one differentiable reconstruction.
+Keep reusable family definitions in `cases/<case>/configs/coherence/` and launch profiles in `cases/<case>/configs/posttrain/`. Supply the intended local SOURCE at launch when the profile does not bind one. Choose the fields, field pairs, query geometry and statistical targets appropriate to your own data. Families include `global_distribution`, `multiscale_spectrum`, `cross_spectrum` and `topology`; the current three-family profile selects the first, second and fourth. Configured families share the primary differentiable reconstruction, and a generative Scale objective can request additional draws.
 
 The common file owns the source contract, optimizer, runtime, rollout, evaluation, and shared coherence compute budget. This template starts with native reconstruction loss plus coherence. Replace `<case>` and field placeholders, choose budgets for your data, and add a selector block from §6.2:
 
@@ -378,7 +401,7 @@ optimization: {epochs: 100, batch_size: 16, train_fraction: 0.2, lr: 5.0e-5, wei
 runtime: {seed: 42, device: cuda:0, deterministic: true, num_workers: 0, data_strategy: async_cpu, progress: true}
 evaluation: {split: validation, max_samples: 32, query_points: 4096, generation_steps: 2, seed: 2027}
 checkpointing: {enabled: true, every_epochs: 10, save_epoch_one: true, selection_metric: reconstruction_mse}
-posttrain_fidelity: {max_relative_mse_increase: 0.05, behavior: report}
+posttrain_fidelity: {max_relative_mse_increase: 0.10, max_relative_field_mse_increase: 0.10, behavior: report}
 
 coherence:
   schedule: {start_epoch: 1, every_n_steps: 1, weight_warmup_epochs: 0, interval_rescale: false}
@@ -462,7 +485,7 @@ optimization:
       lagrangian: {dual_lr: 0.01, penalty_interval_updates: 1}
     fidelity_budget:
       metric: endpoint_mse_model_units
-      relative_increase: 0.05
+      relative_increase: 0.10
       absolute_allowance: 0.0
       denominator_floor: 1.0e-8
       calibration_batches: 4
@@ -474,7 +497,7 @@ coherence:
 checkpointing: {selection_metric: reconstruction_mse}
 ```
 
-Here `relative_increase: 0.05` permits a 5% increase in each field's TRAIN endpoint MSE in normalized model units; choose the allowance and calibration budget deliberately. This block requires all three named families enabled. To use a subset, replace `family_scalarization` with `fixed_sum`, `stch` or `dwa` and **remove** `coherence_aggregation`; keep the external policy and null outer aggregator. Optional optimizer LR warm-up uses `optimization.lr_warmup: {enabled: true, start_lr: 5.0e-6, updates: 20}`; choose its starting LR, target `optimization.lr`, update count and total training exposure for your problem. Warm-up uses the global successful-update cursor and resumes from that cursor.
+Here `relative_increase: 0.10` permits a 10% increase in each field's sampled equal-node TRAIN endpoint MSE in normalized model units; choose the allowance and calibration budget deliberately. This proxy is separate from the 10% per-field full-native physical-area risk used for the current profile's validation decision. This block requires State, Shape and a configured Scale family. To use a subset, replace `family_scalarization` with `fixed_sum`, `stch` or `dwa` and **remove** `coherence_aggregation`; keep the external policy and null outer aggregator. Optional optimizer LR warm-up uses `optimization.lr_warmup: {enabled: true, start_lr: 5.0e-6, updates: 20}`; choose its starting LR, target `optimization.lr`, update count and total training exposure for your problem. Warm-up uses the global successful-update cursor and resumes from that cursor.
 
 External policies require full-model training, dense coherence from the first update, no coherence-weight warm-up/rescaling or recurring family-gradient diagnostics, and selection by `reconstruction_mse` or `topology_with_fidelity`. They do not compose with native retention, endpoint/source-anchor objectives, component constraints, a non-null outer aggregator or a legacy gradient balancer. Merely setting the native loss weight to zero on the ordinary multitask route removes its gradient contribution but still computes that loss; use an external policy to skip native replay.
 
@@ -529,7 +552,7 @@ python scripts/posttraining/summarize_runs.py \
 
 An unchanged resume restores optimizer, policy, calibration, family/RNG/EMA state and warm-up progress. For a different method, budget, SOURCE or scientific definition, create a fresh child; extending a saved horizon is a separate [continuation operation](docs/Posttraining_Strategies.md). The evaluation above measures reconstruction on validation; use the coherence assessments in §7 as well, and match evaluation budgets and weight selection to your protocol. Inspect per-field fidelity as well as aggregate scores: a TRAIN allowance is not a held-out guarantee, and `best_fidelity.pt` need not meet every field's guard. Keep TEST separate from checkpoint selection.
 
-Histories, checkpoints, datasets and generated reports stay local. Share portable profiles, code and tests, and exchange resolved configurations and checkpoint identities alongside results. A dataset-specific [dense Lagrangian/ConFIG profile](cases/turbulent_combustion/configs/posttrain/fidelity_budget/lagrangian_config_warmup.yaml) and [measured results](docs/Posttraining_Results.md) are available as worked examples; adapt their fields, geometry and budgets rather than copying their experiment settings unchanged.
+Histories, checkpoints, datasets and generated reports stay local. Share portable profiles, code and tests, and exchange resolved configurations and checkpoint identities alongside results. The earlier [dense Lagrangian/ConFIG profile](cases/turbulent_combustion/configs/posttrain/fidelity_budget/lagrangian_config_warmup.yaml) and [measured results](docs/Posttraining_Results.md) are historical worked examples; adapt their fields, geometry and budgets rather than copying their experiment settings unchanged.
 
 ### 6.4 Physics post-training and direct training
 
@@ -562,6 +585,7 @@ Post-processing never retrains the model. Point it at an existing base or post-t
 | One qualitative full-field reconstruction | `visualize-run` | 300-DPI reconstruction PNG plus portable NPZ payload |
 | Error distributions over many snapshots | `visualize-run --eval-set ...` | violin/scatter figure, CSV, NPZ, and JSON |
 | Supported physical-coherence comparisons | add `--eval-coherence ...` | family-specific figures and numerical artifacts |
+| Full-native matched risk and SSS scoring | `evaluate-native-coherence` | per-condition native physical risk and frozen-bundle scores |
 | Re-render saved coherence components | `render-history` | `coherence_history.png` |
 | Refresh saved cross-spectrum and topology explanations | `render-coherence-explanatory` | pair scores, band errors, diagrams, and numerical provenance |
 | Review training objectives, gradients, and checkpoint gates | [A+B+C diagnostic gallery](cases/turbulent_combustion/diagnostics/ExampleVisual/README.md) | four history figures plus frozen numerical evidence |
@@ -595,7 +619,7 @@ For a completed, quantitative example with matched validation and test reconstru
 
 ### Quick commands for a saved A+B+C run
 
-From the repository root, set `RUN` to the path **relative to `cases/turbulent_combustion/`**. The run below is a concrete example; use your own run ID and checkpoint when reproducing a different experiment. All generated post-processing files stay inside that run directory:
+This is a historical `cross_spectrum` example, retained for replay. From the repository root, set `RUN` to the path **relative to `cases/turbulent_combustion/`**. The run below is a concrete example; use your own run ID and checkpoint when reproducing a different experiment. All generated post-processing files stay inside that run directory:
 
 ```bash
 RUN=runs/coherence_fix_ABC_sliced_persistence_formal_5000ep_gpu1/20260924T030724Z_4208231c
@@ -703,7 +727,7 @@ python cases/<case>/run.py visualize-run \
   --eval-coherence global_distribution cross_spectrum topology
 ```
 
-Use one or several family names when only part of that evaluation is needed. `--eval-coherence` requires `--eval-set`, accepts `global_distribution`, `cross_spectrum`, and `topology`, and writes each family into `evaluation/reconstruction_set_<split>_<checkpoint>/coherence/<family>/` so figures and numerical artifacts remain separated. The topology set view requires a configured cubical-persistence family and the training `fixed_shared` query policy.
+Use one or several family names when only part of that evaluation is needed. `--eval-coherence` requires `--eval-set`, accepts `global_distribution`, `multiscale_spectrum`, `cross_spectrum`, and `topology`, and writes family-specific numerical artifacts. The new Scale route requires its frozen family artifact and the draws specified by its objective. The topology set view requires a configured cubical-persistence family and the training `fixed_shared` query policy. For the current profile's full-native comparison, use `evaluate-native-coherence` with the same TRAIN-frozen metric bundle for SOURCE and child as described in the [strategy guide](docs/Posttraining_Strategies.md#current-state-scale-and-shape-profiles).
 
 For a post-training target, the same command automatically adds a matched `-base` figure beside each standard post-training coherence figure. The base calculation uses the child run's coherence evaluation contract and the same selected samples, sensor observations, inference settings, and plot limits, so corresponding figures are directly comparable. A requested family configured in the post-training run evaluates the coherence quantity used during training; a requested but unconfigured family uses the repository's paired-ground-truth default and should be interpreted as an auxiliary diagnostic. Use `--no-base-comparison` to skip source-checkpoint evaluation.
 

@@ -1,0 +1,341 @@
+# Recommended complete current stochastic SSS profile. CLI inherits SOURCE model/sensors.
+dataset:
+  path: ../../datasets/turbulent_combustion/Merged_CH4COTU1P.h5
+  split: train
+  reconstruction_unit: snapshot
+  field_names:
+  - CH4
+  - CO
+  - T
+  - U_1
+  - p
+  field_units:
+  - unknown
+  - unknown
+  - unknown
+  - unknown
+  - unknown
+  normalization: none
+  time_stride: 1
+  benchmark_eligible: true
+  coordinate_dim: 2
+  grid_shape:
+  - 100
+  - 403
+  coordinate_reorder: lexicographic_yx
+  grid_mapping_verified: true
+  physical_measure: native_rectilinear_area
+observations:
+  protocol: random_uniform
+  seed: 42
+  fields:
+    T:
+      count: 256
+stage: post_training
+case: turbulent_combustion
+source_run: runs/tc_gl_rbf_cq_coverage_5000ep/20261029T210910Z_cf9c2276
+source_checkpoint: last.pt
+inherit_base_config: true
+source:
+  kind: native_run
+  allow_integration_source: false
+model:
+  name: gl_rbf_cq
+  model_ema_eval: false
+objectives:
+  data_retention:
+    enabled: false
+    weight: 0.0
+  coherence:
+    enabled: true
+    weight: 1.0
+rollout:
+  steps: 2
+  solver: euler
+observation_consistency:
+  mode: endpoint_smooth
+  strength: 1.0
+  sigma: 0.05
+  schedule_power: 2.0
+  final_clamp: true
+  chunk_size: 4096
+trainable:
+  scope: full_model
+optimization:
+  epochs: 500
+  batch_size: 32
+  train_fraction: 1.0
+  sampling: full_pass
+  steps_per_epoch: 13
+  lr: 5.0e-05
+  weight_decay: 1.0e-06
+  grad_clip: 1.0
+  gradient_balance: weighted_sum
+  model_mode: eval
+  multitask:
+    family_scalarization:
+      method: none
+    outer_aggregation: null
+    external_policy:
+      method: lagrangian
+      vector_reduction: sum
+      objective_scale: source_mean
+      lagrangian:
+        dual_lr: 0.01
+        penalty_interval_updates: 1
+    fidelity_budget:
+      metric: endpoint_mse_model_units
+      relative_increase: 0.1
+      absolute_allowance: 0.0
+      denominator_floor: 1.0e-08
+      calibration_batches: 8
+      calibration_draws: 2
+      calibration_seed: 700103
+    coherence_aggregation:
+      method: torchjd_config
+  lr_warmup:
+    enabled: true
+    start_lr: 5.0e-06
+    updates: 76
+runtime:
+  seed: 43
+  device: cuda:0
+  deterministic: true
+  num_workers: 0
+  data_strategy: async_cpu
+  progress: true
+  plot_every_steps: 1
+evaluation:
+  split: validation
+  max_samples: 32
+  query_points: 4096
+  generation_steps: 2
+  seed: 2027
+  preview:
+    enabled: false
+checkpointing:
+  enabled: true
+  every_epochs: 25
+  save_epoch_one: true
+  selection_metric: reconstruction_mse
+  validation_every_epochs: 25
+  epochs:
+  - 1
+  - 25
+  - 50
+  - 75
+  - 100
+  - 125
+  - 150
+  - 175
+  - 200
+  - 225
+  - 250
+  - 275
+  - 300
+  - 325
+  - 350
+  - 375
+  - 400
+  - 425
+  - 450
+  - 475
+  - 500
+coherence:
+  schedule:
+    start_epoch: 1
+    every_n_steps: 1
+    weight_warmup_epochs: 0
+    interval_rescale: false
+  compute_budget:
+    batch_size: 32
+    point_count: 4096
+    query_policy: fixed_shared
+    query_seed: 100045
+  family_balance:
+    mode: none
+    calibration_batches: 2
+    reference: median
+    epsilon: 1.0e-12
+    scale_min: 1.0e-05
+    scale_max: 100.0
+    max_batch_ratio: 100.0
+    gradient_diagnostics_every_epochs: 0
+    seed: 700043
+  families:
+    global_distribution:
+      enabled: true
+      weight: 1.0
+      target_use: paired_supervised
+      units: model_units
+      fields:
+      - CH4
+      - CO
+      - T
+      - U_1
+      - p
+      reference_bank:
+        enabled: false
+      components:
+        self:
+          enabled: true
+          weight: 1.0
+        mutual:
+          enabled: false
+          weight: 1.0
+          directions: 8
+          seed: 1234
+        cross:
+          enabled: true
+          weight: 1.0
+          directions: 32
+          top_fraction: 1.0
+          seed: 1234
+          include_axes: false
+          qmc: true
+      definition: marginal_mixed_weighted_v3
+    cross_spectrum:
+      enabled: false
+      weight: 1.0
+      target_use: paired_supervised
+      units: model_units
+      fields:
+      - CH4
+      - CO
+      - T
+      - U_1
+      - p
+      pairs:
+      - - CO
+        - T
+      - - T
+        - CH4
+      - - T
+        - U_1
+      - - CH4
+        - U_1
+      reference_bank:
+        enabled: false
+      graph:
+        k_neighbors: 16
+        sigma: null
+        num_modes: 48
+        exclude_zero: true
+        bands:
+        - low
+        - mid
+        - high
+      eps: 1.0e-08
+      components:
+        self_spectrum:
+          enabled: false
+          weight: 1.0
+        same_frequency:
+          enabled: true
+          weight: 1.0
+        cross_frequency:
+          enabled: true
+          weight: 1.0
+        band_energy:
+          enabled: false
+          weight: 0.0
+    topology:
+      enabled: true
+      strategy: cubical_persistence
+      weight: 1.0
+      target_use: paired_supervised
+      units: model_units
+      fields:
+      - CO
+      - T
+      reference_bank:
+        enabled: false
+      geometry:
+        grid_shape:
+        - 32
+        - 128
+        axes:
+        - 0
+        - 1
+        neighbors: 4
+        power: 2.0
+        periodic: false
+        allow_projected_collisions: false
+        antialias_downsample: false
+        raster_mapping: physical_cell_overlap_v1
+      filtration:
+        dimensions:
+        - 0
+        - 1
+        directions:
+        - sublevel
+        - superlevel
+        smoothing_sigma: 0.0
+      persistence:
+        projections: 32
+        scale_floor: 0.0001
+        distance: sliced_wasserstein
+        definition: finite_primary_v1
+        calibration:
+          finite_floor: 0.0001
+          essential_floor: 0.0001
+      components:
+        self:
+          enabled: true
+          weight: 1.0
+          fields:
+          - CO
+          - T
+        mutual:
+          enabled: true
+          weight: 1.0
+          groups:
+          - - CO
+            - T
+          lines: 3
+    multiscale_spectrum:
+      enabled: true
+      weight: 1.0
+      target_use: paired_supervised
+      units: model_units
+      fields:
+      - CH4
+      - CO
+      - T
+      - U_1
+      - p
+      reference_bank:
+        enabled: false
+      geometry:
+        operator: fem_p1
+        coordinate_scaling: raw_extent
+        max_modes: 160
+        length_unit: dataset_raw_units_unspecified
+        connectivity: require_connected
+      bands:
+        wavelengths:
+        - 1.5
+        - 0.45
+        - 0.15
+        min_wavelength: 0.1
+      calibration:
+        samples: 128
+        seed: 1729
+        field_unit_floor: 0.01
+      numerics:
+        dtype: float64
+      objective:
+        kind: signed_band_energy_score
+        score_definition_version: signed_spectral_mean_augmented_v4
+        mean_weight: 1.0
+        conditional_draws: 2
+        almost_fair_alpha: 1.0
+        projections: axes_and_pairs
+        joint_energy_score_weight: 0.25
+        coherence_crps_weight: 0.0
+output:
+  experiment_name: coherence_current
+posttrain_fidelity:
+  max_relative_mse_increase: 0.1
+  max_relative_field_mse_increase: 0.1
+  behavior: report

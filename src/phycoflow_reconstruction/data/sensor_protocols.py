@@ -303,7 +303,8 @@ def build_observation_batch(
         count_q = coords_q.shape[0]
         query_coords[batch_index, :count_q] = coords_q
         query_values[batch_index, :count_q] = values_q
-        query_mask[batch_index, :count_q] = True
+        sample_valid = samples[batch_index].valid_points
+        query_mask[batch_index, :count_q] = True if sample_valid is None else sample_valid[ids_q]
         query_indices[batch_index, :count_q] = ids_q
 
     context: dict[str, object] = {}
@@ -340,5 +341,13 @@ def build_observation_batch(
             "sample_context": context,
         },
     )
+    receipts = [sample.metadata.get("measure_metadata") for sample in samples]
+    if receipts[0] is not None:
+        if any(receipt != receipts[0] for receipt in receipts):
+            raise ValueError("a batch must share its native physical measure")
+        batch.metadata["measure_metadata"] = {
+            "native_measure_sha256": receipts[0]["sha256"],
+            "query_policy": "native_nodal_mass_self_normalized",
+        }
     batch.validate()
     return batch

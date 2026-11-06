@@ -8,7 +8,8 @@ from itertools import product
 
 import numpy as np
 import torch
-from scipy.spatial import cKDTree
+from scipy import sparse
+from scipy.spatial import Delaunay, QhullError, cKDTree
 
 
 def coordinate_digest(coordinates: torch.Tensor) -> str:
@@ -24,7 +25,7 @@ class RasterMap:
     grid_shape: tuple[int, int]
     coordinate_sha256: str
     periods: tuple[float, float] | None
-    diagnostics: dict[str, float | int]
+    diagnostics: dict[str, float | int | str]
     valid_mask: torch.Tensor | None = None
 
 
@@ -43,6 +44,159 @@ def _infer_period(values: np.ndarray, axis_name: str) -> float:
             "approximately uniform endpoint-free lattice; configure geometry.periods"
         )
     return float(unique[-1] - unique[0] + pitch)
+
+
+def _physical_axis_overlap(axis: np.ndarray, size: int):
+    """Overlap of native nodal control cells with uniform physical raster cells.
+
+    The domain ends at the endpoint nodes; interior edges are midpoints. Thus
+    source cell widths are the standard trapezoidal quadrature weights.
+    """
+    edges = np.concatenate(([axis[0]], (axis[:-1] + axis[1:]) / 2, [axis[-1]]))
+    output_edges = np.linspace(axis[0], axis[-1], size + 1)
+    lengths = np.maximum(
+        0.0,
+        np.minimum(output_edges[1:, None], edges[None, 1:])
+        - np.maximum(output_edges[:-1, None], edges[None, :-1]),
+    )
+    return sparse.csr_matrix(lengths / np.diff(output_edges)[:, None]), output_edges
+
+
+def build_physical_cell_overlap_map(
+    native_coordinates: torch.Tensor,
+    query_indices: torch.Tensor,
+    *,
+    grid_shape: tuple[int, int],
+    query_coordinates: torch.Tensor | None = None,
+    axes: tuple[int, int] = (0, 1),
+    neighbors: int = 4,
+    power: float = 2.0,
+) -> RasterMap:
+    """Build a fixed physical control-cell average or an explicit sparse surrogate.
+
+    The native support must be a complete nonperiodic rectilinear grid. With
+    all native points, the operator exactly integrates the piecewise-constant
+    nodal control cells. For a strict subset, native values are first estimated
+    by raw-coordinate inverse-distance interpolation, and that reconstructed
+    field is averaged. This is a sparse surrogate, not native antialiasing.
+    `query_coordinates` binds later model-coordinate identity independently of
+    the raw physical geometry used for the overlap and interpolation.
+    """
+    if native_coordinates.ndim != 2 or native_coordinates.shape[0] < 4:
+        raise ValueError("physical overlap requires native coordinates [N,D], N>=4")
+    if len(set(axes)) != 2 or min(axes) < 0 or max(axes) >= native_coordinates.shape[1]:
+        raise ValueError("physical overlap axes must name two distinct coordinate columns")
+    height, width = map(int, grid_shape)
+    if min(height, width) < 2:
+        raise ValueError("physical overlap raster dimensions must be >=2")
+    coords = native_coordinates.detach().to(device="cpu", dtype=torch.float64)[:, axes].numpy()
+    if not np.isfinite(coords).all():
+        raise ValueError("physical overlap requires finite native coordinates")
+    xs, ys = np.unique(coords[:, 0]), np.unique(coords[:, 1])
+    if min(len(xs), len(ys)) < 2 or len(xs) * len(ys) != len(coords):
+        raise ValueError("physical overlap requires a complete rectilinear native grid")
+    order = np.lexsort((coords[:, 0], coords[:, 1]))
+    expected = np.stack(np.meshgrid(xs, ys, indexing="xy"), axis=-1).reshape(-1, 2)
+    if not np.array_equal(coords[order], expected):
+        raise ValueError("physical overlap requires unique complete rectilinear coordinates")
+    selected = torch.as_tensor(query_indices).detach().cpu()
+    if selected.ndim != 1 or selected.numel() < 4 or selected.dtype == torch.bool:
+        raise ValueError("physical overlap query_indices must be a unique integer vector")
+    if selected.is_floating_point() and not torch.equal(selected, selected.round()):
+        raise ValueError("physical overlap query_indices must be integers")
+    selected = selected.long().numpy()
+    if np.any(selected < 0) or np.any(selected >= len(coords)) or len(np.unique(selected)) != len(selected):
+        raise ValueError("physical overlap query_indices must be unique native indices")
+    if query_coordinates is None:
+        query_coordinates = native_coordinates[selected]
+    if query_coordinates.ndim != 2 or query_coordinates.shape[0] != len(selected):
+        raise ValueError("query coordinates must align with query indices")
+    if not bool(torch.isfinite(query_coordinates).all()):
+        raise ValueError("query coordinates must be finite")
+    if neighbors < 1 or not np.isfinite(power) or power <= 0:
+        raise ValueError("physical overlap interpolation needs positive neighbors and power")
+
+    wx, x_edges = _physical_axis_overlap(xs, width)
+    wy, y_edges = _physical_axis_overlap(ys, height)
+    # Columns of the Kronecker product follow sorted native (row, column).
+    native_to_raster = sparse.kron(wy, wx, format="csr")
+    complete = len(selected) == len(coords)
+    if complete:
+        inverse = np.empty(len(coords), dtype=np.int64)
+        inverse[selected] = np.arange(len(selected))
+        final = native_to_raster[:, np.argsort(inverse[order])]
+        nearest_max = 0.0
+        outside_count = 0
+        outside_area_fraction = 0.0
+        mapping_name = "physical_cell_overlap_v1"
+    else:
+        try:
+            outside = Delaunay(coords[selected]).find_simplex(coords, tol=1e-10) < 0
+        except QhullError as error:
+            raise ValueError("sparse physical raster queries must span a 2D domain") from error
+        x_native_edges = np.concatenate(([xs[0]], (xs[:-1] + xs[1:]) / 2, [xs[-1]]))
+        y_native_edges = np.concatenate(([ys[0]], (ys[:-1] + ys[1:]) / 2, [ys[-1]]))
+        sorted_area = np.outer(np.diff(y_native_edges), np.diff(x_native_edges)).ravel()
+        native_area = np.empty(len(coords), dtype=np.float64)
+        native_area[order] = sorted_area
+        outside_count = int(outside.sum())
+        outside_area_fraction = float(native_area[outside].sum() / native_area.sum())
+        neighbor_count = min(int(neighbors), len(selected))
+        distances, nearest = cKDTree(coords[selected]).query(coords, k=neighbor_count)
+        if neighbor_count == 1:
+            distances, nearest = distances[:, None], nearest[:, None]
+        exact = distances <= 1e-12
+        weights = 1.0 / np.maximum(distances, 1e-12) ** float(power)
+        exact_rows = exact.any(axis=1)
+        weights[exact_rows] = exact[exact_rows].astype(np.float64)
+        weights /= weights.sum(axis=1, keepdims=True)
+        interpolation = sparse.csr_matrix(
+            (weights.reshape(-1), (np.repeat(np.arange(len(coords)), neighbor_count), nearest.reshape(-1))),
+            shape=(len(coords), len(selected)),
+        )
+        final = native_to_raster @ interpolation[order]
+        nearest_max = float(distances[:, 0].max())
+        mapping_name = "sparse_idw_then_physical_cell_overlap_v1"
+    final = final.tocsr()
+    final.eliminate_zeros()
+    if not np.allclose(np.asarray(final.sum(axis=1)).ravel(), 1.0, rtol=1e-10, atol=1e-10):
+        raise RuntimeError("physical overlap raster does not cover its declared domain")
+    max_support = int(np.diff(final.indptr).max())
+    indices = np.zeros((height * width, max_support), dtype=np.int64)
+    weights = np.zeros_like(indices, dtype=np.float64)
+    for row in range(height * width):
+        start, end = final.indptr[row : row + 2]
+        row_size = end - start
+        indices[row, :row_size] = final.indices[start:end]
+        weights[row, :row_size] = final.data[start:end]
+    centers_x = (x_edges[:-1] + x_edges[1:]) / 2
+    centers_y = (y_edges[:-1] + y_edges[1:]) / 2
+    grid = np.stack(np.meshgrid(centers_x, centers_y, indexing="xy"), axis=-1)
+    return RasterMap(
+        neighbor_indices=torch.from_numpy(indices),
+        neighbor_weights=torch.from_numpy(weights).float(),
+        grid_coordinates=torch.from_numpy(grid).float(),
+        grid_shape=(height, width),
+        coordinate_sha256=coordinate_digest(query_coordinates),
+        periods=None,
+        diagnostics={
+            "mapping": mapping_name,
+            "physical_coordinates_sha256": coordinate_digest(native_coordinates),
+            "query_coordinates_sha256": coordinate_digest(query_coordinates),
+            "source_edge_rule": "native_endpoints_and_interior_midpoints",
+            "target_edge_rule": "uniform_physical_edges_over_native_extent",
+            "native_shape": f"{len(ys)}x{len(xs)}",
+            "native_points": len(coords),
+            "query_points": len(selected),
+            "sparse_interpolation": int(not complete),
+            "sparse_neighbors": 0 if complete else neighbor_count,
+            "sparse_power": 0.0 if complete else float(power),
+            "sparse_max_nearest_raw_distance": nearest_max,
+            "sparse_outside_convex_hull_native_points": outside_count,
+            "sparse_outside_convex_hull_area_fraction": outside_area_fraction,
+            "antialias_applied": int(complete),
+        },
+    )
 
 
 def build_raster_map(
@@ -124,9 +278,14 @@ def build_raster_map(
         if periodic or antialias_downsample or unique_count != len(coords):
             raise ValueError("native_masked topology requires a unique nonperiodic native lattice")
         if native_grid_indices is None:
-            pitch = span / np.asarray((width - 1, height - 1))
-            cells = np.rint((coords - minimum) / pitch).astype(np.int64)
-            error = np.abs(coords - (minimum + cells * pitch)) / pitch
+            xs, ys = np.unique(coords[:, 0]), np.unique(coords[:, 1])
+            if len(xs) == width and len(ys) == height and len(coords) == height * width:
+                cells = np.stack((np.searchsorted(xs, coords[:, 0]), np.searchsorted(ys, coords[:, 1])), axis=-1)
+                error = np.zeros_like(coords)
+            else:
+                pitch = span / np.asarray((width - 1, height - 1))
+                cells = np.rint((coords - minimum) / pitch).astype(np.int64)
+                error = np.abs(coords - (minimum + cells * pitch)) / pitch
         else:
             rc = native_grid_indices.detach().cpu().numpy()
             if (

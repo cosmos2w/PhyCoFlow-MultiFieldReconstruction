@@ -13,6 +13,7 @@ from typing import Any, TypeAlias
 from .h5_dataset import H5FieldDataset
 from .manifest import dataset_fingerprint
 from .normalization import FieldNormalizer
+from .physical_measure import configure_physical_measure
 from .pt_dataset import PTFieldDataset
 
 FieldDataset: TypeAlias = H5FieldDataset | PTFieldDataset
@@ -49,7 +50,7 @@ def open_field_dataset(
     }
     suffix = str(path).lower()
     if suffix.endswith((".h5", ".hdf5")):
-        return H5FieldDataset(
+        dataset = H5FieldDataset(
             path,
             **common,
             coordinate_dim=config.get("coordinate_dim"),
@@ -58,6 +59,7 @@ def open_field_dataset(
             include_temporal_derivative=bool(config.get("include_temporal_derivative", False)),
             augmentation=config.get("augmentation"),
         )
+        return configure_physical_measure(dataset, config.get("physical_measure"))
     if suffix.endswith((".pt", ".pth")):
         if config.get("augmentation"):
             raise ValueError("augmentation currently requires HDF5 snapshot loading")
@@ -77,5 +79,5 @@ def open_field_dataset(
         coordinate_dim = config.get("coordinate_dim")
         if coordinate_dim is not None and int(coordinate_dim) != dataset.data_spec.coordinate_dim:
             raise ValueError("configured coordinate_dim disagrees with the trusted PT payload")
-        return dataset
+        return configure_physical_measure(dataset, config.get("physical_measure"))
     raise ValueError(f"unsupported dataset extension for {path!r}")

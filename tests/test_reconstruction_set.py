@@ -252,9 +252,15 @@ class _FixtureModel(torch.nn.Module):
 
     def reconstruct(self, batch, *, steps, generator):
         del steps, generator
-        target = batch.target_fields
-        prediction = target * self.scale + 0.02 * target.square()
-        prediction[..., 1] += 0.03 * target[..., 0]
+        assert batch.target_fields is None
+        xy = batch.query_coords
+        observed_xy = batch.obs_coords[:, 0]
+        offset = batch.obs_values[:, 0, 0] - 1.0 - observed_xy[:, 0] - 2.0 * observed_xy[:, 1]
+        u = 1.0 + offset[:, None] + xy[..., 0] + 2.0 * xy[..., 1]
+        v = 2.0 + xy[..., 0] + 2.0 * xy[..., 1]
+        prediction = torch.stack((u, v), dim=-1)
+        prediction = prediction * self.scale + 0.02 * prediction.square()
+        prediction[..., 1] += 0.03 * u
         return SimpleNamespace(prediction=prediction, samples=None)
 
 

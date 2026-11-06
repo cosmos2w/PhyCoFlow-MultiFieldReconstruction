@@ -176,6 +176,111 @@ def signed_band_energy_score(
     )
 
 
+def _projected_band_coefficients(
+    coefficients: torch.Tensor,
+    *,
+    filters: torch.Tensor,
+    scales: torch.Tensor,
+    projections: torch.Tensor,
+    mass: torch.Tensor,
+) -> torch.Tensor:
+    """Embed coefficients as [J,B,S,P,K] in the normalized spatial metric.
+
+    The fitted basis is M-orthonormal. Thus the Euclidean norm on the last
+    axis equals the normalized mass-weighted norm of the corresponding signed
+    spatial band, including each fixed field projection and scale.
+    """
+    if coefficients.ndim != 4:
+        raise ValueError("band coefficients must have shape [J,B,K,C]")
+    if filters.ndim != 2 or filters.shape[1] != coefficients.shape[2]:
+        raise ValueError("band filters must have shape [S,K]")
+    if scales.shape != (filters.shape[0], coefficients.shape[-1]):
+        raise ValueError("band scales must have shape [S,C]")
+    if projections.ndim != 2 or projections.shape[1] != coefficients.shape[-1]:
+        raise ValueError("projections must have shape [P,C]")
+    projected = torch.einsum(
+        "jbkc,sc,pc->jbspk",
+        coefficients,
+        scales.to(coefficients).reciprocal(),
+        projections.to(coefficients),
+    )
+    return (
+        projected
+        * filters.to(coefficients)[None, None, :, None, :]
+        / mass.to(coefficients).sum().sqrt()
+    )
+
+
+def signed_band_coefficient_energy_score(
+    draw_coefficients: torch.Tensor,
+    target_coefficients: torch.Tensor,
+    *,
+    filters: torch.Tensor,
+    mass: torch.Tensor,
+    scales: torch.Tensor,
+    projections: torch.Tensor,
+    alpha: float = 1.0,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """The signed-band energy score in the fitted basis; returns [B,S] tensors.
+
+    This is the same metric as :func:`signed_band_energy_score`, without
+    synthesizing spatial band fields. The zero subgradient at coincidence is
+    supplied by the same unsmoothed ``vector_norm`` convention.
+    """
+    if draw_coefficients.ndim != 4 or draw_coefficients.shape[1:] != target_coefficients.shape:
+        raise ValueError("signed band coefficients must align as [J,B,K,C] and [B,K,C]")
+    # Form differences first. Even a single batched matrix multiplication can
+    # round equal rows differently, which otherwise gives a spurious nonzero
+    # gradient at coincidence; this linear rearrangement needs no smoothing.
+    factor = almost_fair_repulsion_factor(draw_coefficients.shape[0], alpha)
+    attraction = torch.linalg.vector_norm(
+        _projected_band_coefficients(
+            draw_coefficients - target_coefficients.unsqueeze(0),
+            filters=filters,
+            scales=scales,
+            projections=projections,
+            mass=mass,
+        ),
+        dim=-1,
+    ).mean(dim=0)
+    count = draw_coefficients.shape[0]
+    left, right = torch.triu_indices(count, count, offset=1, device=draw_coefficients.device)
+    pair_sum = torch.zeros_like(attraction)
+    for left_chunk, right_chunk in zip(left.split(32), right.split(32)):
+        embedded = _projected_band_coefficients(
+            draw_coefficients[left_chunk] - draw_coefficients[right_chunk],
+            filters=filters,
+            scales=scales,
+            projections=projections,
+            mass=mass,
+        )
+        pair_sum = pair_sum + torch.linalg.vector_norm(embedded, dim=-1).sum(dim=0)
+    repulsion = factor * pair_sum / (count * (count - 1))
+    return tuple(value.mean(dim=-1) for value in (attraction - repulsion, attraction, repulsion))
+
+
+def paired_signed_band_distance(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    *,
+    filters: torch.Tensor,
+    mass: torch.Tensor,
+    scales: torch.Tensor,
+    projections: torch.Tensor,
+) -> torch.Tensor:
+    """Paired projected signed-band point distance; [B,S], with no ensemble claim."""
+    if prediction.ndim != 3 or prediction.shape != target.shape:
+        raise ValueError("paired band coefficients must have shape [B,K,C]")
+    embedded = _projected_band_coefficients(
+        (prediction - target).unsqueeze(0),
+        filters=filters,
+        scales=scales,
+        projections=projections,
+        mass=mass,
+    )
+    return torch.linalg.vector_norm(embedded[0], dim=-1).mean(dim=-1)
+
+
 def joint_spectral_energy_score(
     draws: torch.Tensor,
     target: torch.Tensor,
@@ -201,6 +306,34 @@ def joint_spectral_energy_score(
     Strict propriety applies to this represented vector's law, not excluded
     nodes or unresolved modes. Omitting means preserves the legacy score exactly.
     """
+    draw_embedding, target_embedding = _joint_spectral_embeddings(
+        draws,
+        target,
+        filters=filters,
+        scales=scales,
+        mass=mass,
+        draw_piece_means=draw_piece_means,
+        target_piece_means=target_piece_means,
+        piece_weights=piece_weights,
+        mean_scales=mean_scales,
+        mean_weight=mean_weight,
+    )
+    return vector_energy_score(draw_embedding, target_embedding)
+
+
+def _joint_spectral_embeddings(
+    draws: torch.Tensor,
+    target: torch.Tensor,
+    *,
+    filters: torch.Tensor,
+    scales: torch.Tensor,
+    mass: torch.Tensor,
+    draw_piece_means: torch.Tensor | None,
+    target_piece_means: torch.Tensor | None,
+    piece_weights: torch.Tensor | None,
+    mean_scales: torch.Tensor | None,
+    mean_weight: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
     if draws.ndim != 4 or draws.shape[1:] != target.shape:
         raise ValueError("joint spectral score expects coefficients [J,B,K,C] and [B,K,C]")
     if filters.ndim != 2 or filters.shape[1] != target.shape[1]:
@@ -248,7 +381,36 @@ def joint_spectral_energy_score(
         target_embedding = torch.cat(
             (target_embedding, (target_piece_means * root_mean).flatten(-2)), dim=-1
         )
-    return vector_energy_score(draw_embedding, target_embedding)
+    return draw_embedding, target_embedding
+
+
+def paired_joint_spectral_mean_distance(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    *,
+    filters: torch.Tensor,
+    scales: torch.Tensor,
+    mass: torch.Tensor,
+    prediction_piece_means: torch.Tensor,
+    target_piece_means: torch.Tensor,
+    piece_weights: torch.Tensor,
+    mean_scales: torch.Tensor,
+    mean_weight: float = 1.0,
+) -> torch.Tensor:
+    """Paired point distance of the joint signed-band and piece-mean vector; [B]."""
+    prediction_embedding, target_embedding = _joint_spectral_embeddings(
+        prediction.unsqueeze(0),
+        target,
+        filters=filters,
+        scales=scales,
+        mass=mass,
+        draw_piece_means=prediction_piece_means.unsqueeze(0),
+        target_piece_means=target_piece_means,
+        piece_weights=piece_weights,
+        mean_scales=mean_scales,
+        mean_weight=mean_weight,
+    )
+    return torch.linalg.vector_norm(prediction_embedding[0] - target_embedding, dim=-1)
 
 
 def band_coherence(gram: torch.Tensor, floor: torch.Tensor) -> torch.Tensor:

@@ -62,12 +62,23 @@ OBJECTIVE_KEYS = frozenset(
         "band_weights",
         "coherence_crps_weight",
         "joint_energy_score_weight",
+        "joint_distance_weight",
         "score_definition_version",
         "mean_weight",
     }
 )
-OBJECTIVES = ("paired_descriptor_mse", "conditional_energy_score", "signed_band_energy_score")
-SIGNED_BAND_KEYS = OBJECTIVE_KEYS - {"kind", "conditional_draws", "standardize_descriptors"}
+OBJECTIVES = (
+    "paired_descriptor_mse",
+    "conditional_energy_score",
+    "signed_band_energy_score",
+    "paired_signed_band_mean_distance",
+)
+SIGNED_BAND_KEYS = OBJECTIVE_KEYS - {
+    "kind",
+    "conditional_draws",
+    "standardize_descriptors",
+    "joint_distance_weight",
+}
 PROJECTIONS = ("axes", "axes_and_pairs")
 OPERATORS = ("fem_p1", "knn_graph")
 COORDINATE_SCALINGS = ("none", "raw_extent", "lonlat_degrees")
@@ -76,6 +87,7 @@ CONNECTIVITY = ("require_connected", "components")
 MAX_CONDITIONAL_DRAWS = 8
 LEGACY_SCORE_VERSION = "signed_spectral_v3"
 MEAN_AUGMENTED_SCORE_VERSION = "signed_spectral_mean_augmented_v4"
+PAIRED_MEAN_DISTANCE_VERSION = "paired_signed_spectral_mean_v1"
 
 
 @dataclass(frozen=True)
@@ -158,6 +170,7 @@ class MultiscaleSettings:
     band_weights: tuple[float, ...] | None = None
     coherence_crps_weight: float = 0.0
     joint_energy_score_weight: float = 0.0
+    joint_distance_weight: float = 0.0
     score_definition_version: str = LEGACY_SCORE_VERSION
     mean_weight: float = 1.0
 
@@ -588,12 +601,15 @@ def parse_multiscale_config(
             minimum=1,
         )
         if draws != 1:
-            raise ValueError("paired_descriptor_mse uses one draw; conditional_draws must be 1")
+            raise ValueError(f"{objective} uses one draw; conditional_draws must be 1")
     standardize = objective_settings.get("standardize_descriptors", False)
     if not isinstance(standardize, bool):
         raise TypeError("multiscale_spectrum.objective.standardize_descriptors must be boolean")
     signed_band = _signed_band_settings(objective_settings, objective, bands, fields, standardize)
-    if signed_band.get("score_definition_version") == MEAN_AUGMENTED_SCORE_VERSION:
+    if signed_band.get("score_definition_version") in {
+        MEAN_AUGMENTED_SCORE_VERSION,
+        PAIRED_MEAN_DISTANCE_VERSION,
+    }:
         if calibration.field_unit_floor is None:
             raise ValueError("mean-augmented score requires calibration.field_unit_floor")
         if units == "physical_units" and dtype != "float64":
@@ -666,7 +682,43 @@ def _signed_band_settings(
     fields: tuple[str, ...],
     standardize: bool,
 ) -> dict[str, Any]:
-    """Resolve the signed_band_energy_score settings; other objectives must not set them."""
+    """Resolve signed-band settings without changing historical omitted-key defaults."""
+    if objective == "paired_signed_band_mean_distance":
+        forbidden = {"almost_fair_alpha", "coherence_crps_weight", "joint_energy_score_weight"}
+        present = sorted(forbidden & set(objective_settings))
+        if present:
+            raise ValueError(f"paired signed-band point distance does not use {present}")
+        version = objective_settings.get("score_definition_version", PAIRED_MEAN_DISTANCE_VERSION)
+        if version != PAIRED_MEAN_DISTANCE_VERSION:
+            raise ValueError(
+                "paired signed-band point distance has its own score_definition_version"
+            )
+        joint_weight = float(
+            _positive_float(
+                objective_settings.get("joint_distance_weight", 0.25),
+                "multiscale_spectrum.objective.joint_distance_weight",
+            )
+        )
+        # The shared projection, band-weight and mean validation is identical;
+        # the point distance has neither an alpha nor a repulsion term.
+        common = dict(objective_settings)
+        common.pop("joint_distance_weight", None)
+        common.update(
+            {
+                "score_definition_version": MEAN_AUGMENTED_SCORE_VERSION,
+                "almost_fair_alpha": 1.0,
+                "joint_energy_score_weight": joint_weight,
+            }
+        )
+        parsed = _signed_band_settings(
+            common, "signed_band_energy_score", bands, fields, standardize
+        )
+        parsed.pop("joint_energy_score_weight")
+        parsed["joint_distance_weight"] = joint_weight
+        parsed["score_definition_version"] = PAIRED_MEAN_DISTANCE_VERSION
+        return parsed
+    if "joint_distance_weight" in objective_settings:
+        raise ValueError("joint_distance_weight applies to paired_signed_band_mean_distance only")
     present = sorted(SIGNED_BAND_KEYS & set(objective_settings))
     if objective != "signed_band_energy_score":
         if present:

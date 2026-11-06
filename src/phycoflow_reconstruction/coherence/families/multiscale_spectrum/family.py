@@ -30,7 +30,11 @@ from ....contracts import (
 from ....data.manifest import dataset_fingerprint
 from ....data.normalization import FieldNormalizer
 from ...base import require_field_tensor
-from .config import MEAN_AUGMENTED_SCORE_VERSION, parse_multiscale_config
+from .config import (
+    MEAN_AUGMENTED_SCORE_VERSION,
+    PAIRED_MEAN_DISTANCE_VERSION,
+    parse_multiscale_config,
+)
 from .features import (
     ReferenceAccumulator,
     descriptor_blocks,
@@ -48,7 +52,10 @@ from .objectives import (
     ENERGY_SCORE_PATH,
     JOINT_ENERGY_PATH,
     MEAN_JOINT_ENERGY_PATH,
+    PAIRED_BAND_PATH,
+    PAIRED_MEAN_JOINT_PATH,
     SIGNED_BAND_PATH,
+    paired_signed_band_terms,
     signed_band_terms,
 )
 from .operators import (
@@ -62,6 +69,7 @@ from .operators import (
     tight_filter_bank,
 )
 from .reporting import band_ensemble_report, spectral_report
+from .statistics import band_fields
 
 GEOMETRY_BUFFERS = {
     "mass": 1,
@@ -161,7 +169,10 @@ class MultiscaleSpectrumFamily(nn.Module):
             "reconstruction_unit": data_spec.reconstruction_unit,
         }
         self.compute_dtype = torch.float64 if settings.dtype == "float64" else torch.float32
-        self.mean_augmented = settings.score_definition_version == MEAN_AUGMENTED_SCORE_VERSION
+        self.mean_augmented = settings.score_definition_version in {
+            MEAN_AUGMENTED_SCORE_VERSION,
+            PAIRED_MEAN_DISTANCE_VERSION,
+        }
         self.manifest = factor_manifest(settings)
         self.component_weights = {
             component.key: component.weight for component in settings.components
@@ -183,6 +194,7 @@ class MultiscaleSpectrumFamily(nn.Module):
         self.layout = None
         trained_blocks = self.objective == "paired_descriptor_mse"
         self.signed_band = self.objective == "signed_band_energy_score"
+        self.paired_band = self.objective == "paired_signed_band_mean_distance"
         self._projection_cache: dict[tuple[torch.dtype, torch.device], torch.Tensor] = {}
         specs = [
             CoherenceComponentSpec(
@@ -196,7 +208,7 @@ class MultiscaleSpectrumFamily(nn.Module):
             )
             for component in settings.components
         ]
-        if not trained_blocks:
+        if not trained_blocks and not self.paired_band:
             specs.append(
                 CoherenceComponentSpec(
                     ENERGY_SCORE_PATH,
@@ -235,6 +247,19 @@ class MultiscaleSpectrumFamily(nn.Module):
                             "trained": trained,
                             "conditional_draws": self.conditional_draws,
                         },
+                    )
+                )
+        if self.paired_band:
+            for path in (PAIRED_BAND_PATH, PAIRED_MEAN_JOINT_PATH):
+                specs.append(
+                    CoherenceComponentSpec(
+                        path,
+                        self.target_use,
+                        self.units,
+                        True,
+                        required_geometry="fixed_point_operator",
+                        aggregation="per_sample",
+                        metadata={"minimum_batch_size": 1, "trained": True, "paired_point": True},
                     )
                 )
         self.spec = CoherenceFamilySpec(
@@ -755,7 +780,6 @@ class MultiscaleSpectrumFamily(nn.Module):
         return raw_statistics(
             self._select(fields),
             manifest=self.manifest,
-            with_band_fields=self.signed_band,
             with_piece_means=self.mean_augmented,
             **self._geometry_tensors(self.compute_dtype),
         )
@@ -841,7 +865,10 @@ class MultiscaleSpectrumFamily(nn.Module):
         score_all_draws = context.get("score_all_conditional_draws", False)
         if not isinstance(score_all_draws, bool):
             raise TypeError("score_all_conditional_draws must be boolean")
-        if score_all_draws and self.objective == "paired_descriptor_mse":
+        if score_all_draws and self.objective in {
+            "paired_descriptor_mse",
+            "paired_signed_band_mean_distance",
+        }:
             raise ValueError("score_all_conditional_draws requires a conditional energy score")
         draws: tuple[torch.Tensor, ...] = ()
         if self.objective in {"conditional_energy_score", "signed_band_energy_score"}:
@@ -894,7 +921,7 @@ class MultiscaleSpectrumFamily(nn.Module):
             }
         if trained_blocks:
             per_sample = paired_descriptor_loss(first, target, weights)
-        else:
+        elif not self.paired_band:
             stacked = torch.stack(
                 [
                     first,
@@ -945,6 +972,23 @@ class MultiscaleSpectrumFamily(nn.Module):
             per_sample, signed_report = signed.per_sample_cost, signed.report
             results.update(signed.component_results)
             component_diagnostics.update(signed.component_diagnostics)
+        elif self.paired_band:
+            with torch.autocast(device_type=generated.device.type, enabled=False):
+                paired = paired_signed_band_terms(
+                    prediction_statistics,
+                    target_statistics,
+                    settings=self.settings,
+                    mass=self.mass,
+                    filters=self.filters,
+                    band_scale=self.band_scale,
+                    projections=self._projections(self.compute_dtype, generated.device),
+                    band_weights=self._band_weights(self.compute_dtype, generated.device),
+                    piece_measures=self.piece_measures,
+                    mean_scale=self.piece_mean_scale,
+                )
+            per_sample = paired.per_sample_cost
+            results.update(paired.component_results)
+            component_diagnostics.update(paired.component_diagnostics)
         total = per_sample.mean()
         if not torch.isfinite(total):
             raise FloatingPointError("multiscale_spectrum produced a non-finite cost")
@@ -969,6 +1013,8 @@ class MultiscaleSpectrumFamily(nn.Module):
         }
         if signed_report is not None:
             diagnostics["signed_band"] = signed_report
+        if self.paired_band:
+            diagnostics["paired_signed_band"] = paired.report
         if bool(context.get("report_detail", False)):
             diagnostics["report"] = spectral_report(
                 prediction_statistics,
@@ -984,9 +1030,23 @@ class MultiscaleSpectrumFamily(nn.Module):
                 diagnostics["report"]["signed_band"] = signed_report
                 ensemble = tuple(context.get("ensemble_draws", ()))
                 if ensemble:
+
+                    def spatial_bands(statistics):
+                        return band_fields(
+                            statistics["coefficients"],
+                            self.basis.to(self.compute_dtype),
+                            self.filters.to(self.compute_dtype),
+                        )
+
                     diagnostics["report"]["band_ensemble"] = band_ensemble_report(
-                        (self._statistics(draw)["band_fields"] for draw in (generated, *ensemble)),
-                        target_statistics["band_fields"],
+                        (
+                            spatial_bands(statistics)
+                            for statistics in (
+                                prediction_statistics,
+                                *(self._statistics(draw) for draw in ensemble),
+                            )
+                        ),
+                        spatial_bands(target_statistics),
                         mass=self.mass.to(self.compute_dtype),
                         count=1 + len(ensemble),
                         band_names=self.settings.bands.names,
@@ -1027,12 +1087,14 @@ class MultiscaleSpectrumFamily(nn.Module):
         if dict(artifact.get("config", {})) != self.config:
             raise ValueError("multiscale_spectrum family artifact config mismatch")
         if self.mean_augmented and artifact.get("input_data_contract") != self.input_data_contract:
-            raise ValueError("multiscale_spectrum v4 input field order/units mismatch")
+            raise ValueError("multiscale_spectrum mean-augmented input field order/units mismatch")
         if (
             self.mean_augmented
             and artifact.get("implementation_identity") != _implementation_identity()
         ):
-            raise ValueError("multiscale_spectrum v4 implementation/backend identity mismatch")
+            raise ValueError(
+                "multiscale_spectrum mean-augmented implementation/backend identity mismatch"
+            )
         state = artifact["state_dict"]
         device = self.normalization_offset.device
         for name in {**GEOMETRY_BUFFERS, **CALIBRATION_BUFFERS}:

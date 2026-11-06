@@ -216,6 +216,8 @@ class PTFieldDataset(Dataset[FieldSample]):
             logical_shape=self.grid_shape,
             metadata={"trajectory_index": trajectory},
         )
+        from .physical_measure import attach_sample_measure
+        attach_sample_measure(self, sample)
         sample.validate()
         return sample
 
@@ -234,6 +236,8 @@ class PTFieldDataset(Dataset[FieldSample]):
             reconstruction_unit="space_time_trajectory",
             metadata={"trajectory_index": trajectory},
         )
+        from .physical_measure import attach_sample_measure
+        attach_sample_measure(self, sample)
         sample.validate()
         return sample
 

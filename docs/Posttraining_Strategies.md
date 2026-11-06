@@ -1,6 +1,68 @@
 # Post-training strategies
 
-The framework supports several opt-in ways to combine reconstruction fidelity and coherence objectives. This guide identifies the route boundaries and the portable Run 11f-style recipe; it makes no method-superiority or universal-fidelity claim. For measured outcomes, see [Posttraining results and protocol](Posttraining_Results.md), and for the detailed SOURCE-relative policy mathematics, see [Fidelity-budget post-training](Fidelity_Budget_Posttraining.md).
+The framework supports several ways to combine reconstruction fidelity and coherence objectives. The current combustion profiles below specify the State, Scale and Shape queries and a fresh SOURCE-relative controller. The earlier Run 11f-style recipe remains available for replay. For measured historical outcomes, see [Posttraining results and protocol](Posttraining_Results.md), and for the SOURCE-relative policy mathematics, see [Fidelity-budget post-training](Fidelity_Budget_Posttraining.md).
+
+## Current State, Scale and Shape profiles
+
+Use the complete [stochastic combustion profile](../cases/turbulent_combustion/configs/posttrain/coherence_current.yaml) for the recorded generative SOURCE. Its resolved active families are exactly `global_distribution`, `multiscale_spectrum` and `topology`; `cross_spectrum` is explicitly disabled so recursive YAML inheritance cannot execute both Scale families accidentally. The SOURCE model, sensors and normalization are inherited; the child starts a fresh controller, optimizer and coherence calibration. Historical `cross_spectrum` and `lpc_ordered` recipes retain their existing definitions and checkpoint contracts.
+
+State uses `marginal_mixed_weighted_v3`: paired marginal W2² and a 32-direction mixed mean under case-supplied physical-area masses. Scale uses `signed_spectral_mean_augmented_v4`, two independent conditional draws, alpha 1, joint weight 0.25 and mean weight 1. Shape uses `finite_primary_v1`, the full CO/T sign/line bank, and a 32×128 fixed physical-cell raster. Its fixed Q4096 training panel uses a sparse interpolation followed by physical-cell overlap; this is a surrogate for the native field, not exact full-native quadrature. The case reports its raw coordinate and field units as unknown. Field scales and geometry are frozen from TRAIN. See the [versioned query definitions](coherence_compute_enhancement.md).
+
+`objectives.data_retention` is disabled with weight zero. The fresh TorchJD ConFIG direction combines the three coherence families; dense Lagrangian feedback uses paired TRAIN targets and SOURCE-relative per-field constraints. The model's native `model_loss` path is not called. A displayed sum of family scores is not a scalar objective for this direction. The sampled equal-node, normalized-model-unit endpoint-MSE constraint allows a 10% relative increase per field. The independent validation decision also uses a 10% per-field allowance, but measures decoded-field MSE with native physical-area weights across the declared matched panel and draws. Those are different estimators with the same nominal tolerance.
+
+The [deterministic profile](../cases/turbulent_combustion/configs/posttrain/coherence_deterministic.yaml) selects the separate `paired_signed_spectral_mean_v1` point discrepancy with one draw. It does not represent repeated deterministic outputs as conditional samples. Neither profile establishes a learned benefit until its selected and final checkpoints have been evaluated.
+
+From the repository root, inspect the physical GPU and its current processes before mapping the requested GPU 2 UUID to the profile's logical `cuda:0`:
+
+```bash
+nvidia-smi --query-gpu=index,uuid --format=csv,noheader
+nvidia-smi -i 2
+GPU_UUID="$(nvidia-smi -i 2 --query-gpu=uuid --format=csv,noheader)"
+export CUDA_VISIBLE_DEVICES="$GPU_UUID"
+export KEOPS_CACHE_FOLDER="$(mktemp -d /tmp/phycoflow-coherence-keops.XXXXXX)"
+
+python cases/turbulent_combustion/run.py validate \
+  --config configs/posttrain/coherence_current.yaml
+python cases/turbulent_combustion/run.py post-train \
+  --config configs/posttrain/coherence_current.yaml
+```
+
+For a deterministic SOURCE use `configs/posttrain/coherence_deterministic.yaml` instead. Set a distinct output identity for a new run; an interrupted run resumes from its own checkpoint and frozen family artifacts. Inspect the complete resolved configuration, SOURCE checkpoint and device identity before launching.
+
+Full-native evaluation uses the same frozen TRAIN metric bundle, panel positions, endpoint settings, observations and draw seeds for SOURCE and child. The combustion support contains all 40,300 native nodes and the native Shape complex is 100×403. `evaluate-native-coherence` writes native field-risk arrays and can score saved members with a supplied TRAIN-fitted bundle. Construct that bundle once with [`fit_native_metric_bundle`](../src/phycoflow_reconstruction/evaluation/native_scoring.py) from TRAIN targets and SOURCE endpoints; do not fit a new denominator on validation. The panel file is a JSON list of dataset positions or a manifest containing the selected panel. An endpoint JSON matching the current profile can contain:
+
+```json
+{
+  "steps": 2,
+  "solver": "euler",
+  "observation_config": {
+    "mode": "endpoint_smooth",
+    "strength": 1.0,
+    "sigma": 0.05,
+    "schedule_power": 2.0,
+    "final_clamp": true,
+    "chunk_size": 4096
+  },
+  "weight_selection": "live"
+}
+```
+
+Supply the same recorded sensor manifest when one is used. For a prepared bundle, endpoint and panel:
+
+```bash
+CHILD_RUN=/absolute/path/to/child-run
+PANEL_JSON=/absolute/path/to/frozen-validation-panel.json
+ENDPOINT_JSON=/absolute/path/to/frozen-endpoint.json
+TRAIN_BUNDLE=/absolute/path/to/train-metric-bundle.pt
+
+python cases/turbulent_combustion/run.py evaluate-native-coherence \
+  --run "$CHILD_RUN" --checkpoint last --split validation \
+  --indices "$PANEL_JSON" --endpoint-config "$ENDPOINT_JSON" \
+  --metric-bundle "$TRAIN_BUNDLE" --draws 4 --seed 812711 \
+  --device cuda:0 --output "$CHILD_RUN/evaluation/native_validation_last"
+```
+
+Run the same command with the SOURCE run and a separate output directory, using the identical panel, endpoint, bundle and draw seeds. `--risk-only` streams native field risk without retaining members; it does not perform family scoring. Record SOURCE, selected and final separately, and do not use TEST for checkpoint selection.
 
 ## Choose a route
 
@@ -18,7 +80,7 @@ The separate component-constrained and topology-regularized modes use the legacy
 
 The validator rejects a non-null `outer_aggregation` together with `external_policy`; external policies require `vector_reduction: sum` and `objective_scale: source_mean`. They cannot be combined with a non-default legacy gradient balancer, native data retention, endpoint or source-anchor objectives, component constraints, non-full-model trainable scope, coherence warm-up or interval rescaling, recurring family-gradient diagnostics, or a checkpoint selector other than `reconstruction_mse` or `topology_with_fidelity`.
 
-Internal `coherence_aggregation` is limited to TorchJD ConFIG, requires explicit `family_scalarization.method: none`, requires an external policy, and requires all of global-distribution, cross-spectrum, and topology families to be enabled. Keep the family and objective definitions in the case configuration; the selector does not make arbitrary subsets or a hidden scalarization.
+Internal `coherence_aggregation` is limited to TorchJD ConFIG, requires explicit `family_scalarization.method: none`, requires an external policy, and requires global-distribution, topology, and either multiscale-spectrum or legacy cross-spectrum. Keep the family and objective definitions in the case configuration; the selector does not make arbitrary subsets or a hidden scalarization.
 
 Existing `optimization.multitask` configurations without an external policy retain the hierarchical and joint aggregation routes. Invalid multi-task directions stop with an error instead of falling back to a weighted sum. The internal TorchJD route uses full-width FP64 aggregation and may fail explicitly if a valid direction cannot be constructed.
 
@@ -35,7 +97,7 @@ python -m pip check
 
 ## Select an alternative external policy
 
-External-policy selectors compose with either a scalarized coherence loss or the internal A/B/T ConFIG direction. The first block below is a complete scalar external-policy selector map with fixed-sum families. Use a separate base profile whose resolved map omits `coherence_aggregation`, or replace the entire `optimization.multitask` map with this map using a CLI override. YAML defaults merge recursively: omitting the selector from a leaf profile does not remove an inherited selector, and setting it to null is invalid. This block is therefore not a leaf patch to the primary internal-ConFIG profile:
+External-policy selectors compose with either a scalarized coherence loss or the internal A/B/T ConFIG direction. The first block below is a complete scalar external-policy selector map with fixed-sum families. Use a separate base profile whose resolved map omits `coherence_aggregation`, or replace the entire `optimization.multitask` map with this map using a CLI override. YAML defaults merge recursively: omitting the selector from a leaf profile does not remove an inherited selector, and setting it to null is invalid. This block is therefore not a leaf patch to an internal-ConFIG profile:
 
 ```yaml
 optimization:
@@ -50,7 +112,7 @@ optimization:
 
 Use one selected method's parameters only. For `lagrangian`, the method-specific map is `lagrangian: {dual_lr: 0.01, penalty_interval_updates: 1}`. For `extended_log_barrier`, use `extended_log_barrier: {t_initial: 1.0, growth_factor: 1.1, update_interval: 100, t_max: 100.0}`. `rectify` has no method-specific parameter map. The validator rejects unknown/inactive nested keys, so changing a Lagrangian config to another policy requires replacing the whole `external_policy` map; overriding only `method=rectify` leaves the inherited `lagrangian` map and fails validation.
 
-When replacing the entire `optimization.multitask` map, retain the original `fidelity_budget` settings as well as the desired selectors if the allowance and SOURCE calibration must remain matched. Omitting that budget map selects its defaults, including four calibration batches rather than the primary recipe's eight.
+When replacing the entire `optimization.multitask` map, retain the original `fidelity_budget` settings as well as the desired selectors if the allowance and SOURCE calibration must remain matched. Omitting that budget map selects its defaults, including four calibration batches rather than the current profile's eight.
 
 Here is the complete selector block for the internal A/B/T ConFIG route with the extended log barrier:
 
@@ -67,7 +129,7 @@ optimization:
       extended_log_barrier: {t_initial: 1.0, growth_factor: 1.1, update_interval: 100, t_max: 100.0}
 ```
 
-For example, replace the full policy map when changing the primary internal-ConFIG profile from Lagrangian to rectify, preserve the internal ConFIG selector, and choose a separate output family for the new child:
+For example, replace the full policy map when changing the historical internal-ConFIG profile from Lagrangian to rectify, preserve the internal ConFIG selector, and choose a separate output family for the new child:
 
 ```bash
 python cases/turbulent_combustion/run.py validate \
@@ -76,13 +138,13 @@ python cases/turbulent_combustion/run.py validate \
   --override 'optimization.multitask.external_policy={method: rectify, vector_reduction: sum, objective_scale: source_mean}'
 ```
 
-For a new full run with that alternative, also pass a fresh `output.experiment_name`; the primary recipe's default output family identifies the Lagrangian method. The internal-aggregation route still requires A, B and T all enabled. Scalar external policies may instead use the family subset supported by the selected case profile.
+For a new full run with that alternative, also pass a fresh `output.experiment_name`; the historical recipe's default output family identifies the Lagrangian method. The internal-aggregation route still requires State, Scale and Shape all enabled. Scalar external policies may instead use the family subset supported by the selected case profile.
 
-## Run 11f-style primary example
+## Historical Run 11f-style example
 
-The maintained [Lagrangian, internal-ConFIG, warm-up profile](../cases/turbulent_combustion/configs/posttrain/fidelity_budget/lagrangian_config_warmup.yaml) is a portable 1,000-epoch recipe. It declares `source_run: null` so each invocation supplies a concrete SOURCE run, uses `source_checkpoint: last.pt`, and writes children under the `posttrain_lagrangian_config_warmup` output family. Its selectors are `family_scalarization: none`, `coherence_aggregation: torchjd_config`, `outer_aggregation: null`, and dense Lagrangian feedback with `penalty_interval_updates: 1`. Model LR rises linearly from `5e-6` to `5e-5` across the first 76 global successful updates and then stays at `5e-5`.
+The [Lagrangian, internal-ConFIG, warm-up profile](../cases/turbulent_combustion/configs/posttrain/fidelity_budget/lagrangian_config_warmup.yaml) is the earlier 1,000-epoch legacy-cross-spectrum recipe. It declares `source_run: null` so each invocation supplies a concrete SOURCE run, uses `source_checkpoint: last.pt`, and writes children under the `posttrain_lagrangian_config_warmup` output family. Its selectors are `family_scalarization: none`, `coherence_aggregation: torchjd_config`, `outer_aggregation: null`, and dense Lagrangian feedback with `penalty_interval_updates: 1`. Model LR rises linearly from `5e-6` to `5e-5` across the first 76 global successful updates and then stays at `5e-5`.
 
-Existing `run11*` YAML profiles are retained as historical regression and reproduction profiles; use the maintained warm-up profile above as the portable primary recipe. Historical profiles may contain a bound SOURCE, so inspect their resolved provenance before reuse.
+Existing `run11*` YAML profiles are retained as historical regression and reproduction profiles. Historical profiles may contain a bound SOURCE, so inspect their resolved provenance before reuse.
 
 Choose a completed SOURCE run that contains the architecture, normalization, dataset and checkpoint intended for the experiment. Set `SOURCE_RUN` to that run directory; `validate` checks the composed config, SOURCE configuration inheritance and dataset without starting training. The bounded smoke loads the checkpoint and checks the native SOURCE status, model identity, field order and normalization.
 

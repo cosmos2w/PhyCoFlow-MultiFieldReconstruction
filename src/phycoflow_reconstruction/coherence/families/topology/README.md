@@ -69,7 +69,8 @@ descriptors and a compact provider whose returned nodes are all valid. A full
 grid containing invalid land nodes is rejected. With
 `geometry.structured_indices: <auxiliary-name>`, train
 geometry fitting consumes integer row/column indices for a curvilinear grid;
-otherwise the coordinates must form the declared regular lattice. Missing
+otherwise complete rectilinear nonuniform lattices and masked regular lattices
+are supported. Missing
 vertices and all incident cells are excluded from the complex, rather than
 filled by interpolation. The same mask applies to every snapshot and its
 exact essential counts are frozen at calibration and checked during scoring.
@@ -77,6 +78,41 @@ Periodic masks, changing masks, arbitrary
 3-D domains and physical-area quadrature are not implemented. A full-rectangle
 IDW raster cannot represent holes; use the supported native mask for such a
 domain.
+
+### Physical reduction and sparse queries
+
+`geometry.raster_mapping: physical_cell_overlap_v1` freezes a different
+mapping from a complete nonperiodic rectilinear native grid to the configured
+raster. Native cells end at the endpoint coordinates and have interior edges
+at coordinate midpoints; output cells have equal physical widths over the
+same extent. Each output value is the area-weighted average of the native
+piecewise-constant nodal cells it overlaps. This includes nondivisible and
+nonuniform grids and is a cell-average observable, not native vertex topology.
+The mapping uses `coordinates_raw`, records its coordinate hashes, edge rule,
+and raster size, and is calibrated independently for each geometry.
+
+If the fixed model query panel omits native nodes, the provider first estimates
+the missing values with inverse-distance interpolation in raw coordinates,
+then applies the same physical overlap. The recorded identity is
+`sparse_idw_then_physical_cell_overlap_v1` and `antialias_applied` is false:
+this is a sparse surrogate rather than a native area average. Geometry and
+interpolation distances assume the raw axes form a meaningful common metric;
+coordinates do not by themselves establish their units. The map records native
+points and nodal area outside the sparse query convex hull, where IDW is
+extrapolation. The physical map
+rejects masks, nonrectilinear support and periodic boundaries. Historical
+`antialias_downsample` configurations retain their old mapping semantics.
+Training fits the map through `fit_training_reference`; standalone users may
+call `fit_physical_raster(native_coordinates, query_indices,
+query_coordinates=model_coordinates[query_indices])` before scoring.
+
+`evaluation.finite_primary_visualization.save_finite_primary_payload` saves
+the actual signed line bank, diagrams, raw finite and essential leaves, frozen
+scales and exact fixed-mask Betti curves for one matched member. The companion
+`render_finite_primary_payload` reads this saved payload, and optionally draws
+a separately declared physical-area event with missing/excess and IoU. These
+diagrams are nonspatial and do not measure event placement. The legacy
+topology-set renderer deliberately rejects this definition.
 
 ## Execution and integration
 

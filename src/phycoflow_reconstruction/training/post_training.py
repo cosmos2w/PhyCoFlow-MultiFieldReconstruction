@@ -15,7 +15,7 @@ import os
 import random
 import statistics
 import warnings
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -30,6 +30,7 @@ from ..coherence import ReferenceBank, build_enabled_families, fit_reference_ban
 from ..contracts import DataSpec, FamilyResult, ObservationBatch
 from ..data.factory import FieldDataset, open_field_dataset
 from ..data.manifest import dataset_fingerprint, manifest_from_batch
+from ..data.physical_measure import batch_measure_context
 from ..data.sensor_protocols import SensorProtocol, build_observation_batch
 from ..data.training_batches import (
     build_training_batch_source,
@@ -426,6 +427,7 @@ def _coherence_objective(
                 {
                     "sample_ids": selected.sample_ids,
                     "reference_ids": reference_ids,
+                    **batch_measure_context(selected),
                     **(
                         {"persistence_cache": step_context["persistence_cache"]}
                         if step_context is not None
@@ -1311,6 +1313,7 @@ def _evaluate(
                     {
                         "sample_ids": comparison_batch.sample_ids,
                         "reference_ids": reference_ids,
+                        **batch_measure_context(comparison_batch),
                     },
                     conditional_draws,
                     report_detail=True,
@@ -1545,8 +1548,13 @@ def run_post_training(
     case_dir: str | Path,
     max_steps: int | None = None,
     resume: str | Path | None = None,
+    checkpoint_callback: Callable[[Path, Path, int], None] | None = None,
 ) -> Path:
-    """Create or resume one immutable child post-training run."""
+    """Create or resume a child, optionally observing saved recovery boundaries.
+
+    The callback may evaluate saved weights; its random draws are isolated from
+    training. It must not mutate training configuration or historical artifacts.
+    """
     if (
         "multitask" in config["optimization"]
         or config["optimization"].get("lpc_ordered") is not None
@@ -2618,6 +2626,12 @@ def run_post_training(
                 global_step=global_step + 1,
                 fallback_metric=row["data_loss"],
             )
+        if checkpoint_result is not None and checkpoint_callback is not None:
+            saved_path = checkpoint_result[0]
+            if saved_path is not None:
+                from .coherence_sampling import _preserved_rng
+                with _preserved_rng(device):
+                    checkpoint_callback(store.run_dir, saved_path, global_step + 1)
         if checkpoint_result is not None:
             monitor.record_validation(checkpoint_manager.last_validation_report)
             store.write_json(

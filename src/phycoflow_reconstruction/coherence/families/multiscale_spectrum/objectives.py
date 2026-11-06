@@ -18,7 +18,9 @@ from .losses import (
     almost_fair_crps,
     band_coherence,
     joint_spectral_energy_score,
-    signed_band_energy_score,
+    paired_joint_spectral_mean_distance,
+    paired_signed_band_distance,
+    signed_band_coefficient_energy_score,
 )
 from .reporting import finite_values
 
@@ -28,6 +30,8 @@ SIGNED_BAND_PATH = "signed_band_energy_score.conditional"
 BAND_COHERENCE_PATH = "band_coherence_crps.conditional"
 JOINT_ENERGY_PATH = "joint_spectral_energy_score.conditional"
 MEAN_JOINT_ENERGY_PATH = "joint_spectral_mean_energy_score.conditional"
+PAIRED_BAND_PATH = "paired_signed_band_distance.paired"
+PAIRED_MEAN_JOINT_PATH = "paired_joint_spectral_mean_distance.paired"
 
 
 @dataclass(frozen=True)
@@ -38,6 +42,100 @@ class SignedBandTerms:
     component_results: dict[str, TermResult]
     component_diagnostics: dict[str, dict[str, Any]]
     report: dict[str, Any]
+
+
+def paired_signed_band_terms(
+    prediction: Mapping[str, torch.Tensor],
+    target: Mapping[str, torch.Tensor],
+    *,
+    settings: MultiscaleSettings,
+    mass: torch.Tensor,
+    filters: torch.Tensor,
+    band_scale: torch.Tensor,
+    projections: torch.Tensor,
+    band_weights: torch.Tensor,
+    piece_measures: torch.Tensor,
+    mean_scale: torch.Tensor,
+) -> SignedBandTerms:
+    """One paired point and target, with no distributional or repulsion claim."""
+    per_band = paired_signed_band_distance(
+        prediction["coefficients"],
+        target["coefficients"],
+        filters=filters,
+        mass=mass,
+        scales=band_scale,
+        projections=projections,
+    )
+    primary = (per_band * band_weights).sum(dim=1)
+    joint = paired_joint_spectral_mean_distance(
+        prediction["coefficients"],
+        target["coefficients"],
+        filters=filters,
+        scales=band_scale,
+        mass=mass,
+        prediction_piece_means=prediction["piece_means"],
+        target_piece_means=target["piece_means"],
+        piece_weights=piece_measures.sum(dim=1),
+        mean_scales=mean_scale,
+        mean_weight=settings.mean_weight,
+    )
+    primary_path = f"{FAMILY_NAME}.{PAIRED_BAND_PATH}"
+    joint_path = f"{FAMILY_NAME}.{PAIRED_MEAN_JOINT_PATH}"
+    mean_error = prediction["piece_means"] - target["piece_means"]
+    primary_diagnostics = {
+        "per_band": finite_values(per_band.mean(dim=0).detach().cpu()),
+        "band_weights": band_weights.tolist(),
+        "projections": settings.projections,
+        "projection_pairs": (
+            None
+            if settings.projection_pairs is None
+            else [
+                [settings.fields[left], settings.fields[right]]
+                for left, right in settings.projection_pairs
+            ]
+        ),
+    }
+    joint_diagnostics = {
+        "mean_weight": settings.mean_weight,
+        "piece_mass_fractions": finite_values(
+            (piece_measures.sum(dim=1) / piece_measures.sum()).detach().cpu()
+        ),
+        "mean_scale": finite_values(mean_scale.detach().cpu()),
+        "mean_bias_by_piece_field": finite_values(mean_error.mean(dim=0).detach().cpu()),
+        "mean_absolute_error_by_piece_field": finite_values(
+            mean_error.abs().mean(dim=0).detach().cpu()
+        ),
+        "mean_error_units": settings.units,
+    }
+    results = {
+        primary_path: TermResult(primary, primary.mean(), diagnostics=primary_diagnostics),
+        joint_path: TermResult(joint, joint.mean(), diagnostics=joint_diagnostics),
+    }
+    component_diagnostics = {}
+    for path, loss, weight in (
+        (primary_path, primary, 1.0),
+        (joint_path, joint, settings.joint_distance_weight),
+    ):
+        raw = float(loss.mean().detach())
+        component_diagnostics[path] = {
+            "weight": weight,
+            "executed": True,
+            "raw_scalar_loss": raw,
+            "weighted_scalar_contribution": weight * raw,
+        }
+    report = {
+        "score_definition_version": settings.score_definition_version,
+        "interpretation": "paired_point_distance",
+        "spatial_weighting": "normalized_analysis_mass",
+        "units": settings.units,
+        "band_names": list(settings.bands.names),
+        "distance_per_band": primary_diagnostics["per_band"],
+        "joint_distance_weight": settings.joint_distance_weight,
+        "joint_distance": joint_diagnostics,
+    }
+    return SignedBandTerms(
+        primary + settings.joint_distance_weight * joint, results, component_diagnostics, report
+    )
 
 
 def signed_band_terms(
@@ -58,12 +156,15 @@ def signed_band_terms(
     """Signed-band score, optional fair joint score and band-coherence auxiliary."""
     results: dict[str, TermResult] = {}
     component_diagnostics: dict[str, dict[str, Any]] = {}
-    draw_fields = torch.stack([prediction["band_fields"], *[item["band_fields"] for item in draws]])
+    draw_coefficients = torch.stack(
+        [prediction["coefficients"], *[item["coefficients"] for item in draws]]
+    )
     conditional_draws = len(draws) + 1
-    dtype = draw_fields.dtype
-    score, attraction, repulsion = signed_band_energy_score(
-        draw_fields,
-        target["band_fields"],
+    dtype = draw_coefficients.dtype
+    score, attraction, repulsion = signed_band_coefficient_energy_score(
+        draw_coefficients,
+        target["coefficients"],
+        filters=filters,
         mass=mass.to(dtype),
         scales=band_scale.to(dtype),
         projections=projections,

@@ -1,0 +1,29 @@
+# Complete point-objective example for the existing deterministic Senseiver source.
+# This is an alternative recipe, not the authorized GL-RBF-CQ experiment SOURCE.
+defaults:
+  - coherence_current.yaml
+  - _clear_scale_objective.yaml
+source_run: runs/tc_senseiver_5000ep/20260828T190145Z_fea0fc25
+source_checkpoint: last.pt
+model:
+  name: senseiver
+  model_ema_eval: null
+optimization:
+  epochs: 100
+  multitask:
+    fidelity_budget:
+      calibration_draws: 1
+checkpointing:
+  epochs: [1, 25, 50, 75, 100]
+coherence:
+  families:
+    multiscale_spectrum:
+      objective:
+        kind: paired_signed_band_mean_distance
+        score_definition_version: paired_signed_spectral_mean_v1
+        conditional_draws: 1
+        projections: axes_and_pairs
+        joint_distance_weight: 0.25
+        mean_weight: 1.0
+output:
+  experiment_name: coherence_deterministic

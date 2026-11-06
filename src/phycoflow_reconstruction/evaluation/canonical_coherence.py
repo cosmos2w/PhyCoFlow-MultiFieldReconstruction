@@ -230,17 +230,19 @@ class FrozenCanonicalEvaluator:
                   "field_mse_ensemble_mean": _tensor(mean_mse)}
         family_report = {}
         coordinates = batch.query_coords
+        from ..data.physical_measure import batch_measure_context
+        measure_context = batch_measure_context(batch)
         for name, family in self.families.items():
             mode = self.modes[name]
             results = []
             if mode == "conditional":
                 results.append(family(members[0], target, coordinates=coordinates,
-                    context={"sample_ids": tuple(batch.sample_ids), "reference_ids": reference_ids,
+                    context={**measure_context, "sample_ids": tuple(batch.sample_ids), "reference_ids": reference_ids,
                              "conditional_draws": tuple(members[1:]), "score_all_conditional_draws": True}))
             elif mode == "paired":
                 for member in members:
                     results.append(family(member, target, coordinates=coordinates,
-                        context={"sample_ids": tuple(batch.sample_ids), "reference_ids": reference_ids}))
+                        context={**measure_context, "sample_ids": tuple(batch.sample_ids), "reference_ids": reference_ids}))
             else:
                 for member in members:
                     for start in range(0, conditions, self.group_size):

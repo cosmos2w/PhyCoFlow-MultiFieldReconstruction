@@ -24,11 +24,32 @@ from ....data.normalization import FieldNormalizer
 from ...base import require_field_tensor
 from .betti_curves import betti_curves, gaussian_blur
 from .finite_primary import FinitePrimaryTopologyObjective
-from .geometry import build_raster_map, coordinate_digest, rasterize_fields
+from .geometry import (
+    build_physical_cell_overlap_map,
+    build_raster_map,
+    coordinate_digest,
+    rasterize_fields,
+)
 from .persistence import persistence_source
 from .persistence_objective import PersistenceTopologyObjective
 from .provenance import SOURCE_SNAPSHOT
 from .spatial_objective import SpatialTopologyObjective
+
+_LEGACY_GEOMETRY_SOURCE = {
+    "family.py": "0c80a1a350939dc143b594990216fa454f28526f467adb354befd140543edfda",
+    "geometry.py": "eed9bb67a0aac7114982d5d1af1055ea5780a1d365a0584611a317b0dc9370c7",
+}
+
+
+def _compatible_persistence_source(actual, expected, *, legacy_geometry):
+    """Accept the immediately preceding legacy map while keeping other bindings strict."""
+    if actual == expected:
+        return True
+    if not legacy_geometry or not isinstance(actual, Mapping):
+        return False
+    previous = deepcopy(expected)
+    previous["source_sha256"].update(_LEGACY_GEOMETRY_SOURCE)
+    return actual == previous
 
 
 class TopologyFamily(nn.Module):
@@ -101,6 +122,7 @@ class TopologyFamily(nn.Module):
             raise ValueError("topology geometry.periods requires periodic=true")
         self.allow_projected_collisions = bool(geometry.get("allow_projected_collisions", False))
         self.antialias_downsample = geometry.get("antialias_downsample", False)
+        self.raster_mapping = geometry.get("raster_mapping", "legacy_v1")
         self.native_masked = geometry.get("native_masked", False)
         self.structured_indices = geometry.get("structured_indices")
         if self.structured_indices is not None and (
@@ -125,13 +147,21 @@ class TopologyFamily(nn.Module):
             self.register_buffer("domain_mask", torch.empty(0, 0, dtype=torch.bool))
         if not isinstance(self.antialias_downsample, bool):
             raise TypeError("topology geometry.antialias_downsample must be boolean")
+        if self.raster_mapping not in {"legacy_v1", "physical_cell_overlap_v1"}:
+            raise ValueError("unknown topology geometry.raster_mapping")
+        if self.raster_mapping == "physical_cell_overlap_v1" and (
+            self.periodic or self.native_masked or self.antialias_downsample
+        ):
+            raise ValueError(
+                "physical_cell_overlap_v1 requires a complete nonperiodic grid and excludes legacy antialias"
+            )
         if self.antialias_downsample and self.strategy == "betti_curves":
             raise ValueError("topology antialias_downsample requires topology v2 or v3")
         self.register_buffer("neighbor_indices", torch.empty(0, 0, dtype=torch.long))
         self.register_buffer("neighbor_weights", torch.empty(0, 0))
         self.register_buffer("grid_coordinates", torch.empty(0, 0, 2))
         self.geometry_sha256: str | None = None
-        self.geometry_diagnostics: dict[str, float | int] = {}
+        self.geometry_diagnostics: dict[str, float | int | str] = {}
 
         filtration = config.get("filtration", {})
         quantiles = filtration.get("quantiles", (0.1, 0.25, 0.5, 0.75, 0.9))
@@ -284,8 +314,8 @@ class TopologyFamily(nn.Module):
         return deepcopy(self.spatial_objective.calibration_record)
 
     def fit_training_reference(self, dataset, *, query_indices, device=None) -> None:
-        """Freeze the native masked topology layout from training geometry only."""
-        if not self.native_masked:
+        """Freeze configured topology geometry from the training support."""
+        if not self.native_masked and self.raster_mapping == "legacy_v1":
             return
         if dataset.split_name != "train" or dataset.selection.split != "train":
             raise ValueError("native topology geometry must be fitted on the training split")
@@ -295,16 +325,45 @@ class TopologyFamily(nn.Module):
                 "native_masked topology requires a compact all-valid provider; "
                 "full-grid invalid nodes are unsupported"
             )
-        if self.structured_indices is None:
-            return
         query = torch.as_tensor(query_indices, dtype=torch.long).cpu()
-        indices = sample.metadata.get("auxiliary", {})[self.structured_indices][query]
         if device is not None:
             self.to(device)
+        if self.raster_mapping == "physical_cell_overlap_v1":
+            self.fit_physical_raster(
+                sample.coordinates_raw,
+                query,
+                query_coordinates=sample.coordinates[query],
+            )
+            return
+        if self.structured_indices is None:
+            return
+        indices = sample.metadata.get("auxiliary", {})[self.structured_indices][query]
         self._raster_map(
             sample.coordinates[query][None].to(self.normalization_offset.device),
             native_grid_indices=indices,
         )
+
+    def fit_physical_raster(self, native_coordinates, query_indices, *, query_coordinates):
+        """Freeze a raw-coordinate native overlap map for the selected model queries."""
+        if self.raster_mapping != "physical_cell_overlap_v1":
+            raise ValueError("physical raster fitting requires physical_cell_overlap_v1")
+        if self.neighbor_indices.numel():
+            raise ValueError("topology raster mapping is already frozen")
+        mapping = build_physical_cell_overlap_map(
+            native_coordinates,
+            query_indices,
+            grid_shape=self.grid_shape,
+            query_coordinates=query_coordinates,
+            axes=self.axes,
+            neighbors=self.raster_neighbors,
+            power=self.raster_power,
+        )
+        device = self.normalization_offset.device
+        self.neighbor_indices = mapping.neighbor_indices.to(device)
+        self.neighbor_weights = mapping.neighbor_weights.to(device)
+        self.grid_coordinates = mapping.grid_coordinates.to(device)
+        self.geometry_sha256 = mapping.coordinate_sha256
+        self.geometry_diagnostics = dict(mapping.diagnostics)
 
     def _raster_map(self, coordinates: torch.Tensor, *, native_grid_indices=None) -> None:
         if coordinates.ndim != 3:
@@ -313,6 +372,8 @@ class TopologyFamily(nn.Module):
             raise ValueError("topology requires identical coordinates for every sample")
         digest = coordinate_digest(coordinates[0])
         if not self.neighbor_indices.numel():
+            if self.raster_mapping == "physical_cell_overlap_v1":
+                raise ValueError("fit physical topology raster from native coordinates before scoring")
             if self.structured_indices is not None and native_grid_indices is None:
                 raise ValueError("fit native topology geometry or load its artifact before scoring")
             mapping = build_raster_map(
@@ -653,8 +714,10 @@ class TopologyFamily(nn.Module):
             raise ValueError(
                 "topology family artifact scientific source mismatch; rebuild the artifact"
             )
-        if self.version in {"3", "4"} and artifact.get("scientific_source") != persistence_source(
-            finite_primary=self.version == "4"
+        if self.version in {"3", "4"} and not _compatible_persistence_source(
+            artifact.get("scientific_source"),
+            persistence_source(finite_primary=self.version == "4"),
+            legacy_geometry=self.raster_mapping == "legacy_v1",
         ):
             raise ValueError("persistence family source/backend mismatch; start a new experiment")
         state = artifact["state_dict"]

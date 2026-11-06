@@ -268,6 +268,8 @@ class H5FieldDataset(Dataset[FieldSample]):
             sample = self._space_time_sample(trajectory_index)
         else:
             sample = self._snapshot_sample(trajectory_index, time_index)
+        from .physical_measure import attach_sample_measure
+        attach_sample_measure(self, sample)
         sample.validate()
         return sample
 
