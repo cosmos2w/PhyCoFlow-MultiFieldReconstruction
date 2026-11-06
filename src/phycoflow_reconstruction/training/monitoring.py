@@ -109,6 +109,8 @@ class TrainingMonitor:
         self.enabled = bool(enabled)
         self._steps: dict[str, list[int]] = defaultdict(list)
         self._values: dict[str, list[float]] = defaultdict(list)
+        self._coherence_semantics: set[str] = set()
+        self._data_semantics: set[str] = set()
         self._epoch_sums: dict[str, float] = defaultdict(float)
         self._epoch_counts: dict[str, int] = defaultdict(int)
         self._epoch_latest: dict[str, Any] = {}
@@ -168,6 +170,18 @@ class TrainingMonitor:
 
     def _capture(self, row: Mapping[str, Any]) -> None:
         step = int(row.get("step", 0))
+        coherence = row.get("coherence_loss")
+        if isinstance(coherence, (int, float)) and math.isfinite(float(coherence)):
+            self._coherence_semantics.add(
+                "direction" if row.get("total_semantics") == "parameter_direction_without_scalar_objective"
+                else "scalar"
+            )
+        data = row.get("data_loss")
+        if isinstance(data, (int, float)) and math.isfinite(float(data)):
+            self._data_semantics.add(
+                "paired" if row.get("data_retention_objective") == "paired_endpoint_field_budget"
+                else "other"
+            )
         family_keys = (
             key
             for key in row
@@ -469,12 +483,14 @@ class TrainingMonitor:
             # the first row's left-aligned panel titles.
             height_ratios=(0.34, *([1.0] * individual_rows)),
         )
+        has_direction = "direction" in self._coherence_semantics
+        direction_only = self._coherence_semantics == {"direction"}
         title_axis = figure.add_subplot(grid[0, :])
         title_axis.set_axis_off()
         title_axis.text(
             0.5,
             0.64,
-            f"{self._stage_label()} objectives",
+            f"{self._stage_label()} {'diagnostics' if has_direction else 'objectives'}",
             ha="center",
             va="center",
             color=_TEXT_COLOR,
@@ -509,8 +525,8 @@ class TrainingMonitor:
                 shown_values,
                 color=_LOSS_COLORS[key],
                 linewidth=1.7,
-                marker="o" if key == "validation_loss" else None,
-                markersize=4.3 if key == "validation_loss" else None,
+                marker="o" if key == "validation_loss" or len(shown_values) == 1 else None,
+                markersize=4.3 if key == "validation_loss" or len(shown_values) == 1 else None,
                 markerfacecolor="white" if key == "validation_loss" else None,
                 markeredgewidth=1.1 if key == "validation_loss" else None,
             )
@@ -518,6 +534,13 @@ class TrainingMonitor:
             axis.set_ylabel("Objective value", labelpad=3)
             if key == "validation_loss":
                 title = "Fixed validation objective"
+            elif key == "coherence_loss" and has_direction:
+                title = ("Coherence reporting sum" if direction_only
+                         else "Coherence values · includes reporting sums")
+                axis.set_ylabel("Recorded value", labelpad=3)
+            elif key == "data_loss" and self._data_semantics == {"paired"}:
+                title = "Sampled TRAIN paired-endpoint data diagnostic"
+                axis.set_ylabel("Recorded value", labelpad=3)
             elif post_training and key == "total":
                 title = "Weighted combined objective"
             elif post_training and key == "data_loss":

@@ -20,6 +20,7 @@ _NAMED_FAMILY_STYLES = {
     "global_distribution": ("#D95F59", "--"),
     "cross_spectrum": ("#3B6EA8", "-."),
     "topology": ("#B58900", ":"),
+    "multiscale_spectrum": ("#356b9a", "-"),
 }
 
 

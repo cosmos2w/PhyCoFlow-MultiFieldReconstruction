@@ -46,6 +46,8 @@ class CoherenceHistoryData:
     total_epochs: tuple[float, ...]
     total_values: tuple[float, ...]
     family_totals: dict[str, tuple[tuple[float, ...], tuple[float, ...]]]
+    state_definition: str | None = None
+    coherence_semantics: str = "scalar"
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -216,12 +218,23 @@ def extract_coherence_history(
         }
         if points:
             family_totals[family] = _ordered_points(points)
+    observed_semantics = {
+        "direction" if row.get("total_semantics") == "parameter_direction_without_scalar_objective"
+        else "scalar"
+        for row in rows if _finite_number(row.get("coherence_loss")) is not None
+    }
+    semantics = "mixed" if len(observed_semantics) > 1 else next(iter(observed_semantics), "scalar")
+    state_definition = (
+        config.get("coherence", {}).get("families", {}).get("global_distribution", {}).get("definition")
+    )
     return CoherenceHistoryData(
         components=tuple(components),
         family_order=tuple(family_order),
         total_epochs=total_epochs,
         total_values=total_values,
         family_totals=family_totals,
+        state_definition=state_definition,
+        coherence_semantics=semantics,
     )
 
 
@@ -234,7 +247,15 @@ def _display_name(value: str) -> str:
     return f"{label[:1].upper()}{label[1:]}"
 
 
-def _component_label(component: str) -> str:
+def _component_label(component: str, *, family: str, definition: str | None) -> str:
+    if family == "global_distribution" and definition in {
+        "marginal_mixed_mean_v2", "marginal_mixed_weighted_v3"
+    }:
+        measure = "Measure-weighted" if definition == "marginal_mixed_weighted_v3" else "Equal-node"
+        if component == "self.marginal_w2":
+            return f"{measure} marginal W2² mean"
+        if component == "cross.joint_topk_swd":
+            return f"{measure} mixed-projection W2² mean"
     return " · ".join(_display_name(part) for part in component.split("."))
 
 
@@ -297,20 +318,37 @@ def build_coherence_history_figure(data: CoherenceHistoryData, plt, *, descripti
     total_axis, family_axis = subfigures[0].subplots(
         1, 2, gridspec_kw={"width_ratios": [1.0, 1.55], "wspace": 0.22}
     )
+    direction = data.coherence_semantics == "direction"
+    mixed = data.coherence_semantics == "mixed"
+    if direction:
+        total_title, total_ylabel, total_label = (
+            "Coherence reporting sum", "Reporting sum · not optimized scalar", "Reporting sum"
+        )
+        family_title, family_ylabel = "Weighted family reporting values", "Weighted reporting value"
+    elif mixed:
+        total_title, total_ylabel, total_label = (
+            "Coherence values · includes reporting sums", "Recorded value", "Recorded coherence"
+        )
+        family_title, family_ylabel = "Weighted family values", "Recorded weighted value"
+    else:
+        total_title, total_ylabel, total_label = "Total coherence", "Weighted objective", "Total coherence"
+        family_title, family_ylabel = "Weighted family contributions", "Weighted objective"
     if data.total_values:
         total_axis.plot(
             data.total_epochs,
             data.total_values,
             color=_SUMMARY_COLOR,
             linewidth=2.2,
-            label="Total coherence",
+            marker="o" if len(data.total_epochs) == 1 else None,
+            markersize=4.3 if len(data.total_epochs) == 1 else None,
+            label=total_label,
         )
     total_axis.set_title(
-        "Total coherence", loc="left", color=HISTORY_TEXT_COLOR,
+        total_title, loc="left", color=HISTORY_TEXT_COLOR,
         fontsize=11.5, fontweight="medium", pad=8,
     )
     total_axis.set_xlabel("Training epoch")
-    total_axis.set_ylabel("Weighted objective")
+    total_axis.set_ylabel(total_ylabel)
     style_history_axis(total_axis, data.total_values, x_max=epoch_max)
 
     family_values: list[float] = []
@@ -327,10 +365,12 @@ def build_coherence_history_figure(data: CoherenceHistoryData, plt, *, descripti
                 color=color,
                 linestyle=linestyle,
                 linewidth=1.8,
+                marker="o" if len(epochs) == 1 else None,
+                markersize=4.3 if len(epochs) == 1 else None,
                 label=_display_name(family),
             )
     family_axis.set_title(
-        "Weighted family contributions",
+        family_title,
         loc="left",
         color=HISTORY_TEXT_COLOR,
         fontsize=11.5,
@@ -338,7 +378,7 @@ def build_coherence_history_figure(data: CoherenceHistoryData, plt, *, descripti
         pad=8,
     )
     family_axis.set_xlabel("Training epoch")
-    family_axis.set_ylabel("Weighted objective")
+    family_axis.set_ylabel(family_ylabel)
     style_history_axis(family_axis, family_values, x_max=epoch_max)
     if family_axis.lines:
         family_axis.legend(
@@ -411,7 +451,7 @@ def build_coherence_history_figure(data: CoherenceHistoryData, plt, *, descripti
                     zorder=3,
                 )
             axis.set_title(
-                _component_label(component.component),
+                _component_label(component.component, family=family, definition=data.state_definition),
                 loc="left",
                 color=HISTORY_TEXT_COLOR,
                 fontsize=9.4,
@@ -472,8 +512,17 @@ def render_coherence_history(
         Path(output_path) if output_path is not None else run_dir / "coherence_history.png"
     )
     destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = destination.with_name(f".{destination.name}.tmp")
+    if destination.suffix.lower() == ".pdf":
+        pdf_destination = destination
+        png_destination = destination.with_suffix(".png")
+    else:
+        png_destination = destination
+        pdf_destination = destination.with_suffix(".pdf")
+    temporary = png_destination.with_name(f".{png_destination.name}.tmp")
+    pdf_temporary = pdf_destination.with_name(f".{pdf_destination.name}.tmp")
     figure.savefig(temporary, dpi=180, format="png")
+    figure.savefig(pdf_temporary, format="pdf")
     pyplot.close(figure)
-    os.replace(temporary, destination)
+    os.replace(pdf_temporary, pdf_destination)
+    os.replace(temporary, png_destination)
     return destination

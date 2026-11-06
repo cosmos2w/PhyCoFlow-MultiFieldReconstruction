@@ -298,3 +298,93 @@ def test_truncated_epoch_writes_one_explicit_partial_history_row(tmp_path):
     assert history["epoch_complete"] is False
     assert history["total"] == 3.0
     assert history["update_mode"] == "weighted_sum"
+
+
+def test_config_singleton_monitor_uses_recorded_diagnostics_and_visible_marks(tmp_path):
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    (tmp_path / "metrics").mkdir()
+    monitor = TrainingMonitor(
+        tmp_path,
+        start_step=0,
+        final_step=1,
+        configured_steps=1,
+        steps_per_epoch=1,
+        description="post_training:test",
+        enabled=False,
+    )
+    monitor._capture(
+        {
+            "step": 1,
+            "data_loss": 0.02,
+            "coherence_loss": 0.5,
+            "data_retention_objective": "paired_endpoint_field_budget",
+            "total_semantics": "parameter_direction_without_scalar_objective",
+        }
+    )
+    figure = monitor._build_loss_figure(plt)
+    assert figure.axes[0].texts[0].get_text() == "Post-training diagnostics"
+    assert [axis.get_title(loc="left") for axis in figure.axes[1:]] == [
+        "Sampled TRAIN paired-endpoint data diagnostic",
+        "Coherence reporting sum",
+    ]
+    assert all(axis.lines[0].get_marker() == "o" for axis in figure.axes[1:])
+    assert [list(axis.lines[0].get_ydata()) for axis in figure.axes[1:]] == [[0.02], [0.5]]
+    assert all(axis.get_ylabel() == "Recorded value" for axis in figure.axes[1:])
+    plt.close(figure)
+    monitor.close()
+
+
+def test_mixed_coherence_monitor_does_not_label_config_reporting_sum_as_objective(tmp_path):
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    (tmp_path / "metrics").mkdir()
+    monitor = TrainingMonitor(
+        tmp_path,
+        start_step=0,
+        final_step=2,
+        configured_steps=2,
+        steps_per_epoch=1,
+        description="post_training:test",
+        enabled=False,
+    )
+    monitor._capture({"step": 1, "coherence_loss": 1.0})
+    monitor._capture(
+        {
+            "step": 2,
+            "coherence_loss": 0.5,
+            "total_semantics": "parameter_direction_without_scalar_objective",
+        }
+    )
+    figure = monitor._build_loss_figure(plt)
+    assert figure.axes[1].get_title(loc="left") == "Coherence values · includes reporting sums"
+    assert figure.axes[1].get_ylabel() == "Recorded value"
+    plt.close(figure)
+    monitor.close()
+
+
+def test_config_semantics_are_restored_from_history_on_resume(tmp_path):
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    (tmp_path / "metrics").mkdir()
+    (tmp_path / "metrics/history.jsonl").write_text(
+        json.dumps({"step": 1, "coherence_loss": .5, "data_loss": .02,
+                    "data_retention_objective": "paired_endpoint_field_budget",
+                    "total_semantics": "parameter_direction_without_scalar_objective"}) + "\n"
+    )
+    monitor = TrainingMonitor(tmp_path, start_step=1, final_step=2, configured_steps=2,
+                              steps_per_epoch=1, description="post_training:test", enabled=False)
+    assert monitor._coherence_semantics == {"direction"}
+    assert monitor._data_semantics == {"paired"}
+    figure = monitor._build_loss_figure(plt)
+    assert [axis.get_title(loc="left") for axis in figure.axes[1:]] == [
+        "Sampled TRAIN paired-endpoint data diagnostic", "Coherence reporting sum"
+    ]
+    plt.close(figure)
+    monitor.close()

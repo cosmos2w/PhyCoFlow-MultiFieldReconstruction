@@ -295,6 +295,16 @@ coherence:
 
     assert path == tmp_path / "coherence_history.png"
     assert path.stat().st_size > 0
+    assert (tmp_path / "coherence_history.pdf").read_bytes().startswith(b"%PDF")
+    from PIL import Image
+
+    with Image.open(path) as image:
+        image.verify()
+    explicit_pdf = tmp_path / "custom.pdf"
+    assert render_coherence_history(tmp_path, output_path=explicit_pdf) == explicit_pdf
+    assert explicit_pdf.read_bytes().startswith(b"%PDF")
+    with Image.open(tmp_path / "custom.png") as image:
+        image.verify()
 
 
 def test_live_monitor_writes_loss_and_coherence_figures_from_one_epoch_row(tmp_path) -> None:
@@ -337,3 +347,90 @@ coherence:
 
     assert (tmp_path / "loss_history.png").stat().st_size > 0
     assert (tmp_path / "coherence_history.png").stat().st_size > 0
+    assert (tmp_path / "coherence_history.pdf").read_bytes().startswith(b"%PDF")
+
+
+@pytest.mark.parametrize(
+    ("definition", "marginal_title", "cross_title"),
+    [
+        (
+            "marginal_mixed_mean_v2",
+            "Equal-node marginal W2² mean",
+            "Equal-node mixed-projection W2² mean",
+        ),
+        (
+            "marginal_mixed_weighted_v3",
+            "Measure-weighted marginal W2² mean",
+            "Measure-weighted mixed-projection W2² mean",
+        ),
+        ("global_distribution_v1", "Self · Marginal W2", "Cross · Joint topk SWD"),
+    ],
+)
+def test_state_definition_labels_keep_legacy_keys_and_scale_style(
+    definition, marginal_title, cross_title
+):
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    from matplotlib import pyplot as plt
+
+    config = {
+        "coherence": {
+            "families": {
+                "global_distribution": {"definition": definition},
+                "topology": {},
+                "multiscale_spectrum": {},
+            }
+        }
+    }
+    rows = [
+        {
+            "epoch": 1,
+            "coherence_loss": 5.0,
+            "total_semantics": "parameter_direction_without_scalar_objective",
+            "coherence_family/global_distribution/weighted_contribution": 2.0,
+            "coherence_family/topology/weighted_contribution": 1.0,
+            "coherence_family/multiscale_spectrum/weighted_contribution": 2.0,
+            "coherence_component/global_distribution/self.marginal_w2/raw": 0.5,
+            "coherence_component/global_distribution/cross.joint_topk_swd/raw": 1.0,
+            "coherence_component/topology/self.example/raw": 1.0,
+            "coherence_component/multiscale_spectrum/self.example/raw": 2.0,
+        }
+    ]
+    data = extract_coherence_history(rows, config)
+    figure = build_coherence_history_figure(data, plt, description="post:test")
+    titles = [axis.get_title(loc="left") for axis in figure.axes]
+    assert marginal_title in titles and cross_title in titles
+    assert {component.component for component in data.components} >= {
+        "self.marginal_w2",
+        "cross.joint_topk_swd",
+    }
+    assert figure.axes[0].get_title(loc="left") == "Coherence reporting sum"
+    assert "not optimized scalar" in figure.axes[0].get_ylabel()
+    assert figure.axes[0].lines[0].get_marker() == "o"
+    lines = {line.get_label(): line for line in figure.axes[1].lines}
+    assert lines["Multiscale spectrum"].get_color() == "#356b9a"
+    assert lines["Multiscale spectrum"].get_color() != lines["Topology"].get_color()
+    assert lines["Multiscale spectrum"].get_marker() == "o"
+    plt.close(figure)
+
+
+def test_mixed_scalar_and_config_history_is_labeled_as_mixed():
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    from matplotlib import pyplot as plt
+
+    rows = [
+        {"epoch": 1, "coherence_loss": 2.0, "global_distribution.self.marginal_w2": 2.0},
+        {
+            "epoch": 2,
+            "coherence_loss": 1.0,
+            "global_distribution.self.marginal_w2": 1.0,
+            "total_semantics": "parameter_direction_without_scalar_objective",
+        },
+    ]
+    figure = build_coherence_history_figure(
+        extract_coherence_history(rows, _config()), plt, description="post:test"
+    )
+    assert figure.axes[0].get_title(loc="left") == "Coherence values · includes reporting sums"
+    assert figure.axes[0].get_ylabel() == "Recorded value"
+    plt.close(figure)
