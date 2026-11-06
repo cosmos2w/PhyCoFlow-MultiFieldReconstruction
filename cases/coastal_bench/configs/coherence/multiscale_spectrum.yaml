@@ -1,0 +1,96 @@
+coherence:
+  schedule:
+    start_epoch: 1
+    every_n_steps: 1
+    weight_warmup_epochs: 0
+    interval_rescale: false
+  compute_budget:
+    batch_size: 1
+    point_count: 30389
+    query_policy: fixed_shared
+  family_balance:
+    mode: none
+    gradient_diagnostics_every_epochs: 0
+  families:
+    multiscale_spectrum:
+      enabled: true
+      weight: 1.0
+      target_use: paired_supervised
+      units: model_units
+      fields:
+      - u
+      - v
+      - temp
+      - salt
+      reference_bank:
+        enabled: false
+      geometry:
+        operator: fem_p1
+        coordinate_scaling: lonlat_degrees
+        triangulation: structured_indices
+        structured_indices: native_grid_indices
+        connectivity: components
+        min_component_fraction: 0.01
+        max_modes: 2048
+      bands:
+        wavelengths:
+        - 16.0
+        - 8.0
+        - 4.0
+        - 2.0
+        names:
+        - 16km
+        - 8km
+        - 4km
+        - 2km
+        min_wavelength: 1.0
+      calibration:
+        samples: 512
+        seed: 1234
+        band_relative_floor: 0.001
+        absolute_floor: 1.0e-06
+      numerics:
+        dtype: float32
+      objective:
+        kind: signed_band_energy_score
+        conditional_draws: 2
+        almost_fair_alpha: 1.0
+        projections: axes_and_pairs
+        joint_energy_score_weight: 0.25
+        coherence_crps_weight: 0.0
+      components:
+        log_band_power:
+          enabled: true
+          weight: 1.0
+        signed_band_cospectrum:
+          enabled: true
+          weight: 1.0
+        third_order_product_moments:
+          enabled: true
+          weight: 1.0
+          regional: false
+          tuples:
+          - - - salt
+              - 16km
+            - - salt
+              - 16km
+            - - salt
+              - 8km
+          - - - temp
+              - 16km
+            - - temp
+              - 16km
+            - - temp
+              - 8km
+          - - - temp
+              - 16km
+            - - salt
+              - 4km
+            - - salt
+              - 4km
+          - - - salt
+              - 16km
+            - - v
+              - 4km
+            - - v
+              - 4km

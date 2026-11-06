@@ -707,6 +707,7 @@ def _validate_base_training(config: Mapping[str, Any]) -> None:
         optimization,
         {
             "epochs",
+            "steps_per_epoch",
             "batch_size",
             "lr",
             "weight_decay",
@@ -716,6 +717,10 @@ def _validate_base_training(config: Mapping[str, Any]) -> None:
         },
         "optimization",
     )
+    if "steps_per_epoch" in optimization:
+        from ..training.update_budget import base_training_steps_per_epoch
+
+        base_training_steps_per_epoch(config, 1)
     _validate_optimization_values(optimization)
 
 
@@ -1146,11 +1151,26 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
                     "periods",
                     "allow_projected_collisions",
                     "antialias_downsample",
+                    "native_masked",
+                    "structured_indices",
                 },
                 "topology.geometry",
             )
             if not isinstance(geometry.get("antialias_downsample", False), bool):
                 raise ValueError("topology geometry.antialias_downsample must be boolean")
+            if not isinstance(geometry.get("native_masked", False), bool):
+                raise ValueError("topology geometry.native_masked must be boolean")
+            if geometry.get("structured_indices") is not None and (
+                not geometry.get("native_masked", False) or not isinstance(geometry["structured_indices"], str)
+            ):
+                raise ValueError("topology structured_indices requires native_masked and an auxiliary array name")
+            if geometry.get("native_masked", False) and (
+                topology_strategy != "cubical_persistence" or geometry.get("periodic", False)
+                or geometry.get("antialias_downsample", False)
+                or float(family.get("filtration", {}).get("smoothing_sigma", 0.8)) != 0
+                or family.get("persistence", {}).get("descriptors")
+            ):
+                raise ValueError("native_masked requires nonperiodic cubical persistence, zero smoothing, no downsampling or derived descriptors")
             if geometry.get("antialias_downsample", False) and topology_strategy == "betti_curves":
                 raise ValueError("topology antialias_downsample requires v2 or v3")
             filtration = family.get("filtration", {})

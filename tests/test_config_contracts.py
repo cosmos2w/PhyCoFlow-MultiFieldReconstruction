@@ -77,6 +77,7 @@ def test_case_dataset_catalog_uses_the_canonical_lowercase_root():
     assert {path.parents[1].name for path in configs} == {
         "active_emulsion",
         "brusselator",
+        "coastal_bench",
         "kolmogorov",
         "ks",
         "mass_transport_fluid",

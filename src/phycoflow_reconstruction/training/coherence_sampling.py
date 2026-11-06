@@ -68,7 +68,11 @@ def _fit_training_references(
         fit = getattr(family, "fit_training_reference", None)
         if fit is None:
             continue
-        if structured_grid_required and point_count < total:
+        if (
+            structured_grid_required
+            and getattr(family, "requires_full_grid_calibration", False)
+            and point_count < total
+        ):
             raise ValueError(
                 f"{name} with a structured-grid source needs coherence.compute_budget.point_count "
                 f"to cover all {total} grid points"

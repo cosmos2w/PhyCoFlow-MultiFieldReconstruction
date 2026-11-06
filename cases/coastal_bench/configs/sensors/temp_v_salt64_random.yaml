@@ -1,0 +1,9 @@
+observations:
+  protocol: random_uniform
+  seed: 42
+  # Reallocate 64 temperature sensors to salinity. The total count distribution
+  # matches temp_v_random_192_384: 384–768 entries, mean 576 per snapshot.
+  fields:
+    v: {count_min: 192, count_max: 384}
+    temp: {count_min: 128, count_max: 320}
+    salt: {count_min: 64, count_max: 64}

@@ -99,6 +99,7 @@ def _plain(value: Any) -> Any:
 class MultiscaleSpectrumFamily(nn.Module):
     family_name = "multiscale_spectrum"
     version = "1"
+    requires_full_grid_calibration = True
     supports_report_detail = True
     # The report accepts every available independent draw (``context["ensemble_draws"]``)
     # for per-band member/mean/spread power diagnostics.

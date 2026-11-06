@@ -1,0 +1,25 @@
+defaults:
+- unified.yaml
+objectives:
+  data_retention:
+    enabled: false
+    weight: 0.0
+optimization:
+  multitask:
+    family_scalarization:
+      method: none
+    outer_aggregation: null
+    coherence_aggregation:
+      method: torchjd_config
+    external_policy:
+      method: lagrangian
+      vector_reduction: sum
+    fidelity_budget:
+      relative_increase: 0.03
+      calibration_batches: 4
+      calibration_draws: 2
+output:
+  experiment_name: coastal_all_three_fidelity
+evaluation:
+  preview:
+    enabled: false

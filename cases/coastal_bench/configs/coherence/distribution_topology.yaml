@@ -1,0 +1,86 @@
+coherence:
+  families:
+    global_distribution:
+      enabled: true
+      weight: 1.0
+      target_use: paired_supervised
+      units: model_units
+      fields:
+      - u
+      - v
+      - temp
+      - salt
+      reference_bank:
+        enabled: false
+      components:
+        self:
+          enabled: true
+          weight: 1.0
+        mutual:
+          enabled: true
+          weight: 1.0
+          directions: 8
+          seed: 1234
+        cross:
+          enabled: true
+          weight: 1.0
+          directions: 16
+          top_fraction: 0.1
+          seed: 1234
+          include_axes: true
+          qmc: true
+    topology:
+      enabled: true
+      strategy: cubical_persistence
+      weight: 1.0
+      target_use: paired_supervised
+      units: model_units
+      fields:
+      - u
+      - v
+      - temp
+      - salt
+      reference_bank:
+        enabled: false
+      geometry:
+        grid_shape:
+        - 201
+        - 381
+        native_masked: true
+        structured_indices: native_grid_indices
+        periodic: false
+        antialias_downsample: false
+      filtration:
+        directions:
+        - sublevel
+        - superlevel
+        dimensions:
+        - 0
+        - 1
+        smoothing_sigma: 0.0
+      persistence:
+        distance: sliced_wasserstein
+        projections: 32
+        essential_weight: 0.1
+        scale_floor: 0.0001
+      components:
+        self:
+          enabled: true
+          weight: 1.0
+          fields:
+          - u
+          - v
+          - temp
+          - salt
+        mutual:
+          enabled: true
+          weight: 1.0
+          groups:
+          - - u
+            - v
+          - - temp
+            - salt
+          lines: 2
+          seed: 1729
+          direction_floor: 0.25
+          offset_range: 1.0

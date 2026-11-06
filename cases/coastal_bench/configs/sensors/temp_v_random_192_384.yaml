@@ -1,0 +1,8 @@
+observations:
+  protocol: random_uniform
+  seed: 42
+  # Temperature plus the northward velocity component only; each field draws
+  # its own random locations and budget per snapshot.
+  fields:
+    v: {count_min: 192, count_max: 384}
+    temp: {count_min: 192, count_max: 384}

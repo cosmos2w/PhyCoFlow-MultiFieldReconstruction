@@ -90,6 +90,18 @@ class TopologyFamily(nn.Module):
             raise ValueError("topology geometry.periods requires periodic=true")
         self.allow_projected_collisions = bool(geometry.get("allow_projected_collisions", False))
         self.antialias_downsample = geometry.get("antialias_downsample", False)
+        self.native_masked = geometry.get("native_masked", False)
+        self.structured_indices = geometry.get("structured_indices")
+        if self.structured_indices is not None and (not self.native_masked or not isinstance(self.structured_indices, str)):
+            raise ValueError("topology structured_indices requires native_masked and an auxiliary array name")
+        if not isinstance(self.native_masked, bool):
+            raise TypeError("topology geometry.native_masked must be boolean")
+        if self.native_masked:
+            if (self.strategy != "cubical_persistence" or self.periodic or self.antialias_downsample
+                    or float(config.get("filtration", {}).get("smoothing_sigma", 0.8)) != 0
+                    or config.get("persistence", {}).get("descriptors")):
+                raise ValueError("native_masked requires nonperiodic cubical persistence, zero smoothing, no downsampling or derived descriptors")
+            self.register_buffer("domain_mask", torch.empty(0, 0, dtype=torch.bool))
         if not isinstance(self.antialias_downsample, bool):
             raise TypeError("topology geometry.antialias_downsample must be boolean")
         if self.antialias_downsample and self.strategy == "betti_curves":
@@ -232,13 +244,29 @@ class TopologyFamily(nn.Module):
         )
         self.spec.validate()
 
-    def _raster_map(self, coordinates: torch.Tensor) -> None:
+    def fit_training_reference(self, dataset, *, query_indices, device=None) -> None:
+        """Freeze the native masked topology layout from training geometry only."""
+        if not self.native_masked or self.structured_indices is None:
+            return
+        if dataset.split_name != "train" or dataset.selection.split != "train":
+            raise ValueError("native topology geometry must be fitted on the training split")
+        sample = dataset[0]
+        query = torch.as_tensor(query_indices, dtype=torch.long).cpu()
+        indices = sample.metadata.get("auxiliary", {})[self.structured_indices][query]
+        if device is not None:
+            self.to(device)
+        self._raster_map(sample.coordinates[query][None].to(self.normalization_offset.device),
+                         native_grid_indices=indices)
+
+    def _raster_map(self, coordinates: torch.Tensor, *, native_grid_indices=None) -> None:
         if coordinates.ndim != 3:
             raise ValueError("topology coordinates must have shape [B,N,D]")
         if not torch.equal(coordinates, coordinates[:1].expand_as(coordinates)):
             raise ValueError("topology requires identical coordinates for every sample")
         digest = coordinate_digest(coordinates[0])
         if not self.neighbor_indices.numel():
+            if self.structured_indices is not None and native_grid_indices is None:
+                raise ValueError("fit native topology geometry or load its artifact before scoring")
             mapping = build_raster_map(
                 coordinates[0],
                 grid_shape=self.grid_shape,
@@ -249,6 +277,8 @@ class TopologyFamily(nn.Module):
                 periods=self.periods,
                 allow_projected_collisions=self.allow_projected_collisions,
                 antialias_downsample=self.antialias_downsample,
+                native_masked=self.native_masked,
+                native_grid_indices=native_grid_indices,
             )
             self.neighbor_indices = mapping.neighbor_indices.to(coordinates.device)
             self.neighbor_weights = mapping.neighbor_weights.to(coordinates.device)
@@ -256,6 +286,8 @@ class TopologyFamily(nn.Module):
             self.geometry_sha256 = mapping.coordinate_sha256
             self.periods = mapping.periods
             self.geometry_diagnostics = dict(mapping.diagnostics)
+            if self.native_masked:
+                self.domain_mask = mapping.valid_mask.to(coordinates.device)
         elif digest != self.geometry_sha256:
             raise ValueError("topology coordinates changed after raster-map construction")
 
@@ -442,7 +474,8 @@ class TopologyFamily(nn.Module):
         if self.spatial_objective is not None:
             with torch.autocast(device_type=generated.device.type, enabled=False):
                 kwargs = (
-                    {"reference_cache": reference_cache}
+                    {"reference_cache": reference_cache,
+                     "valid_mask": self.domain_mask if self.native_masked else None}
                     if self.strategy == "cubical_persistence"
                     else {}
                 )
@@ -565,6 +598,8 @@ class TopologyFamily(nn.Module):
         self.neighbor_indices = state["neighbor_indices"].to(device)
         self.neighbor_weights = state["neighbor_weights"].to(device)
         self.grid_coordinates = state["grid_coordinates"].to(device)
+        if self.native_masked:
+            self.domain_mask = state["domain_mask"].to(device)
         self.geometry_sha256 = artifact.get("geometry_sha256")
         self.periods = artifact.get("periods", self.periods)
         self.geometry_diagnostics = dict(artifact.get("geometry_diagnostics", {}))

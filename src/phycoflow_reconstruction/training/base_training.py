@@ -8,7 +8,6 @@ only integration checks; normal configs run their declared epochs.
 
 from __future__ import annotations
 
-import math
 from collections.abc import Mapping
 from dataclasses import asdict
 from pathlib import Path
@@ -39,6 +38,7 @@ from .model_lifecycle import (
 from .monitoring import TrainingMonitor
 from .preview import TrainingReconstructionPreview
 from .run_store import RunStore, checkpoint_model_state, file_sha256, load_model_state_strict
+from .update_budget import base_training_steps_per_epoch
 
 
 def _build_dataset(config: Mapping[str, Any]):
@@ -107,7 +107,7 @@ def run_base_training(
     adaptive_backward_scaling = bool(
         config["optimization"].get("adaptive_backward_scaling", False)
     )
-    steps_per_epoch = math.ceil(len(dataset) / batch_size)
+    steps_per_epoch = base_training_steps_per_epoch(config, len(dataset))
     configured_steps = epochs * steps_per_epoch
     if start_step >= configured_steps:
         raise ValueError(f"run already reached configured_steps={configured_steps}")
@@ -139,6 +139,14 @@ def run_base_training(
         benchmark_telemetry_enabled=bool(telemetry_settings.get("enabled", False)),
         normalization_method=dataset.normalizer.method,
         normalization_digest=dataset.normalizer.digest(),
+        training_epoch_budget={
+            "steps_per_epoch": steps_per_epoch,
+            "batch_size": batch_size,
+            "sample_presentations_per_epoch": steps_per_epoch * batch_size,
+            "available_training_snapshots": len(dataset),
+            "sampling": "independent_batches_from_full_split",
+            "explicit": config["optimization"].get("steps_per_epoch") is not None,
+        },
     )
     store.save_artifact("normalization.pt", dataset.normalizer.state_dict())
     store.write_json(

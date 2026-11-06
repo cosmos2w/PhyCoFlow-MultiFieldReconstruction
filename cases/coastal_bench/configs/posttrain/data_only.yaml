@@ -1,0 +1,14 @@
+defaults:
+- spectral.yaml
+objectives:
+  data_retention:
+    enabled: true
+    weight: 1.0
+  coherence:
+    enabled: false
+    weight: 0.0
+coherence:
+  family_balance:
+    mode: none
+output:
+  experiment_name: coastal_native_continuation

@@ -14,11 +14,11 @@ from phycoflow_reconstruction.training.run_store import load_project_checkpoint
 
 
 @pytest.mark.parametrize(
-    ("method", "penalty_interval"),
-    [("lagrangian", 1), ("rectify", 1)],
+    ("method", "penalty_interval", "masked"),
+    [("lagrangian", 1, False), ("rectify", 1, False), ("lagrangian", 1, True)],
 )
 def test_spectral_composition_shared_draws_and_recovery(
-    tmp_path, monkeypatch, method, penalty_interval
+    tmp_path, monkeypatch, method, penalty_interval, masked
 ):
     pytest.importorskip("torchjd")
     if method == "lagrangian":
@@ -27,6 +27,20 @@ def test_spectral_composition_shared_draws_and_recovery(
 
     path = tmp_path / "fixture.h5"
     _write_fixture(path)
+    if masked:
+        import h5py
+        import numpy as np
+
+        rows, columns = np.meshgrid(np.arange(4), np.arange(5), indexing="ij")
+        keep = np.ones((4, 5), dtype=bool)
+        keep[[0, 1, 2, 3], [1, 2, 2, 3]] = False
+        rc = np.stack((rows[keep], columns[keep]), -1)
+        coords = np.stack(
+            (rc[:, 1] + 0.03 * rc[:, 0] ** 2, rc[:, 0] + 0.02 * rc[:, 1] ** 2, np.zeros(16)), -1
+        )
+        with h5py.File(path, "r+") as handle:
+            handle["coordinates"][:] = coords[:, None, None].astype("float32")
+            handle.create_dataset("auxiliary/native_grid_indices", data=rc)
     case_dir = tmp_path / "case"
     source = run_base_training(_base_config(path), case_dir=case_dir)
     config = _post_config(path, source)
@@ -89,6 +103,19 @@ def test_spectral_composition_shared_draws_and_recovery(
             },
         },
     )
+    if masked:
+        families = config["coherence"]["families"]
+        families["topology"]["geometry"].update(
+            grid_shape=[4, 5],
+            native_masked=True,
+            structured_indices="native_grid_indices",
+            antialias_downsample=False,
+        )
+        families["multiscale_spectrum"]["geometry"].update(
+            triangulation="structured_indices",
+            structured_indices="native_grid_indices",
+            connectivity="components",
+        )
     config["checkpointing"] = {"every_epochs": 1, "selection_metric": "reconstruction_mse"}
     config["evaluation"].update(max_samples=2, query_points=16, preview={"enabled": False})
     config["runtime"].update(progress=False, plot_every_steps=1000)

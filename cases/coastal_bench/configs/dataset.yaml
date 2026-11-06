@@ -1,0 +1,14 @@
+dataset:
+  path: ../../datasets/coastal_bench/coastal_bench.h5
+  split: train
+  reconstruction_unit: snapshot
+  field_names: [u, v, temp, salt]
+  # Preserve the source metadata; physical units were not supplied by the exporter.
+  field_units: [unknown, unknown, unknown, unknown]
+  coordinate_dim: 2
+  grid_shape: [30542]
+  coordinate_reorder: stored
+  normalization: mean_std
+  normalization_stats_path: artifacts/train_mean_std.json
+  time_stride: 1
+  benchmark_eligible: true

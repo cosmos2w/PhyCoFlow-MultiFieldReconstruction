@@ -1,0 +1,22 @@
+dataset:
+  path: ../../datasets/coastal_bench/calendar_576days_hourly/coastal_bench.h5
+  split: train
+  reconstruction_unit: snapshot
+  field_names:
+  - u
+  - v
+  - temp
+  - salt
+  field_units:
+  - m/s
+  - m/s
+  - degC
+  - PSU
+  coordinate_dim: 2
+  grid_shape:
+  - 30389
+  coordinate_reorder: stored
+  normalization: robust_99
+  normalization_stats_path: null
+  time_stride: 1
+  benchmark_eligible: true

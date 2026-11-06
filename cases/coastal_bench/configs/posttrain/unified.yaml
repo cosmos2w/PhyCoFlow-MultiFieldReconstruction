@@ -1,0 +1,5 @@
+defaults:
+- spectral.yaml
+- ../coherence/distribution_topology.yaml
+output:
+  experiment_name: coastal_all_three

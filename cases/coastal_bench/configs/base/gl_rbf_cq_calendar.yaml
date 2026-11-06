@@ -1,0 +1,71 @@
+defaults:
+- ../../../../configs/defaults/base_training.yaml
+- ../dataset_calendar.yaml
+- ../sensors/temp_v_random_192_384.yaml
+- ../../../../configs/models/gl_rbf_cq.yaml
+stage: base_training
+case: coastal_bench
+observations:
+  fields:
+    temp:
+      count_min: 128
+      count_max: 320
+model:
+  train_query_microbatch_size: 2048
+  gather_query_chunk_size: 2048
+  neighbor_backend: torch
+  reconstruction_query_chunk_size: 2048
+  attn_dropout: 0.1
+  mlp_dropout: 0.1
+  sensor_local_dropout: 0.1
+optimization:
+  epochs: 5000
+  steps_per_epoch: 54
+  batch_size: 128
+  lr: 5.0e-05
+  weight_decay: 0.05
+  grad_clip: 1.0
+runtime:
+  seed: 42
+  device: cuda:0
+  deterministic: true
+  data_strategy: vram
+  num_workers: 0
+  progress: true
+  plot_every_steps: 54
+evaluation:
+  split: validation
+  sample_selection: uniform
+  max_samples: 48
+  query_points: null
+  generation_steps: 16
+  seed: 2027
+  preview:
+    enabled: true
+    loss_every_epochs: 10
+    reconstruct_every_epochs: 250
+    split: validation
+    sample_index: 576
+    query_points: null
+    generation_steps: 16
+    seed: 2027
+    keep_history: false
+checkpointing:
+  enabled: true
+  every_epochs: 10
+  save_epoch_one: true
+  epochs:
+  - 50
+  - 100
+  - 250
+  - 500
+  - 1000
+  - 1500
+  - 2000
+  - 3000
+  - 4000
+  - 5000
+benchmark_telemetry:
+  enabled: false
+output:
+  experiment_name: coastal_calendar576_gl_rbf_cq

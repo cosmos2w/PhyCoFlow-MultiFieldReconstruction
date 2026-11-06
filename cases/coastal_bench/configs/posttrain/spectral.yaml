@@ -1,0 +1,101 @@
+defaults:
+- ../dataset_calendar.yaml
+- ../sensors/temp_v_random_192_384.yaml
+- ../coherence/multiscale_spectrum.yaml
+stage: post_training
+case: coastal_bench
+model:
+  name: gl_rbf_cq
+  model_ema_eval: false
+source_run: null
+source_checkpoint: best.pt
+inherit_base_config: true
+source:
+  kind: native_run
+  allow_integration_source: false
+objectives:
+  data_retention:
+    enabled: true
+    weight: 0.1
+  coherence:
+    enabled: true
+    weight: 1.0
+coherence:
+  family_balance:
+    mode: initial_grad_norm
+    calibration_batches: 4
+    reference: median
+    epsilon: 1.0e-12
+    scale_min: 1.0e-05
+    scale_max: 100.0
+    max_batch_ratio: 100.0
+    gradient_diagnostics_every_epochs: 0
+    seed: 700043
+rollout:
+  steps: 16
+  solver: euler
+observation_consistency:
+  mode: endpoint_smooth
+  strength: 1.0
+  sigma: 0.05
+  schedule_power: 2.0
+  final_clamp: true
+  chunk_size: 8192
+trainable:
+  scope: full_model
+optimization:
+  model_mode: eval
+  epochs: 1000
+  sampling: full_pass
+  steps_per_epoch: 54
+  batch_size: 4
+  train_fraction: 1.0
+  lr: 1.0e-05
+  weight_decay: 1.0e-06
+  grad_clip: 1.0
+  multitask:
+    family_scalarization:
+      method: fixed_sum
+    outer_aggregation:
+      method: sum
+runtime:
+  seed: 42
+  device: cuda:0
+  deterministic: true
+  num_workers: 0
+  progress: true
+  plot_every_steps: 54
+  data_strategy: vram
+  vram_dataset_threshold_gb: 20
+evaluation:
+  split: validation
+  sample_selection: uniform
+  max_samples: 32
+  query_points: 30389
+  generation_steps: 16
+  seed: 2027
+  preview:
+    enabled: true
+    loss_every_epochs: 50
+    reconstruct_every_epochs: 50
+    split: validation
+    sample_index: 576
+    query_points: null
+    generation_steps: 16
+    seed: 2027
+    keep_history: false
+checkpointing:
+  enabled: true
+  every_epochs: 10
+  save_epoch_one: true
+  selection_metric: reconstruction_mse
+  validation_every_epochs: 50
+  epochs:
+  - 50
+  - 100
+  - 250
+  - 500
+  - 750
+  - 1000
+output:
+  experiment_name: coastal_spectral_fair_joint

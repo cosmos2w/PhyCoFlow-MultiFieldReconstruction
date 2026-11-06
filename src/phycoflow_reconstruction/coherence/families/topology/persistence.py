@@ -55,6 +55,21 @@ def _cpu_pairing(values, periodic, cacheable):
     )
     complex_.compute_persistence(homology_coeff_field=2, min_persistence=0)
     pairs, essential = complex_.vertices_of_persistence_pairs()
+    # Excluded vertices enter at +infinity. Classes born at a finite vertex and
+    # killed only by excluded cells are essential in the actual masked domain.
+    # Classes born at infinity belong solely to the excluded region.
+    if np.isinf(values).any():
+        flat = values.ravel(order="F")
+        kept_pairs, kept_essential = [], []
+        for dim in range(max(len(pairs), len(essential))):
+            p = pairs[dim] if dim < len(pairs) else np.empty((0, 2), dtype=np.int64)
+            e = essential[dim] if dim < len(essential) else np.empty(0, dtype=np.int64)
+            births_finite = np.isfinite(flat[p[:, 0]])
+            deaths_finite = np.isfinite(flat[p[:, 1]])
+            kept_pairs.append(p[births_finite & deaths_finite])
+            kept_essential.append(np.concatenate((e[np.isfinite(flat[e])],
+                                                  p[births_finite & ~deaths_finite, 0])))
+        pairs, essential = kept_pairs, kept_essential
     result = (
         [np.array(p, dtype=np.int64, copy=True) for p in pairs],
         [np.array(p, dtype=np.int64, copy=True) for p in essential],
@@ -109,6 +124,7 @@ def cubical_diagrams(
     dimensions: tuple[int, ...] = (0, 1),
     locations: bool = False,
     cacheable: bool = False,
+    valid_mask: torch.Tensor | None = None,
 ) -> list[dict[int, Diagram]]:
     """Compute all positive-persistence pairs for [N,H,W], without truncation."""
     try:
@@ -121,6 +137,11 @@ def cubical_diagrams(
     arrays = fields.detach().to(device="cpu", dtype=torch.float64).numpy()
     if not np.isfinite(arrays).all():
         raise FloatingPointError("cubical persistence input must be finite")
+    if valid_mask is not None:
+        if valid_mask.dtype != torch.bool or tuple(valid_mask.shape) != tuple(fields.shape[-2:]) or not valid_mask.any():
+            raise ValueError("persistence valid_mask must be a nonempty boolean [H,W] domain")
+        arrays = arrays.copy()
+        arrays[:, ~valid_mask.detach().cpu().numpy()] = np.inf
     pool = _pairing_pool()
     reduce = lambda values: _cpu_pairing(values, periodic, cacheable)
     reductions = list(map(reduce, arrays) if pool is None else pool.map(reduce, arrays))

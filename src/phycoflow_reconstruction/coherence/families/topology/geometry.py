@@ -25,6 +25,7 @@ class RasterMap:
     coordinate_sha256: str
     periods: tuple[float, float] | None
     diagnostics: dict[str, float | int]
+    valid_mask: torch.Tensor | None = None
 
 
 def _infer_period(values: np.ndarray, axis_name: str) -> float:
@@ -55,6 +56,8 @@ def build_raster_map(
     periods: tuple[float, float] | None = None,
     allow_projected_collisions: bool = False,
     antialias_downsample: bool = False,
+    native_masked: bool = False,
+    native_grid_indices: torch.Tensor | None = None,
 ) -> RasterMap:
     """Precompute inverse-distance weights; gradients flow only through field values."""
     if coordinates.ndim != 2 or coordinates.shape[0] < 4:
@@ -116,6 +119,41 @@ def build_raster_map(
         y = np.linspace(minimum[1], maximum[1], height)
     grid_y, grid_x = np.meshgrid(y, x, indexing="ij")
     grid = np.stack((grid_x, grid_y), axis=-1).reshape(-1, 2)
+
+    if native_masked:
+        if periodic or antialias_downsample or unique_count != len(coords):
+            raise ValueError("native_masked topology requires a unique nonperiodic native lattice")
+        if native_grid_indices is None:
+            pitch = span / np.asarray((width - 1, height - 1))
+            cells = np.rint((coords - minimum) / pitch).astype(np.int64)
+            error = np.abs(coords - (minimum + cells * pitch)) / pitch
+        else:
+            rc = native_grid_indices.detach().cpu().numpy()
+            if rc.shape != (len(coords), 2) or not np.isfinite(rc).all() or not np.equal(rc, np.rint(rc)).all():
+                raise ValueError("native grid indices must be integer [N,2] row/column indices")
+            rc = rc.astype(np.int64) - rc.min(axis=0).astype(np.int64)
+            if tuple(rc.max(axis=0) + 1) != (height, width):
+                raise ValueError("native grid indices extent must match grid_shape")
+            cells, error = rc[:, ::-1], np.zeros_like(rc)
+        flat_ids = cells[:, 1] * width + cells[:, 0]
+        if error.max() > 1e-3 or len(np.unique(flat_ids)) != len(coords):
+            raise ValueError("native_masked grid_shape does not match the source lattice")
+        indices = np.zeros((height * width, 1), dtype=np.int64)
+        weights = np.zeros_like(indices, dtype=np.float64)
+        indices[flat_ids, 0] = np.arange(len(coords))
+        weights[flat_ids, 0] = 1.0
+        grid[flat_ids] = coords
+        valid = weights[:, 0].astype(bool).reshape(height, width)
+        return RasterMap(
+            neighbor_indices=torch.from_numpy(indices),
+            neighbor_weights=torch.from_numpy(weights).float(),
+            grid_coordinates=torch.from_numpy(grid).float().reshape(height, width, 2),
+            grid_shape=(height, width), coordinate_sha256=coordinate_digest(coordinates),
+            periods=None, valid_mask=torch.from_numpy(valid),
+            diagnostics={"point_count": len(coords), "native_masked": 1,
+                         "valid_vertices": int(valid.sum()), "excluded_vertices": int((~valid).sum()),
+                         "max_lattice_error_cells": float(error.max()), "antialias_applied": 0},
+        )
 
     # Use every native lattice value when reducing a complete Cartesian grid.
     # Express block averaging in the existing fixed linear-map contract so

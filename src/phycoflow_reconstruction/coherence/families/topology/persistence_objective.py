@@ -289,9 +289,15 @@ class PersistenceTopologyObjective(nn.Module):
         reference: torch.Tensor,
         *,
         reference_cache: dict | None = None,
+        valid_mask: torch.Tensor | None = None,
     ) -> FamilyResult:
         # Cache lifetime is one transactional update. The family validates the
         # original target and coordinate tensor identities/versions before reuse.
+        if reference_cache is not None:
+            mask_identity = (valid_mask, None if valid_mask is None else valid_mask._version)
+            cached_mask, cached_version = reference_cache.setdefault("mask_identity", mask_identity)
+            if cached_mask is not valid_mask or cached_version != mask_identity[1]:
+                raise ValueError("persistence reference cache domain mask changed")
         if reference_cache is not None and "signature" not in reference_cache:
             original, version = reference_cache.setdefault(
                 "reference_identity", (reference, reference._version)
@@ -301,8 +307,9 @@ class PersistenceTopologyObjective(nn.Module):
         prepared = None if reference_cache is None else reference_cache.get("prepared")
         if prepared is None:
             y = self._descriptor_fields(reference.detach())
-            mean = y.mean((-2, -1), keepdim=True)
-            scale = y.std((-2, -1), keepdim=True, unbiased=False).clamp_min(self.scale_floor)
+            support = y if valid_mask is None else y[..., valid_mask].unsqueeze(-2)
+            mean = support.mean((-2, -1), keepdim=True)
+            scale = support.std((-2, -1), keepdim=True, unbiased=False).clamp_min(self.scale_floor)
             target, _, _, _ = self._filtrations((y - mean) / scale)
             target_diagrams = cubical_diagrams(
                 target.flatten(0, 1),
@@ -310,6 +317,7 @@ class PersistenceTopologyObjective(nn.Module):
                 dimensions=self.dimensions,
                 locations=self.distance == "spatial_wasserstein",
                 cacheable=True,
+                valid_mask=valid_mask,
             )
             prepared = (mean, scale, target_diagrams, tuple(reference.shape), id(self))
             if reference_cache is not None:
@@ -325,6 +333,7 @@ class PersistenceTopologyObjective(nn.Module):
             periodic=self.periodic,
             dimensions=self.dimensions,
             locations=self.distance == "spatial_wasserstein",
+            valid_mask=valid_mask,
         )
         compare = (
             sliced_diagram_distance
@@ -342,6 +351,7 @@ class PersistenceTopologyObjective(nn.Module):
             }
         )
         terms = {name: [] for name in self.weights if self.weights[name] > 0}
+        point_normalization = h * w if valid_mask is None else int(valid_mask.sum())
         by_dimension = {f"{name}.h{d}": [] for name in terms for d in self.dimensions}
         batched_costs = None
         if self.distance == "sliced_wasserstein":
@@ -350,7 +360,7 @@ class PersistenceTopologyObjective(nn.Module):
                 [item[d] for item in target_diagrams for d in self.dimensions],
                 projections=self.projections,
                 essential_weight=self.essential_weight,
-                normalization=h * w,
+                normalization=point_normalization,
             ).reshape(n, batch, len(self.dimensions))
         for i, (label, weight) in enumerate(zip(labels, line_weights)):
             dim_costs = []
@@ -364,7 +374,7 @@ class PersistenceTopologyObjective(nn.Module):
                                 diagrams[i * batch + j][dim],
                                 target_diagrams[i * batch + j][dim],
                                 essential_weight=self.essential_weight,
-                                normalization=h * w,
+                                normalization=point_normalization,
                                 **distance_kwargs,
                             )
                             for j in range(batch)
@@ -404,7 +414,7 @@ class PersistenceTopologyObjective(nn.Module):
                 else None,
                 "finite_slice_approximation": True,
                 "essential_classes_included": True,
-                "point_normalization": h * w,
+                "point_normalization": point_normalization,
                 "descriptor_fields": self.fields,
                 "self_descriptor_fields": self.self_fields,
                 "diagram_distance": self.distance,
