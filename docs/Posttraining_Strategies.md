@@ -64,6 +64,17 @@ python cases/turbulent_combustion/run.py evaluate-native-coherence \
 
 Run the same command with the SOURCE run and a separate output directory, using the identical panel, endpoint, bundle and draw seeds. `--risk-only` streams native field risk without retaining members; it does not perform family scoring. Record SOURCE, selected and final separately, and do not use TEST for checkpoint selection.
 
+Saved native payloads can be rendered without model inference, using the same TRAIN bundle. Add `--selected` and `--final` condition NPZs for a matched atlas; member indices are zero-based. State and Shape use the displayed member, Scale scores use all saved conditional members, and ensemble-mean fidelity is a separate view. Optional event thresholds must be fitted on TRAIN, declare `field_space: decoded_dataset`, and bind the frozen SOURCE/bundle. Fit signed thresholds directly in decoded space, or convert them with the frozen positive-scale normalizer: for `x_phys = scale * x_model + offset` and event `sign * x >= threshold`, use `threshold_phys = scale * threshold_model + sign * offset`, at the saved fields' decode precision.
+
+```bash
+python cases/turbulent_combustion/run.py render-native-coherence \
+  --metric-bundle /path/to/native_metric_bundle.pt \
+  --source /path/to/source/condition_00000.npz \
+  --selected /path/to/selected/condition_00000.npz \
+  --final /path/to/final/condition_00000.npz \
+  --member 0 --output /path/to/native_atlas
+```
+
 ## Choose a route
 
 | Route | Main selectors | What is combined |

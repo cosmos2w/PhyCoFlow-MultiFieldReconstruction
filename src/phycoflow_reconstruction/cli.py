@@ -194,6 +194,16 @@ def run_case_cli(case_name: str, case_dir: str | Path) -> int:
     native.add_argument("--risk-only", action="store_true")
     native.add_argument("--output", type=Path, required=True)
 
+    native_renderer = subparsers.add_parser("render-native-coherence")
+    native_renderer.add_argument("--metric-bundle", type=Path, required=True)
+    native_renderer.add_argument("--source", type=Path, required=True)
+    native_renderer.add_argument("--selected", type=Path)
+    native_renderer.add_argument("--final", type=Path)
+    native_renderer.add_argument("--member", type=int, default=0, help="zero-based member index")
+    native_renderer.add_argument("--event-config", type=Path, help="frozen TRAIN physical event thresholds JSON")
+    native_renderer.add_argument("--no-ensemble-mean", action="store_true")
+    native_renderer.add_argument("--output", type=Path, required=True)
+
     history_renderer = subparsers.add_parser("render-history")
     history_renderer.add_argument("--run", type=Path, required=True)
     history_renderer.add_argument("--output", type=Path)
@@ -266,6 +276,19 @@ def run_case_cli(case_name: str, case_dir: str | Path) -> int:
     )
 
     args = parser.parse_args()
+    if args.command == "render-native-coherence":
+        from .evaluation.native_rendering import render_native_coherence
+        paths = {"SOURCE": args.source}
+        if args.selected is not None:
+            paths["Selected"] = args.selected
+        if args.final is not None:
+            paths["Final"] = args.final
+        events = None if args.event_config is None else json.loads(args.event_config.read_text())
+        render_native_coherence(args.metric_bundle, paths, args.output, member=args.member,
+            event_config=events, include_ensemble_mean=not args.no_ensemble_mean)
+        print(args.output / "INDEX.md")
+        return 0
+
     if args.command == "evaluate-native-coherence":
         from .evaluation.checkpoint import load_evaluation_runtime
         from .evaluation.native_coherence import infer_native_panel
@@ -274,7 +297,8 @@ def run_case_cli(case_name: str, case_dir: str | Path) -> int:
         indices = panels[args.panel] if isinstance(panels, dict) else panels
         endpoint = json.loads(args.endpoint_config.read_text())
         endpoint = endpoint.get("effective_endpoint", endpoint)
-        runtime = load_evaluation_runtime(args.run, split=args.split, checkpoint=args.checkpoint,
+        native_run = args.run.resolve() if args.run.is_absolute() else (case_dir / args.run).resolve()
+        runtime = load_evaluation_runtime(native_run, split=args.split, checkpoint=args.checkpoint,
             sensor_config=None, generation_steps=endpoint["steps"], device_name=args.device,
             include_temporal_derivative=False)
         try:

@@ -254,7 +254,13 @@ def test_reference_calibration_preserves_random_streams():
         "runtime": {},
         "observations": {},
     }
-    dataset = SimpleNamespace(data_spec=SimpleNamespace(logical_shape=(4, 4)))
+    class Dataset:
+        data_spec = SimpleNamespace(logical_shape=(4, 4))
+
+        def __getitem__(self, index):
+            return SimpleNamespace(valid_points=None)
+
+    dataset = Dataset()
     family = ReferenceConsumer()
     before = torch.get_rng_state().clone(), random.getstate(), np.random.get_state()
     _fit_training_references(
@@ -286,7 +292,13 @@ def test_ordinary_topology_keeps_structured_grid_query_subsets():
     )
     config = {"coherence": {"compute_budget": {"point_count": 8}},
               "runtime": {}, "observations": {}}
-    dataset = SimpleNamespace(data_spec=DataSpec(("u", "v"), ("1", "1"), 2, (4, 4)))
+    class Dataset:
+        data_spec = DataSpec(("u", "v"), ("1", "1"), 2, (4, 4))
+
+        def __getitem__(self, index):
+            return SimpleNamespace(valid_points=None)
+
+    dataset = Dataset()
     _fit_training_references(
         {"topology": family}, dataset, config, device=torch.device("cpu"),
         structured_grid_required=True,

@@ -104,7 +104,7 @@ runtime:
   num_workers: 0
   data_strategy: async_cpu
   progress: true
-  plot_every_steps: 1
+  plot_every_steps: 25
 evaluation:
   split: validation
   max_samples: 32
