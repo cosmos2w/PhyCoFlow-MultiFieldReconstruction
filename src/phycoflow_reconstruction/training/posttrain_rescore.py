@@ -27,7 +27,7 @@ from ..config.validate import validate_config
 from ..data.factory import open_field_dataset
 from ..data.manifest import SensorManifest, manifest_from_batch
 from ..utils.reproducibility import seed_everything
-from .coherence_sampling import _load_checkpoint_family_state
+from .coherence_sampling import _load_checkpoint_family_state, _requires_frozen_checkpoint_state
 from .common import sensor_protocol_from_config
 from .model_lifecycle import load_training_aux_state
 from .post_training import (
@@ -87,9 +87,7 @@ class RestoredPanel:
                     family, payload["family_states"][family_name],
                     source_checkpoint_sha256=source_hashes(self.config)["checkpoint"],
                 )
-            elif (family_name == "topology" and family.version == "4") or getattr(
-                family, "mean_augmented", False
-            ):
+            elif _requires_frozen_checkpoint_state(family):
                 raise ValueError("checkpoint is missing frozen new-family state")
         return int(payload["global_step"])
 

@@ -153,10 +153,19 @@ def _fit_source_calibrations(
         model.train(was_training)
 
 
+def _requires_frozen_checkpoint_state(family) -> bool:
+    """New score definitions require checkpoint buffers to match their frozen artifact."""
+    return (
+        (family.family_name == "topology" and family.version == "4")
+        or getattr(family, "mean_augmented", False)
+        or getattr(family, "score_definition", None) == "marginal_mixed_mean_v2"
+    )
+
+
 def _load_checkpoint_family_state(family, state, *, source_checkpoint_sha256=None):
     """Never let checkpoint buffers override a validated, frozen new descriptor."""
     finite_primary = family.family_name == "topology" and family.version == "4"
-    if finite_primary or getattr(family, "mean_augmented", False):
+    if _requires_frozen_checkpoint_state(family):
         frozen = family.state_dict()
         if frozen.keys() != state.keys() or any(
             not torch.equal(value.detach().cpu(), state[key].detach().cpu())

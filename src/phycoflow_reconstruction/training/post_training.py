@@ -53,6 +53,7 @@ from .coherence_sampling import (
     _fit_source_calibrations,
     _fit_training_references,
     _load_checkpoint_family_state,
+    _requires_frozen_checkpoint_state,
 )
 from .common import (
     iter_unique_batch_indices,
@@ -1722,9 +1723,7 @@ def run_post_training(
                     family, checkpoint["family_states"][name],
                     source_checkpoint_sha256=source_hashes_before["checkpoint"],
                 )
-            elif (name == "topology" and family.version == "4") or getattr(
-                family, "mean_augmented", False
-            ):
+            elif _requires_frozen_checkpoint_state(family):
                 raise ValueError("recovery checkpoint is missing frozen new-family state")
     else:
         _fit_training_references(
