@@ -1299,6 +1299,7 @@ class GlobalDistributionAccumulator:
         report = {
             "family": "global_distribution",
             "view": "pairwise_joint_probability_density",
+            "estimand": "pooled_equal_node_occupation_not_per_snapshot_loss",
             "split": split,
             "checkpoint": f"{checkpoint_label}.pt",
             "sample_count": len(self.sample_ids),
@@ -1363,26 +1364,29 @@ class GlobalDistributionAccumulator:
         marginal = result.component_results.get(paths["marginal"])
         pairwise = result.component_results.get(paths["pairwise"])
         joint = result.component_results.get(paths["joint"])
-        if marginal is None or pairwise is None or joint is None:
-            raise ValueError(
-                "global-distribution statistical evaluation requires self, mutual, and cross components"
-            )
-        marginal_values = marginal.diagnostics["per_field_w2"][0].detach().cpu().numpy()
-        pairwise_values = pairwise.diagnostics["per_pair_swd"][0].detach().cpu().numpy()
+        # Disabled optimized components are unavailable, never a zero loss.
+        marginal_values = (
+            marginal.diagnostics["per_field_w2"][0].detach().cpu().numpy()
+            if marginal is not None else np.full(len(self.field_names), np.nan)
+        )
+        pairwise_values = (
+            pairwise.diagnostics["per_pair_swd"][0].detach().cpu().numpy()
+            if pairwise is not None else np.full(len(self.pair_labels), np.nan)
+        )
         weights = self.family.component_weights
         self.sample_ids.append(sample_id)
         self.marginal.append(marginal_values)
         self.pairwise.append(pairwise_values)
-        self.joint.append(float(joint.per_sample_cost[0].detach().cpu()))
-        self.marginal_total.append(
-            weights["self_marginal_w2"] * float(marginal.per_sample_cost[0].detach().cpu())
-        )
-        self.pairwise_total.append(
-            weights["mutual_pairwise_swd"] * float(pairwise.per_sample_cost[0].detach().cpu())
-        )
-        self.joint_total.append(
-            weights["cross_joint_topk_swd"] * float(joint.per_sample_cost[0].detach().cpu())
-        )
+        self.joint.append(float(joint.per_sample_cost[0].detach().cpu()) if joint else np.nan)
+        for values, component, key in (
+            (self.marginal_total, marginal, "self_marginal_w2"),
+            (self.pairwise_total, pairwise, "mutual_pairwise_swd"),
+            (self.joint_total, joint, "cross_joint_topk_swd"),
+        ):
+            values.append(
+                weights[key] * float(component.per_sample_cost[0].detach().cpu())
+                if component is not None else np.nan
+            )
         self.family_total.append(float(result.per_sample_cost[0].detach().cpu()))
         if self.extra_view:
             indices = fixed_query_indices(
@@ -1519,6 +1523,15 @@ class GlobalDistributionAccumulator:
         report = {
             "family": "global_distribution",
             "metric": "paired_reconstruction_to_ground_truth_squared_distribution_discrepancy",
+            "score_definition": self.family.score_definition,
+            "component_availability": {
+                "marginal": "self_marginal_w2" in self.family.components_by_key
+                and self.family.component_weights.get("self_marginal_w2", 0) > 0,
+                "pairwise": "mutual_pairwise_swd" in self.family.components_by_key
+                and self.family.component_weights.get("mutual_pairwise_swd", 0) > 0,
+                "joint": "cross_joint_topk_swd" in self.family.components_by_key
+                and self.family.component_weights.get("cross_joint_topk_swd", 0) > 0,
+            },
             "split": split,
             "sample_count": len(self.sample_ids),
             "target_use": "paired_supervised",

@@ -34,6 +34,9 @@ class GlobalDistributionFamily(nn.Module):
     ) -> None:
         super().__init__()
         self.config = dict(config)
+        self.score_definition = str(config.get("definition", "global_distribution_v1"))
+        if self.score_definition not in {"global_distribution_v1", "marginal_mixed_mean_v2"}:
+            raise ValueError("unknown global_distribution.definition")
         self.target_use = str(config.get("target_use", "training_reference"))
         self.units = str(config.get("units", "model_units"))
         self.family_weight = float(config.get("weight", 1.0))
@@ -109,7 +112,18 @@ class GlobalDistributionFamily(nn.Module):
             )
 
         cross_settings = components.get("cross", {})
-        if bool(cross_settings.get("enabled", len(field_names) >= 2)):
+        mean_bank = self.score_definition == "marginal_mixed_mean_v2"
+        if mean_bank and (
+            not bool(self_settings.get("enabled", True))
+            or bool(mutual_settings.get("enabled", len(field_names) >= 2))
+            or float(cross_settings.get("top_fraction", 0.1)) != 1.0
+            or bool(cross_settings.get("include_axes", True))
+            or not bool(cross_settings.get("qmc", True))
+        ):
+            raise ValueError("marginal_mixed_mean_v2 requires marginals, no mutual, and a full mixed QMC mean bank")
+        if bool(cross_settings.get("enabled", len(field_names) >= 2)) and (
+            not mean_bank or len(field_names) >= 2
+        ):
             self.components_by_key["cross_joint_topk_swd"] = CrossJointTopKSWD(
                 self.field_ids,
                 int(cross_settings.get("directions", 32)),
@@ -119,6 +133,7 @@ class GlobalDistributionFamily(nn.Module):
                 bool(cross_settings.get("qmc", True)),
                 target_use=self.target_use,
                 units=self.units,
+                mean_reduction=mean_bank,
             )
             self.component_weights["cross_joint_topk_swd"] = float(
                 cross_settings.get("weight", 1.0)
@@ -197,6 +212,7 @@ class GlobalDistributionFamily(nn.Module):
             diagnostics={
                 "family": self.family_name,
                 "version": self.version,
+                "score_definition": self.score_definition,
                 "target_use": self.target_use,
                 "units": self.units,
                 "fields": self.field_names,
@@ -210,6 +226,7 @@ class GlobalDistributionFamily(nn.Module):
         return {
             "family": self.family_name,
             "version": self.version,
+            "score_definition": self.score_definition,
             "config": self.config,
             "field_names": self.field_names,
             "field_ids": self.field_ids,

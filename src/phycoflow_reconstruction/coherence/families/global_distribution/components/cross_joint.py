@@ -23,6 +23,7 @@ class CrossJointTopKSWD(nn.Module):
         qmc: bool,
         target_use: str = "training_reference",
         units: str = "model_units",
+        mean_reduction: bool = False,
     ) -> None:
         super().__init__()
         self.spec = CoherenceComponentSpec("cross.joint_topk_swd", target_use, units, True)
@@ -40,6 +41,7 @@ class CrossJointTopKSWD(nn.Module):
         if not 0.0 < float(top_fraction) <= 1.0:
             raise ValueError("cross top_fraction must lie in (0,1]")
         self.top_fraction = float(top_fraction)
+        self.mean_reduction = bool(mean_reduction)
 
     def forward(self, generated: torch.Tensor, reference: torch.Tensor) -> TermResult:
         if len(self.field_ids) < 2:
@@ -54,7 +56,10 @@ class CrossJointTopKSWD(nn.Module):
             reference_projection = reference_item[:, self.field_ids] @ directions.T
             costs = empirical_w2_columns(generated_projection, reference_projection)
             count = max(1, min(costs.numel(), math.ceil(self.top_fraction * costs.numel())))
-            values, indices = costs.topk(count, largest=True, sorted=True)
+            if self.mean_reduction:
+                values, indices = costs, torch.arange(costs.numel(), device=costs.device)
+            else:
+                values, indices = costs.topk(count, largest=True, sorted=True)
             per_batch.append(values.mean())
             per_direction.append(costs)
             top_indices.append(indices)

@@ -1,0 +1,15 @@
+# Equal-node occupation in fixed TRAIN model units. Geometry panels must remain
+# distinct from any measure-correct resampling used for a nonuniform case.
+coherence:
+  families:
+    global_distribution:
+      definition: marginal_mixed_mean_v2
+      enabled: true
+      weight: 1.0
+      target_use: paired_supervised
+      units: model_units
+      reference_bank: {enabled: false}
+      components:
+        self: {enabled: true, weight: 1.0}
+        mutual: {enabled: false}
+        cross: {enabled: true, weight: 1.0, directions: 32, top_fraction: 1.0, seed: 1234, include_axes: false, qmc: true}
