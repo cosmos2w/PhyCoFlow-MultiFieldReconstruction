@@ -112,7 +112,12 @@ class PeriodicCheckpointManager:
         fallback_metric: float,
         force: bool = False,
     ) -> tuple[Path | None, Path | None] | None:
-        """Refresh independently scheduled last, best, and milestone checkpoints."""
+        """Refresh scheduled checkpoints and return a current recovery path and best.
+
+        A milestone can be saved between rolling recovery checkpoints. Return
+        that new snapshot to callers so checkpoint callbacks still run, without
+        refreshing the independently scheduled ``last`` alias.
+        """
         # Disabling periodic saves must never suppress the terminal recovery
         # checkpoint. ``force`` is used by every trainer at normal/truncated
         # termination so a completed run is always evaluable and resumable.
@@ -289,4 +294,4 @@ class PeriodicCheckpointManager:
             ),
             best_metric={"name": self.best_name, "value": self.best_value},
         )
-        return last_path, best_path
+        return last_path if last_path is not None else milestone_path, best_path

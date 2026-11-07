@@ -205,13 +205,18 @@ def test_explicit_epoch_schedule_keeps_immutable_milestone_checkpoints(tmp_path)
         global_step=2,
         fallback_metric=1.0,
     )
-    manager.save(
+    milestone = manager.save(
         {"model": model.state_dict()},
         model=model,
         preview=preview,
         global_step=4,
         fallback_metric=0.5,
     )
+    # Post-training callbacks use the returned recovery path. An independently
+    # scheduled milestone must reach them even when ``last`` is not due.
+    assert milestone is not None
+    assert milestone[0] == store.run_dir / "checkpoints/epoch_002.pt"
+    assert torch.load(milestone[0], weights_only=True)["global_step"] == 4
     assert store.load_checkpoint("epoch_001")["global_step"] == 2
     assert store.load_checkpoint("epoch_002")["global_step"] == 4
     assert store.load_checkpoint("last")["global_step"] == 2
@@ -246,6 +251,26 @@ def test_validation_can_update_best_without_refreshing_last(tmp_path):
     assert saved is not None and saved[0] is None and saved[1] is not None
     assert store.load_checkpoint("best")["global_step"] == 1
     assert not (store.run_dir / "checkpoints/last.pt").exists()
+
+
+def test_milestone_between_rolling_saves_returns_its_own_step_for_callbacks(tmp_path):
+    config = {"stage": "post_training", "checkpointing": {
+        "every_epochs": 100, "epochs": [400, 450, 500]}}
+    store = RunStore.create(tmp_path, "native_callback", config)
+    manager = PeriodicCheckpointManager(config, store=store, steps_per_epoch=13)
+    model = torch.nn.Linear(1, 1)
+    callback_steps = []
+    for step in (400 * 13, 450 * 13):
+        saved = manager.save(
+            {"model": model.state_dict()}, model=model, preview=_Preview(),
+            global_step=step, fallback_metric=1.0,
+        )
+        assert saved is not None and saved[1] is None
+        if saved[0] is not None:
+            callback_steps.append(torch.load(saved[0], weights_only=True)["global_step"])
+    assert callback_steps == [5200, 5850]
+    assert saved[0].name == "epoch_450.pt"
+    assert store.load_checkpoint("last")["global_step"] == 5200
 
 
 def test_reconstruction_fidelity_selection_writes_explicit_best_alias(tmp_path):
