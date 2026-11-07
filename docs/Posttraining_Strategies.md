@@ -75,6 +75,8 @@ python cases/turbulent_combustion/run.py render-native-coherence \
   --member 0 --output /path/to/native_atlas
 ```
 
+For an opt-in self/mutual Gram candidate, retain the original SSS bundle above and add `--gram-bundle /path/to/native_gram_bundle.pt --gram-pair CO T`. The auxiliary bundle must bind that exact v4 yardstick. Its saved-data panels distinguish physical-unit power, mean-pattern/member-variation Gram, represented member/mean skill, TRAIN-floor regularized alignment, and the separate self/mutual scores. This performs no inference or fitting. The augmented candidate total and the unchanged v4 anchor are different definitions; report both. A single-field family retains its self score and explicitly marks mutual quantities unavailable.
+
 ## Choose a route
 
 | Route | Main selectors | What is combined |

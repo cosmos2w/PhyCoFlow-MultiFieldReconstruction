@@ -58,6 +58,21 @@ The extension rejects a non-fair or non-mean-augmented anchor and requires the d
 
 `evaluation.native_gram.fit_native_gram_bundle` reuses a strictly restored v4 native geometry and fits the candidate block scales on the same TRAIN sample IDs; `score_native_gram_payloads` then scores saved native draws without inference. The auxiliary bundle is separate from the unchanged v4 SSS yardstick. Native reports retain the v4 score units and provide physical-unit band power, signed Gram, spread and represented-skill decompositions. They include both raw rho and `G_ij/sqrt((G_ii+floor_i)(G_jj+floor_j))`, using the frozen TRAIN power floors converted to physical units; no validation data fit these denominators.
 
+The combustion-specific `cases/turbulent_combustion/configs/posttrain/fragments/coherence_gram.yaml` is a stage-free overlay with the locally TRAIN-qualified coefficient. Compose it after `coherence_current.yaml` and bind the actual shared SOURCE reference in a generated launch configuration. It is not a standalone profile, and the recommended current profile is unchanged:
+
+```yaml
+defaults:
+  - /absolute/project/cases/turbulent_combustion/configs/posttrain/coherence_current.yaml
+  - /absolute/project/cases/turbulent_combustion/configs/posttrain/fragments/coherence_gram.yaml
+optimization:
+  multitask:
+    fidelity_budget:
+      reference_artifact: /absolute/path/to/frozen_shared_source_reference.json
+      reference_sha256: <actual_64_lowercase_hexadecimal_SHA256>
+```
+
+Use the same bound artifact for the matched unaugmented arm. Schema validation checks the supplied path and digest shape; training verifies the actual bytes and complete SOURCE/data/feedback binding. A missing artifact or mismatch fails before optimization. Keep absolute artifact paths and preserve the saved resolved configurations for historical launches. A coefficient qualified for this combustion study is not a universal default.
+
 ## Shape: finite and essential information with a fixed sign/line bank
 
 `topology.strategy: cubical_persistence` with `persistence.definition: finite_primary_v1` selects version 4. Its exact bank and calibration API are documented in the [topology family](../src/phycoflow_reconstruction/coherence/families/topology/README.md). Each pair uses four sign combinations and these three lines:

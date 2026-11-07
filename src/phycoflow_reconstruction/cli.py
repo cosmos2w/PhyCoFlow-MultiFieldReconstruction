@@ -201,6 +201,8 @@ def run_case_cli(case_name: str, case_dir: str | Path) -> int:
     native_renderer.add_argument("--final", type=Path)
     native_renderer.add_argument("--member", type=int, default=0, help="zero-based member index")
     native_renderer.add_argument("--event-config", type=Path, help="frozen TRAIN physical event thresholds JSON")
+    native_renderer.add_argument("--gram-bundle", type=Path, help="frozen native Gram auxiliary bundle")
+    native_renderer.add_argument("--gram-pair", nargs=2, metavar=("FIELD1", "FIELD2"), help="field pair for signed Gram and rho")
     native_renderer.add_argument("--no-ensemble-mean", action="store_true")
     native_renderer.add_argument("--output", type=Path, required=True)
 
@@ -285,7 +287,8 @@ def run_case_cli(case_name: str, case_dir: str | Path) -> int:
             paths["Final"] = args.final
         events = None if args.event_config is None else json.loads(args.event_config.read_text())
         render_native_coherence(args.metric_bundle, paths, args.output, member=args.member,
-            event_config=events, include_ensemble_mean=not args.no_ensemble_mean)
+            event_config=events, include_ensemble_mean=not args.no_ensemble_mean,
+            gram_bundle_path=args.gram_bundle, gram_field_pair=args.gram_pair)
         print(args.output / "INDEX.md")
         return 0
 

@@ -55,7 +55,8 @@ def _validate_event_config(event_config, bundle):
 
 
 def render_native_coherence(bundle_path, payload_paths, output_dir, *, member=0,
-                            event_config=None, include_ensemble_mean=True):
+                            event_config=None, include_ensemble_mean=True,
+                            gram_bundle_path=None, gram_field_pair=None):
     """Validate matched payloads, then render fidelity, State, Scale and Shape.
 
     ``event_config`` is optional case-provided physical signed thresholds fitted
@@ -66,10 +67,22 @@ def render_native_coherence(bundle_path, payload_paths, output_dir, *, member=0,
     output = Path(output_dir)
     bundle, families = load_native_metric_bundle(bundle_path)
     _validate_event_config(event_config, bundle)
+    if gram_field_pair is not None and gram_bundle_path is None:
+        raise ValueError("native Gram field pair requires a Gram auxiliary bundle")
+    if gram_bundle_path is not None:
+        gram_bundle, _ = load_native_metric_bundle(gram_bundle_path)
+        if gram_bundle.get("anchor_bundle_sha256") != bundle["sha256"]:
+            raise ValueError("native Gram bundle must identify this frozen v4 yardstick")
     output.mkdir(parents=True, exist_ok=True)
     atlas = render_native_atlas(bundle_path, payload_paths, output / "fidelity_state",
                                member=member, include_ensemble_mean=include_ensemble_mean)
     scale = render_native_scale(bundle_path, payload_paths, output / "scale", member=member)
+    gram = None
+    if gram_bundle_path is not None:
+        from .native_gram_visualization import render_native_gram
+
+        gram = render_native_gram(gram_bundle_path, payload_paths, output / "gram",
+                                  field_pair=gram_field_pair)
     shape = {}
     for ordinal, (label, path) in enumerate(payload_paths.items()):
         directory = output / "shape" / f"endpoint_{ordinal:02d}"
@@ -106,11 +119,15 @@ def render_native_coherence(bundle_path, payload_paths, output_dir, *, member=0,
     report = {"metric_bundle_sha256": bundle["sha256"], "member_index_zero_based": member,
               "fidelity_state": atlas, "scale": scale, "shape": shape,
               "event_config": event_config, "inference_performed": False}
+    if gram is not None:
+        report["gram"] = gram
     (output / "native_rendering.json").write_text(json.dumps(report, indent=2, default=str) + "\n")
     lines = ["# Matched full-native SSS atlas", "",
              "All views use saved matched members and one frozen TRAIN metric bundle.", "",
              f"[Fidelity and State]({Path(atlas['index']).resolve().relative_to(output.resolve()).as_posix()})", "",
              f"[Scale]({Path(scale['index']).resolve().relative_to(output.resolve()).as_posix()})", ""]
+    if gram is not None:
+        lines.extend(["[Native Gram and skill](gram/INDEX.md)", ""])
     for ordinal, label in enumerate(payload_paths):
         lines.extend([f"[{label}: Shape](shape/endpoint_{ordinal:02d}/INDEX.md)", ""])
     (output / "INDEX.md").write_text("\n".join(lines))
