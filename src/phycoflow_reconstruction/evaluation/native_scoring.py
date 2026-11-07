@@ -197,9 +197,23 @@ def load_native_metric_bundle(path):
 
 
 @torch.no_grad()
-def score_native_payloads(bundle_path, payload_paths, output_path):
-    """Rescore complete saved native members using one immutable TRAIN bundle."""
+def score_native_payloads(bundle_path, payload_paths, output_path, *, family_names=None):
+    """Rescore saved native members, optionally at a declared family cadence.
+
+    An omitted summary family produces an unavailable summary rather than a
+    partial sum presented as a full SSS score. The default retains all families.
+    """
     bundle, families = load_native_metric_bundle(bundle_path)
+    unscored = []
+    if family_names is not None:
+        requested = tuple(family_names)
+        if not requested or len(set(requested)) != len(requested):
+            raise ValueError("native family_names must be nonempty and unique")
+        if set(requested).difference(families):
+            raise ValueError("native family_names contains an unavailable frozen family")
+        unscored = [name for name in families if name not in requested]
+        families = {name: families[name] for name in requested}
+    complete_summary = set(bundle["summary_families"]).issubset(families)
     initial = {name: content_sha256(family.state_artifact()) for name, family in families.items()}
     context = {"generated_weights": bundle["native_weights"], "reference_weights": bundle["native_weights"],
                "measure_metadata": {"native_measure_sha256": bundle["measure"]["sha256"]}}
@@ -227,7 +241,8 @@ def score_native_payloads(bundle_path, payload_paths, output_path):
             if members.shape[2:] != target.shape[1:] or members.shape[0] < 2:
                 raise ValueError("saved native member and target shapes do not satisfy the conditional score")
             values, components, _, details = _score(families, members, target, coordinates, context)
-            summary = float(np.mean([values[name]/bundle["summary_scales"][name] for name in bundle["summary_families"]]))
+            summary = (float(np.mean([values[name]/bundle["summary_scales"][name] for name in bundle["summary_families"]]))
+                       if complete_summary else None)
             rows.append({"payload": str(Path(path).resolve()), "values": values,
                          "components": components, "details": details, "summary": summary})
     if not rows:
@@ -237,7 +252,10 @@ def score_native_payloads(bundle_path, payload_paths, output_path):
     report = {"metric_bundle_sha256": bundle["sha256"], "query_policy": "full_native",
               "condition_count": len(rows), "rows": rows,
               "means": {name: float(np.mean([row["values"][name] for row in rows])) for name in families},
-              "summary": float(np.mean([row["summary"] for row in rows])),
+              "summary": float(np.mean([row["summary"] for row in rows])) if complete_summary else None,
               "scoring_seconds": perf_counter()-started}
+    if family_names is not None:
+        report.update(requested_families=list(families), unscored_families=unscored,
+                      summary_status="complete" if complete_summary else "unavailable_missing_families")
     Path(output_path).write_text(json.dumps(_json_value(report), indent=2)+"\n")
     return report

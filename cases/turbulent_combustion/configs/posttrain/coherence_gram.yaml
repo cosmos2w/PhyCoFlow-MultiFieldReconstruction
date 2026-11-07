@@ -1,0 +1,13 @@
+# Experimental TRAIN-qualified candidate, not a change to the recommended default.
+# Bind an immutable shared SOURCE reference using fidelity_budget.reference_artifact
+# and reference_sha256 at launch. SOURCE model/sensors remain inherited by the CLI.
+defaults:
+  - coherence_current.yaml
+  - ../../../../configs/coherence/multiscale_gram.yaml
+coherence:
+  families:
+    multiscale_spectrum:
+      gram_extension:
+        weight: 0.06287622600055182
+output:
+  experiment_name: coherence_gram

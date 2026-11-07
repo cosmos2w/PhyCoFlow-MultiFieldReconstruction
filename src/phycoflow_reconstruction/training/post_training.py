@@ -67,6 +67,11 @@ from .fast_lagrangian import (
     training_execution,
 )
 from .fidelity_budget import ExternalPolicy, FidelityBudget, field_error_sums, field_mse
+from .fidelity_reference import (
+    load_shared_reference,
+    shared_reference_binding,
+    validate_shared_reference_recovery,
+)
 from .gradient_balance import data_only_update
 from .gradient_balance import two_objective_update as legacy_two_objective_update
 from .model_lifecycle import (
@@ -1793,7 +1798,59 @@ def run_post_training(
             raise ValueError("resume checkpoint family scales differ from calibration artifact")
     family_scales = {name: float(calibration["resolved_scales"][name]) for name in families}
     if external_settings is not None:
-        if checkpoint is None:
+        fidelity_settings = config["optimization"]["multitask"].get("fidelity_budget", {})
+        shared_path = fidelity_settings.get("reference_artifact")
+        shared_hash = fidelity_settings.get("reference_sha256")
+        if (shared_path is None) != (shared_hash is None):
+            raise ValueError("shared fidelity reference requires both artifact path and SHA-256")
+        if checkpoint is not None and bool(shared_path) != bool(checkpoint.get("shared_fidelity_reference_sha256")):
+            raise ValueError("resume shared fidelity reference mode differs from checkpoint")
+        if shared_path is not None:
+            if ordered_settings is not None:
+                raise ValueError("shared fidelity reference does not support LPC-ordered calibration")
+            selection = train_dataset.selection
+            train_selection = {
+                "split": selection.split,
+                "strategy": selection.strategy,
+                "trajectory_indices": [int(value) for value in selection.trajectory_indices],
+                "frame_indices": [int(value) for value in selection.frame_indices],
+                "sample_count": len(train_dataset),
+                "training_subset_sha256": (
+                    None if subset_manifest is None else subset_manifest["sha256"]
+                ),
+            }
+            shared_binding = shared_reference_binding(
+                config,
+                field_names=train_dataset.field_names,
+                normalizer_sha256=train_dataset.normalizer.digest(),
+                source_hashes=source_hashes_before,
+                dataset_fingerprint=dataset_fingerprint(train_dataset.path),
+                train_selection=train_selection,
+                family_scales=family_scales,
+            )
+            reference, reference_bytes = load_shared_reference(shared_path, shared_hash, shared_binding)
+            local_shared_path = store.run_dir / "artifacts" / "shared_fidelity_reference.json"
+            if checkpoint is None:
+                local_shared_path.write_bytes(reference_bytes)
+                store.write_json("artifacts/fidelity_budget_reference.json", {
+                    "settings": dict(fidelity_settings),
+                    "reference": reference.state_dict(),
+                    "shared_reference_sha256": shared_hash,
+                    "source": "shared_source_reference_v1",
+                })
+            else:
+                saved_policy = checkpoint["external_policy"]
+                manifest = json.loads((store.run_dir / "run_manifest.json").read_text(encoding="utf-8"))
+                validate_shared_reference_recovery(
+                    reference, shared_hash, checkpoint, manifest, local_shared_path
+                )
+            policy = ExternalPolicy(external_settings, reference, device)
+            policy.shared_fidelity_reference_sha256 = shared_hash
+            store.update_manifest(
+                shared_fidelity_reference_sha256=shared_hash,
+                shared_fidelity_reference_artifact="artifacts/shared_fidelity_reference.json",
+            )
+        elif checkpoint is None:
             ordered_means = {} if ordered_settings is not None else None
             reference, reference_report = _calibrate_fidelity_budget(
                 model, train_dataset, families, banks, config, family_scales, device,
@@ -2854,6 +2911,8 @@ def _post_checkpoint_payload(
         payload["family_scalarizer"] = scalarizer.state_dict()
     if policy is not None:
         payload["external_policy"] = policy.state_dict()
+        if hasattr(policy, "shared_fidelity_reference_sha256"):
+            payload["shared_fidelity_reference_sha256"] = policy.shared_fidelity_reference_sha256
         if hasattr(policy, "lpc_ordered"):
             from .lpc_ordered import implementation_binding as ordered_implementation_binding
 

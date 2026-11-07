@@ -80,6 +80,8 @@ python -m pip install -e '.[dev,multitask,posttrain_constraints,plot]'
 
 The recommended complete [stochastic profile](cases/turbulent_combustion/configs/posttrain/coherence_current.yaml) enables exactly `global_distribution` (State), `multiscale_spectrum` (Scale), and `topology` (Shape); legacy `cross_spectrum` is explicitly disabled. State uses paired physical-area occupation, Scale uses the signed mean-augmented score with two independent conditional draws, and Shape uses paired persistence on a 32×128 physical-cell raster. The profile starts a fresh TorchJD ConFIG/Lagrangian controller from the recorded SOURCE and does not call the model's native training-loss path. It remains paired supervised training. These are method choices; their post-training learning benefit has not yet been established.
 
+An optional experimental [self/mutual Gram extension](docs/coherence_compute_enhancement.md#experimental-selfmutual-gram-extension) has a separate definition, TRAIN calibration and artifact identity.
+
 For the local GPU 2 example, inspect the device UUID and processes first. Map the selected physical UUID to logical `cuda:0`, as specified by the profile:
 
 ```bash

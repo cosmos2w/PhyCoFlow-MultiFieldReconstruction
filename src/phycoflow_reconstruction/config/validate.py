@@ -589,6 +589,8 @@ def _validate_fidelity_budget(multitask: Mapping[str, Any]) -> None:
             "calibration_batches",
             "calibration_draws",
             "calibration_seed",
+            "reference_artifact",
+            "reference_sha256",
         },
         "optimization.multitask.fidelity_budget",
     )
@@ -597,6 +599,17 @@ def _validate_fidelity_budget(multitask: Mapping[str, Any]) -> None:
             "optimization.multitask.fidelity_budget.metric must be "
             "endpoint_mse_model_units"
         )
+    reference_keys = {"reference_artifact", "reference_sha256"}
+    supplied = reference_keys.intersection(budget)
+    if supplied and supplied != reference_keys:
+        raise ValueError("fidelity_budget.reference_artifact and reference_sha256 are required together")
+    if supplied:
+        path, digest = budget["reference_artifact"], budget["reference_sha256"]
+        if not isinstance(path, str) or not path.strip():
+            raise ValueError("fidelity_budget.reference_artifact must be a nonempty path string")
+        if (not isinstance(digest, str) or len(digest) != 64
+                or any(char not in "0123456789abcdef" for char in digest)):
+            raise ValueError("fidelity_budget.reference_sha256 must be 64 lowercase hexadecimal characters")
     _method_parameter(
         budget.get("relative_increase", 0.05),
         "optimization.multitask.fidelity_budget.relative_increase",
@@ -692,6 +705,9 @@ def _validate_multitask(optimization: Mapping[str, Any]) -> None:
             )
         _validate_external_policy(multitask)
         _validate_fidelity_budget(multitask)
+        if ("reference_artifact" in multitask.get("fidelity_budget", {})
+                and optimization.get("lpc_ordered") is not None):
+            raise ValueError("shared fidelity reference_artifact is not supported with lpc_ordered")
     else:
         _validate_multitask_interface(
             multitask,
@@ -963,7 +979,16 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
             field_names = config.get("dataset", {}).get("field_names") or family.get("fields")
             if not field_names:
                 raise ValueError("multiscale_spectrum requires explicit field names")
-            parse_multiscale_config(family, tuple(field_names))
+            if "gram_extension" in family:
+                from ..coherence.families.multiscale_gram import parse_gram_extension_config
+
+                parse_gram_extension_config(family, tuple(field_names))
+                multitask = config["optimization"].get("multitask", {})
+                if (family.get("enabled", True) and multitask.get("external_policy") is not None
+                        and "reference_artifact" not in multitask.get("fidelity_budget", {})):
+                    raise ValueError("gram_extension with external_policy requires a shared SOURCE reference_artifact")
+            else:
+                parse_multiscale_config(family, tuple(field_names))
             if family.get("enabled", True) and config["optimization"].get("lpc_ordered") is not None:
                 raise ValueError(
                     "multiscale_spectrum is not supported by the fixed A/B/T lpc_ordered policy"

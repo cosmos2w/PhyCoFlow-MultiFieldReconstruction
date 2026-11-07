@@ -38,6 +38,26 @@ Signed coefficient-space and synthesized-field joint distances have matching val
 
 New v4 artifacts bind scientific implementation/backend identity as well as geometry, normalization, scales and config. Exact recovery must use the recorded implementation. Legacy v3 score values, state and default behavior remain unchanged.
 
+### Experimental self/mutual Gram extension
+
+The opt-in `gram_extension` augments the fair mean-augmented v4 anchor with separately scored self-power and signed mutual-Gram descriptors. For each band, the coefficient-space Gram uses the frozen v4 analysis-mass convention. Its diagonal is transformed with `log1p(power/power_floor)`; each configured off-diagonal is transformed with `asinh(cospectrum/(band_scale_left*band_scale_right))`. All underlying power floors and band scales are frozen from TRAIN. Positive field-unit tolerances must be converted together with any change of physical field units.
+
+For each descriptor block, the extension fits the unbiased per-coordinate variance over the anchor's same frozen TRAIN reference states. The denominator is `sqrt(max(variance, relative_std_floor^2 * mean_block_variance, std_floor^2))`; it remains strictly positive for a constant field. Every coordinate is additionally divided by the square root of its block dimension. With at least two fields, the result is `v4_anchor + weight * (self_ES + mutual_ES)/2`. With one field, the empty mutual block is omitted and the self score gets the full extension weight. Each score is the fair conditional energy score above, with every draw connected to autograd. The two blocks are scored separately; the legacy detached joint descriptor diagnostic is not the extension.
+
+Configure the extension at the root of an otherwise valid `multiscale_spectrum` v4 family block:
+
+```yaml
+gram_extension:
+  definition: self_mutual_gram_v1
+  weight: 0.1                 # example only; freeze a positive TRAIN-selected value
+  std_floor: 0.001
+  relative_std_floor: 0.05
+```
+
+The extension rejects a non-fair or non-mean-augmented anchor and requires the declared descriptor blocks. Its v2 family artifact records the candidate definition, exact config, TRAIN variances, effective scales, floor counts and source identity. The old v4 implementation and artifacts retain their original strict identity. Reports identify the candidate and v4 anchor separately; compare against a common frozen v4 native yardstick, not the candidate's augmented family total alone. The extension is an experimental mechanism, with no implied learning or cross-dataset benefit. Neither an integrated Gram nor its normalized alignment is a causal interaction or a conditional covariance estimate.
+
+`evaluation.native_gram.fit_native_gram_bundle` reuses a strictly restored v4 native geometry and fits the candidate block scales on the same TRAIN sample IDs; `score_native_gram_payloads` then scores saved native draws without inference. The auxiliary bundle is separate from the unchanged v4 SSS yardstick. Native reports retain the v4 score units and provide physical-unit band power, signed Gram, spread and represented-skill decompositions. They include both raw rho and `G_ij/sqrt((G_ii+floor_i)(G_jj+floor_j))`, using the frozen TRAIN power floors converted to physical units; no validation data fit these denominators.
+
 ## Shape: finite and essential information with a fixed sign/line bank
 
 `topology.strategy: cubical_persistence` with `persistence.definition: finite_primary_v1` selects version 4. Its exact bank and calibration API are documented in the [topology family](../src/phycoflow_reconstruction/coherence/families/topology/README.md). Each pair uses four sign combinations and these three lines:

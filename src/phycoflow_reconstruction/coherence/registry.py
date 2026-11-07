@@ -95,6 +95,11 @@ def build_coherence_family(
 ):
     _register_defaults()
     normalized = str(name).strip().lower()
+    if normalized == "multiscale_spectrum" and "gram_extension" in config:
+        # Keep the frozen v4 implementation and its artifact hashes untouched.
+        from .families.multiscale_gram import MultiscaleGramFamily
+
+        return MultiscaleGramFamily(config, data_spec, normalizer)
     return COHERENCE_FAMILY_REGISTRY.build(
         normalized,
         config=config,

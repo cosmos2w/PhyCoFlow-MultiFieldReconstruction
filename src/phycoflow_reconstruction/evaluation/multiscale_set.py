@@ -195,6 +195,8 @@ class MultiscaleSetAccumulator:
                 or "signed_band_energy_score" in name
                 or "joint_spectral" in name
                 or "paired_signed_band_distance" in name
+                or "gram_self_energy_score" in name
+                or "gram_mutual_energy_score" in name
             )
         ]
         if not selected:
@@ -219,7 +221,10 @@ class MultiscaleSetAccumulator:
             "split": split,
             "sample_ids": self.sample_ids,
             "objective": self.family.objective,
-            "score_definition_version": self.family.settings.score_definition_version,
+            "score_definition_version": getattr(
+                self.family, "score_definition_version", self.family.settings.score_definition_version
+            ),
+            "anchor_score_definition_version": self.family.settings.score_definition_version,
             "draw_count": self.draw_count,
             "query_policy": "frozen_training_fixed_shared",
             "query_indices_sha256": hashlib.sha256(

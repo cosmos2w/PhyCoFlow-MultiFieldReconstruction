@@ -41,5 +41,7 @@ notes:
   - optimization.multitask is limited to coherence post-training and cannot be combined with component_constrained, topology_regularized, or component_constraints policies.
   - optimization.rollout_execution selects context_cache (none, condition, geometry, static_features) and activation checkpointing for physical CQ models; shared context requires eval mode.
   - optimization.sampling=full_pass and training_subset select continuous shuffled coverage; steps_per_epoch changes reporting intervals without resetting sampling.
+  - optimization.multitask.fidelity_budget.reference_artifact and reference_sha256 opt into one immutable shared SOURCE risk/objective reference; both keys are required, and the calibration contract and exact bytes are checked at launch and resume.
+  - multiscale_spectrum.gram_extension.definition=self_mutual_gram_v1 adds separately TRAIN-standardized self-power and signed mutual-Gram fair scores to the retained signed/mean anchor; weight must be positive and TRAIN-qualified, and external-policy training requires the shared SOURCE reference pair.
   - Shared topology optimizer/runtime defaults are in configs/defaults/topology_post_training.yaml; source_run must be explicitly supplied.
   - training_subset accepts strata_keys and trajectory_key/time_key/frame_key/split_key metadata mappings; default columns are trajectory_id/time/frame/split with no strata.

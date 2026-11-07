@@ -84,7 +84,7 @@ def _payload(path, dataset, draws, target):
                         normalizer_sha256=np.asarray(dataset.normalizer.digest()))
 
 
-def test_freeze_and_saved_native_rescore_preserve_bank_and_reject_changed_support(tmp_path):
+def test_freeze_and_saved_native_rescore_preserve_bank_and_reject_changed_support(tmp_path, monkeypatch):
     dataset = TrainData(tmp_path / "train.dat")
     targets = torch.stack([dataset[i].values for i in (0, 1)])
     generator = torch.Generator().manual_seed(100)
@@ -103,6 +103,23 @@ def test_freeze_and_saved_native_rescore_preserve_bank_and_reject_changed_suppor
     for name, value in bundle["calibration_rows"][0][0].items():
         assert result["rows"][0]["values"][name] == pytest.approx(value)
     details = result["rows"][0]["details"]
+    from phycoflow_reconstruction.coherence.families.topology import TopologyFamily
+
+    def unexpected_shape(*args, **kwargs):
+        raise AssertionError("Shape executed outside its declared native cadence")
+
+    monkeypatch.setattr(TopologyFamily, "forward", unexpected_shape)
+    names = ["global_distribution", "multiscale_spectrum", "state_equal_node_v2"]
+    partial = score_native_payloads(bundle_path, [payload], tmp_path / "partial.json", family_names=names)
+    assert partial["summary"] is None and partial["rows"][0]["summary"] is None
+    assert partial["summary_status"] == "unavailable_missing_families"
+    assert partial["unscored_families"] == ["topology"]
+    for name in names:
+        assert partial["means"][name] == result["means"][name]
+        assert partial["rows"][0]["details"][name] == details[name]
+    for invalid in ([], [names[0], names[0]], ["not_a_frozen_family"]):
+        with pytest.raises(ValueError, match="family_names"):
+            score_native_payloads(bundle_path, [payload], tmp_path / "invalid.json", family_names=invalid)
     assert len(details["topology"]["per_result_family"]) == 2
     assert details["multiscale_spectrum"]["aggregation"] == "conditional_all_members"
     scale_components = details["multiscale_spectrum"]["per_result_components"][0]

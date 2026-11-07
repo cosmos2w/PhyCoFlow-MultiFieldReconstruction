@@ -42,6 +42,43 @@ def test_external_policy_methods_use_common_defaults(method):
     validate_config(config)
 
 
+def test_shared_source_reference_requires_path_and_content_digest_together():
+    config = _config()
+    budget = config["optimization"]["multitask"].setdefault("fidelity_budget", {})
+    budget["reference_artifact"] = "/tmp/shared-source-reference.json"
+    with pytest.raises(ValueError, match="required together"):
+        validate_config(config)
+    budget["reference_sha256"] = "0" * 64
+    validate_config(config)
+    budget.pop("reference_artifact")
+    with pytest.raises(ValueError, match="required together"):
+        validate_config(config)
+
+
+@pytest.mark.parametrize("path,digest", [("", "0"*64), (None, "0"*64),
+                                         ("source.json", "F"*64), ("source.json", "a"*63),
+                                         ("source.json", "g"*64)])
+def test_shared_source_reference_rejects_invalid_identity(path, digest):
+    config = _config()
+    config["optimization"]["multitask"]["fidelity_budget"] = {
+        "reference_artifact": path, "reference_sha256": digest,
+    }
+    with pytest.raises(ValueError, match="reference_"):
+        validate_config(config)
+
+
+def test_shared_source_reference_does_not_silently_replace_ordered_reference():
+    from phycoflow_reconstruction.config.validate import _validate_multitask
+    config = _config()
+    optimization = config["optimization"]
+    optimization["lpc_ordered"] = {"enabled": True}
+    optimization["multitask"]["fidelity_budget"] = {
+        "reference_artifact": "source.json", "reference_sha256": "0"*64,
+    }
+    with pytest.raises(ValueError, match="not supported with lpc_ordered"):
+        _validate_multitask(optimization)
+
+
 def test_external_policy_none_family_scalarization_requires_explicit_sum_and_clears_outer():
     config = _config()
     multitask = config["optimization"]["multitask"]

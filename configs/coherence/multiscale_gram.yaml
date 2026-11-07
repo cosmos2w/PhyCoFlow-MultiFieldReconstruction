@@ -1,0 +1,10 @@
+# Experimental augmentation of an existing signed_spectral_mean_augmented_v4 profile.
+# Supply a positive TRAIN-calibrated weight; no universal coefficient is implied.
+coherence:
+  families:
+    multiscale_spectrum:
+      gram_extension:
+        definition: self_mutual_gram_v1
+        weight: null
+        std_floor: 0.001
+        relative_std_floor: 0.05
