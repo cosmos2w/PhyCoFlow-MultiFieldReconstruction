@@ -259,6 +259,22 @@ def _component_label(component: str, *, family: str, definition: str | None) -> 
     return " · ".join(_display_name(part) for part in component.split("."))
 
 
+def _wrap_component_label(label: str) -> str:
+    """Keep long, dot-separated leaf identities inside their panel."""
+    if len(label) <= 42:
+        return label
+    lines: list[str] = []
+    current = ""
+    for part in label.split(" · "):
+        joined = f"{current} · {part}" if current else part
+        if current and len(joined) > 36:
+            lines.append(current)
+            current = part
+        else:
+            current = joined
+    return "\n".join((*lines, current))
+
+
 def _rolling_median(values: tuple[float, ...]) -> tuple[float, ...]:
     """Return a centered, two-percent-window median for visual trend context."""
     if len(values) < 8:
@@ -280,6 +296,15 @@ def _stage_label(description: str) -> str:
 
 def build_coherence_history_figure(data: CoherenceHistoryData, plt, *, description: str):
     """Build a compact family-grouped figure of weighted and raw diagnostics."""
+    from matplotlib.ticker import (
+        FuncFormatter,
+        LogFormatterMathtext,
+        LogFormatterSciNotation,
+        LogLocator,
+        MaxNLocator,
+        NullFormatter,
+    )
+
     by_family = {
         family: tuple(component for component in data.components if component.family == family)
         for family in data.family_order
@@ -297,15 +322,18 @@ def build_coherence_history_figure(data: CoherenceHistoryData, plt, *, descripti
     for component in data.components:
         all_epochs.extend(component.epochs)
     epoch_max = max(all_epochs, default=1.0)
+    summary_height, component_height = (
+        (3.5, 2.05) if total_component_rows > 3 else (2.5, 1.9)
+    )
     figure = plt.figure(
-        figsize=(12.6, 2.5 + 1.9 * total_component_rows + 0.45 * len(by_family)),
+        figsize=(12.6, summary_height + component_height * total_component_rows + 0.45 * len(by_family)),
         constrained_layout=True,
         facecolor="white",
     )
     subfigures = figure.subfigures(
         1 + len(by_family),
         1,
-        height_ratios=[1.15, *(family_rows.values())],
+        height_ratios=[1.65, *(family_rows.values())],
         squeeze=False,
     ).ravel()
     figure.suptitle(
@@ -322,7 +350,7 @@ def build_coherence_history_figure(data: CoherenceHistoryData, plt, *, descripti
     mixed = data.coherence_semantics == "mixed"
     if direction:
         total_title, total_ylabel, total_label = (
-            "Coherence reporting sum", "Reporting sum · not optimized scalar", "Reporting sum"
+            "Coherence reporting sum", "Reporting sum\nnot optimized scalar", "Reporting sum"
         )
         family_title, family_ylabel = "Weighted family reporting values", "Weighted reporting value"
     elif mixed:
@@ -347,7 +375,11 @@ def build_coherence_history_figure(data: CoherenceHistoryData, plt, *, descripti
         total_title, loc="left", color=HISTORY_TEXT_COLOR,
         fontsize=11.5, fontweight="medium", pad=8,
     )
-    total_axis.set_xlabel("Training epoch")
+    total_axis.set_xlabel(
+        "Training epoch\nComponent panels: light = raw; dark = rolling median"
+        if any(len(component.raw) >= 8 for component in data.components)
+        else "Training epoch"
+    )
     total_axis.set_ylabel(total_ylabel)
     style_history_axis(total_axis, data.total_values, x_max=epoch_max)
 
@@ -377,7 +409,10 @@ def build_coherence_history_figure(data: CoherenceHistoryData, plt, *, descripti
         fontweight="medium",
         pad=8,
     )
-    family_axis.set_xlabel("Training epoch")
+    family_axis.set_xlabel(
+        "Training epoch\nFamily values use distinct scales; magnitudes do not measure gradient influence"
+        "\nA weighted-zero leaf does not establish zero gradient influence"
+    )
     family_axis.set_ylabel(family_ylabel)
     style_history_axis(family_axis, family_values, x_max=epoch_max)
     if family_axis.lines:
@@ -450,8 +485,9 @@ def build_coherence_history_figure(data: CoherenceHistoryData, plt, *, descripti
                     s=28,
                     zorder=3,
                 )
+            label = _component_label(component.component, family=family, definition=data.state_definition)
             axis.set_title(
-                _component_label(component.component, family=family, definition=data.state_definition),
+                _wrap_component_label(label) if columns == 3 else label,
                 loc="left",
                 color=HISTORY_TEXT_COLOR,
                 fontsize=9.4,
@@ -472,6 +508,25 @@ def build_coherence_history_figure(data: CoherenceHistoryData, plt, *, descripti
             axis.set_xlabel("Epoch", labelpad=2)
             axis.set_ylabel("Raw loss", labelpad=2)
             style_history_axis(axis, component.raw, x_max=epoch_max)
+            decades = (
+                math.log10(max(component.raw)) - math.log10(min(component.raw))
+                if axis.get_yscale() == "log"
+                else 0.0
+            )
+            if 1 <= decades < 2:
+                axis.yaxis.set_major_locator(LogLocator(base=10, subs=(1, 2, 5), numticks=6))
+                axis.yaxis.set_major_formatter(
+                    LogFormatterSciNotation(
+                        base=10, labelOnlyBase=False, minor_thresholds=(math.inf, math.inf)
+                    )
+                )
+            elif decades >= 2:
+                axis.yaxis.set_major_locator(LogLocator(base=10, numticks=5))
+                axis.yaxis.set_major_formatter(LogFormatterMathtext(base=10))
+            else:
+                axis.yaxis.set_major_locator(MaxNLocator(nbins=4))
+                axis.yaxis.set_major_formatter(FuncFormatter(lambda value, _: f"{value:.3g}"))
+            axis.yaxis.set_minor_formatter(NullFormatter())
     return figure
 
 
