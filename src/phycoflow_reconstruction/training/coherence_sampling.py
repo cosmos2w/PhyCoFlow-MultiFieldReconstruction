@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
 import random
 from collections.abc import Iterator, Mapping
@@ -68,11 +69,56 @@ def _fit_training_references(
     """Freeze training-only geometry and reference scales before any model evaluation."""
     total = math.prod(train_dataset.data_spec.logical_shape)
     point_count = min(int(config["coherence"]["compute_budget"]["point_count"]), total)
+    frozen = config["coherence"].get("frozen_family_artifacts", {})
+    if frozen and (getattr(train_dataset, "split_name", None) != "train"
+                   or getattr(getattr(train_dataset, "selection", None), "split", None) != "train"):
+        raise ValueError("frozen coherence artifacts require the live TRAIN split")
+    query_indices = fixed_query_indices(total, point_count, seed=_coherence_query_seed(config))
     if any(callable(getattr(family, "fit_training_reference", None)) for family in families.values()):
         first = train_dataset[0]
         if first.valid_points is not None and not bool(first.valid_points.all()):
             raise ValueError("coherence calibration requires compact all-valid nodes; full-grid invalid-point masks are unsupported")
     for name, family in families.items():
+        if name in frozen:
+            from ..data.manifest import dataset_fingerprint
+            from .run_store import file_sha256
+            declaration = frozen[name]
+            if file_sha256(declaration["path"]) != declaration["sha256"]:
+                raise ValueError(f"frozen TRAIN family artifact hash mismatch: {name}")
+            artifact = torch.load(declaration["path"], map_location=device, weights_only=True)
+            binding = artifact.get("frozen_training_context")
+            expected = {
+                "dataset_fingerprint": dataset_fingerprint(train_dataset.path),
+                "query_indices_sha256": hashlib.sha256(query_indices.numpy().tobytes()).hexdigest(),
+                "normalizer_digest": train_dataset.normalizer.digest(),
+                "field_names": list(train_dataset.data_spec.field_names),
+                "split": "train",
+            }
+            if not isinstance(binding, Mapping) or any(binding.get(k) != v for k, v in expected.items()):
+                raise ValueError(f"frozen TRAIN family data/query/normalizer binding mismatch: {name}")
+            native = artifact.get("definition") == "self_rho_native_quadrature_v1"
+            base_artifact = artifact["native_reference"] if native else artifact
+            for key in ("normalization_offset", "normalization_scale"):
+                if not torch.equal(base_artifact["state_dict"][key].cpu(), getattr(family, key).cpu()):
+                    raise ValueError(f"frozen TRAIN family normalization mismatch: {name}")
+            family.load_state_artifact(artifact)
+            if getattr(family, "weighted_measure", False):
+                family.bind_measure_artifact(train_dataset.physical_measure_receipt,
+                                             weights=train_dataset.physical_weights)
+            record = getattr(family, "calibration_record", None)
+            if isinstance(record, Mapping):
+                if record.get("split") != "train":
+                    raise ValueError(f"frozen family lacks TRAIN provenance: {name}")
+                digest = hashlib.sha256(query_indices.numpy().tobytes()).hexdigest()
+                if not native and record.get("query_indices_sha256") != digest:
+                    raise ValueError(f"frozen TRAIN family query identity mismatch: {name}")
+                if record.get("dataset_fingerprint") != dataset_fingerprint(train_dataset.path):
+                    raise ValueError(f"frozen TRAIN family dataset identity mismatch: {name}")
+                family._require_ready(first.values[query_indices][None].to(device),
+                                      first.coordinates[query_indices][None].to(device))
+            # The family's strict loader owns geometry, measure, units, backend,
+            # config and normalization checks. No reference is fitted again.
+            continue
         bind_measure = getattr(family, "bind_measure_artifact", None)
         receipt = getattr(train_dataset, "physical_measure_receipt", None)
         if callable(bind_measure) and getattr(family, "weighted_measure", False) and receipt is not None:
@@ -102,7 +148,15 @@ def _fit_source_calibrations(
     This is distinct from family gradient balancing and the endpoint-MSE budget.
     Reference fitting and this source calibration never advance training streams.
     """
-    selected = [f for f in families.values() if getattr(f, "needs_source_calibration", False)]
+    frozen = config["coherence"].get("frozen_family_artifacts", {})
+    selected = [f for name, f in families.items()
+                if getattr(f, "needs_source_calibration", False) and name not in frozen]
+    for name in frozen:
+        family = families[name]
+        if getattr(family, "needs_source_calibration", False):
+            record = family.spatial_objective.calibration_record
+            if record.get("provenance", {}).get("source_checkpoint_sha256") != source_checkpoint_sha256:
+                raise ValueError(f"frozen family SOURCE calibration identity mismatch: {name}")
     if not selected:
         return
     if train_dataset.split_name != "train":

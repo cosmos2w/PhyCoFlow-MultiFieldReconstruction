@@ -879,7 +879,7 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
     coherence = config["coherence"]
     _reject_unknown(
         coherence,
-        {"schedule", "compute_budget", "family_balance", "families"},
+        {"schedule", "compute_budget", "family_balance", "families", "frozen_family_artifacts"},
         "coherence",
     )
     family_balance = coherence.get("family_balance", {})
@@ -953,6 +953,20 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
     ]
     if not enabled_families:
         raise ValueError("post-training coherence must enable at least one family")
+    frozen = coherence.get("frozen_family_artifacts", {})
+    if not isinstance(frozen, Mapping):
+        raise TypeError("coherence.frozen_family_artifacts must be a mapping")
+    for name, artifact in frozen.items():
+        if name not in enabled_families:
+            raise ValueError(f"frozen family {name!r} must be enabled")
+        if not isinstance(artifact, Mapping):
+            raise TypeError(f"frozen family {name!r} artifact must be a mapping")
+        _reject_unknown(artifact, {"path", "sha256"}, f"coherence.frozen_family_artifacts.{name}")
+        path, digest = artifact.get("path"), artifact.get("sha256")
+        if not isinstance(path, str) or not path.strip():
+            raise ValueError(f"frozen family {name!r} requires a path")
+        if not isinstance(digest, str) or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+            raise ValueError(f"frozen family {name!r} requires a lowercase SHA256")
     if any(
         name in {"cross_spectrum", "multiscale_spectrum", "topology"} for name in enabled_families
     ) and query_policy != "fixed_shared":
@@ -979,7 +993,23 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
             field_names = config.get("dataset", {}).get("field_names") or family.get("fields")
             if not field_names:
                 raise ValueError("multiscale_spectrum requires explicit field names")
-            if "gram_extension" in family:
+            if "relation_extension" in family:
+                extension = family["relation_extension"]
+                if isinstance(extension, Mapping) and extension.get("definition") == "self_rho_native_quadrature_v1":
+                    from ..coherence.families.native_relation import parse_native_relation_config
+
+                    parse_native_relation_config(family, tuple(field_names))
+                else:
+                    from ..coherence.families.multiscale_relation import (
+                        parse_relation_extension_config,
+                    )
+
+                    parse_relation_extension_config(family, tuple(field_names))
+                multitask = config["optimization"].get("multitask", {})
+                if (family.get("enabled", True) and multitask.get("external_policy") is not None
+                        and "reference_artifact" not in multitask.get("fidelity_budget", {})):
+                    raise ValueError("relation_extension with external_policy requires a shared SOURCE reference_artifact")
+            elif "gram_extension" in family:
                 from ..coherence.families.multiscale_gram import parse_gram_extension_config
 
                 parse_gram_extension_config(family, tuple(field_names))

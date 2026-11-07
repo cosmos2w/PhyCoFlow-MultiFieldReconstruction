@@ -1,0 +1,10 @@
+# R: compose after the fair signed-v4 mean profile. Freeze weights on TRAIN.
+coherence:
+  families:
+    multiscale_spectrum:
+      relation_extension:
+        definition: self_rho_fair_v1
+        self_weight: null
+        rho_weight: null
+        std_floor: 0.001
+        relative_std_floor: 0.05

@@ -53,7 +53,7 @@ def _baseline_config_anchor(config: Mapping[str, Any]) -> dict[str, Any]:
 
     Output, checkpointing, evaluation, plotting, optimizer settings and horizon
     are not calibration inputs. The separately persisted run configuration still
-    binds those training choices on resume. Only ``gram_extension`` is excluded
+    binds those training choices on resume. Candidate extensions are excluded
     from the family configs used for this shared baseline.
     """
     coherence = config["coherence"]
@@ -61,6 +61,7 @@ def _baseline_config_anchor(config: Mapping[str, Any]) -> dict[str, Any]:
     scale = families.get("multiscale_spectrum")
     if isinstance(scale, dict):
         scale.pop("gram_extension", None)
+        scale.pop("relation_extension", None)
     optimization = config["optimization"]
     runtime = config.get("runtime", {})
     observations = deepcopy(config["observations"])
@@ -164,7 +165,7 @@ def create_shared_reference(
     itself. Do not call with an augmented Scale config.
     """
     scale = baseline_config["coherence"].get("families", {}).get("multiscale_spectrum", {})
-    if "gram_extension" in scale:
+    if "gram_extension" in scale or "relation_extension" in scale:
         raise ValueError("shared SOURCE reference must be created from the unaugmented baseline")
     expected = _sha256(report_sha256, "report_sha256")
     raw = Path(report_path).read_bytes()

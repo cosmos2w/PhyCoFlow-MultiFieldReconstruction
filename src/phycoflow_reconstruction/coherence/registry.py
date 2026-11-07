@@ -95,6 +95,15 @@ def build_coherence_family(
 ):
     _register_defaults()
     normalized = str(name).strip().lower()
+    if normalized == "multiscale_spectrum" and "relation_extension" in config:
+        extension = config["relation_extension"]
+        if isinstance(extension, Mapping) and extension.get("definition") == "self_rho_native_quadrature_v1":
+            from .families.native_relation import NativeRelationFamily
+
+            return NativeRelationFamily(config, data_spec, normalizer)
+        from .families.multiscale_relation import MultiscaleRelationFamily
+
+        return MultiscaleRelationFamily(config, data_spec, normalizer)
     if normalized == "multiscale_spectrum" and "gram_extension" in config:
         # Keep the frozen v4 implementation and its artifact hashes untouched.
         from .families.multiscale_gram import MultiscaleGramFamily
