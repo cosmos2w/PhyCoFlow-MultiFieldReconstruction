@@ -103,3 +103,21 @@ def test_state_optional_cpu_timing_preserves_values():
     for bank in ('main', 'heldout'):
         torch.testing.assert_close(actual[bank]['squared_distances'], baseline[bank]['squared_distances'])
     assert timing['state_main_seconds'] >= 0 and timing['state_heldout_seconds'] >= 0
+
+
+def test_optional_cached_common_state_matches_uncached_with_mask_and_ties():
+    f = family(fields=('a', 'b'))
+    members = torch.tensor([[[[0., 1.], [1., 0.], [1., 0.], [4., 1.]]],
+                            [[[2., 1.], [2., 0.], [0., 3.], [3., 1.]]],
+                            [[[0., 2.], [1., 2.], [1., 0.], [2., 1.]]],
+                            [[[1., 0.], [3., 1.], [2., 3.], [0., 1.]]]])
+    target = torch.zeros_like(members[0])
+    weights = torch.tensor([1., 2., 1., 3.])
+    mask = torch.tensor([True, True, False, True])
+    plain = CommonStateObserver(f).score(members, target, weights=weights, mask=mask)
+    cached = CommonStateObserver(f, cache=True).score(members, target, weights=weights, mask=mask)
+    for bank in ('main', 'heldout'):
+        for key in ('squared_distances', 'paired_primary', 'm_member', 'm_bank', 'v_bank', 'u_mean', 'fair_score'):
+            torch.testing.assert_close(plain[bank][key], cached[bank][key])
+        for key in plain[bank]['leaf_squared_distances']:
+            torch.testing.assert_close(plain[bank]['leaf_squared_distances'][key], cached[bank]['leaf_squared_distances'][key])

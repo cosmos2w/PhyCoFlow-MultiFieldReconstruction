@@ -54,9 +54,10 @@ class CommonStateObserver:
     The independent held-out copy is frozen at construction and exposed through
     ``heldout_directions`` for inclusion in the campaign's metric binding.
     """
-    def __init__(self, family):
+    def __init__(self, family, *, cache=False):
         if getattr(family, "score_definition", None) != "marginal_mixed_weighted_v3":
             raise ValueError("common State observer requires the historical weighted v3 family")
+        self.cache = bool(cache)
         self.main = copy.deepcopy(family)
         self.heldout = copy.deepcopy(family)
         cross = (self.heldout.components_by_key["cross_joint_topk_swd"]
@@ -76,12 +77,12 @@ class CommonStateObserver:
         if timings is not None and members.device.type == "cuda":
             torch.cuda.synchronize(members.device)
         started = perf_counter()
-        main = self._bank(self.main, members, target, context)
+        main = self._bank(self.main, members, target, context, cache=self.cache)
         if timings is not None and members.device.type == "cuda":
             torch.cuda.synchronize(members.device)
         main_seconds = perf_counter() - started
         started = perf_counter()
-        heldout = self._bank(self.heldout, members, target, context)
+        heldout = self._bank(self.heldout, members, target, context, cache=self.cache)
         if timings is not None and members.device.type == "cuda":
             torch.cuda.synchronize(members.device)
         heldout_seconds = perf_counter() - started
@@ -91,7 +92,17 @@ class CommonStateObserver:
         return {"version": OBSERVER_VERSION, "main": main, "heldout": heldout}
 
     @staticmethod
-    def _bank(family, members, target, context):
+    def _bank(family, members, target, context, *, cache=False):
+        if cache:
+            if members.device.type != 'cpu':
+                raise ValueError('cached native State is CPU-only')
+            from .quantile_state_cache import cached_state_matrices
+            claimed = context.get('measure_metadata', {}).get('native_measure_sha256')
+            if family._measure_artifact is not None and claimed is not None and claimed != family._measure_artifact['sha256']:
+                raise ValueError('runtime State measure differs from the frozen native measure')
+            result = cached_state_matrices(family, members, target, weights=context['generated_weights'],
+                                           mask=context.get('generated_mask'))
+            return {**result, **squared_distance_accounting(result['squared_distances'])}
         endpoints = [target, *members.unbind(0)]
         n, b = len(endpoints), target.shape[0]
         matrix = target.new_zeros((n, n, b))
