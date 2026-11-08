@@ -119,7 +119,7 @@ def test_ordered_shared_endpoint_calibration_and_recovery(tmp_path, monkeypatch,
     first = load_project_checkpoint(child / "checkpoints/last.pt")
     artifact = child / "artifacts/lpc_ordered_reference.json"
     reference_hash = file_sha256(artifact)
-    log = child / "metrics/lpc_ordered_updates.jsonl"
+    log = child / "logs/lpc_ordered_updates.jsonl"
     first_row = json.loads(log.read_text().splitlines()[0])
     # Speculative writes and torn rows must be removed before replay.
     with log.open("a") as handle:
@@ -136,7 +136,7 @@ def test_ordered_shared_endpoint_calibration_and_recovery(tmp_path, monkeypatch,
     assert second["external_policy"]["completed_updates"] == second["global_step"] == 2
     assert second["lpc_ordered_state"]["completed_updates"] == 2
     assert records == [{"forwards": 1, "backwards": 1}] * 2
-    history = [json.loads(line) for line in (child / "metrics/history.jsonl").read_text().splitlines()]
+    history = [json.loads(line) for line in (child / "logs/history.jsonl").read_text().splitlines()]
     assert all(row["total"] == row["optimized_scalar"] for row in history)
     assert all(row["coherence_loss"] != row["primary_scalar"] for row in history)
     assert all(row["native_data_loss"] is None for row in history)

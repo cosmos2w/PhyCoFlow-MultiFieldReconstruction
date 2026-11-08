@@ -93,7 +93,7 @@ def _fixture_matrix(tmp_path):
         "coherence_grad_norm": 2.0,
         "update_mode": "weighted_sum",
     }
-    history_path = child / "metrics" / "history.jsonl"
+    history_path = child / "logs" / "history.jsonl"
     history_path.parent.mkdir(parents=True)
     history_path.write_text(json.dumps(history) + "\n", encoding="utf-8")
     artifact = child / "artifacts" / "evaluation_query_indices.pt"

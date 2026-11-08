@@ -209,6 +209,7 @@ def run_case_cli(case_name: str, case_dir: str | Path) -> int:
     history_renderer = subparsers.add_parser("render-history")
     history_renderer.add_argument("--run", type=Path, required=True)
     history_renderer.add_argument("--output", type=Path)
+    history_renderer.add_argument("--detailed", action="store_true", help="Include every recorded component")
 
     explanatory_renderer = subparsers.add_parser("render-coherence-explanatory")
     explanatory_renderer.add_argument("--run", type=Path, required=True)
@@ -334,7 +335,7 @@ def run_case_cli(case_name: str, case_dir: str | Path) -> int:
         output = args.output
         if output is not None and not output.is_absolute():
             output = Path.cwd() / output
-        figure = render_coherence_history(run_dir, output_path=output)
+        figure = render_coherence_history(run_dir, output_path=output, detailed=args.detailed)
         if figure is None:
             raise ValueError(f"run has no recorded coherence component history: {run_dir}")
         print(figure)

@@ -177,7 +177,7 @@ def test_spectral_composition_shared_draws_and_recovery(
         "multiscale_spectrum",
         "topology",
     }
-    rows = [json.loads(line) for line in (child / "metrics/history.jsonl").read_text().splitlines()]
+    rows = [json.loads(line) for line in (child / "logs/history.jsonl").read_text().splitlines()]
     assert len(records) == len(rows)
     for record, row in zip(records, rows):
         assert row["native_data_loss"] is None and row["total"] is None

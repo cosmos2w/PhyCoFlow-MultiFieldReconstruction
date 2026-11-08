@@ -124,7 +124,7 @@ def test_shared_endpoint_no_native_replay_and_resume(tmp_path, monkeypatch, dete
                for key, value in second["model"].items())
     assert native == 0
     assert ordinary == [{"reconstructions": 1, "backwards": 1}] * 2
-    rows = [json.loads(line) for line in (child / "metrics/history.jsonl").read_text().splitlines()]
+    rows = [json.loads(line) for line in (child / "logs/history.jsonl").read_text().splitlines()]
     assert all(row["native_data_loss"] is None for row in rows)
     manifest = json.loads((child / "run_manifest.json").read_text())
     assert manifest["best_metric"]["name"] == "fixed_validation_reconstruction_mse"

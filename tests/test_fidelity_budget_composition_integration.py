@@ -118,7 +118,7 @@ def test_composition_shared_rollout_counts_and_recovery(tmp_path, monkeypatch, m
         assert restored["external_policy"]["reference"] == first["external_policy"]["reference"]
         assert restored["external_policy"]["completed_updates"] == 2
         assert all(float(state["step"]) == 2 for state in restored["optimizer"]["state"].values())
-    rows = [json.loads(line) for line in (child / "metrics/history.jsonl").read_text().splitlines()]
+    rows = [json.loads(line) for line in (child / "logs/history.jsonl").read_text().splitlines()]
     assert len(records) == len(rows)
     for record, row in zip(records, rows):
         assert row["native_data_loss"] is None and row["total"] is None

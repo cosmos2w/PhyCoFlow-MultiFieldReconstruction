@@ -205,7 +205,7 @@ def test_multiscale_posttraining_fits_references_scores_draws_and_resumes(tmp_pa
         == 0.0
     )
     assert payload["diagnostics"]["report"]["reference"]["band_power_mean"]
-    history = json.loads((child / "metrics" / "history.jsonl").read_text().splitlines()[0])
+    history = json.loads((child / "logs" / "history.jsonl").read_text().splitlines()[0])
     assert math.isfinite(history[energy_path])
     assert "family_gradient_diagnostics" in history
     resumed = run_post_training(post, case_dir=case_dir, resume=child, max_steps=1)

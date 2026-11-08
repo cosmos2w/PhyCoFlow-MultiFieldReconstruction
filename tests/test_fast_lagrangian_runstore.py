@@ -23,7 +23,7 @@ def test_link_runstore_atomic_checkpoint_and_history_recovery(tmp_path):
     store = RunStore.create(case, "campaign/T0", config)
     assert store.run_dir.is_relative_to(payload)
     store.save_checkpoint("last", {"global_step": 2, "state": torch.tensor([3.0])})
-    history = store.run_dir / "metrics/fast_lagrangian_updates.jsonl"
+    history = store.run_dir / "logs/fast_lagrangian_updates.jsonl"
     history.write_text("".join(json.dumps({"step": i}) + "\n" for i in [1, 2, 3]) + "{")
     restored = RunStore.resume(store.run_dir, config)
     assert restored.load_checkpoint()["global_step"] == 2

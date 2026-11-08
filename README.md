@@ -345,7 +345,7 @@ The maintained template sorts sampled sensors by canonical point index before fl
 
 The local `0_demo_TurbulentCombustion` Cond_T run has a different training contract. It trains with **192--384** T sensors and a 384-slot branch, using exactly 256 only in fixed reconstruction diagnostics. It sorts slots by the stored point index, includes the constant third coordinate, trains on a random 9,000-frame split with Adam and cosine annealing, and averages validation loss over all 1,000 random holdouts. This repository trains on the chronological first 8,000 frames; its training-preview validation curve is one fixed later frame, evaluated every ten epochs. The two loss curves therefore cannot be interpreted as a controlled model comparison. Field normalization is mean/std in both runs, but each uses statistics from its own training split.
 
-The tracked Senseiver example below shows the total training objective and fixed-validation loss over a completed 5,000-epoch turbulent-combustion base run. Each run writes its current `loss_history.png` at the run root.
+The tracked Senseiver example below shows the total training objective and fixed-validation loss over a completed 5,000-epoch turbulent-combustion base run. Each run writes its current `logs/loss_history.png` and PDF master alongside its recorded histories in `logs/`. Legacy `metrics/` histories remain readable on resume.
 
 <img src="docs/assets/reconstruction_examples/senseiver_base_5000ep_loss_history.png" alt="Senseiver 5000-epoch base-run training and validation loss history" width="78%">
 
@@ -588,10 +588,12 @@ Post-processing never retrains the model. Point it at an existing base or post-t
 | Error distributions over many snapshots | `visualize-run --eval-set ...` | violin/scatter figure, CSV, NPZ, and JSON |
 | Supported physical-coherence comparisons | add `--eval-coherence ...` | family-specific figures and numerical artifacts |
 | Full-native matched risk and SSS scoring | `evaluate-native-coherence` | per-condition native physical risk and frozen-bundle scores |
-| Re-render saved coherence components | `render-history` | `coherence_history.png` |
+| Re-render saved coherence components | `render-history` | `logs/coherence_history.png` and PDF |
 | Refresh saved cross-spectrum and topology explanations | `render-coherence-explanatory` | pair scores, band errors, diagrams, and numerical provenance |
 | Review training objectives, gradients, and checkpoint gates | [A+B+C diagnostic gallery](cases/turbulent_combustion/diagnostics/ExampleVisual/README.md) | four history figures plus frozen numerical evidence |
 | Re-render a saved preview without a model | visualization script with `--payload` | PNG from a portable NPZ |
+
+The default coherence figure shows family objectives and recorded aggregate diagnostics. Add `--detailed` to `render-history` to show every recorded component; use `--output` to preserve an existing figure. For conditional State, paired self and mixed squared diagnostics are separate from its joint fair objective.
 
 Start with `best` for the checkpoint selected by fixed validation, or choose `last` when the final optimization state is scientifically relevant. Use `--weight-selection configured` unless intentionally diagnosing live rather than configured/EMA weights. Keep the same split, sensor manifest, sample IDs, generation steps, and seeds for a fair comparison.
 

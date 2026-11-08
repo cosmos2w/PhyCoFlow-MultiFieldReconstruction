@@ -19,6 +19,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+from phycoflow_reconstruction.run_logs import history_paths
+
 FAMILIES = ("global_distribution", "cross_spectrum", "topology")
 FAMILY_LABELS = {
     "global_distribution": "A: global",
@@ -98,7 +100,16 @@ def parse_run_payload(run_dir: str | Path) -> dict[str, Any]:
     root = Path(run_dir)
     before, before_error = _read_json(root / "evaluation" / "before.json")
     after, after_error = _read_json(root / "evaluation" / "after.json")
-    history, history_error = _read_jsonl(root / "metrics" / "history.jsonl")
+    paths = history_paths(root, "history.jsonl")
+    history = []
+    errors = []
+    for path in paths:
+        rows, error = _read_jsonl(path)
+        history.extend(rows)
+        if error:
+            errors.append(f"{path.relative_to(root)}: {error}")
+    history_error = "; ".join(errors) if errors else (None if paths else "missing")
+    history_inputs = [str(path.relative_to(root)) for path in paths]
     calibration = None
     calibration_path = None
     calibration_error = "missing"
@@ -140,7 +151,12 @@ def parse_run_payload(run_dir: str | Path) -> dict[str, Any]:
         "inputs": {
             "evaluation_before": {"path": "evaluation/before.json", "error": before_error},
             "evaluation_after": {"path": "evaluation/after.json", "error": after_error},
-            "history": {"path": "metrics/history.jsonl", "error": history_error, "rows": len(history)},
+            "history": {
+                "path": history_inputs[0] if history_inputs else None,
+                "paths": history_inputs,
+                "error": history_error,
+                "rows": len(history),
+            },
             "calibration": {
                 "path": None if calibration_path is None else str(calibration_path.relative_to(root)),
                 "error": calibration_error,

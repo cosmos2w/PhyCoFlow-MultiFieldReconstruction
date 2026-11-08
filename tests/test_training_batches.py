@@ -219,7 +219,7 @@ def test_base_training_uses_resident_pipeline_on_physical_gpu_one(tmp_path):
     }
     run_dir = run_base_training(config, case_dir=tmp_path / "case")
     manifest = json.loads((run_dir / "run_manifest.json").read_text())
-    history = (run_dir / "metrics" / "history.jsonl").read_text().splitlines()
+    history = (run_dir / "logs" / "history.jsonl").read_text().splitlines()
     assert manifest["training_data_strategy"] == "vram_resident"
     assert len(history) == 1
     epoch_history = json.loads(history[0])

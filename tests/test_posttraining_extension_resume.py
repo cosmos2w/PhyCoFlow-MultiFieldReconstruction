@@ -105,7 +105,7 @@ def test_posttraining_epoch_extension_resumes_warmup_and_fidelity_policy(
     assert all(float(state["step"]) == 1 for state in first["optimizer"]["state"].values())
     first_lr_rows = [
         json.loads(line)
-        for line in (child / "metrics/lr_warmup_updates.jsonl").read_text().splitlines()
+        for line in (child / "logs/lr_warmup_updates.jsonl").read_text().splitlines()
     ]
     assert [row["step"] for row in first_lr_rows] == [1]
     assert first_lr_rows[0]["optimizer_lr"] == pytest.approx(1.0e-4)
@@ -129,12 +129,12 @@ def test_posttraining_epoch_extension_resumes_warmup_and_fidelity_policy(
     assert all(float(state["step"]) == 2 for state in second["optimizer"]["state"].values())
     lr_rows = [
         json.loads(line)
-        for line in (child / "metrics/lr_warmup_updates.jsonl").read_text().splitlines()
+        for line in (child / "logs/lr_warmup_updates.jsonl").read_text().splitlines()
     ]
     assert [row["step"] for row in lr_rows] == [1, 2]
     assert [row["optimizer_lr"] for row in lr_rows] == pytest.approx([1.0e-4, 4.0e-4])
     history = [
-        json.loads(line) for line in (child / "metrics/history.jsonl").read_text().splitlines()
+        json.loads(line) for line in (child / "logs/history.jsonl").read_text().splitlines()
     ]
     assert [row["step"] for row in history] == [1, 2]
     assert all(row["native_data_loss"] is None for row in history)

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import load_config
+from ..run_logs import history_paths, log_path
 from .history_plotting import (
     HISTORY_MUTED_TEXT_COLOR,
     HISTORY_TEXT_COLOR,
@@ -247,7 +248,20 @@ def _display_name(value: str) -> str:
     return f"{label[:1].upper()}{label[1:]}"
 
 
+def _view_label(family: str) -> str:
+    return {
+        "global_distribution": "State",
+        "multiscale_spectrum": "Scale",
+        "topology": "Shape",
+    }.get(family, _display_name(family))
+
+
 def _component_label(component: str, *, family: str, definition: str | None) -> str:
+    if family == "global_distribution" and definition == "conditional_quantile_fair_v1":
+        if component == "self.marginal_w2":
+            return "Paired squared self diagnostic"
+        if component == "cross.joint_topk_swd":
+            return "Paired squared mixed diagnostic"
     if family == "global_distribution" and definition in {
         "marginal_mixed_mean_v2", "marginal_mixed_weighted_v3"
     }:
@@ -294,7 +308,7 @@ def _stage_label(description: str) -> str:
     return stage.title() or "Training"
 
 
-def build_coherence_history_figure(data: CoherenceHistoryData, plt, *, description: str):
+def _build_detailed_coherence_figure(data: CoherenceHistoryData, plt, *, description: str):
     """Build a compact family-grouped figure of weighted and raw diagnostics."""
     from matplotlib.ticker import (
         FuncFormatter,
@@ -530,16 +544,86 @@ def build_coherence_history_figure(data: CoherenceHistoryData, plt, *, descripti
     return figure
 
 
+
+def build_coherence_history_figure(
+    data: CoherenceHistoryData, plt, *, description: str, detailed: bool = False
+):
+    """Show recorded family objectives and selected aggregate diagnostics.
+
+    Detailed mode displays every recorded component, including structural zeros.
+    State paired squared values are diagnostics, not pieces of its fair score.
+    """
+    if detailed:
+        return _build_detailed_coherence_figure(data, plt, description=description)
+    selected = {
+        "global_distribution": {
+            "self.marginal_w2", "cross.joint_topk_swd", "mutual.pairwise_swd",
+        },
+        "multiscale_spectrum": {
+            "log_band_power.squared_error", "signed_band_cospectrum.squared_error",
+            "gram_self_energy_score.conditional", "gram_mutual_energy_score.conditional",
+            "relation_self_energy_score.conditional", "relation_rho_crps.conditional",
+            "signed_anchor_total.conditional",
+        },
+        "topology": {"self.persistence", "mutual.persistence", "self.betti_curves",
+                     "mutual.fibered_betti_curves"},
+        "cross_spectrum": {"self_spectrum.auto_spectrum", "cross_spectrum.cross_spectrum"},
+    }
+    groups = {
+        family: [c for c in data.components
+                 if c.family == family and c.component in selected.get(family, set())]
+        for family in data.family_order
+    }
+    groups = {family: components for family, components in groups.items() if components}
+    figure, axes = plt.subplots(1 + len(groups), 1, figsize=(10.5, 2.8 + 2.35 * len(groups)),
+                                squeeze=False, constrained_layout=True)
+    figure.suptitle(f"{_stage_label(description)} coherence history", fontsize=14)
+    summary = axes[0, 0]
+    values = []
+    for index, family in enumerate(data.family_order):
+        if family not in data.family_totals:
+            continue
+        epochs, series = data.family_totals[family]
+        values.extend(series)
+        color, linestyle = history_family_style(family, index)
+        summary.plot(epochs, series, label=_view_label(family), color=color, linestyle=linestyle,
+                     marker="o" if len(epochs) == 1 else None)
+    title = "Weighted family objectives" if data.coherence_semantics == "scalar" else "Weighted family reporting values · not a scalar ConFIG objective"
+    summary.set_title(title, loc="left")
+    summary.set_ylabel("Recorded weighted value")
+    summary.set_xlabel("Training epoch")
+    style_history_axis(summary, values, x_max=max((e for c in data.components for e in c.epochs), default=1))
+    if summary.lines:
+        summary.legend(fontsize=8)
+    for index, (family, components) in enumerate(groups.items(), 1):
+        axis = axes[index, 0]
+        values = []
+        for component in components:
+            values.extend(component.raw)
+            label = _component_label(component.component, family=family, definition=data.state_definition)
+            axis.plot(component.epochs, component.raw, label=label,
+                      marker="o" if len(component.epochs) == 1 else None)
+        title = f"{_view_label(family)} · recorded aggregate diagnostics"
+        if family == "global_distribution" and data.state_definition == "conditional_quantile_fair_v1":
+            title += " · paired squared, separate from joint fair objective"
+        axis.set_title(title, loc="left", fontsize=10)
+        axis.set_ylabel("Raw diagnostic")
+        axis.set_xlabel("Training epoch")
+        style_history_axis(axis, values, x_max=max((e for c in components for e in c.epochs), default=1))
+        axis.legend(fontsize=8, ncol=2)
+    return figure
+
 def render_coherence_history(
     run_dir: str | Path,
     *,
     description: str | None = None,
     output_path: str | Path | None = None,
     pyplot=None,
+    detailed: bool = False,
 ) -> Path | None:
     """Render ``coherence_history.png`` from run metadata without loading a model."""
     run_dir = Path(run_dir)
-    rows = _read_jsonl(run_dir / "metrics" / "history.jsonl")
+    rows = [row for path in history_paths(run_dir, "history.jsonl") for row in _read_jsonl(path)]
     config_path = run_dir / "resolved_config.yaml"
     config = load_config(config_path) if config_path.is_file() else {}
     data = extract_coherence_history(rows, config)
@@ -562,9 +646,11 @@ def render_coherence_history(
         stage = str(config.get("stage", "training")).replace("_training", "")
         model = str(config.get("model", {}).get("name", "model"))
         description = f"{stage}:{model}"
-    figure = build_coherence_history_figure(data, pyplot, description=description)
+    figure = build_coherence_history_figure(data, pyplot, description=description, detailed=detailed)
     destination = (
-        Path(output_path) if output_path is not None else run_dir / "coherence_history.png"
+        Path(output_path) if output_path is not None else log_path(
+            run_dir, "coherence_history_detailed.png" if detailed else "coherence_history.png"
+        )
     )
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.suffix.lower() == ".pdf":

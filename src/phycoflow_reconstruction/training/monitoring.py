@@ -14,6 +14,7 @@ from typing import Any
 
 from tqdm.auto import tqdm
 
+from ..run_logs import history_paths, log_path
 from .history_plotting import (
     HISTORY_MUTED_TEXT_COLOR,
     HISTORY_TEXT_COLOR,
@@ -93,10 +94,10 @@ class TrainingMonitor:
         plot_every_steps: int = 10,
     ) -> None:
         self.run_dir = Path(run_dir)
-        self.history_path = self.run_dir / "metrics" / "history.jsonl"
-        self.validation_history_path = self.run_dir / "metrics" / "validation_history.jsonl"
-        self.plot_path = self.run_dir / "loss_history.png"
-        self.optimization_plot_path = self.run_dir / "optimization_diagnostics.png"
+        self.history_path = log_path(self.run_dir, "history.jsonl")
+        self.validation_history_path = log_path(self.run_dir, "validation_history.jsonl")
+        self.plot_path = log_path(self.run_dir, "loss_history.png")
+        self.optimization_plot_path = log_path(self.run_dir, "optimization_diagnostics.png")
         self.final_step = int(final_step)
         self.configured_steps = int(configured_steps)
         self.steps_per_epoch = max(1, int(steps_per_epoch))
@@ -153,20 +154,18 @@ class TrainingMonitor:
         )
 
     def _load_existing_history(self) -> None:
-        if not self.history_path.exists():
-            return
-        with self.history_path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                if line.strip():
-                    self._capture(json.loads(line))
+        for path in history_paths(self.run_dir, "history.jsonl"):
+            with path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    if line.strip():
+                        self._capture(json.loads(line))
 
     def _load_existing_validation_history(self) -> None:
-        if not self.validation_history_path.exists():
-            return
-        with self.validation_history_path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                if line.strip():
-                    self._capture(json.loads(line))
+        for path in history_paths(self.run_dir, "validation_history.jsonl"):
+            with path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    if line.strip():
+                        self._capture(json.loads(line))
 
     def _capture(self, row: Mapping[str, Any]) -> None:
         step = int(row.get("step", 0))
@@ -430,6 +429,7 @@ class TrainingMonitor:
                 f".{self.optimization_plot_path.name}.tmp"
             )
             optimization_figure.savefig(temporary, dpi=180, format="png")
+            optimization_figure.savefig(self.optimization_plot_path.with_suffix(".pdf"))
             plt.close(optimization_figure)
             os.replace(temporary, self.optimization_plot_path)
         from .coherence_history import render_coherence_history

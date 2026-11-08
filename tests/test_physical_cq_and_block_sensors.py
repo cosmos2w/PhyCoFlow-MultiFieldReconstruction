@@ -187,7 +187,7 @@ def test_native_posttraining_roundtrip_with_physical_fields_and_block_means(
     after = json.loads((child / "evaluation/after.json").read_text())
     assert before["sensor_manifest_sha256"] == after["sensor_manifest_sha256"]
     assert before["generation_seed"] == after["generation_seed"]
-    history = (child / "metrics/history.jsonl").read_text()
+    history = (child / "logs/history.jsonl").read_text()
     for component in ("self.persistence", "mutual.persistence"):
         assert f"topology.{component}" in history
     assert "topology.mutual.persistence" in after["coherence"]["components"]

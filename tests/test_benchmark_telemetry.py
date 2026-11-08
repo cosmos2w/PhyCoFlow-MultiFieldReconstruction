@@ -90,7 +90,7 @@ def test_benchmark_telemetry_records_cpu_step_and_epoch(tmp_path):
     telemetry.finish_epoch(1)
     telemetry.close()
     payload = json.loads(
-        (tmp_path / "metrics" / "benchmark_telemetry.json").read_text(encoding="utf-8")
+        (tmp_path / "logs" / "benchmark_telemetry.json").read_text(encoding="utf-8")
     )
     assert payload["epochs"][0]["epoch"] == 1
     assert payload["epochs"][0]["steps_per_epoch"] == 2
@@ -116,7 +116,7 @@ def test_benchmark_telemetry_accumulates_retry_phase_time(tmp_path):
     telemetry.close()
 
     payload = json.loads(
-        (tmp_path / "metrics" / "benchmark_telemetry.json").read_text(encoding="utf-8")
+        (tmp_path / "logs" / "benchmark_telemetry.json").read_text(encoding="utf-8")
     )
     assert payload["steps"][0]["backward_time_s"] >= 0
 
@@ -152,7 +152,23 @@ def test_benchmark_telemetry_preserves_history_and_discards_uncheckpointed_futur
     resumed.finish_step()
     resumed.finish_epoch(3)
     resumed.close()
-    payload = json.loads((tmp_path / "metrics/benchmark_telemetry.json").read_text())
+    payload = json.loads((tmp_path / "logs/benchmark_telemetry.json").read_text())
     assert [row["global_step"] for row in payload["steps"]] == [0, 1, 2]
     assert [row["epoch"] for row in payload["epochs"]] == [1, 2, 3]
     assert payload["steps"][:2] == initial.steps[:2]
+
+
+def test_telemetry_resume_reads_legacy_and_writes_logs(tmp_path):
+    metrics = tmp_path / "metrics"
+    metrics.mkdir()
+    legacy = metrics / "benchmark_telemetry.json"
+    legacy.write_text(json.dumps({"steps_per_epoch": 2, "parameter_count": 12,
+                                  "trainable_parameter_count": 10,
+                                  "steps": [], "epochs": [{"epoch": 1}]}))
+    telemetry = BenchmarkTelemetry(tmp_path, enabled=True, device=torch.device("cpu"),
+                                   steps_per_epoch=2, parameter_count=12,
+                                   trainable_parameter_count=10)
+    assert telemetry.epochs == [{"epoch": 1}]
+    telemetry.write()
+    assert json.loads((tmp_path / "logs/benchmark_telemetry.json").read_text())["epochs"] == [{"epoch": 1}]
+    assert json.loads(legacy.read_text())["epochs"] == [{"epoch": 1}]

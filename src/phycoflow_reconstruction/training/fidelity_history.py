@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import load_config
+from ..run_logs import history_paths, log_path
 from .history_plotting import HISTORY_MUTED_TEXT_COLOR, HISTORY_TEXT_COLOR, style_history_axis
 
 _FIELD_COLORS = {
@@ -291,10 +292,10 @@ def render_fidelity_history(
 ) -> Path | None:
     """Render ``checkpoint_fidelity.png`` without loading a model or dataset."""
     run_dir = Path(run_dir)
-    validation_rows = _read_jsonl(run_dir / "metrics" / "topology_validation.jsonl")
+    validation_rows = [row for path in history_paths(run_dir, "topology_validation.jsonl") for row in _read_jsonl(path)]
     if not validation_rows:
         return None
-    training_rows = _read_jsonl(run_dir / "metrics" / "history.jsonl")
+    training_rows = [row for path in history_paths(run_dir, "history.jsonl") for row in _read_jsonl(path)]
     config_path = run_dir / "resolved_config.yaml"
     config = load_config(config_path) if config_path.is_file() else {}
     fidelity = config.get("posttrain_fidelity", {})
@@ -328,10 +329,15 @@ def render_fidelity_history(
     )
     if figure is None:
         return None
-    destination = Path(output_path) if output_path is not None else run_dir / "checkpoint_fidelity.png"
+    destination = Path(output_path) if output_path is not None else log_path(run_dir, "checkpoint_fidelity.png")
     destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = destination.with_name(f".{destination.name}.tmp")
+    png_destination = destination.with_suffix(".png")
+    pdf_destination = destination.with_suffix(".pdf")
+    temporary = png_destination.with_name(f".{png_destination.name}.tmp")
+    pdf_temporary = pdf_destination.with_name(f".{pdf_destination.name}.tmp")
     figure.savefig(temporary, dpi=180, format="png")
+    figure.savefig(pdf_temporary, format="pdf")
     pyplot.close(figure)
-    os.replace(temporary, destination)
+    os.replace(pdf_temporary, pdf_destination)
+    os.replace(temporary, png_destination)
     return destination

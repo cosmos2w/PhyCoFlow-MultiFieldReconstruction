@@ -83,3 +83,52 @@ def test_missing_optional_payloads_are_inventoried_without_family_figures(tmp_pa
     ]
     assert report["inputs"]["evaluation_after"]["error"] == "missing"
     assert report["generated"] == ["coherence_summary.png"]
+
+
+def test_history_inputs_combine_legacy_and_logs_and_deduplicate_alias(tmp_path: Path) -> None:
+    legacy = tmp_path / "metrics/history.jsonl"
+    current = tmp_path / "logs/history.jsonl"
+    legacy.parent.mkdir()
+    current.parent.mkdir()
+    legacy.write_text('{"step": 1}\n')
+    current.write_text('{"step": 2}\n')
+    parsed = parse_run_payload(tmp_path)
+    assert [row["step"] for row in parsed["history"]] == [1, 2]
+    assert parsed["inputs"]["history"] == {
+        "path": "metrics/history.jsonl", "paths": ["metrics/history.jsonl", "logs/history.jsonl"],
+        "error": None, "rows": 2,
+    }
+    legacy.unlink()
+    legacy.symlink_to("../logs/history.jsonl")
+    parsed = parse_run_payload(tmp_path)
+    assert [row["step"] for row in parsed["history"]] == [2]
+    assert parsed["inputs"]["history"]["paths"] == ["metrics/history.jsonl"]
+
+
+def test_history_input_reports_canonical_path_and_read_errors(tmp_path: Path) -> None:
+    current = tmp_path / "logs/history.jsonl"
+    current.parent.mkdir()
+    current.write_text('{"step": 1}\n{broken}\n')
+    history = parse_run_payload(tmp_path)["inputs"]["history"]
+    assert history["path"] == "logs/history.jsonl"
+    assert history["paths"] == ["logs/history.jsonl"]
+    assert history["rows"] == 1
+    assert "logs/history.jsonl: unreadable" in history["error"]
+
+
+def test_offline_parser_import_does_not_load_training_or_model_dependencies(tmp_path: Path) -> None:
+    import os
+    import subprocess
+    import sys
+
+    code = """
+import runpy
+import sys
+runpy.run_path(sys.argv[1], run_name='offline_report_import')
+blocked = ('phycoflow_reconstruction.training', 'phycoflow_reconstruction.models', 'pykeops')
+loaded = [name for name in sys.modules if any(name == p or name.startswith(p + '.') for p in blocked)]
+assert not loaded, loaded
+"""
+    env = os.environ.copy()
+    env["MPLCONFIGDIR"] = str(tmp_path / "matplotlib")
+    subprocess.run([sys.executable, "-c", code, str(_SCRIPT)], check=True, env=env)

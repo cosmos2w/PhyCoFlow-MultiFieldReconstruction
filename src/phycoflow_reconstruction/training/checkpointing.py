@@ -165,7 +165,7 @@ class PeriodicCheckpointManager:
             self.last_validation_report = {"global_step": global_step, "loss": metric_value,
                 "training_epoch": global_step / self.steps_per_epoch,
                 "topology_selection_eligible": eligible_for_best}
-            with (self.store.run_dir / "metrics" / "topology_validation.jsonl").open("a") as handle:
+            with (self.store.run_dir / "logs" / "topology_validation.jsonl").open("a") as handle:
                 handle.write(json.dumps({"step": global_step, **panel_report}) + "\n")
         elif self.selection_metric == "reconstruction_mse":
             if self.panel_evaluator is not None:

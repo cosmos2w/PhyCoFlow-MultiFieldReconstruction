@@ -58,7 +58,7 @@ def test_spatial_topology_trains_with_other_families_and_preserves_source(tmp_pa
     assert (child / "checkpoints" / "last.pt").is_file()
     manifest = json.loads((child / "run_manifest.json").read_text())
     assert manifest["source_immutable_verified"] is True
-    history = (child / "metrics" / "history.jsonl").read_text()
+    history = (child / "logs" / "history.jsonl").read_text()
     for term in ("self.region", "self.connectivity", "anchor_self.spatial", "mutual.spatial"):
         assert f"topology.{term}" in history
     for family in ("global_distribution", "cross_spectrum", "topology"):
@@ -147,7 +147,7 @@ def test_persistence_retention_panel_selection_and_resume(tmp_path, constrained,
         torch.testing.assert_close(value, b["model"][name], rtol=0, atol=0)
     # The final checkpoint may survive preemption while final reporting does
     # not. Recovery must finish reports without taking another optimizer step.
-    history_before = (child / "metrics/history.jsonl").read_bytes()
+    history_before = (child / "logs/history.jsonl").read_bytes()
     (child / "evaluation/after.json").unlink()
     (child / "status.json").write_text(json.dumps({"status": "running", "global_step": 4}))
     run_post_training(post, case_dir=tmp_path / "case", max_steps=0, resume=child)
@@ -155,13 +155,13 @@ def test_persistence_retention_panel_selection_and_resume(tmp_path, constrained,
     assert recovered["global_step"] == 4
     for name, value in a["model"].items():
         torch.testing.assert_close(value, recovered["model"][name], rtol=0, atol=0)
-    assert (child / "metrics/history.jsonl").read_bytes() == history_before
+    assert (child / "logs/history.jsonl").read_bytes() == history_before
     assert (child / "evaluation/after.json").is_file()
     recovered_status = json.loads((child / "status.json").read_text())
     assert recovered_status["status"] == "completed"
     assert recovered_status["segment_steps"] == 0
     history = [
-        json.loads(line) for line in (child / "metrics/history.jsonl").read_text().splitlines()
+        json.loads(line) for line in (child / "logs/history.jsonl").read_text().splitlines()
     ]
     if constrained:
         assert a["component_controller"] == b["component_controller"]
@@ -177,7 +177,7 @@ def test_persistence_retention_panel_selection_and_resume(tmp_path, constrained,
         assert topology["total"] == selected["metrics"]["native_topology"]["total"]
         audit = [
             json.loads(line)
-            for line in (child / "metrics/constraint_updates.jsonl").read_text().splitlines()
+            for line in (child / "logs/constraint_updates.jsonl").read_text().splitlines()
         ]
         assert [row["step"] for row in audit] == [1, 2, 3, 4]
         for row in audit:

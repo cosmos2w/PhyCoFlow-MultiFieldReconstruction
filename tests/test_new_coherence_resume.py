@@ -214,7 +214,7 @@ def test_new_definitions_config_lagrangian_resume_and_frozen_state(tmp_path, mon
 
     panel = restore_evaluation_panel(child, evaluation_overrides={}, device_name="cpu")
     assert panel.load_checkpoint("last") == 1
-    history_path = child / "metrics/history.jsonl"
+    history_path = child / "logs/history.jsonl"
     history_before = history_path.read_bytes()
 
     def forbid_update(*args, **kwargs):

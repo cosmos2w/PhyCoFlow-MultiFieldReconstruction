@@ -1,7 +1,7 @@
 """Opt-in, model-agnostic timing and memory telemetry for benchmark runs.
 
 The normal training path does not instantiate this helper.  When enabled, it
-records a compact per-step trace and per-epoch summary under ``metrics`` in a
+records a compact per-step trace and per-epoch summary under ``logs`` in a
 run directory.  CUDA timings synchronize once per completed step and use CUDA
 events for the model phases, so asynchronous kernel launches are not reported
 as CPU enqueue time.
@@ -41,7 +41,7 @@ class BenchmarkTelemetry:
     ) -> None:
         self.enabled = bool(enabled)
         self.run_dir = Path(run_dir)
-        self.metrics_dir = self.run_dir / "metrics"
+        self.metrics_dir = self.run_dir / "logs"
         self.device = device
         self.steps_per_epoch = max(1, int(steps_per_epoch))
         self.parameter_count = int(parameter_count)
@@ -50,6 +50,8 @@ class BenchmarkTelemetry:
         self.steps: list[dict[str, Any]] = []
         self.epochs: list[dict[str, Any]] = []
         history_path = self.metrics_dir / "benchmark_telemetry.json"
+        if not history_path.is_file():
+            history_path = self.run_dir / "metrics" / "benchmark_telemetry.json"
         if self.enabled and history_path.is_file():
             history = json.loads(history_path.read_text(encoding="utf-8"))
             for key in ("steps_per_epoch", "parameter_count", "trainable_parameter_count"):

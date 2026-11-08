@@ -62,6 +62,8 @@ def _checkpoint(step: int = 17) -> dict[str, Any]:
 def _new_run(tmp_path: Path) -> tuple[RunStore, dict[str, Any]]:
     config = _config()
     store = RunStore.create(tmp_path, "extension", config)
+    assert (store.run_dir / "logs").is_dir()
+    assert not (store.run_dir / "metrics").exists()
     store.save_checkpoint("last", _checkpoint())
     store.save_checkpoint("best", _checkpoint(step=12))
     store.append_history({"epoch": 2, "step": 17, "loss": 0.25})
@@ -120,7 +122,7 @@ def test_epoch_change_requires_explicit_extension_and_preserves_archived_state(t
         for path in [config_path, manifest_path, *checkpoint_paths]
     }
     original_last = store.load_checkpoint("last")
-    original_history = (store.run_dir / "metrics" / "history.jsonl").read_bytes()
+    original_history = (store.run_dir / "logs" / "history.jsonl").read_bytes()
     run_id = json.loads(manifest_path.read_text(encoding="utf-8"))["run_id"]
 
     extended = RunStore.extend_epochs(store.run_dir, 3)
@@ -161,7 +163,7 @@ def test_epoch_change_requires_explicit_extension_and_preserves_archived_state(t
     assert last_path.read_bytes() == original_files["checkpoints/last.pt"]
     assert store.load_checkpoint("last")["global_step"] == 17
     _assert_same_value(original_last, store.load_checkpoint("last"))
-    assert (store.run_dir / "metrics" / "history.jsonl").read_bytes() == original_history
+    assert (store.run_dir / "logs" / "history.jsonl").read_bytes() == original_history
 
     # RunStore writes checkpoints through atomic replacement. The hard-linked
     # archive must remain the old checkpoint after the live last.pt is replaced.

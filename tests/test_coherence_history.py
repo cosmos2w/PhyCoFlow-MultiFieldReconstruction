@@ -197,7 +197,7 @@ def test_adaptive_figure_uses_family_groups_and_independent_component_scales() -
     ]
     data = extract_coherence_history(rows, _config())
 
-    figure = build_coherence_history_figure(data, plt, description="post:fixture")
+    figure = build_coherence_history_figure(data, plt, description="post:fixture", detailed=True)
 
     assert len(figure.axes) == 5  # separate total/family summaries + three component panels
     assert figure.axes[0].get_title(loc="left") == "Total coherence"
@@ -238,7 +238,7 @@ def test_family_summary_displays_all_weighted_families_in_stable_colors() -> Non
             }
         )
     data = extract_coherence_history(rows, _config())
-    figure = build_coherence_history_figure(data, plt, description="post:fixture")
+    figure = build_coherence_history_figure(data, plt, description="post:fixture", detailed=True)
 
     total, families = figure.axes[:2]
     assert [line.get_label() for line in total.lines] == ["Total coherence"]
@@ -293,13 +293,16 @@ coherence:
 
     path = render_coherence_history(tmp_path)
 
-    assert path == tmp_path / "coherence_history.png"
+    assert path == tmp_path / "logs/coherence_history.png"
     assert path.stat().st_size > 0
-    assert (tmp_path / "coherence_history.pdf").read_bytes().startswith(b"%PDF")
+    assert (tmp_path / "logs/coherence_history.pdf").read_bytes().startswith(b"%PDF")
     from PIL import Image
 
     with Image.open(path) as image:
         image.verify()
+    detailed = render_coherence_history(tmp_path, detailed=True)
+    assert detailed == tmp_path / "logs/coherence_history_detailed.png"
+    assert detailed.with_suffix(".pdf").read_bytes().startswith(b"%PDF")
     explicit_pdf = tmp_path / "custom.pdf"
     assert render_coherence_history(tmp_path, output_path=explicit_pdf) == explicit_pdf
     assert explicit_pdf.read_bytes().startswith(b"%PDF")
@@ -345,9 +348,9 @@ coherence:
     )
     monitor.close()
 
-    assert (tmp_path / "loss_history.png").stat().st_size > 0
-    assert (tmp_path / "coherence_history.png").stat().st_size > 0
-    assert (tmp_path / "coherence_history.pdf").read_bytes().startswith(b"%PDF")
+    assert (tmp_path / "logs/loss_history.png").stat().st_size > 0
+    assert (tmp_path / "logs/coherence_history.png").stat().st_size > 0
+    assert (tmp_path / "logs/coherence_history.pdf").read_bytes().startswith(b"%PDF")
 
 
 @pytest.mark.parametrize(
@@ -397,7 +400,7 @@ def test_state_definition_labels_keep_legacy_keys_and_scale_style(
         }
     ]
     data = extract_coherence_history(rows, config)
-    figure = build_coherence_history_figure(data, plt, description="post:test")
+    figure = build_coherence_history_figure(data, plt, description="post:test", detailed=True)
     titles = [axis.get_title(loc="left") for axis in figure.axes]
     assert marginal_title in titles and cross_title in titles
     assert {component.component for component in data.components} >= {
@@ -429,8 +432,46 @@ def test_mixed_scalar_and_config_history_is_labeled_as_mixed():
         },
     ]
     figure = build_coherence_history_figure(
-        extract_coherence_history(rows, _config()), plt, description="post:test"
+        extract_coherence_history(rows, _config()), plt, description="post:test", detailed=True
     )
     assert figure.axes[0].get_title(loc="left") == "Coherence values · includes reporting sums"
     assert figure.axes[0].get_ylabel() == "Recorded value"
     plt.close(figure)
+
+
+def test_compact_sss_preserves_raw_leaves_and_separates_paired_state():
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    from matplotlib import pyplot as plt
+
+    config = {"coherence": {"families": {
+        "global_distribution": {"definition": "conditional_quantile_fair_v1"},
+        "multiscale_spectrum": {}, "topology": {},
+    }}}
+    row = {"epoch": 1, "coherence_loss": 9.0,
+           "total_semantics": "parameter_direction_without_scalar_objective",
+           "coherence_family/global_distribution/weighted_contribution": 1.0,
+           "coherence_family/multiscale_spectrum/weighted_contribution": 2.0,
+           "coherence_family/topology/weighted_contribution": 3.0,
+           "coherence_component/global_distribution/self.marginal_w2/raw": 4.0,
+           "coherence_component/global_distribution/cross.joint_topk_swd/raw": 5.0,
+           "coherence_component/global_distribution/conditional_quantile_fair/raw": 6.0,
+           "coherence_component/multiscale_spectrum/gram_self_energy_score.conditional/raw": 7.0,
+           "coherence_component/multiscale_spectrum/gram_mutual_energy_score.conditional/raw": 8.0,
+           "coherence_component/topology/self.persistence/raw": 1.0,
+           "coherence_component/topology/mutual.persistence/raw": 0.0,
+           "coherence_component/topology/self.persistence.field.h0/raw": 12.0}
+    data = extract_coherence_history([row], config)
+    assert len(data.components) == 8
+    figure = build_coherence_history_figure(data, plt, description="post:test")
+    assert len(figure.axes) == 4
+    assert "not a scalar ConFIG objective" in figure.axes[0].get_title(loc="left")
+    assert [line.get_label() for line in figure.axes[0].lines] == ["State", "Scale", "Shape"]
+    assert "paired squared, separate from joint fair objective" in figure.axes[1].get_title(loc="left")
+    assert sorted(line.get_ydata()[0] for line in figure.axes[1].lines) == [4.0, 5.0]
+    assert sorted(line.get_ydata()[0] for line in figure.axes[3].lines) == [0.0, 1.0]
+    plt.close(figure)
+    detailed = build_coherence_history_figure(data, plt, description="post:test", detailed=True)
+    assert len(detailed.axes) > len(figure.axes)
+    assert any("Field" in axis.get_title(loc="left") for axis in detailed.axes)
+    plt.close(detailed)

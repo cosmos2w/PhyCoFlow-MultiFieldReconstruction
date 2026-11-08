@@ -240,7 +240,7 @@ def test_target_free_posttraining_writes_child_and_preserves_source(tmp_path):
     manifest = json.loads((child / "run_manifest.json").read_text())
     before = json.loads((child / "evaluation" / "before.json").read_text())
     after = json.loads((child / "evaluation" / "after.json").read_text())
-    history = json.loads((child / "metrics" / "history.jsonl").read_text())
+    history = json.loads((child / "logs" / "history.jsonl").read_text())
     assert manifest["parent_run"] == str(source_run)
     assert manifest["source_immutable_verified"] is True
     assert file_sha256(source_checkpoint) == source_hash
@@ -291,8 +291,8 @@ def test_initial_family_calibration_is_fixed_hashed_and_restored_on_resume(tmp_p
     none_post["optimization"]["epochs"] = 3
     none_post["output"]["experiment_name"] = "child_none"
     none_child = run_post_training(none_post, case_dir=case_dir, max_steps=1)
-    calibrated_history = json.loads((child / "metrics" / "history.jsonl").read_text())
-    none_history = json.loads((none_child / "metrics" / "history.jsonl").read_text())
+    calibrated_history = json.loads((child / "logs" / "history.jsonl").read_text())
+    none_history = json.loads((none_child / "logs" / "history.jsonl").read_text())
     assert calibrated_history["native_data_loss"] == none_history["native_data_loss"]
 
     resumed = run_post_training(post, case_dir=case_dir, resume=child, max_steps=1)

@@ -19,6 +19,8 @@ from typing import Any
 import torch
 import yaml
 
+from ..run_logs import history_paths, log_path
+
 
 def load_project_checkpoint(path: str | Path) -> dict[str, Any]:
     """Restricted-load project checkpoints with audited dependency symbols."""
@@ -101,7 +103,7 @@ class RunStore:
         store = cls(run_dir, config)
         if run_dir.exists():
             raise FileExistsError(f"run directory already exists: {run_dir}")
-        for relative in ("checkpoints", "metrics", "artifacts", "evaluation", "logs"):
+        for relative in ("checkpoints", "artifacts", "evaluation", "logs"):
             (run_dir / relative).mkdir(parents=True, exist_ok=False)
         (run_dir / "resolved_config.yaml").write_text(
             yaml.safe_dump(dict(config), sort_keys=False), encoding="utf-8"
@@ -355,7 +357,7 @@ class RunStore:
         return load_project_checkpoint(path)
 
     def append_history(self, row: Mapping[str, Any]) -> None:
-        path = self.run_dir / "metrics" / "history.jsonl"
+        path = log_path(self.run_dir, "history.jsonl")
         with path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(dict(row), sort_keys=True) + "\n")
 
@@ -373,24 +375,23 @@ class RunStore:
             "execution_strategy_updates",
             "execution_strategy_audits",
         ):
-            path = self.run_dir / "metrics" / f"{name}.jsonl"
-            if not path.exists():
-                continue
-            rows = {}
-            lines = path.read_text(encoding="utf-8").splitlines()
-            for index, line in enumerate(lines):
-                if not line.strip():
-                    continue
-                try:
-                    row = json.loads(line)
-                except json.JSONDecodeError:
-                    if index == len(lines) - 1:
-                        break
-                    raise
-                step = int(row["step"])
-                if step <= completed_step:
-                    rows[step] = line
-            _atomic_text(path, "".join(rows[step] + "\n" for step in sorted(rows)))
+            for found_path in history_paths(self.run_dir, f"{name}.jsonl"):
+                path = found_path.resolve()
+                rows = {}
+                lines = path.read_text(encoding="utf-8").splitlines()
+                for index, line in enumerate(lines):
+                    if not line.strip():
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except json.JSONDecodeError:
+                        if index == len(lines) - 1:
+                            break
+                        raise
+                    step = int(row["step"])
+                    if step <= completed_step:
+                        rows[step] = line
+                _atomic_text(path, "".join(rows[step] + "\n" for step in sorted(rows)))
 
 
 def _package_exists(name: str) -> bool:

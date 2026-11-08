@@ -162,7 +162,8 @@ def main(argv=None):
                 "job_id": os.environ.get("SLURM_JOB_ID"),
                 "completed_utc": datetime.now(timezone.utc).isoformat(),
             }
-            with (run / "metrics/segments.jsonl").open("a") as handle:
+            (run / "logs").mkdir(parents=True, exist_ok=True)
+            with (run / "logs/segments.jsonl").open("a") as handle:
                 handle.write(json.dumps(record) + "\n")
             summary = {
                 "run": str(run),

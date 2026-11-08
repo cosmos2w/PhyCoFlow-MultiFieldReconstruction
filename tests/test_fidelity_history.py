@@ -101,3 +101,17 @@ def test_renderer_reads_saved_jsonl_and_writes_only_requested_output(tmp_path) -
     assert path == output
     assert path.stat().st_size > 0
     assert not (run_dir / "checkpoint_fidelity.png").exists()
+
+
+def test_fidelity_default_outputs_pdf_and_png_in_logs_with_legacy_input(tmp_path):
+    metrics = tmp_path / "metrics"
+    metrics.mkdir()
+    (metrics / "history.jsonl").write_text(json.dumps({"step": 1, "epoch": 1}) + "\n")
+    (metrics / "topology_validation.jsonl").write_text(json.dumps({
+        "step": 1, "metric": 0.5, "eligible": True,
+        "relative_mse_increase": {"total": 0.01},
+    }) + "\n")
+    path = render_fidelity_history(tmp_path)
+    assert path == tmp_path / "logs/checkpoint_fidelity.png"
+    assert path.read_bytes().startswith(b"\x89PNG")
+    assert path.with_suffix(".pdf").read_bytes().startswith(b"%PDF")

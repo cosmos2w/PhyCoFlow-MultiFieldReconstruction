@@ -38,6 +38,7 @@ from ..data.training_batches import (
     fixed_query_indices,
 )
 from ..evaluation import reconstruction_metrics
+from ..run_logs import history_paths
 from ..utils.reproducibility import seed_everything
 from .checkpointing import PeriodicCheckpointManager
 from .coherence_calibration import (
@@ -1949,9 +1950,8 @@ def run_post_training(
         if controller.counts["attempted"] != start_step:
             raise ValueError("constrained optimizer attempt count differs from recovery step")
         if resume is not None:
-            restore_constraint_audit(
-                store.run_dir / "metrics" / "constraint_updates.jsonl", start_step
-            )
+            for path in history_paths(store.run_dir, "constraint_updates.jsonl"):
+                restore_constraint_audit(path.resolve(), start_step)
     calibration_hash = file_sha256(calibration_path)
     store.save_artifact("normalization.pt", train_dataset.normalizer.state_dict())
     store.write_json("artifacts/trainable_parameters.json", {"names": list(trainable_names)})
@@ -2491,7 +2491,7 @@ def run_post_training(
                 )
                 row["data_loss"] = gradient["endpoint_nmse_before"]
                 row["native_data_loss"] = None
-                with (store.run_dir / "metrics" / "constraint_updates.jsonl").open("a") as handle:
+                with (store.run_dir / "logs" / "constraint_updates.jsonl").open("a") as handle:
                     handle.write(
                         json.dumps(
                             {
@@ -2540,7 +2540,7 @@ def run_post_training(
             )
             if "lpc_ordered" in gradient:
                 row["objective_semantics"] = "T_over_T0_with_dense_A_B_and_endpoint_constraints"
-                with (store.run_dir / "metrics/lpc_ordered_updates.jsonl").open("a") as handle:
+                with (store.run_dir / "logs/lpc_ordered_updates.jsonl").open("a") as handle:
                     handle.write(json.dumps(_json_safe({
                         "epoch": epoch, "step": global_step + 1,
                         "raw_coherence_sum": row["coherence_loss"],
@@ -2567,7 +2567,7 @@ def run_post_training(
                 row["coherence_semantics"] = "training_estimate_full_evaluation_required"
                 execution_log = ("execution_strategy_updates" if execution_runtime is not None
                                  else "fast_lagrangian_updates")
-                with (store.run_dir / f"metrics/{execution_log}.jsonl").open("a") as handle:
+                with (store.run_dir / f"logs/{execution_log}.jsonl").open("a") as handle:
                     handle.write(json.dumps(_json_safe({
                         "epoch": epoch, "step": global_step + 1,
                         "execution": execution, "T_estimate": row["T_estimate"],
@@ -2610,7 +2610,7 @@ def run_post_training(
                     model, execution_probe_batches, families, banks, config, execution_runtime, epoch,
                 )
                 audit["step"] = global_step + 1
-                with (store.run_dir / "metrics/execution_strategy_audits.jsonl").open("a") as handle:
+                with (store.run_dir / "logs/execution_strategy_audits.jsonl").open("a") as handle:
                     handle.write(json.dumps(audit, allow_nan=False) + "\n")
         del data_loss
         row["total"] = row["data_update_weight"] * row["data_loss"] + row[
@@ -2652,7 +2652,7 @@ def run_post_training(
                 name: row.get(f"coherence_family/{name}/weighted_contribution")
                 for name in families
             }
-            with (store.run_dir / "metrics/lr_warmup_updates.jsonl").open("a") as handle:
+            with (store.run_dir / "logs/lr_warmup_updates.jsonl").open("a") as handle:
                 handle.write(json.dumps(detail, allow_nan=False) + "\n")
         monitor.record(row, lr=row["optimizer_lr"])
         checkpoint_result = None

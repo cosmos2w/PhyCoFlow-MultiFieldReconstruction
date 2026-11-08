@@ -22,12 +22,12 @@ def test_sparse_coherence_epochs_ignore_missing_gradients_and_count_updates(tmp_
     assert row["coherence_applied_fraction"] == pytest.approx(1/3)
     assert row["update_mode"] == "mixed"
     assert row["update_mode_counts"] == {"weighted_sum": 1, "data_only": 2}
-    assert "NaN" not in (tmp_path / "metrics/history.jsonl").read_text()
+    assert "NaN" not in (tmp_path / "logs/history.jsonl").read_text()
     monitor.close()
 
 
 def test_monitor_loads_history_and_updates_loss_figure(tmp_path):
-    metrics = tmp_path / "metrics"
+    metrics = tmp_path / "logs"
     metrics.mkdir()
     monitor = TrainingMonitor(
         tmp_path,
@@ -65,7 +65,7 @@ def test_monitor_loads_history_and_updates_loss_figure(tmp_path):
         "finite_counts": {"total": 2, "coherence_loss": 1},
         "update_mode_counts": {},
     }
-    assert (tmp_path / "loss_history.png").stat().st_size > 0
+    assert (tmp_path / "logs/loss_history.png").stat().st_size > 0
     assert monitor.last_epoch_report is not None
     assert monitor.last_epoch_report["total"] == 2.0
     assert monitor.last_epoch_report["coherence_loss"] == 4.0
@@ -133,7 +133,7 @@ def test_loss_figure_uses_independent_panels_without_duplicate_overview(tmp_path
     plt.close(figure)
 
     monitor._plot()
-    assert [path.name for path in tmp_path.glob("*.png")] == ["loss_history.png"]
+    assert [path.name for path in (tmp_path / "logs").glob("*.png")] == ["loss_history.png"]
     monitor.close()
 
 
@@ -270,7 +270,7 @@ def test_plot_interval_is_measured_in_epochs(tmp_path):
     assert plotted_at == [3, 9, 12]
     history = [
         json.loads(line)
-        for line in (tmp_path / "metrics" / "history.jsonl").read_text().splitlines()
+        for line in (tmp_path / "logs" / "history.jsonl").read_text().splitlines()
     ]
     assert [row["epoch"] for row in history] == [1, 2, 3, 4]
     assert [row["total"] for row in history] == [2.0, 5.0, 8.0, 11.0]
@@ -292,7 +292,7 @@ def test_truncated_epoch_writes_one_explicit_partial_history_row(tmp_path):
     monitor.record({"step": 1, "total": 4.0, "update_mode": "weighted_sum"})
     monitor.record({"step": 2, "total": 2.0, "update_mode": "weighted_sum"})
 
-    history = json.loads((tmp_path / "metrics" / "history.jsonl").read_text())
+    history = json.loads((tmp_path / "logs" / "history.jsonl").read_text())
     assert history["epoch"] == 1
     assert history["batches"] == 2
     assert history["epoch_complete"] is False
@@ -388,3 +388,28 @@ def test_config_semantics_are_restored_from_history_on_resume(tmp_path):
     ]
     plt.close(figure)
     monitor.close()
+
+
+def test_resume_combines_legacy_and_current_history_and_deduplicates_symlinks(tmp_path):
+    from phycoflow_reconstruction.run_logs import history_paths
+    from phycoflow_reconstruction.training.run_store import RunStore
+
+    metrics = tmp_path / "metrics"
+    metrics.mkdir()
+    legacy = metrics / "history.jsonl"
+    legacy.write_text(json.dumps({"step": 1, "epoch": 1, "total": 3.0}) + "\n")
+    monitor = TrainingMonitor(tmp_path, start_step=1, final_step=2, configured_steps=2,
+                              steps_per_epoch=1, description="test", enabled=False)
+    monitor.record({"step": 2, "total": 2.0})
+    monitor.close()
+    assert monitor._values["total"] == [3.0, 2.0]
+    assert legacy.read_text().count("\n") == 1
+    assert (tmp_path / "logs/history.jsonl").read_text().count("\n") == 1
+    assert (tmp_path / "logs/loss_history.pdf").read_bytes().startswith(b"%PDF")
+
+    legacy.unlink()
+    legacy.symlink_to("../logs/history.jsonl")
+    assert len(history_paths(tmp_path, "history.jsonl")) == 1
+    RunStore(tmp_path, {}).recover_metric_histories(1)
+    assert legacy.is_symlink()
+    assert (tmp_path / "logs/history.jsonl").read_text() == ""

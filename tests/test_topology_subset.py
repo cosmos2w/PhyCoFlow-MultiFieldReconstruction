@@ -220,7 +220,7 @@ def test_subset_training_resumes_mid_epoch_with_short_final_batch(tmp_path, dist
     assert resumed["component_controller"] == expected["component_controller"]
     audit = [
         json.loads(line)
-        for line in (child / "metrics/constraint_updates.jsonl").read_text().splitlines()
+        for line in (child / "logs/constraint_updates.jsonl").read_text().splitlines()
     ]
     assert [r["constraint_batch_size"] for r in audit] == [2, 1, 2, 1]
     assert all(
