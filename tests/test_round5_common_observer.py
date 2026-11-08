@@ -88,3 +88,18 @@ def test_scale_companion_matches_frozen_r_family():
     torch.testing.assert_close(result["self_proper"]["score"], baseline.component_results[SELF_PATH].per_sample_cost)
     torch.testing.assert_close(result["rho_proper"]["score"], baseline.component_results[RHO_PATH].per_sample_cost)
     assert set(result["retained"]) == {"gram", "coefficients", "piece_means"}
+
+
+def test_state_optional_cpu_timing_preserves_values():
+    f = family(fields=('a', 'b'))
+    observer = CommonStateObserver(f)
+    members = torch.tensor([[[[0., 1.], [1., 0.], [2., 3.], [4., 1.]]],
+                            [[[2., 1.], [2., 0.], [0., 3.], [3., 1.]]]])
+    target = torch.zeros_like(members[0])
+    weights = torch.tensor([1., 2., 1., 3.])
+    baseline = observer.score(members, target, weights=weights)
+    timing = {}
+    actual = observer.score(members, target, weights=weights, timings=timing)
+    for bank in ('main', 'heldout'):
+        torch.testing.assert_close(actual[bank]['squared_distances'], baseline[bank]['squared_distances'])
+    assert timing['state_main_seconds'] >= 0 and timing['state_heldout_seconds'] >= 0

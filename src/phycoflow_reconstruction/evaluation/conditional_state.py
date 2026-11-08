@@ -73,11 +73,17 @@ class CommonStateObserver:
         context = {"generated_weights": weights, "reference_weights": weights,
                    "generated_mask": mask, "reference_mask": mask,
                    "measure_metadata": measure_metadata or {}}
+        if timings is not None and members.device.type == "cuda":
+            torch.cuda.synchronize(members.device)
         started = perf_counter()
         main = self._bank(self.main, members, target, context)
+        if timings is not None and members.device.type == "cuda":
+            torch.cuda.synchronize(members.device)
         main_seconds = perf_counter() - started
         started = perf_counter()
         heldout = self._bank(self.heldout, members, target, context)
+        if timings is not None and members.device.type == "cuda":
+            torch.cuda.synchronize(members.device)
         heldout_seconds = perf_counter() - started
         if timings is not None:
             timings["state_main_seconds"] = timings.get("state_main_seconds", 0.0) + main_seconds

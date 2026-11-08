@@ -1036,7 +1036,10 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
                 )
             continue
         extra_keys = {
-            "global_distribution": {"definition"},
+            "global_distribution": {"definition"} | (
+                {"base_definition", "conditional_draws"}
+                if family.get("definition") == "conditional_quantile_fair_v1" else set()
+            ),
             "cross_spectrum": {"pairs", "graph", "eps"},
             "topology": {
                 "geometry",
@@ -1091,13 +1094,20 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
             raise ValueError(f"{family_name}.components cannot be empty")
         if family_name == "global_distribution":
             definition = family.get("definition", "global_distribution_v1")
-            if definition not in {"global_distribution_v1", "marginal_mixed_mean_v2", "marginal_mixed_weighted_v3"}:
+            if definition not in {"global_distribution_v1", "marginal_mixed_mean_v2", "marginal_mixed_weighted_v3", "conditional_quantile_fair_v1"}:
                 raise ValueError("unknown global_distribution.definition")
-            if definition == "marginal_mixed_weighted_v3" and len(family.get("fields") or config["dataset"].get("field_names", ())) > 1 and not components.get("cross", {}).get("enabled", True):
+            if definition == "conditional_quantile_fair_v1":
+                draws = family.get("conditional_draws")
+                if family.get("base_definition") != "marginal_mixed_weighted_v3":
+                    raise ValueError("conditional State requires explicit marginal_mixed_weighted_v3 base_definition")
+                if isinstance(draws, bool) or not isinstance(draws, int) or draws < 2:
+                    raise ValueError("conditional State conditional_draws must be an integer of at least 2")
+            weighted_state = definition in {"marginal_mixed_weighted_v3", "conditional_quantile_fair_v1"}
+            if weighted_state and len(family.get("fields") or config["dataset"].get("field_names", ())) > 1 and not components.get("cross", {}).get("enabled", True):
                 raise ValueError("marginal_mixed_weighted_v3 requires its mixed projection bank")
-            if definition == "marginal_mixed_weighted_v3" and family.get("target_use") != "paired_supervised":
+            if weighted_state and family.get("target_use") != "paired_supervised":
                 raise ValueError("weighted State requires paired_supervised endpoint masses")
-            if definition in {"marginal_mixed_mean_v2", "marginal_mixed_weighted_v3"}:
+            if definition in {"marginal_mixed_mean_v2", "marginal_mixed_weighted_v3", "conditional_quantile_fair_v1"}:
                 cross = components.get("cross", {})
                 if (
                     not components.get("self", {}).get("enabled", True)

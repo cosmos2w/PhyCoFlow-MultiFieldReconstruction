@@ -1,6 +1,7 @@
 """Focused Phase-1 checks for config separation and shared dataclass shapes."""
 
 import os
+import copy
 from pathlib import Path
 
 import pytest
@@ -14,8 +15,41 @@ from phycoflow_reconstruction.contracts import (
     ObservationBatch,
 )
 from phycoflow_reconstruction.registry import Registry
+from helpers.coherence import _post_config
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_conditional_state_schema_and_registry_dispatch():
+    from phycoflow_reconstruction.coherence import build_coherence_family
+    from phycoflow_reconstruction.contracts import DataSpec
+    from phycoflow_reconstruction.data.normalization import FieldNormalizer
+
+    config = _post_config(Path('/unused/data.h5'), Path('/unused/source'))
+    state = config['coherence']['families']['global_distribution']
+    state.update(definition='conditional_quantile_fair_v1', base_definition='marginal_mixed_weighted_v3',
+                 conditional_draws=2, target_use='paired_supervised')
+    state['reference_bank']['enabled'] = False
+    state['components']['mutual']['enabled'] = False
+    state['components']['cross'].update(top_fraction=1.0, include_axes=False, qmc=True)
+    validate_config(config)
+    family = build_coherence_family('global_distribution', state,
+        DataSpec(('u', 'v'), ('1', '1'), 2, (4,)), FieldNormalizer.identity(2))
+    assert family.score_definition == 'conditional_quantile_fair_v1' and family.conditional_draws == 2
+    for key, value in [('base_definition', 'other'), ('conditional_draws', 1), ('conditional_draws', True),
+                       ('conditional_draws', 2.0)]:
+        changed = copy.deepcopy(config)
+        changed['coherence']['families']['global_distribution'][key] = value
+        with pytest.raises(ValueError):
+            validate_config(changed)
+    changed = copy.deepcopy(config)
+    del changed['coherence']['families']['global_distribution']['base_definition']
+    with pytest.raises(ValueError, match='explicit'):
+        validate_config(changed)
+    changed = copy.deepcopy(config)
+    changed['coherence']['families']['global_distribution']['definition'] = 'marginal_mixed_weighted_v3'
+    with pytest.raises(ValueError, match='unknown .* keys'):
+        validate_config(changed)
 BASE_CONFIGS = tuple(
     path
     for path in sorted((PROJECT_ROOT / "cases").glob("*/configs/base/*.yaml"))
