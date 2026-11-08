@@ -1554,6 +1554,7 @@ def run_post_training(
     max_steps: int | None = None,
     resume: str | Path | None = None,
     checkpoint_callback: Callable[[Path, Path, int], None] | None = None,
+    update_attempt_callback: Callable[[int], None] | None = None,
 ) -> Path:
     """Create or resume a child, optionally observing saved recovery boundaries.
 
@@ -2242,6 +2243,8 @@ def run_post_training(
     last_coherence_loss = None
     for offset, batch in enumerate(batch_source):
         global_step = start_step + offset
+        if update_attempt_callback is not None:
+            update_attempt_callback(global_step)
         if not full_pass:
             torch.randperm(len(train_dataset), generator=index_generator)
         epoch = global_step // steps_per_epoch + 1

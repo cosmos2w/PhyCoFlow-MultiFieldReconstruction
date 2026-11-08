@@ -1,0 +1,18 @@
+# Conditional fair State on the exact weighted v3 occupation representation.
+# Reuses all model draws supplied by another conditional family; no new draw
+# is required when Scale already declares J2.
+coherence:
+  families:
+    global_distribution:
+      definition: conditional_quantile_fair_v1
+      base_definition: marginal_mixed_weighted_v3
+      conditional_draws: 2
+      enabled: true
+      weight: 1.0
+      target_use: paired_supervised
+      units: model_units
+      reference_bank: {enabled: false}
+      components:
+        self: {enabled: true, weight: 1.0}
+        mutual: {enabled: false}
+        cross: {enabled: true, weight: 1.0, directions: 32, top_fraction: 1.0, seed: 1234, include_axes: false, qmc: true}

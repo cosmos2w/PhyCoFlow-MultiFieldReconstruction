@@ -95,6 +95,10 @@ def build_coherence_family(
 ):
     _register_defaults()
     normalized = str(name).strip().lower()
+    if normalized == "global_distribution" and config.get("definition") == "conditional_quantile_fair_v1":
+        from .families.global_distribution.conditional import ConditionalQuantileFairFamily
+
+        return ConditionalQuantileFairFamily(config, data_spec, normalizer)
     if normalized == "multiscale_spectrum" and "relation_extension" in config:
         extension = config["relation_extension"]
         if isinstance(extension, Mapping) and extension.get("definition") == "self_rho_native_quadrature_v1":

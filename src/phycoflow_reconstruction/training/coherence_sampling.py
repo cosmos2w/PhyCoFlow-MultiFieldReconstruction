@@ -101,7 +101,11 @@ def _fit_training_references(
             for key in ("normalization_offset", "normalization_scale"):
                 if not torch.equal(base_artifact["state_dict"][key].cpu(), getattr(family, key).cpu()):
                     raise ValueError(f"frozen TRAIN family normalization mismatch: {name}")
-            family.load_state_artifact(artifact)
+            if (getattr(family, "score_definition", None) == "conditional_quantile_fair_v1"
+                    and artifact.get("score_definition") == "marginal_mixed_weighted_v3"):
+                family.load_base_artifact(artifact)
+            else:
+                family.load_state_artifact(artifact)
             if getattr(family, "weighted_measure", False):
                 family.bind_measure_artifact(train_dataset.physical_measure_receipt,
                                              weights=train_dataset.physical_weights)
@@ -216,7 +220,9 @@ def _requires_frozen_checkpoint_state(family) -> bool:
     return (
         (family.family_name == "topology" and family.version == "4")
         or getattr(family, "mean_augmented", False)
-        or getattr(family, "score_definition", None) in {"marginal_mixed_mean_v2", "marginal_mixed_weighted_v3"}
+        or getattr(family, "score_definition", None) in {
+            "marginal_mixed_mean_v2", "marginal_mixed_weighted_v3", "conditional_quantile_fair_v1"
+        }
     )
 
 

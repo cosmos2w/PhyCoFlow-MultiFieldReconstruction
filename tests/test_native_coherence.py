@@ -158,3 +158,26 @@ def test_explicit_case_measure_and_native_fallback_share_comparison_identity(tmp
     right = infer_native_panel(_runtime(tmp_path, NativeModel(.1)), child, [0, 1],
                                tmp_path / "explicit", _endpoint(), panel_seed_base=29, draws=4)
     require_matching_native_panels(left, right)
+
+
+def test_stream_consumer_preserves_contract_and_selective_examples(tmp_path):
+    dataset = Dataset(tmp_path / 'dataset.dat')
+    full = infer_native_panel(_runtime(tmp_path), dataset, [0, 1], tmp_path / 'full', _endpoint(),
+                              panel_seed_base=99, draws=4)
+    seen = []
+    def consume(arrays, row):
+        seen.append((row, {k: v.copy() for k, v in arrays.items()}))
+    streamed = infer_native_panel(_runtime(tmp_path), dataset, [0, 1], tmp_path / 'stream', _endpoint(),
+        panel_seed_base=99, draws=4, retain_payloads=False, consumer=consume, retain_payload_indices=[1])
+    require_matching_native_panels(full, streamed)
+    assert len(seen) == 2
+    for i, (row, arrays) in enumerate(seen):
+        with np.load(tmp_path / f'full/condition_{i:05d}.npz', allow_pickle=False) as expected:
+            for key in expected.files:
+                np.testing.assert_array_equal(arrays[key], expected[key])
+        assert row['dataset_index'] == i
+    assert not (tmp_path / 'stream/condition_00000.npz').exists()
+    assert (tmp_path / 'stream/condition_00001.npz').exists()
+    with np.load(tmp_path / 'full/field_risk.npz') as expected, np.load(tmp_path / 'stream/field_risk.npz') as actual:
+        for key in expected.files:
+            np.testing.assert_array_equal(expected[key], actual[key])

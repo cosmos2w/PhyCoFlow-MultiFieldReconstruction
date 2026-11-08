@@ -58,6 +58,15 @@ def _baseline_config_anchor(config: Mapping[str, Any]) -> dict[str, Any]:
     """
     coherence = config["coherence"]
     families = deepcopy(coherence.get("families", {}))
+    state = families.get("global_distribution")
+    if isinstance(state, dict) and state.get("definition") == "conditional_quantile_fair_v1":
+        # The estimator and frozen representation are those of the v3 control;
+        # only this exact declared J2 score substitution shares its SOURCE C0.
+        # All other fields remain in the binding and therefore reject tampering.
+        if state.get("base_definition") != "marginal_mixed_weighted_v3" or state.get("conditional_draws") != 2:
+            raise ValueError("shared fidelity reference requires the exact v3 State base and J2 policy")
+        state["definition"] = state.pop("base_definition")
+        state.pop("conditional_draws")
     scale = families.get("multiscale_spectrum")
     if isinstance(scale, dict):
         scale.pop("gram_extension", None)

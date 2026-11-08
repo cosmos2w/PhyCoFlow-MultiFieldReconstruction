@@ -94,6 +94,32 @@ def test_shared_baseline_and_gram_extension_have_identical_fixed_reference(tmp_p
         create_shared_reference(tmp_path / "original_reference.json", artifact["origin"]["calibration_report_sha256"], candidate, **arguments)
 
 
+def test_conditional_state_shares_only_the_exact_v3_reference(tmp_path):
+    config, arguments, _, _, _, path, digest = _artifact(tmp_path)
+    state = config["coherence"]["families"]["global_distribution"]
+    state.update(definition="marginal_mixed_weighted_v3", components={"cross": {"seed": 1234, "weight": 1.0}})
+    # Rebind the fixture to this explicitly versioned reference.
+    artifact = json.loads(path.read_text())
+    artifact["binding"] = shared_reference_binding(config, **arguments)
+    raw = serialize_shared_reference(artifact)
+    path.write_bytes(raw)
+    digest = _digest(raw)
+    candidate = deepcopy(config)
+    conditional = candidate["coherence"]["families"]["global_distribution"]
+    conditional.update(definition="conditional_quantile_fair_v1", base_definition="marginal_mixed_weighted_v3", conditional_draws=2)
+    load_shared_reference(path, digest, shared_reference_binding(candidate, **arguments))
+    for key, value in (("base_definition", "other"), ("conditional_draws", 4)):
+        tampered = deepcopy(candidate)
+        tampered["coherence"]["families"]["global_distribution"][key] = value
+        with pytest.raises(ValueError, match="exact v3 State base and J2"):
+            shared_reference_binding(tampered, **arguments)
+    for key, value in (("seed", 1235), ("weight", .9)):
+        tampered = deepcopy(candidate)
+        tampered["coherence"]["families"]["global_distribution"]["components"]["cross"][key] = value
+        with pytest.raises(ValueError, match="binding mismatch"):
+            load_shared_reference(path, digest, shared_reference_binding(tampered, **arguments))
+
+
 @pytest.mark.parametrize("change", ["source", "normalizer", "field_order", "dataset", "train_split", "scales", "endpoint", "observations", "query", "budget", "scale_anchor", "other_family", "model", "estimator"])
 def test_binding_rejects_incompatible_contracts(tmp_path, change):
     config, arguments, _, _, artifact, path, digest = _artifact(tmp_path)

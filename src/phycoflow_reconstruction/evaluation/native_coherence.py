@@ -130,7 +130,7 @@ def _manifest(endpoint_config, dataset):
 
 def infer_native_panel(
     runtime, dataset, indices, output_dir, endpoint_config, *, panel_seed_base, draws=4,
-    retain_payloads=True,
+    retain_payloads=True, consumer=None, retain_payload_indices=(),
 ):
     """Infer a matched panel and save fieldwise risks plus optional member payloads.
 
@@ -142,6 +142,8 @@ def infer_native_panel(
     recorded sparse query IDs are intentionally ignored. Without one the
     configured protocol is deterministically applied per condition. Relative L2
     is NaN where reference power is zero; MSE and RMSE remain available.
+    Optional consumer(arrays, row) receives each complete condition in memory;
+    retain_payload_indices selects additional dataset positions for saved examples.
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -163,6 +165,11 @@ def infer_native_panel(
     positions = [int(i) for i in indices]
     if not positions or len(set(positions)) != len(positions) or any(i < 0 or i >= len(dataset) for i in positions):
         raise ValueError("native panel indices must be nonempty, unique and within the dataset")
+    retained_indices = {int(i) for i in retain_payload_indices}
+    if not retained_indices.issubset(positions):
+        raise ValueError("retained native positions must belong to the panel")
+    if consumer is not None and not callable(consumer):
+        raise TypeError("native consumer must be callable")
     sensor_manifest = _manifest(endpoint_config, dataset)
     protocol = (SensorProtocol(**sensor_manifest.protocol) if sensor_manifest is not None
                 else sensor_protocol_from_config(runtime.config))
@@ -181,6 +188,8 @@ def infer_native_panel(
                "seed_scheme": "sha256_native_coherence_v1", "panel_seed_base": int(panel_seed_base),
                "draws": draws}
     rows, risks, ids = [], [], []
+    callback_seconds = 0.0
+    io_seconds = 0.0
     started = time.perf_counter()
     if device.type == "cuda":
         torch.cuda.synchronize(device)
@@ -249,22 +258,31 @@ def infer_native_panel(
                 arrays["observation_coords"], arrays["observation_values"], arrays["observation_indices"],
                 arrays["observation_field_ids"], arrays["observation_mask"], arrays["draw_seeds"],
             )
-            name = f"condition_{ordinal:05d}.npz" if retain_payloads else None
+            name = f"condition_{ordinal:05d}.npz" if retain_payloads or index in retained_indices else None
+            row = {"sample_id": sample_id, "dataset_index": index, "payload": name,
+                   "contract_sha256": contract_hash, "point_count": len(native_ids),
+                   "valid_count": int(mask.sum()), "physical_measure": measure,
+                   "draw_seeds": seeds}
+            if consumer is not None:
+                callback_started = time.perf_counter()
+                consumer(arrays, dict(row))
+                callback_seconds += time.perf_counter() - callback_started
             if name is not None:
                 path = output_dir / name
                 if path.exists():
                     raise FileExistsError(f"native member payload already exists: {path}")
+                io_started = time.perf_counter()
                 np.savez_compressed(path, **arrays)
-            rows.append({"sample_id": sample_id, "dataset_index": index, "payload": name,
-                         "contract_sha256": contract_hash, "point_count": len(native_ids),
-                         "valid_count": int(mask.sum()), "physical_measure": measure,
-                         "draw_seeds": seeds})
+                io_seconds += time.perf_counter() - io_started
+            rows.append(row)
             ids.append(sample_id)
     if device.type == "cuda":
         torch.cuda.synchronize(device)
     risk_arrays = {key: np.stack([row[key] for row in risks]) for key in risks[0]}
     risk_arrays.update({"sample_ids": np.asarray(ids), "field_names": np.asarray(sample.field_names)})
+    io_started = time.perf_counter()
     np.savez_compressed(output_dir / "field_risk.npz", **risk_arrays)
+    io_seconds += time.perf_counter() - io_started
     meta = {
         "schema": "native_coherence_inference_v1", "query_policy": "full_native",
         "sampler": sampler, "sensor_protocol": protocol.to_dict(),
@@ -280,6 +298,9 @@ def infer_native_panel(
         "peak_cpu_maxrss_kib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
         "peak_cuda_allocated_bytes": torch.cuda.max_memory_allocated(device) if device.type == "cuda" else None,
     }
+    if consumer is not None:
+        meta["stream_timing"] = {"consumer_seconds": callback_seconds, "payload_and_risk_write_seconds": io_seconds,
+                                 "wall_includes_consumer": True}
     manifest_path.write_text(json.dumps(meta, indent=2, sort_keys=True), encoding="utf-8")
     return manifest_path
 
