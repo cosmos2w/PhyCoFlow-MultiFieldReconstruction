@@ -195,6 +195,21 @@ def test_offline_report_matched_decision_and_guard(monkeypatch, tmp_path):
     test_u.write_text(json.dumps(test_u_payload))
     failed = report.build_report(spec_path)
     assert failed["validation_choice"] == "U6" and failed["operational_choice"] == "SOURCE"
+    for model in ("U6", "A6"):
+        validation_path = tmp_path / inputs["validation"][model]
+        validation_payload = json.loads(validation_path.read_text())
+        validation_payload["rows"][0]["losses"]["scale"] = 1.03
+        validation_path.write_text(json.dumps(validation_payload))
+    report.freeze_validation_choice(
+        {model: tmp_path / inputs["validation"][model] for model in ("SOURCE", "U6", "A6")},
+        metrics, spec["scales"], spec["costs"], output_path=tmp_path / "validation_choice.json",
+    )
+    rejected = report.build_report(spec_path)
+    assert rejected["validation_choice"] == rejected["operational_choice"] == "SOURCE"
+    rejection_text = (tmp_path / "postprocess" / "REPORT.md").read_text()
+    assert "U6 VALIDATION disqualification: scale regression +0.03" in rejection_text
+    assert "A6 VALIDATION disqualification: scale regression +0.03" in rejection_text
+    assert "neither learned arm qualified" in rejection_text
     file = tmp_path / inputs["test"]["A6"]
     payload = json.loads(file.read_text())
     payload["rows"][0]["sample_id"] = "wrong"

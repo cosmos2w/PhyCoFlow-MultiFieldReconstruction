@@ -363,8 +363,31 @@ def build_report(spec_path):
         "# Round 6 loss-aligned comparison",
         "",
         "Sampled-population results: TRAIN 800/8,000, VALIDATION 100/1,000 and TEST 100/1,000 matched conditions. Shape also samples the declared relation population.",
-        f"Validation choice: **{pick}**; fixed TEST confirmation: {result['test_confirmation']}; operational model: **{result['operational_choice']}**.",
+        f"Validation choice: **{pick}**; operational model: **{result['operational_choice']}**.",
+        (
+            "All three fixed models were evaluated on TEST; neither learned arm qualified on VALIDATION, so no candidate required TEST confirmation."
+            if pick == "SOURCE"
+            else f"Fixed TEST confirmation of {pick}: {result['test_confirmation']}."
+        ),
         "Loss changes are paired means divided by frozen positive TRAIN/SOURCE scales; negative values are gains and positive values are losses.",
+    ]
+    for arm in ("U6", "A6"):
+        assessment = assessments["validation"][arm]
+        if assessment["qualified"]:
+            continue
+        changes = assessment["normalized_changes"]
+        reasons = [
+            f"{name} regression {value:+.5g} exceeds +0.02 frozen scale"
+            for name, value in sorted(changes.items()) if value > 0.02
+        ]
+        if min(changes["scale_rho"], changes["shape_mutual"]) > -0.02:
+            reasons.append("neither mutual quantity improves by 0.02 frozen scale")
+        reasons += [
+            f"{name} MSE/SOURCE {ratio:.5g} exceeds 1.10"
+            for name, ratio in zip(field_names, assessment["field_ratios"]) if ratio > 1.10
+        ]
+        lines.append(f"{arm} VALIDATION disqualification: " + "; ".join(reasons) + ".")
+    lines += [
         "",
         "| Split | Loss quantity | U6 − SOURCE | A6 − SOURCE | A6 − U6 |",
         "| --- | --- | ---: | ---: | ---: |",
