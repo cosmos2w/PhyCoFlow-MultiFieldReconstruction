@@ -149,6 +149,8 @@ def test_offline_report_matched_decision_and_guard(monkeypatch, tmp_path):
             inputs[split][model] = path.name
     spec = {
         "inputs": inputs,
+        "field_names": ["CO"],
+        "spending": {"qualification_attempts": 24, "formal_updates": {"U6": 2600, "A6": 2600}},
         "decision_metrics": metrics,
         "scales": dict.fromkeys(metrics, 1),
         "costs": {
@@ -156,13 +158,29 @@ def test_offline_report_matched_decision_and_guard(monkeypatch, tmp_path):
             "A6": {"update_seconds_per_step": 3, "total_wall_seconds": 30},
         },
     }
+    receipt = report.freeze_validation_choice(
+        {model: tmp_path / inputs["validation"][model] for model in ("SOURCE", "U6", "A6")},
+        metrics,
+        spec["scales"],
+        spec["costs"],
+        output_path=tmp_path / "validation_choice.json",
+    )
+    assert receipt["validation_choice"] == "U6"
+    spec["validation_receipt"] = "validation_choice.json"
     spec_path = tmp_path / "spec.json"
     spec_path.write_text(json.dumps(spec))
     result = report.build_report(spec_path)
     assert result["validation_choice"] == "U6"  # A's gain per update-second is lower.
     assert result["test_confirmation"] is True
     assert result["coverage"]["test"]["mutual_draws"] == 12
-    assert (tmp_path / "postprocess" / "REPORT.md").is_file()
+    report_text = (tmp_path / "postprocess" / "REPORT.md").read_text()
+    assert "CO" in report_text and "2600" in report_text and "A6 − U6" in report_text
+    test_u = tmp_path / inputs["test"]["U6"]
+    test_u_payload = json.loads(test_u.read_text())
+    test_u_payload["rows"][0]["field_error_sums"] = [2.0]
+    test_u.write_text(json.dumps(test_u_payload))
+    failed = report.build_report(spec_path)
+    assert failed["validation_choice"] == "U6" and failed["operational_choice"] == "SOURCE"
     file = tmp_path / inputs["test"]["A6"]
     payload = json.loads(file.read_text())
     payload["rows"][0]["sample_id"] = "wrong"
