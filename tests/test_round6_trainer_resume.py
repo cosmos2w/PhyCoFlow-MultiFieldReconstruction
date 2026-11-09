@@ -43,7 +43,7 @@ def test_coverage_external_policy_resume_without_native_loss(tmp_path, monkeypat
     families = _new_families()
     cfg["coherence"].update(compute_budget={"batch_size": 2, "point_count": 16,
         "query_policy": "fixed_shared"}, families=families)
-    cfg["checkpointing"] = {"every_epochs": 1, "selection_metric": "reconstruction_mse"}
+    cfg["checkpointing"] = {"every_epochs": 1, "validation_every_epochs": 1, "selection_metric": "fixed_endpoint"}
     cfg["evaluation"].update(max_samples=2, query_points=16, preview={"enabled": False})
     cfg["runtime"].update(progress=False, plot_every_steps=1000, num_workers=0)
     kwargs = {"evaluation_callback": lambda **_: None, "qualification_only": True}
@@ -57,7 +57,7 @@ def test_coverage_external_policy_resume_without_native_loss(tmp_path, monkeypat
     cfg["coherence"].update(compute_budget={"batch_size": 2, "point_count": 16,
         "query_policy": "fixed_shared"}, families=families,
         query_coverage={"enabled": True, "mode": "adaptive", "seed": 7})
-    cfg["checkpointing"] = {"every_epochs": 1, "selection_metric": "reconstruction_mse"}
+    cfg["checkpointing"] = {"every_epochs": 1, "validation_every_epochs": 1, "selection_metric": "fixed_endpoint"}
     cfg["evaluation"].update(max_samples=2, query_points=16, preview={"enabled": False})
     cfg["runtime"].update(progress=False, plot_every_steps=1000, num_workers=0)
     kwargs = {"evaluation_callback": lambda **_: None, "qualification_only": True}

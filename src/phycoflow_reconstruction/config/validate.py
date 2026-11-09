@@ -297,8 +297,8 @@ def _validate_common_sections(config: Mapping[str, Any]) -> None:
         interval = checkpointing["validation_every_epochs"]
         if isinstance(interval, bool) or int(interval) != interval or int(interval) < 1:
             raise ValueError("checkpointing.validation_every_epochs must be a positive integer")
-        if checkpointing.get("selection_metric") not in {"topology_with_fidelity", "reconstruction_mse"}:
-            raise ValueError("validation_every_epochs requires topology_with_fidelity or reconstruction_mse")
+        if checkpointing.get("selection_metric") not in {"topology_with_fidelity", "reconstruction_mse", "fixed_endpoint"}:
+            raise ValueError("validation_every_epochs requires topology_with_fidelity, reconstruction_mse or fixed_endpoint")
     if "epochs" in checkpointing:
         epochs = checkpointing["epochs"]
         if (
@@ -313,9 +313,10 @@ def _validate_common_sections(config: Mapping[str, Any]) -> None:
         "native_validation_loss",
         "reconstruction_mse",
         "topology_with_fidelity",
+        "fixed_endpoint",
     }:
         raise ValueError(
-            "checkpointing.selection_metric must be native_validation_loss or reconstruction_mse"
+            "checkpointing.selection_metric must be native_validation_loss, reconstruction_mse, topology_with_fidelity or fixed_endpoint"
         )
     external_policy = (
         config.get("optimization", {}).get("multitask", {}).get("external_policy")
@@ -1750,10 +1751,10 @@ def _validate_external_policy_contract(config: Mapping[str, Any]) -> None:
     selection_metric = config.get("checkpointing", {}).get(
         "selection_metric", "native_validation_loss"
     )
-    if selection_metric not in {"reconstruction_mse", "topology_with_fidelity"}:
+    if selection_metric not in {"reconstruction_mse", "topology_with_fidelity", "fixed_endpoint"}:
         raise ValueError(
             "external_policy requires checkpointing.selection_metric=reconstruction_mse "
-            "or topology_with_fidelity"
+            "or topology_with_fidelity or fixed_endpoint"
         )
 
 
