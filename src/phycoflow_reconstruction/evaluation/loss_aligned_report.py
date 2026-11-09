@@ -437,6 +437,63 @@ def build_report(spec_path):
         "A6 must improve a mutual score over U6 by 0.02 scale without guard regression and give better best-mutual gain per update second. A failed fixed TEST confirmation retains SOURCE without reranking.",
         "State/Scale use two conditional draws; Shape and fidelity use the primary endpoint. Q4096 measurements do not replace earlier full-native results. Complete component values and provenance are in the CSV and JSON files.",
     ]
+    pipeline = costs.get("pipeline")
+    if pipeline:
+        lines += [
+            "",
+            (f"Successful reference preparation invocation: {pipeline['reference_preparation_wall_seconds']:.4g} s; "
+            f"qualification: {pipeline['qualification_wall_seconds']:.4g} s; "
+            f"final parallel evaluation and validation freeze: {pipeline['parallel_evaluation_and_validation_freeze_wall_seconds']:.4g} s wall."),
+            "Evaluator process wall times: "
+            + "; ".join(
+                f"{model} {pipeline['evaluation_children'][model]['wall_seconds']:.4g} s"
+                for model in models
+            )
+            + ". These process times overlap.",
+            (f"First-launch-to-evaluation elapsed time: {pipeline['campaign_elapsed_through_evaluation_seconds']:.4g} s, "
+            "including preparation failures, orchestration gaps and waiting. The final cost ledger records postprocessing separately."),
+        ]
+    train_coverage = (spec.get("metadata") or {}).get("training_query_coverage")
+    if train_coverage:
+        lines += [
+            "",
+            "Recorded TRAIN query packs: "
+            + "; ".join(
+                f"{arm} {train_coverage[arm]['self_query_pack_draws']} self and "
+                f"{train_coverage[arm]['mutual_query_pack_draws']} mutual draws, "
+                f"{train_coverage[arm]['distinct_queries']} distinct queries"
+                for arm in ("U6", "A6")
+            )
+            + ". Each pack is shared across its B32 batch; these are not distinct-condition counts.",
+        ]
+    balance = (spec.get("metadata") or {}).get("loss_balance_U100")
+    if balance:
+        scale = balance["families"]["multiscale_spectrum"]
+        validation = balance["validation"]["multiscale_spectrum.total"]
+        coordination = balance["coordination"]
+        lines += [
+            "",
+            (f"Scale at U100: sampled TRAIN epochs1–10 versus91–100 changed by {100 * scale['relative_train_change']:+.4g}%, "
+             f"while matched VALIDATION total changed by {100 * validation['delta'] / validation['source']:+.4g}% versus SOURCE. "
+             f"{coordination['equal_positive_steps_tolerance_1e_10']}/1300 saved steps had equal positive family-to-ConFIG cosines; "
+             "working coordination did not establish useful Scale learning."),
+            "Family coordination does not rebalance Scale’s internal terms. Scalar loss magnitude alone does not establish gradient dominance; the diagnostic reports saved gradient norms and the internal scalar accounting separately.",
+            "The isolated adaptive-strength prototype uses bounded TRAIN-progress preferences through TorchJD ConFIG. Positive scalar row weights leave its unit direction unchanged but can affect its length; fidelity and AdamW can change the realized update. This prototype did not change U6/A6 and does not establish learned efficacy.",
+            "[U100 balance evidence](../../exploration/adaptive_strength/loss_balance_U100.md) · [Final split and gradient evidence](../../exploration/adaptive_strength/loss_balance_final.md) · [Prototype and synthetic checks](../../exploration/adaptive_strength/prototype/README.md).",
+        ]
+    lines += [
+        "",
+        (
+            "Disposition: retain SOURCE for this case and close the learned recipe within this budget. "
+            "Retain the qualified bounded multi-field implementation; adaptivity has not earned deployment."
+            if result["operational_choice"] == "SOURCE"
+            else f"Disposition: adopt the fixed {result['operational_choice']} epoch-200 model for this case. "
+            + ("Use adaptive coverage as the chosen strategy." if result["operational_choice"] == "A6" else "Use uniform coverage as the simpler qualified strategy.")
+        ),
+        "This single-backbone case does not establish efficacy on other model families; no extension is included.",
+        "",
+        "[Complete losses](loss_comparison.csv) · [Numerical summary and provenance](summary.json).",
+    ]
     (out / "REPORT.md").write_text("\n".join(lines) + "\n")
     return result
 

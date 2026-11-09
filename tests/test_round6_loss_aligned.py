@@ -150,12 +150,24 @@ def test_offline_report_matched_decision_and_guard(monkeypatch, tmp_path):
     spec = {
         "inputs": inputs,
         "field_names": ["CO"],
+        "metadata": {"loss_balance_U100": {
+            "families": {"multiscale_spectrum": {"relative_train_change": -0.0146917}},
+            "validation": {"multiscale_spectrum.total": {"source": 0.999421, "delta": 0.0144531}},
+            "coordination": {"equal_positive_steps_tolerance_1e_10": 1300},
+        }},
         "spending": {"qualification_attempts": 24, "formal_updates": {"U6": 2600, "A6": 2600}},
         "decision_metrics": metrics,
         "scales": dict.fromkeys(metrics, 1),
         "costs": {
             "U6": {"update_seconds_per_step": 1, "total_wall_seconds": 10},
             "A6": {"update_seconds_per_step": 3, "total_wall_seconds": 30},
+            "pipeline": {
+                "reference_preparation_wall_seconds": 4,
+                "qualification_wall_seconds": 5,
+                "parallel_evaluation_and_validation_freeze_wall_seconds": 6,
+                "evaluation_children": {model: {"wall_seconds": 5} for model in ("SOURCE", "U6", "A6")},
+                "campaign_elapsed_through_evaluation_seconds": 60,
+            },
         },
     }
     receipt = report.freeze_validation_choice(
@@ -175,6 +187,8 @@ def test_offline_report_matched_decision_and_guard(monkeypatch, tmp_path):
     assert result["coverage"]["test"]["mutual_draws"] == 12
     report_text = (tmp_path / "postprocess" / "REPORT.md").read_text()
     assert "CO" in report_text and "2600" in report_text and "A6 − U6" in report_text
+    assert "process times overlap" in report_text and "preparation failures" in report_text
+    assert "Scale at U100" in report_text and "did not establish useful Scale learning" in report_text
     test_u = tmp_path / inputs["test"]["U6"]
     test_u_payload = json.loads(test_u.read_text())
     test_u_payload["rows"][0]["field_error_sums"] = [2.0]
