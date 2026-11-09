@@ -373,7 +373,9 @@ class TopologyFamily(nn.Module):
         digest = coordinate_digest(coordinates[0])
         if not self.neighbor_indices.numel():
             if self.raster_mapping == "physical_cell_overlap_v1":
-                raise ValueError("fit physical topology raster from native coordinates before scoring")
+                raise ValueError(
+                    "fit physical topology raster from native coordinates before scoring"
+                )
             if self.structured_indices is not None and native_grid_indices is None:
                 raise ValueError("fit native topology geometry or load its artifact before scoring")
             mapping = build_raster_map(
@@ -536,6 +538,8 @@ class TopologyFamily(nn.Module):
                 reference._version,
                 id(coordinates),
                 coordinates._version if coordinates is not None else None,
+                self.normalization_offset._version,
+                self.normalization_scale._version,
             )
             reference_cache.setdefault("reference_identity", (reference, coordinates))
             if reference_cache.setdefault("signature", signature) != signature:
@@ -597,6 +601,10 @@ class TopologyFamily(nn.Module):
                     if self.strategy == "cubical_persistence"
                     else {}
                 )
+                if context and context.get("query_selection") is not None:
+                    if self.version != "4":
+                        raise ValueError("query selection requires finite_primary_v1")
+                    kwargs["query_selection"] = context["query_selection"]
                 result = self.spatial_objective(
                     generated_grid.float(), reference_grid.float(), **kwargs
                 )

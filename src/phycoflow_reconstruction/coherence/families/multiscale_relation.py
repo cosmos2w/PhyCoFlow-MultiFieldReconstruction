@@ -15,7 +15,7 @@ from ...contracts import CoherenceComponentSpec, CoherenceFamilySpec, FamilyResu
 from .multiscale_gram import parse_gram_extension_config
 from .multiscale_spectrum import MultiscaleSpectrumFamily
 from .multiscale_spectrum.config import MEAN_AUGMENTED_SCORE_VERSION
-from .multiscale_spectrum.losses import band_coherence, vector_energy_score
+from .multiscale_spectrum.losses import selected_band_coherence, vector_energy_score
 
 RELATION_DEFINITION = "self_rho_fair_v1"
 SELF_PATH = "multiscale_spectrum.relation_self_energy_score.conditional"
@@ -93,7 +93,7 @@ class MultiscaleRelationFamily(MultiscaleSpectrumFamily):
         blocks = super()._descriptors(statistics)
         capture = _CAPTURE.get()
         if capture is not None and capture[0] == id(self):
-            capture[1].append((blocks, statistics["gram"]))
+            capture[1].append((blocks, statistics))
         return blocks
 
     def fit_reference_tensors(self, coordinates, states: torch.Tensor | Iterable[torch.Tensor], **kwargs: Any):
@@ -151,16 +151,24 @@ class MultiscaleRelationFamily(MultiscaleSpectrumFamily):
         self_score, attraction, repulsion = vector_energy_score(
             torch.stack([blocks["log_band_power"] / denominator for blocks, _ in draws]),
             target[0]["log_band_power"] / denominator, alpha=1.0)
+        # These are detached scheduling diagnostics, not a decomposition of the
+        # complete joint self norm and not an additional optimized objective.
+        bands, fields = len(self.settings.bands.names), len(self.field_names)
+        field_draws = torch.stack([blocks["log_band_power"].reshape(-1, bands, fields).transpose(1, 2) / denominator.reshape(bands, fields).T for blocks, _ in draws])
+        field_target = target[0]["log_band_power"].reshape(-1, bands, fields).transpose(1, 2) / denominator.reshape(bands, fields).T
+        field_scores, _, _ = vector_energy_score(field_draws, field_target, alpha=1.0)
+        result.diagnostics["coverage_priorities"] = {"self": field_scores.mean(dim=0).detach().cpu().tolist(), "pair": []}
         entries = [(SELF_PATH, self_score, self.relation_extension["self_weight"], {
             "conditional_draws": expected, "dimension": self.relation_self_scale.numel(),
             "attraction": float(attraction.mean().detach()), "repulsion": float(repulsion.mean().detach())})]
         if len(self.field_names) > 1:
-            rho_draws = torch.stack([band_coherence(gram, self.power_floor) for _, gram in draws])
-            rho_target = band_coherence(target[1], self.power_floor)
+            rho_draws = torch.stack([selected_band_coherence(statistics, self.power_floor) for _, statistics in draws])
+            rho_target = selected_band_coherence(target[1], self.power_floor)
             crps, rho_attraction, rho_repulsion = vector_energy_score(
                 rho_draws[..., None], rho_target[..., None], alpha=1.0
             )
             score = crps.mean(dim=(1, 2))
+            result.diagnostics["coverage_priorities"]["pair"] = crps.mean(dim=(0, 1)).detach().cpu().tolist()
             entries.append((RHO_PATH, score, self.relation_extension["rho_weight"], {
                 "conditional_draws": expected,
                 "attraction": float(rho_attraction.mean().detach()),

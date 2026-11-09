@@ -439,3 +439,14 @@ def almost_fair_crps(
     if draw_values.ndim < 2 or draw_values.shape[1:] != target.shape:
         raise ValueError("almost-fair CRPS expects draws [J,B,...] matching the target [B,...]")
     return vector_energy_score(draw_values[..., None], target[..., None], alpha=alpha)[0]
+
+
+def selected_band_coherence(statistics, floor):
+    """Rho for explicitly declared pairs, without constructing a dense Gram."""
+    if "gram" in statistics:
+        return band_coherence(statistics["gram"], floor)
+    power, pairs = statistics["power"], statistics["pair_indices"]
+    left, right = pairs[:, 0], pairs[:, 1]
+    denominator = ((power[:, :, left] + floor[:, left].to(power)) *
+                   (power[:, :, right] + floor[:, right].to(power))).sqrt()
+    return statistics["pair_gram"] / denominator

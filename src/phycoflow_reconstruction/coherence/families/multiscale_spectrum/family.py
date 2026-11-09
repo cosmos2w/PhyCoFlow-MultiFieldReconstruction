@@ -589,6 +589,7 @@ class MultiscaleSpectrumFamily(nn.Module):
                         fields,
                         manifest=self.manifest,
                         with_piece_means=self.mean_augmented,
+                        relation_pairs=getattr(self, "coverage_pairs", None),
                         **geometry,
                     ),
                     measures,
@@ -781,6 +782,7 @@ class MultiscaleSpectrumFamily(nn.Module):
             self._select(fields),
             manifest=self.manifest,
             with_piece_means=self.mean_augmented,
+            relation_pairs=getattr(self, "coverage_pairs", None),
             **self._geometry_tensors(self.compute_dtype),
         )
 
@@ -791,9 +793,9 @@ class MultiscaleSpectrumFamily(nn.Module):
                 len(self.field_names),
                 self.settings.projections,
                 pairs=(
-                    None
-                    if self.settings.projection_pairs is None
-                    else list(self.settings.projection_pairs)
+                    list(self.coverage_pairs) if hasattr(self, "coverage_pairs") else (
+                        None if self.settings.projection_pairs is None
+                        else list(self.settings.projection_pairs))
                 ),
                 dtype=dtype,
                 device=device,

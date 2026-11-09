@@ -16,10 +16,10 @@ from ....contracts import TermResult
 from .config import MEAN_AUGMENTED_SCORE_VERSION, MultiscaleSettings
 from .losses import (
     almost_fair_crps,
-    band_coherence,
     joint_spectral_energy_score,
     paired_joint_spectral_mean_distance,
     paired_signed_band_distance,
+    selected_band_coherence,
     signed_band_coefficient_energy_score,
 )
 from .reporting import finite_values
@@ -203,15 +203,16 @@ def signed_band_terms(
         "weighted_scalar_contribution": raw,
     }
     floor = power_floor.to(dtype)
-    rho_draws = torch.stack([band_coherence(item["gram"], floor) for item in (prediction, *draws)])
+    rho_draws = torch.stack([selected_band_coherence(item, floor) for item in (prediction, *draws)])
     with torch.no_grad():
-        rho_target = band_coherence(target["gram"], floor)
+        rho_target = selected_band_coherence(target, floor)
     crps = almost_fair_crps(rho_draws, rho_target, settings.almost_fair_alpha)  # [B,S,P2]
     has_pairs = crps.shape[-1] > 0
     coherence = crps.mean(dim=(1, 2)) if has_pairs else torch.zeros_like(primary)
     weight = settings.coherence_crps_weight
     count = len(settings.fields)
-    pairs = torch.triu_indices(count, count, offset=1)
+    pairs = (prediction["pair_indices"].T.cpu() if "pair_indices" in prediction
+             else torch.triu_indices(count, count, offset=1))
     path = f"{FAMILY_NAME}.{BAND_COHERENCE_PATH}"
     coherence_diagnostics = {
         "conditional_draws": conditional_draws,

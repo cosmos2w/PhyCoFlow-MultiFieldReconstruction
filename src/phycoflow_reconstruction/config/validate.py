@@ -737,6 +737,12 @@ def _validate_base_training(config: Mapping[str, Any]) -> None:
 
 
 def _validate_post_training(config: Mapping[str, Any]) -> None:
+    if "coherence" in config:
+        from ..coherence.relation_queries import resolve_coverage_config
+
+        config = dict(config)
+        config["coherence"] = resolve_coverage_config(
+            config["coherence"], config.get("dataset", {}).get("field_names", ()))
     if "coherence" in config and "physics" in config:
         raise ValueError("post_training must select exactly one of coherence or physics")
     if not config.get("source_run") or not config.get("source_checkpoint"):
@@ -879,9 +885,20 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
     coherence = config["coherence"]
     _reject_unknown(
         coherence,
-        {"schedule", "compute_budget", "family_balance", "families", "frozen_family_artifacts"},
+        {"schedule", "compute_budget", "family_balance", "families", "frozen_family_artifacts", "query_coverage"},
         "coherence",
     )
+    coverage = coherence.get("query_coverage", {})
+    if not isinstance(coverage, Mapping):
+        raise TypeError("coherence.query_coverage must be a mapping")
+    _reject_unknown(coverage, {"enabled", "mode", "seed", "relation_seed", "window_epochs", "ema_decay", "uniform_fraction", "self_draws", "mutual_draws"}, "coherence.query_coverage")
+    if coverage.get("enabled", False):
+        if coverage.get("mode", "uniform") not in {"uniform", "adaptive"}:
+            raise ValueError("invalid query coverage mode")
+        if int(coverage.get("window_epochs", 10)) != 10 or float(coverage.get("ema_decay", .9)) != .9 or float(coverage.get("uniform_fraction", .5)) != .5:
+            raise ValueError("query coverage requires the fixed 10 epoch, 0.9 EMA, 0.5 uniform policy")
+        if int(coverage.get("self_draws", 1)) != 1 or int(coverage.get("mutual_draws", 3)) != 3:
+            raise ValueError("query coverage requires one self and three mutual draws")
     family_balance = coherence.get("family_balance", {})
     if not isinstance(family_balance, Mapping):
         raise TypeError("coherence.family_balance must be a mapping")

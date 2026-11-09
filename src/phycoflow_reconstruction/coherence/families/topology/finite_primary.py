@@ -107,9 +107,11 @@ class FinitePrimaryTopologyObjective(PersistenceTopologyObjective):
         )
         self.spec.validate()
 
-    def _filtrations(self, x):
+    def _filtrations(self, x, indices=None):
         banks = []
-        for _, _, ids, signs, line in self.units:
+        for _, _, ids, signs, line in (
+            self.units[i] for i in (range(len(self.units)) if indices is None else indices)
+        ):
             if line is None:
                 banks.append(signs[0] * x[:, ids[0]])
             else:
@@ -125,7 +127,14 @@ class FinitePrimaryTopologyObjective(PersistenceTopologyObjective):
         return torch.stack(banks)
 
     def raw_leaves(
-        self, generated, reference, *, valid_mask=None, reference_cache=None, return_counts=False
+        self,
+        generated,
+        reference,
+        *,
+        valid_mask=None,
+        reference_cache=None,
+        return_counts=False,
+        indices=None,
     ):
         """Return raw F/E and E presence, or exact domain counts if requested."""
         if reference_cache is not None:
@@ -146,15 +155,15 @@ class FinitePrimaryTopologyObjective(PersistenceTopologyObjective):
                 or old[3] != identity[3]
             ):
                 raise ValueError("persistence reference cache target or mask changed")
-        prepared = (
-            None if reference_cache is None else reference_cache.get("finite_primary_prepared")
-        )
+        indices = tuple(range(len(self.units))) if indices is None else tuple(indices)
+        cache_key = ("finite_primary_prepared", indices)
+        prepared = None if reference_cache is None else reference_cache.get(cache_key)
         if prepared is None:
             y = self._descriptor_fields(reference.detach())
             support = y if valid_mask is None else y[..., valid_mask].unsqueeze(-2)
             mean = support.mean((-2, -1), keepdim=True)
             scale = support.std((-2, -1), keepdim=True, unbiased=False).clamp_min(self.scale_floor)
-            bank = self._filtrations((y - mean) / scale)
+            bank = self._filtrations((y - mean) / scale, indices)
             target_diagrams = cubical_diagrams(
                 bank.flatten(0, 1),
                 periodic=self.periodic,
@@ -164,12 +173,12 @@ class FinitePrimaryTopologyObjective(PersistenceTopologyObjective):
             )
             prepared = (mean, scale, target_diagrams, tuple(reference.shape), id(self))
             if reference_cache is not None:
-                reference_cache["finite_primary_prepared"] = prepared
+                reference_cache[cache_key] = prepared
         mean, scale, target_diagrams, shape, owner = prepared
         if tuple(reference.shape) != shape or owner != id(self):
             raise ValueError("persistence reference cache belongs to another objective or shape")
         x = (self._descriptor_fields(generated) - mean) / scale
-        bank = self._filtrations(x)
+        bank = self._filtrations(x, indices)
         n, batch, h, w = bank.shape
         diagrams = cubical_diagrams(
             bank.flatten(0, 1),
@@ -251,19 +260,47 @@ class FinitePrimaryTopologyObjective(PersistenceTopologyObjective):
         }
         return deepcopy(self.calibration_record)
 
-    def forward(self, generated, reference, *, reference_cache=None, valid_mask=None):
+    def forward(
+        self, generated, reference, *, reference_cache=None, valid_mask=None, query_selection=None
+    ):
         if not self.calibrated:
             raise ValueError(
                 "finite_primary_v1 must be calibrated on TRAIN/SOURCE pairs before scoring"
             )
+        selected = None
+        if query_selection is not None:
+            manifest = query_selection.bank_manifest
+            if manifest is not None:
+                expected_pairs = {tuple(self.fields[i] for i in group) for group in self.groups}
+                if (
+                    set(manifest["field_ids"]) != set(self.self_fields)
+                    or {tuple(pair) for pair in manifest["pairs"]} != expected_pairs
+                ):
+                    raise ValueError("query selection bank differs from topology population")
+            lookup = {}
+            for i, (component, _, ids, signs, line) in enumerate(self.units):
+                kind = "self" if component == "self.persistence" else "mutual"
+                fields = tuple(self.fields[j] for j in ids)
+                lookup[(kind, fields, signs, line)] = i
+            selected = []
+            for query in query_selection.queries:
+                if query.query_id not in lookup:
+                    raise ValueError(f"selected query not in topology bank: {query.query_id}")
+                selected.append((lookup[query.query_id], query))
+            if not selected or len({i for i, _ in selected}) != len(selected):
+                raise ValueError("selected queries must be nonempty and coalesced")
+        indices = (
+            tuple(i for i, _ in selected) if selected is not None else tuple(range(len(self.units)))
+        )
         raw, counts, normalization = self.raw_leaves(
             generated,
             reference,
             valid_mask=valid_mask,
             reference_cache=reference_cache,
             return_counts=True,
+            indices=indices,
         )
-        if not torch.equal(counts, self.essential_counts):
+        if not torch.equal(counts, self.essential_counts[list(indices)]):
             raise ValueError("fixed-domain essential class counts differ from calibration")
         results, sums = {}, {}
         recorded_scales = self.calibration_record["scales"]
@@ -272,9 +309,10 @@ class FinitePrimaryTopologyObjective(PersistenceTopologyObjective):
             "self.persistence": 2 * len(self.self_fields),
             "mutual.persistence": 4 * len(self.groups),
         }
-        for i, (component, label, _, _, line) in enumerate(self.units):
+        for row, i in enumerate(indices):
+            component, label, _, _, line = self.units[i]
             for j, dim in enumerate(self.dimensions):
-                finite, essential = raw[i, :, j, 0], raw[i, :, j, 1]
+                finite, essential = raw[row, :, j, 0], raw[row, :, j, 1]
                 for k, (kind, value) in enumerate((("finite", finite), ("essential", essential))):
                     key = f"topology.{label}.h{dim}.{kind}"
                     results[key] = TermResult(
@@ -289,10 +327,13 @@ class FinitePrimaryTopologyObjective(PersistenceTopologyObjective):
                 cost = 0.9 * finite / self.leaf_scales[i, j, 0]
                 if recorded_presence[i][j]:
                     cost = cost + 0.1 * essential / self.leaf_scales[i, j, 1]
-                weight = 1.0 if line is None else self.line_weights[line].to(cost)
-                sums[component] = sums.get(component, 0) + weight * cost / (
-                    unit_counts[component] * len(self.dimensions)
-                )
+                if selected is None:
+                    weight = (
+                        1.0 if line is None else self.line_weights[line].to(cost)
+                    ) / unit_counts[component]
+                else:
+                    weight = selected[row][1].estimator_weight
+                sums[component] = sums.get(component, 0) + weight * cost / len(self.dimensions)
         total = generated.sum(dim=(1, 2, 3)) * 0
         for name, value in sums.items():
             results[f"topology.{name}"] = TermResult(value, value.mean())
@@ -303,7 +344,10 @@ class FinitePrimaryTopologyObjective(PersistenceTopologyObjective):
             total.mean(),
             diagnostics={
                 "definition": self.definition,
-                "scalar_filtrations": len(self.units),
+                "scalar_filtrations": len(indices),
+                "query_selection": None
+                if selected is None
+                else [vars(query) for _, query in selected],
                 "point_normalization": normalization,
                 "finite_fraction": 0.9,
                 "essential_fraction": 0.1,

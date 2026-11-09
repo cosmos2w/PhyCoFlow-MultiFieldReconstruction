@@ -136,16 +136,16 @@ def spectral_report(
         floor = power_floor
 
         def summary(statistics: Mapping[str, torch.Tensor]) -> dict[str, Any]:
-            gram = statistics["gram"].detach()
-            power = torch.diagonal(gram, dim1=-2, dim2=-1)
+            gram = statistics.get("gram")
+            power = (statistics["power"] if gram is None else torch.diagonal(gram, dim1=-2, dim2=-1)).detach()
             total = statistics["fluctuation_power"].detach()
             unresolved = torch.where(
                 total > 0, 1.0 - power.sum(dim=1) / total.clamp_min(1e-300), 0.0
             )
-            left, right = torch.triu_indices(power.shape[-1], power.shape[-1], offset=1)
+            left, right = (statistics["pair_indices"].T if gram is None else torch.triu_indices(power.shape[-1], power.shape[-1], offset=1, device=power.device))
             valid = (power[:, :, left] > floor[:, left]) & (power[:, :, right] > floor[:, right])
             rho = (
-                gram[:, :, left, right]
+                (statistics["pair_gram"].detach() if gram is None else gram[:, :, left, right].detach())
                 / (power[:, :, left] * power[:, :, right]).clamp_min(1e-300).sqrt()
             )
             counts = valid.sum(dim=0)
@@ -164,7 +164,7 @@ def spectral_report(
                 ),
             }
 
-        pairs = torch.triu_indices(len(field_names), len(field_names), offset=1)
+        pairs = (prediction["pair_indices"].T.cpu() if "pair_indices" in prediction else torch.triu_indices(len(field_names), len(field_names), offset=1))
         blocks = {}
         for key, names in zip(layout.keys, layout.names):
             difference = (prediction_blocks[key] - target_blocks[key]).detach()
@@ -176,7 +176,7 @@ def spectral_report(
                 "rms_error": finite_values(difference.square().mean(dim=0).sqrt().cpu()),
             }
         return {
-            "states": int(prediction["gram"].shape[0]),
+            "states": int(prediction["coefficients"].shape[0]),
             "fields": list(field_names),
             "bands": list(band_names),
             "coherence_pairs": [

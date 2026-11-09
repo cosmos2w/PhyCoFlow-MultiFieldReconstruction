@@ -149,7 +149,19 @@ class PeriodicCheckpointManager:
                      (epoch is not None and epoch % int(self.validation_every_epochs) == 0)
                      or (self.selection_metric == "reconstruction_mse"
                          and self.save_epoch_one and epoch == 1))
-        if self.selection_metric == "topology_with_fidelity" and not panel_due:
+        if self.selection_metric == "fixed_endpoint":
+            metric_name, metric_value = "not_evaluated", None
+            if panel_due:
+                if self.panel_evaluator is None:
+                    raise ValueError("fixed endpoint requires a fixed-panel evaluator")
+                reconstruction_report = self.panel_evaluator(global_step)
+                metric_name = "fixed_panel_reconstruction_mse"
+                if reconstruction_report["metrics"] is not None:
+                    metric_value = float(reconstruction_report["metrics"]["mse_normalized"])
+                    self.last_validation_report = {"global_step": global_step, "loss": metric_value,
+                        "training_epoch": global_step / self.steps_per_epoch}
+            eligible_for_best = False
+        elif self.selection_metric == "topology_with_fidelity" and not panel_due:
             eligible_for_best = False
         elif self.selection_metric == "topology_with_fidelity":
             if self.panel_evaluator is None:

@@ -12,6 +12,7 @@ from phycoflow_reconstruction.training.fidelity_budget import FidelityBudget
 from phycoflow_reconstruction.training.fidelity_reference import (
     create_shared_reference,
     load_shared_reference,
+    rebind_query_population_reference,
     serialize_shared_reference,
     shared_reference_binding,
     validate_shared_reference_recovery,
@@ -66,6 +67,39 @@ def _artifact(tmp_path):
     path = tmp_path / "shared.json"
     path.write_bytes(raw)
     return config, arguments, reference, report_path, artifact, path, _digest(raw)
+
+
+def test_query_population_rebind_preserves_risks_and_c0_and_provenance(tmp_path):
+    config, arguments, reference, report_path = _case(tmp_path)
+    topology = config["coherence"]["families"]["topology"]
+    topology.update(fields=["CO", "T"], components={
+        "self": {"fields": ["CO"], "weight": 1.0},
+        "mutual": {"groups": [["CO", "T"]], "weight": 1.0},
+    })
+    artifact = create_shared_reference(report_path, _digest(report_path.read_bytes()), config, **arguments)
+    raw = serialize_shared_reference(artifact)
+    path = tmp_path / "shared.json"
+    path.write_bytes(raw)
+    candidate = deepcopy(config)
+    candidate["coherence"]["query_coverage"] = {"enabled": True, "relation_seed": 600001}
+    topology = candidate["coherence"]["families"]["topology"]
+    topology["fields"] = ["T", "CO"]
+    topology["components"]["self"]["fields"] = ["T", "CO"]
+    rebound = rebind_query_population_reference(
+        path, _digest(raw), old_config=config, new_config=candidate, **arguments
+    )
+    assert path.read_bytes() == raw
+    assert rebound["reference"] == artifact["reference"] == reference.state_dict()
+    assert rebound["origin"]["query_population_reuse"]["parent_shared_reference_sha256"] == _digest(raw)
+    target = tmp_path / "rebound.json"
+    target.write_bytes(serialize_shared_reference(rebound))
+    loaded, _ = load_shared_reference(target, _digest(target.read_bytes()),
+                                     shared_reference_binding(candidate, **arguments))
+    assert loaded == reference
+    candidate["rollout"]["steps"] = 3
+    with pytest.raises(ValueError, match="non-query"):
+        rebind_query_population_reference(path, _digest(raw), old_config=config,
+                                         new_config=candidate, **arguments)
 
 
 def test_shared_baseline_and_gram_extension_have_identical_fixed_reference(tmp_path):

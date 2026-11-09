@@ -194,6 +194,72 @@ def serialize_shared_reference(artifact: Mapping[str, Any]) -> bytes:
     return (json.dumps(artifact, sort_keys=True, indent=2, allow_nan=False) + "\n").encode("utf-8")
 
 
+def rebind_query_population_reference(
+    path: str | Path,
+    expected_sha256: str,
+    *,
+    old_config: Mapping[str, Any],
+    new_config: Mapping[str, Any],
+    **binding_arguments: Any,
+) -> dict[str, Any]:
+    """Explicitly retain risk bounds and C0 while expanding the Shape query bank.
+
+    The original calibration is not attributed to the expanded objective. All
+    endpoint, data, risk-estimator and non-query settings remain strictly bound;
+    the new artifact records intentional reuse of the old normalization scale.
+    Normal artifact loading and its complete binding checks are unchanged.
+    """
+    old_binding = shared_reference_binding(old_config, **binding_arguments)
+    reference, raw = load_shared_reference(path, expected_sha256, old_binding)
+    coverage = new_config["coherence"].get("query_coverage", {})
+    if not coverage.get("enabled", False):
+        raise ValueError("query-population rebinding requires explicit query coverage")
+    new_binding = shared_reference_binding(new_config, **binding_arguments)
+    old_check, new_check = deepcopy(old_binding), deepcopy(new_binding)
+    old_topology = old_check["baseline_config_anchor"]["coherence"]["families"]["topology"]
+    new_topology = new_check["baseline_config_anchor"]["coherence"]["families"]["topology"]
+    from ..coherence.relation_queries import QueryBank
+
+    fields = list(new_binding["field_names"])
+    bank = QueryBank(fields, seed=int(coverage.get("relation_seed", 600001)))
+    if new_topology.get("fields") != fields or new_topology["components"]["self"].get("fields") != fields:
+        raise ValueError("new Shape self queries must cover the complete declared field list")
+    actual_pairs = new_topology["components"]["mutual"].get("groups", [])
+    if {tuple(sorted(pair)) for pair in actual_pairs} != set(bank.pairs) or len(actual_pairs) != len(bank.pairs):
+        raise ValueError("new Shape mutual groups differ from the declared bounded bank")
+    old_groups = old_topology["components"]["mutual"].get("groups", [])
+    if not {tuple(sorted(pair)) for pair in old_groups} <= set(bank.pairs):
+        raise ValueError("query rebinding cannot remove an existing Shape relation")
+    old_query = {
+        "fields": old_topology.pop("fields"),
+        "self_fields": old_topology["components"]["self"].pop("fields"),
+        "mutual_groups": old_topology["components"]["mutual"].pop("groups"),
+    }
+    new_query = {
+        "fields": new_topology.pop("fields"),
+        "self_fields": new_topology["components"]["self"].pop("fields"),
+        "mutual_groups": new_topology["components"]["mutual"].pop("groups"),
+    }
+    if old_check != new_check:
+        raise ValueError("query-population rebinding changed a non-query calibration input")
+    artifact = json.loads(raw)
+    if artifact["reference"] != reference.state_dict():
+        raise ValueError("historical reference is not in canonical budget form")
+    artifact["binding"] = new_binding
+    artifact["origin"]["query_population_reuse"] = {
+        "parent_shared_reference_sha256": expected_sha256,
+        "retained_reference_sha256": _digest_bytes(
+            json.dumps(artifact["reference"], sort_keys=True, separators=(",", ":")).encode()
+        ),
+        "old_shape_queries": old_query,
+        "new_shape_queries": new_query,
+        "query_bank": bank.manifest(),
+        "policy": "retain_original_output_risks_bounds_and_C0_without_recalibration",
+    }
+    _validate_reference(artifact["reference"], new_binding)
+    return artifact
+
+
 def load_shared_reference(
     path: str | Path, expected_sha256: str, binding: Mapping[str, Any]
 ) -> tuple[FidelityBudget, bytes]:

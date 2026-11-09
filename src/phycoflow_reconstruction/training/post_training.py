@@ -320,6 +320,8 @@ def _coherence_objective(
             prediction=prediction, target=selected.target_fields, mask=selected.query_valid_mask
         )
     if step_context is not None:
+        step_context.setdefault("persistence_cache", {})
+    if step_context is not None and source_anchor_model is not None:
 
         def reconstruct(candidate):
             candidate_generator = torch.Generator(device=prediction.device)
@@ -435,7 +437,7 @@ def _coherence_objective(
                     "reference_ids": reference_ids,
                     **batch_measure_context(selected),
                     **(
-                        {"persistence_cache": step_context["persistence_cache"]}
+                        {"persistence_cache": step_context["persistence_cache"], **({"query_selection": step_context["query_selection"]} if "query_selection" in step_context else {})}
                         if step_context is not None
                         else {}
                     ),
@@ -1556,12 +1558,20 @@ def run_post_training(
     resume: str | Path | None = None,
     checkpoint_callback: Callable[[Path, Path, int], None] | None = None,
     update_attempt_callback: Callable[[int], None] | None = None,
+    evaluation_callback: Callable[..., Mapping[str, Any] | None] | None = None,
+    qualification_only: bool = False,
 ) -> Path:
     """Create or resume a child, optionally observing saved recovery boundaries.
 
     The callback may evaluate saved weights; its random draws are isolated from
     training. It must not mutate training configuration or historical artifacts.
     """
+    if "coherence" in config:
+        from ..coherence.relation_queries import resolve_coverage_config
+
+        config = dict(config)
+        config["coherence"] = resolve_coverage_config(
+            config["coherence"], config.get("dataset", {}).get("field_names", ()))
     if (
         "multitask" in config["optimization"]
         or config["optimization"].get("lpc_ordered") is not None
@@ -1575,6 +1585,8 @@ def run_post_training(
         validate_config(config)
     if config["stage"] != "post_training":
         raise ValueError("run_post_training accepts only stage=post_training")
+    if qualification_only and (max_steps is None or max_steps > 26 or evaluation_callback is None):
+        raise ValueError("qualification_only requires a callback and at most 26 steps")
     if max_steps is not None and max_steps < 0:
         raise ValueError("max_steps must be non-negative")
     _configure_persistence_workers(config)
@@ -1656,6 +1668,8 @@ def run_post_training(
     else:
         store = RunStore.resume(resume, config)
         checkpoint = store.load_checkpoint("last")
+        if bool(checkpoint.get("qualification_only", False)) != qualification_only:
+            raise ValueError("resume qualification mode differs from checkpoint")
         if (
             config["optimization"].get("fast_lagrangian") is not None
             and checkpoint.get("fast_lagrangian_implementation") != implementation_binding()
@@ -1703,6 +1717,36 @@ def run_post_training(
         config["coherence"], train_dataset.data_spec, train_dataset.normalizer
     )
     families = {name: family.to(device) for name, family in families.items()}
+    coverage_sampler = None
+    coverage = config["coherence"].get("query_coverage", {})
+    if coverage.get("enabled", False):
+        from ..coherence.relation_queries import QueryBank
+        from .adaptive_coverage import AdaptiveCoverageSampler
+
+        scale = families.get("multiscale_spectrum")
+        if scale is None or not hasattr(scale, "relation_extension") or "topology" not in families:
+            raise ValueError("query coverage requires relation Scale and topology families")
+        bank = QueryBank(scale.field_names, seed=int(coverage.get("relation_seed", 0)))
+        indices = {name: i for i, name in enumerate(scale.field_names)}
+        scale.coverage_pairs = tuple((indices[a], indices[b]) for a, b in bank.pairs)
+        declared = {tuple(sorted(pair)) for pair in scale.coverage_pairs}
+        for component in scale.settings.components:
+            if component.key == "signed_band_cospectrum" and any(tuple(sorted(pair)) not in declared for pair in component.pairs):
+                raise ValueError("Scale descriptor pair is outside the frozen query bank")
+        coverage_sampler = AdaptiveCoverageSampler(bank, policy=coverage.get("mode", "uniform"),
+            seed=int(coverage.get("seed", 0)), window_epochs=10, decay=.9)
+        if checkpoint is not None:
+            if "query_coverage" not in checkpoint:
+                raise ValueError("resume checkpoint lacks query coverage state")
+            coverage_sampler.load_state_dict(checkpoint["query_coverage"])
+            coverage_log = store.run_dir / "logs/query_coverage.jsonl"
+            if coverage_log.exists():
+                lines = coverage_log.read_text().splitlines()
+                retained = [line for line in lines if int(json.loads(line)["step"]) <= start_step]
+                coverage_log.write_text("".join(line + "\n" for line in retained))
+        store.write_json("artifacts/query_bank.json", bank.manifest())
+    elif checkpoint is not None and "query_coverage" in checkpoint:
+        raise ValueError("cannot resume coverage checkpoint without query coverage")
     if _conditional_draw_count(families) > 1 and not model.capabilities.generative:
         raise ValueError("conditional-draw coherence objectives require a generative source model")
     banks: dict[str, ReferenceBank | None] = {}
@@ -2004,55 +2048,77 @@ def run_post_training(
         coherence_family_balance_mode=calibration["mode"],
     )
 
-    evaluation_split = config.get("evaluation", {}).get("split", "validation")
-    evaluation_dataset = open_field_dataset(
-        config["dataset"], split=evaluation_split, normalizer=train_dataset.normalizer
-    )
-    protocol = sensor_protocol_from_config(config)
-    evaluation_batch = _build_evaluation_batch(evaluation_dataset, config, protocol, device)
-    comparison_batch = _build_comparison_batch(evaluation_batch, config)
-    if any(
-        getattr(family, "strategy", None) == "cubical_persistence" for family in families.values()
-    ):
-        contract_batch = (
-            evaluation_batch if model.capabilities.structured_grid_required else comparison_batch
+    if coverage_sampler is not None and evaluation_callback is None:
+        raise ValueError("query coverage requires a fixed-panel evaluation_callback")
+    evaluation_manifest = None
+    evaluation_dataset = None
+    if evaluation_callback is None:
+        evaluation_split = config.get("evaluation", {}).get("split", "validation")
+        evaluation_dataset = open_field_dataset(
+            config["dataset"], split=evaluation_split, normalizer=train_dataset.normalizer
         )
-        report = verify_rollout_contract(
-            model, _without_target(_slice_batch(contract_batch, 1)), config
+        protocol = sensor_protocol_from_config(config)
+        evaluation_batch = _build_evaluation_batch(evaluation_dataset, config, protocol, device)
+        comparison_batch = _build_comparison_batch(evaluation_batch, config)
+        if any(
+            getattr(family, "strategy", None) == "cubical_persistence" for family in families.values()
+        ):
+            contract_batch = (
+                evaluation_batch if model.capabilities.structured_grid_required else comparison_batch
+            )
+            report = verify_rollout_contract(
+                model, _without_target(_slice_batch(contract_batch, 1)), config
+            )
+            store.write_json("evaluation/rollout_contract.json", report)
+        # Bind sensors and the exact fixed comparison queries into one replayable
+        # evaluation contract. The complete batch remains available only for
+        # structured-model reconstruction before gathering these comparison IDs.
+        evaluation_manifest = manifest_from_batch(
+            comparison_batch, evaluation_dataset.path, evaluation_split
         )
-        store.write_json("evaluation/rollout_contract.json", report)
-    # Bind sensors and the exact fixed comparison queries into one replayable
-    # evaluation contract. The complete batch remains available only for
-    # structured-model reconstruction before gathering these comparison IDs.
-    evaluation_manifest = manifest_from_batch(
-        comparison_batch, evaluation_dataset.path, evaluation_split
-    )
-    evaluation_manifest.save(store.run_dir / "artifacts" / "evaluation_sensor_manifest.json")
-    query_path = store.save_artifact(
-        "evaluation_query_indices.pt",
-        {"query_indices": comparison_batch.metadata.get("query_indices")},
-    )
-    store.update_manifest(evaluation_query_indices_sha256=file_sha256(query_path))
-    before_metrics = None
-    if resume is None:
-        before_metrics = _evaluate(
-            model,
-            evaluation_batch,
-            comparison_batch,
-            families,
-            banks,
-            train_dataset.field_names,
-            config,
-            normalizer=train_dataset.normalizer,
-            family_scales=family_scales,
+        evaluation_manifest.save(store.run_dir / "artifacts" / "evaluation_sensor_manifest.json")
+        query_path = store.save_artifact(
+            "evaluation_query_indices.pt",
+            {"query_indices": comparison_batch.metadata.get("query_indices")},
         )
-        before_metrics["sensor_manifest_sha256"] = evaluation_manifest.digest()
-        store.write_json("evaluation/before.json", before_metrics)
-    source_metrics = (
-        before_metrics
-        if before_metrics is not None
-        else json.loads((store.run_dir / "evaluation" / "before.json").read_text(encoding="utf-8"))
-    )
+        store.update_manifest(evaluation_query_indices_sha256=file_sha256(query_path))
+        before_metrics = None
+        if resume is None:
+            before_metrics = _evaluate(
+                model,
+                evaluation_batch,
+                comparison_batch,
+                families,
+                banks,
+                train_dataset.field_names,
+                config,
+                normalizer=train_dataset.normalizer,
+                family_scales=family_scales,
+            )
+            before_metrics["sensor_manifest_sha256"] = evaluation_manifest.digest()
+            store.write_json("evaluation/before.json", before_metrics)
+    else:
+        from .coherence_sampling import _preserved_rng
+
+        def evaluate_coverage(step, source=False):
+            was_training = model.training
+            try:
+                model.eval()
+                with _preserved_rng(device):
+                    value = evaluation_callback(model=model, families=families, config=config,
+                        run_dir=store.run_dir, global_step=step, source=source)
+                    if value is None and not qualification_only:
+                        raise ValueError("formal evaluation callback returned no metrics")
+                    return None if value is None else dict(value)
+            finally:
+                model.train(was_training)
+
+        before_metrics = evaluate_coverage(0, source=True) if resume is None else None
+        if before_metrics is not None:
+            store.write_json("evaluation/before.json", before_metrics)
+    source_metrics = (None if qualification_only else (
+        before_metrics if before_metrics is not None else
+        json.loads((store.run_dir / "evaluation" / "before.json").read_text(encoding="utf-8"))))
     # Evaluation initializes geometry-dependent fixed artifacts. Persist those
     # exact tensors rather than the empty lazy-construction placeholders.
     family_paths = {
@@ -2175,7 +2241,17 @@ def run_post_training(
         steps_per_epoch=steps_per_epoch,
     )
     panel_metrics_cache = {}
-    if policy is not None and checkpoint_manager.selection_metric == "reconstruction_mse":
+    if evaluation_callback is not None:
+        preview.enabled = False
+        checkpoint_manager.selection_metric = "fixed_endpoint"
+
+        def evaluate_coverage_panel(step):
+            if step not in panel_metrics_cache:
+                panel_metrics_cache[step] = evaluate_coverage(step)
+            return {"metrics": panel_metrics_cache[step]}
+
+        checkpoint_manager.panel_evaluator = evaluate_coverage_panel
+    if evaluation_callback is None and policy is not None and checkpoint_manager.selection_metric == "reconstruction_mse":
 
         def evaluate_endpoint_panel(step):
             metrics = _evaluate(
@@ -2233,6 +2309,8 @@ def run_post_training(
                     controller=controller,
                     scalarizer=scalarizer,
                     policy=policy,
+                    coverage_sampler=coverage_sampler,
+                    qualification_only=qualification_only,
                 ),
                 model=model,
                 preview=preview,
@@ -2282,7 +2360,9 @@ def run_post_training(
             "coherence_weight": coherence_weight,
         }
         if coherence_active or retention_active:
-            step_context = {} if constrained else None
+            step_context = {} if constrained or coverage_sampler is not None else None
+            if coverage_sampler is not None:
+                step_context["query_selection"] = coverage_sampler.select()
             endpoint_context = {} if policy is not None else None
             retention_losses: dict[str, torch.Tensor] = {}
             diagnostic_every = int(config["coherence"].get("family_balance", {}).get(
@@ -2575,6 +2655,17 @@ def run_post_training(
                         "families": result.diagnostics["families"],
                         "gradient": gradient,
                     }), allow_nan=False) + "\n")
+            if coverage_sampler is not None:
+                priorities = result.diagnostics["families"]["multiscale_spectrum"]["coverage_priorities"]
+                coverage_sampler.observe([max(0., x) for x in priorities["self"]],
+                                         [max(0., x) for x in priorities["pair"]])
+                selection = step_context["query_selection"]
+                with (store.run_dir / "logs/query_coverage.jsonl").open("a") as handle:
+                    handle.write(json.dumps(_json_safe({"step": global_step + 1, "epoch": epoch,
+                        "queries": [asdict(query) for query in selection.queries],
+                        "self_draws": selection.self_draws, "mutual_draws": selection.mutual_draws,
+                        "probabilities": coverage_sampler.probabilities,
+                        "priorities": priorities}), allow_nan=False) + "\n")
             last_coherence_loss = row["coherence_loss"]
             # The final report needs a scalar, not a retained rollout graph.
             # Release it before the next rollout or large validation panel.
@@ -2594,6 +2685,14 @@ def run_post_training(
             )
         if row.get("update_accepted", True):
             after_optimizer_step(model)
+        if coverage_sampler is not None and (global_step + 1) % steps_per_epoch == 0:
+            coverage_sampler.finalize_epoch()
+            coverage_state = coverage_sampler.state_dict()
+            with (store.run_dir / "logs/query_coverage.jsonl").open("a") as handle:
+                handle.write(json.dumps(_json_safe({"event": "epoch", "step": global_step + 1,
+                    "epoch": epoch, "probabilities": coverage_state["probabilities"],
+                    "self_exposure": sum(value for key, value in coverage_state["exposure"].items() if key[0] == "self"),
+                    "mutual_exposure": sum(value for key, value in coverage_state["exposure"].items() if key[0] == "mutual")}), allow_nan=False) + "\n")
         if scalarizer is not None and (global_step + 1) % steps_per_epoch == 0:
             scalarizer.step()
         row["update_seconds"] = perf_counter() - step_started
@@ -2680,6 +2779,8 @@ def run_post_training(
                     controller=controller,
                     scalarizer=scalarizer,
                     policy=policy,
+                    coverage_sampler=coverage_sampler,
+                    qualification_only=qualification_only,
                 ),
                 model=model,
                 preview=preview,
@@ -2720,7 +2821,9 @@ def run_post_training(
         torch.cuda.synchronize(device)
     post_training_seconds = perf_counter() - training_started
     after_metrics = panel_metrics_cache.get(final_step)
-    if after_metrics is None:
+    if after_metrics is None and evaluation_callback is not None:
+        after_metrics = evaluate_coverage(final_step)
+    if after_metrics is None and evaluation_callback is None:
         after_metrics = _evaluate(
             model,
             evaluation_batch,
@@ -2732,27 +2835,31 @@ def run_post_training(
             normalizer=train_dataset.normalizer,
             family_scales=family_scales,
         )
-    after_metrics["sensor_manifest_sha256"] = evaluation_manifest.digest()
-    if policy is not None:
-        after_metrics["validation_source_endpoint_mse_model_units"] = source_metrics[
-            "endpoint_mse_model_units"
-        ]
-        after_metrics["validation_endpoint_source_ratios"] = {
-            name: (value / source_metrics["endpoint_mse_model_units"][name]
-                   if source_metrics["endpoint_mse_model_units"][name] > 0 else None)
-            for name, value in after_metrics["endpoint_mse_model_units"].items()
-        }
-    _add_source_relative_coherence(source_metrics, after_metrics)
-    store.write_json("evaluation/after.json", after_metrics)
-    fidelity_guard = _fidelity_guard_report(source_metrics, after_metrics, config)
-    store.write_json("evaluation/fidelity_guard.json", fidelity_guard)
-    if fidelity_guard["exceeded"] and fidelity_guard["behavior"] == "warn":
-        warnings.warn(
-            "post-training reconstruction MSE exceeded the configured fidelity guard",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-    guard_failed = fidelity_guard["exceeded"] and fidelity_guard["behavior"] == "error"
+    guard_failed = False
+    fidelity_guard = None
+    if after_metrics is not None:
+        if evaluation_manifest is not None:
+            after_metrics["sensor_manifest_sha256"] = evaluation_manifest.digest()
+        if policy is not None:
+            after_metrics["validation_source_endpoint_mse_model_units"] = source_metrics[
+                "endpoint_mse_model_units"
+            ]
+            after_metrics["validation_endpoint_source_ratios"] = {
+                name: (value / source_metrics["endpoint_mse_model_units"][name]
+                       if source_metrics["endpoint_mse_model_units"][name] > 0 else None)
+                for name, value in after_metrics["endpoint_mse_model_units"].items()
+            }
+        _add_source_relative_coherence(source_metrics, after_metrics)
+        store.write_json("evaluation/after.json", after_metrics)
+        fidelity_guard = _fidelity_guard_report(source_metrics, after_metrics, config)
+        store.write_json("evaluation/fidelity_guard.json", fidelity_guard)
+        if fidelity_guard["exceeded"] and fidelity_guard["behavior"] == "warn":
+            warnings.warn(
+                "post-training reconstruction MSE exceeded the configured fidelity guard",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        guard_failed = fidelity_guard["exceeded"] and fidelity_guard["behavior"] == "error"
     family_paths = {
         name: store.save_artifact(f"{name}_family.pt", family.state_artifact())
         for name, family in families.items()
@@ -2773,8 +2880,12 @@ def run_post_training(
         controller=controller,
         scalarizer=scalarizer,
         policy=policy,
+        coverage_sampler=coverage_sampler,
+        qualification_only=qualification_only,
     )
-    if checkpoint_manager.selection_metric == "topology_with_fidelity":
+    if checkpoint_manager.selection_metric == "fixed_endpoint":
+        checkpoint_manager.panel_evaluator = lambda step: {"metrics": after_metrics}
+    elif checkpoint_manager.selection_metric == "topology_with_fidelity":
         checkpoint_manager.panel_evaluator = lambda step: topology_selection_report(
             source_metrics, after_metrics, config["posttrain_fidelity"]
         )
@@ -2786,7 +2897,7 @@ def run_post_training(
         preview=preview,
         global_step=final_step,
         fallback_metric=(
-            float(after_metrics["mse_normalized"]) if reporting_only else float(row["data_loss"])
+            float(after_metrics["mse_normalized"]) if reporting_only and after_metrics is not None else float(row["data_loss"])
         ),
         force=True,
     )
@@ -2826,9 +2937,9 @@ def run_post_training(
         checkpoint_hashes=final_checkpoint_hashes,
         source_hashes_after=source_hashes_after,
         source_immutable_verified=True,
-        evaluation_sensor_manifest_sha256=evaluation_manifest.digest(),
+        evaluation_sensor_manifest_sha256=None if evaluation_manifest is None else evaluation_manifest.digest(),
         before_metric=None if before_metrics is None else before_metrics.get("mse_normalized"),
-        after_metric=after_metrics.get("mse_normalized"),
+        after_metric=None if after_metrics is None else after_metrics.get("mse_normalized"),
         fidelity_guard=fidelity_guard,
         coherence_family_state_sha256s={
             name: file_sha256(path) for name, path in family_paths.items()
@@ -2858,7 +2969,8 @@ def run_post_training(
         ),
     )
     train_dataset.close()
-    evaluation_dataset.close()
+    if evaluation_dataset is not None:
+        evaluation_dataset.close()
     if guard_failed:
         raise RuntimeError(
             "post-training reconstruction MSE exceeded the fidelity guard; recovery checkpoint saved"
@@ -2883,6 +2995,8 @@ def _post_checkpoint_payload(
     controller=None,
     scalarizer: FamilyScalarizer | None = None,
     policy: ExternalPolicy | None = None,
+    coverage_sampler=None,
+    qualification_only=False,
 ) -> dict[str, Any]:
     """Build an internally consistent post-training recovery checkpoint."""
     payload = {
@@ -2908,6 +3022,10 @@ def _post_checkpoint_payload(
             "index_generator": index_generator.get_state(),
         },
     }
+    if qualification_only:
+        payload["qualification_only"] = True
+    if coverage_sampler is not None:
+        payload["query_coverage"] = coverage_sampler.state_dict()
     if controller is not None:
         payload["component_controller"] = controller.state_dict()
     if scalarizer is not None and scalarizer.method == "dwa":

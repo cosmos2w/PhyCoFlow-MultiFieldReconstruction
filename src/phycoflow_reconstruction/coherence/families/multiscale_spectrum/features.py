@@ -122,6 +122,7 @@ def raw_statistics(
     manifest: FactorManifest,
     with_band_fields: bool = False,
     with_piece_means: bool = False,
+    relation_pairs: tuple[tuple[int, int], ...] | None = None,
 ) -> dict[str, torch.Tensor]:
     """Untransformed per-state statistics shared by calibration and descriptors.
 
@@ -134,8 +135,14 @@ def raw_statistics(
         "coefficients": coefficients,
         "second_moment": mean_square(fields, mass),
         "fluctuation_power": mean_square(fluctuations, mass),
-        "gram": band_gram(coefficients, filters.square()),
     }
+    if relation_pairs is None:
+        statistics["gram"] = band_gram(coefficients, filters.square())
+    else:
+        pairs = torch.as_tensor(relation_pairs, dtype=torch.long, device=fields.device).reshape(-1, 2)
+        statistics["power"] = torch.einsum("sk,bkc->bsc", filters.square(), coefficients.square())
+        statistics["pair_gram"] = torch.einsum("sk,bkp,bkp->bsp", filters.square(), coefficients[:, :, pairs[:, 0]], coefficients[:, :, pairs[:, 1]])
+        statistics["pair_indices"] = pairs
     if with_piece_means:
         statistics["piece_means"] = piecewise_means(fields, piece_measures)
     if with_band_fields:
@@ -187,7 +194,7 @@ class ReferenceAccumulator:
         self.piece_mean_m2 = torch.zeros_like(self.piece_mean) if pieces is not None else None
 
     def update(self, statistics: Mapping[str, torch.Tensor], measures: torch.Tensor) -> None:
-        power = torch.diagonal(statistics["gram"], dim1=-2, dim2=-1)
+        power = statistics["power"] if "power" in statistics else torch.diagonal(statistics["gram"], dim1=-2, dim2=-1)
         total = statistics["fluctuation_power"]
         previous_count = self.count
         batch_count = int(total.shape[0])
@@ -289,23 +296,29 @@ def descriptor_blocks(
 ) -> dict[str, torch.Tensor]:
     """Transform raw statistics into the configured descriptor blocks, each [B,d_c]."""
     blocks: dict[str, torch.Tensor] = {}
-    gram = statistics["gram"]
-    batch = gram.shape[0]
+    gram = statistics.get("gram")
+    power = statistics["power"] if gram is None else torch.diagonal(gram, dim1=-2, dim2=-1)
+    batch = power.shape[0]
     for component in settings.components:
         key = component.key
         if key == "log_band_power":
-            power = torch.diagonal(gram, dim1=-2, dim2=-1)
             blocks[key] = torch.log1p(power / calibration["power_floor"]).reshape(batch, -1)
         elif key == "signed_band_cospectrum":
-            left = torch.tensor([pair[0] for pair in component.pairs], device=gram.device)
-            right = torch.tensor([pair[1] for pair in component.pairs], device=gram.device)
+            left = torch.tensor([pair[0] for pair in component.pairs], device=power.device)
+            right = torch.tensor([pair[1] for pair in component.pairs], device=power.device)
             scale = calibration["band_scale"][:, left] * calibration["band_scale"][:, right]
-            blocks[key] = torch.asinh(gram[:, :, left, right] / scale).reshape(batch, -1)
+            if gram is None:
+                lookup = {tuple(sorted(pair)): i for i, pair in enumerate(statistics["pair_indices"].tolist())}
+                indices = [lookup[tuple(sorted(pair))] for pair in component.pairs]
+                cross = statistics["pair_gram"][:, :, indices]
+            else:
+                cross = gram[:, :, left, right]
+            blocks[key] = torch.asinh(cross / scale).reshape(batch, -1)
         else:
             rows = measures.shape[0] if component.regional else 1
             centered = regional_centered(statistics["factor_series"], measures[:rows])
             normalized = centered / calibration["factor_scale"][None, :, :rows, None]
-            index = torch.tensor(manifest.triples, device=gram.device, dtype=torch.long)
+            index = torch.tensor(manifest.triples, device=power.device, dtype=torch.long)
             moment = third_central_moments(normalized, measures[:rows], index)
             blocks[key] = torch.asinh(moment).reshape(batch, -1)
     return blocks
