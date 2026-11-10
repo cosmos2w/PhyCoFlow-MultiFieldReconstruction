@@ -1560,12 +1560,24 @@ def run_post_training(
     update_attempt_callback: Callable[[int], None] | None = None,
     evaluation_callback: Callable[..., Mapping[str, Any] | None] | None = None,
     qualification_only: bool = False,
+    scale_only_supplement: Mapping[str, Any] | None = None,
 ) -> Path:
     """Create or resume a child, optionally observing saved recovery boundaries.
 
     The callback may evaluate saved weights; its random draws are isolated from
     training. It must not mutate training configuration or historical artifacts.
     """
+    supplement_baseline = None
+    supplement_source_metrics = None
+    if scale_only_supplement is not None:
+        from .scale_only_supplement import load_source_validation_metrics, validate_recipe
+        if set(scale_only_supplement) != {"baseline_config", "initializer_checkpoint", "source_validation_reductions"}:
+            raise ValueError("invalid Scale supplement declaration")
+        if evaluation_callback is None or qualification_only:
+            raise ValueError("Scale supplement requires its fixed-panel evaluation callback")
+        supplement_baseline = validate_recipe(config, scale_only_supplement["baseline_config"])
+        supplement_source_metrics = load_source_validation_metrics(
+            scale_only_supplement["source_validation_reductions"], config["dataset"]["field_names"])
     if "coherence" in config:
         from ..coherence.relation_queries import resolve_coverage_config
 
@@ -1630,6 +1642,9 @@ def run_post_training(
     trainable_parameter_count = sum(
         parameter.numel() for parameter in model.parameters() if parameter.requires_grad
     )
+    if scale_only_supplement is not None and resume is None:
+        from .scale_only_supplement import initialize_live_model
+        initialize_live_model(model, scale_only_supplement["initializer_checkpoint"])
     optimizer = torch.optim.AdamW(
         [parameter for parameter in model.parameters() if parameter.requires_grad],
         lr=float(config["optimization"].get("lr", 5e-5)),
@@ -1744,6 +1759,15 @@ def run_post_training(
                 lines = coverage_log.read_text().splitlines()
                 retained = [line for line in lines if int(json.loads(line)["step"]) <= start_step]
                 coverage_log.write_text("".join(line + "\n" for line in retained))
+        store.write_json("artifacts/query_bank.json", bank.manifest())
+    elif scale_only_supplement is not None:
+        from ..coherence.relation_queries import QueryBank
+        scale = families["multiscale_spectrum"]
+        bank = QueryBank(scale.field_names, seed=600001)
+        indices = {name: i for i, name in enumerate(scale.field_names)}
+        scale.coverage_pairs = tuple((indices[a], indices[b]) for a, b in bank.pairs)
+        if len(scale.field_names) != 5 or len(scale.coverage_pairs) != 10:
+            raise ValueError("supplement requires the complete five-field relation bank")
         store.write_json("artifacts/query_bank.json", bank.manifest())
     elif checkpoint is not None and "query_coverage" in checkpoint:
         raise ValueError("cannot resume coverage checkpoint without query coverage")
@@ -1865,16 +1889,35 @@ def run_post_training(
                     None if subset_manifest is None else subset_manifest["sha256"]
                 ),
             }
-            shared_binding = shared_reference_binding(
-                config,
-                field_names=train_dataset.field_names,
-                normalizer_sha256=train_dataset.normalizer.digest(),
-                source_hashes=source_hashes_before,
-                dataset_fingerprint=dataset_fingerprint(train_dataset.path),
-                train_selection=train_selection,
-                family_scales=family_scales,
-            )
-            reference, reference_bytes = load_shared_reference(shared_path, shared_hash, shared_binding)
+            binding_arguments = {
+                "field_names": train_dataset.field_names,
+                "normalizer_sha256": train_dataset.normalizer.digest(),
+                "dataset_fingerprint": dataset_fingerprint(train_dataset.path),
+                "train_selection": train_selection,
+            }
+            supplement_binding = None
+            if scale_only_supplement is not None:
+                from .scale_only_supplement import REFERENCE_SHA, bind_reference, binding_digest
+                if shared_hash != REFERENCE_SHA:
+                    raise ValueError("supplement requires pinned original reference")
+                reference, reference_bytes, supplement_binding = bind_reference(
+                    config, supplement_baseline, reference_path=shared_path,
+                    source_hashes=source_hashes_before, binding_arguments=binding_arguments)
+                digest = binding_digest(supplement_binding)
+                binding_path = store.run_dir / "artifacts/scale_only_binding.json"
+                if checkpoint is None:
+                    store.write_json("artifacts/scale_only_binding.json", supplement_binding)
+                else:
+                    if (not binding_path.is_file() or json.loads(binding_path.read_text()) != supplement_binding
+                        or checkpoint.get("scale_only_binding_sha256") != digest
+                        or json.loads((store.run_dir / "run_manifest.json").read_text()).get("scale_only_binding_sha256") != digest):
+                        raise ValueError("supplement recovery binding mismatch")
+                store.update_manifest(scale_only_binding_sha256=digest,
+                    scale_only_binding_artifact="artifacts/scale_only_binding.json")
+            else:
+                shared_binding = shared_reference_binding(config, source_hashes=source_hashes_before,
+                    family_scales=family_scales, **binding_arguments)
+                reference, reference_bytes = load_shared_reference(shared_path, shared_hash, shared_binding)
             local_shared_path = store.run_dir / "artifacts" / "shared_fidelity_reference.json"
             if checkpoint is None:
                 local_shared_path.write_bytes(reference_bytes)
@@ -1892,6 +1935,8 @@ def run_post_training(
                 )
             policy = ExternalPolicy(external_settings, reference, device)
             policy.shared_fidelity_reference_sha256 = shared_hash
+            if supplement_binding is not None:
+                policy.scale_only_binding_sha256 = digest
             store.update_manifest(
                 shared_fidelity_reference_sha256=shared_hash,
                 shared_fidelity_reference_artifact="artifacts/shared_fidelity_reference.json",
@@ -1955,6 +2000,23 @@ def run_post_training(
                     raise ValueError("ordered recovery dual cursor differs from accepted model updates")
                 if policy.completed_updates != start_step:
                     raise ValueError("ordered recovery field dual cursor differs from model updates")
+    if scale_only_supplement is not None and checkpoint is None:
+        from ..evaluation.loss_aligned import model_state_digest
+        from .scale_only_supplement import MODEL_SHA
+        ema = model._ema
+        if (optimizer.state or policy.completed_updates != 0 or any(policy._multipliers())
+            or ema.num_updates != 0 or model_state_digest(model) != MODEL_SHA
+            or any(not torch.equal(value, ema.shadow[name]) for name, value in model.state_dict().items())):
+            raise ValueError("supplement fresh optimizer, dual, or EMA state invalid")
+        store.write_json("artifacts/initial_training_state.json", {
+            "live_model_sha256": MODEL_SHA, "optimizer": "AdamW",
+            "optimizer_state_entries": len(optimizer.state), "optimizer_steps": 0,
+            "optimizer_betas": list(optimizer.defaults["betas"]),
+            "optimizer_eps": optimizer.defaults["eps"], "optimizer_amsgrad": optimizer.defaults["amsgrad"],
+            "dual_updates": policy.completed_updates, "dual_multipliers": policy._multipliers(),
+            "ema_updates": ema.num_updates, "ema_decay": ema.decay,
+            "ema_matches_live": True, "ema_eval": model._ema_eval,
+        })
     execution_runtime = None
     if strategy_settings.get("enabled", False):
         from .execution_strategy.runtime import ExecutionRuntime
@@ -2115,10 +2177,15 @@ def run_post_training(
 
         before_metrics = evaluate_coverage(0, source=True) if resume is None else None
         if before_metrics is not None:
+            if scale_only_supplement is not None:
+                before_metrics["weight_provenance"] = "A200_live_initializer"
             store.write_json("evaluation/before.json", before_metrics)
     source_metrics = (None if qualification_only else (
+        supplement_source_metrics if scale_only_supplement is not None else
         before_metrics if before_metrics is not None else
         json.loads((store.run_dir / "evaluation" / "before.json").read_text(encoding="utf-8"))))
+    if scale_only_supplement is not None:
+        store.write_json("evaluation/source_validation_reference.json", source_metrics)
     # Evaluation initializes geometry-dependent fixed artifacts. Persist those
     # exact tensors rather than the empty lazy-construction placeholders.
     family_paths = {
@@ -2359,6 +2426,13 @@ def run_post_training(
             "coherence_applied": coherence_active,
             "coherence_weight": coherence_weight,
         }
+        if scale_only_supplement is not None:
+            row["training_route"] = {
+                "active_families": ["multiscale_spectrum"],
+                "state_provider_calls": 0, "shape_provider_calls": 0,
+                "config_calls": 0, "scale_objective_calls": int(coherence_active),
+                "native_data_loss_calls": 0,
+            }
         if coherence_active or retention_active:
             step_context = {} if constrained or coverage_sampler is not None else None
             if coverage_sampler is not None:
@@ -2838,6 +2912,9 @@ def run_post_training(
     guard_failed = False
     fidelity_guard = None
     if after_metrics is not None:
+        if scale_only_supplement is not None:
+            after_metrics["source_relative_provenance"] = "original_SOURCE_live_validation"
+            after_metrics["initial_model_provenance"] = "A200_live_initializer"
         if evaluation_manifest is not None:
             after_metrics["sensor_manifest_sha256"] = evaluation_manifest.digest()
         if policy is not None:
@@ -3032,6 +3109,8 @@ def _post_checkpoint_payload(
         payload["family_scalarizer"] = scalarizer.state_dict()
     if policy is not None:
         payload["external_policy"] = policy.state_dict()
+        if hasattr(policy, "scale_only_binding_sha256"):
+            payload["scale_only_binding_sha256"] = policy.scale_only_binding_sha256
         if hasattr(policy, "shared_fidelity_reference_sha256"):
             payload["shared_fidelity_reference_sha256"] = policy.shared_fidelity_reference_sha256
         if hasattr(policy, "lpc_ordered"):

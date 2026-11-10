@@ -93,6 +93,15 @@ def test_matched_shards_bind_condition_draw_and_weight(monkeypatch, tmp_path):
     assert len(calls) == 2
     with pytest.raises(ValueError, match="incompatible cached"):
         aligned.evaluate_split(**{**kwargs, "checkpoint_sha256": "c" * 64})
+    scale_kwargs = {**kwargs, "families": {"multiscale_spectrum": families["multiscale_spectrum"]},
+                    "output_dir": tmp_path / "scale", "scale_only": True}
+    with pytest.raises(ValueError, match="incompatible cached"):
+        aligned.evaluate_split(**{**scale_kwargs, "output_dir": tmp_path})
+    scale_path = aligned.evaluate_split(**scale_kwargs)
+    assert set(json.loads(scale_path.read_text())["rows"][0]["family_weights"]) == {"multiscale_spectrum"}
+    assert len(calls) == 4
+    with pytest.raises(ValueError, match="expected three retained families"):
+        aligned.evaluate_split(**{**scale_kwargs, "scale_only": False})
     batches["validation"][0].obs_values += 1
     with pytest.raises(ValueError, match="condition identity"):
         aligned.evaluate_split(**kwargs)

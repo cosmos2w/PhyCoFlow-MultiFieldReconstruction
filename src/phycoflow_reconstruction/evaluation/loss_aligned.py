@@ -203,6 +203,7 @@ def _evaluate_split(
     query_bank,
     family_scales=None,
     weight_identity_kind="checkpoint_file_sha256",
+    scale_only=False,
 ):
     """Evaluate and persist one matched split; reuse only identity-matched shards.
 
@@ -220,19 +221,16 @@ def _evaluate_split(
         raise ValueError("unknown evaluated weight identity kind")
     if len(checkpoint_sha256) != 64 or any(c not in "0123456789abcdef" for c in checkpoint_sha256):
         raise ValueError("checkpoint SHA-256 required")
-    if _conditional_draw_count(families) != 2 or set(families) != {
-        "global_distribution",
-        "multiscale_spectrum",
-        "topology",
-    }:
+    expected_families = ({"multiscale_spectrum"} if scale_only else
+                         {"global_distribution", "multiscale_spectrum", "topology"})
+    if _conditional_draw_count(families) != 2 or set(families) != expected_families:
         raise ValueError("expected three retained families and J2")
     if any(f.target_use != "paired_supervised" for f in families.values()):
         raise ValueError("loss-aligned family references must be paired")
     records = {item["sample_id"]: item for item in manifest["splits"][split]}
     if len(records) != _COUNTS[split]:
         raise ValueError("duplicate manifest condition")
-    signature = _digest(
-        {
+    signature_inputs = {
             "manifest": expected_hash,
             "checkpoint": checkpoint_sha256,
             "config": config,
@@ -241,7 +239,9 @@ def _evaluate_split(
             "weight_identity_kind": weight_identity_kind,
             "reduction_schema": 2,
         }
-    )
+    if scale_only:
+        signature_inputs["active_families"] = ["multiscale_spectrum"]
+    signature = _digest(signature_inputs)
     root = Path(output_dir)
     seen, rows = set(), []
     started = perf_counter()
