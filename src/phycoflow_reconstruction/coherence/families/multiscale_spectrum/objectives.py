@@ -152,6 +152,7 @@ def signed_band_terms(
     band_weights: torch.Tensor,
     piece_measures: torch.Tensor | None = None,
     mean_scale: torch.Tensor | None = None,
+    diagnostic_context: dict | None = None,
 ) -> SignedBandTerms:
     """Signed-band score, optional fair joint score and band-coherence auxiliary."""
     results: dict[str, TermResult] = {}
@@ -261,6 +262,9 @@ def signed_band_terms(
             mass=mass,
             **mean_args,
         )
+        if diagnostic_context is not None:
+            diagnostic_context["joint_attraction"] = joint_attraction.mean() * joint_weight
+            diagnostic_context["joint_separation"] = -joint_repulsion.mean() * joint_weight
         path = f"{FAMILY_NAME}.{MEAN_JOINT_ENERGY_PATH if augmented else JOINT_ENERGY_PATH}"
         joint_report = {
             "conditional_draws": conditional_draws,

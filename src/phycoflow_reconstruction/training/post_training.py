@@ -321,6 +321,18 @@ def _coherence_objective(
         )
     if step_context is not None:
         step_context.setdefault("persistence_cache", {})
+        if "round7_scale_components" in step_context:
+            query_ids = selected.metadata.get("query_indices")
+            step_context["round7_identity"] = {
+                "sample_ids": list(selected.sample_ids),
+                "query_indices": query_ids.detach().cpu().tolist() if isinstance(query_ids, torch.Tensor) else None,
+                "draw_seeds": [int(generator.initial_seed())] + [
+                    int(_conditional_draw_seed(generator.initial_seed(), draw))
+                    for draw in range(1, _conditional_draw_count(active_families))],
+                "unique_condition_count": len(set(selected.sample_ids)),
+                "shape_queries": ([asdict(q) for q in step_context["query_selection"].queries]
+                                  if "query_selection" in step_context else None),
+            }
     if step_context is not None and source_anchor_model is not None:
 
         def reconstruct(candidate):
@@ -437,7 +449,7 @@ def _coherence_objective(
                     "reference_ids": reference_ids,
                     **batch_measure_context(selected),
                     **(
-                        {"persistence_cache": step_context["persistence_cache"], **({"query_selection": step_context["query_selection"]} if "query_selection" in step_context else {})}
+                        {"persistence_cache": step_context["persistence_cache"], **({"query_selection": step_context["query_selection"]} if "query_selection" in step_context else {}), **({"round7_scale_components": step_context["round7_scale_components"]} if family_name == "multiscale_spectrum" and "round7_scale_components" in step_context else {})}
                         if step_context is not None
                         else {}
                     ),
@@ -447,6 +459,21 @@ def _coherence_objective(
         )
         family_results[family_name] = result
         inclusion_scale = 1.0 / probability
+        if (family_name == "multiscale_spectrum" and step_context is not None
+                and step_context.get("round7_component_probe", False)):
+            from ..coherence.families.multiscale_relation import SELF_PATH, RHO_PATH
+            from ..coherence.families.multiscale_spectrum.objectives import (
+                FAMILY_NAME, SIGNED_BAND_PATH, MEAN_JOINT_ENERGY_PATH,
+            )
+            paths = {"signed": f"{FAMILY_NAME}.{SIGNED_BAND_PATH}",
+                     "joint": f"{FAMILY_NAME}.{MEAN_JOINT_ENERGY_PATH}",
+                     "self": SELF_PATH, "rho": RHO_PATH}
+            capture = step_context["round7_scale_components"]
+            factor = float(getattr(family_module, "family_weight", 1.0)) * float((family_scales or {}).get(family_name, 1.0)) * inclusion_scale
+            for key, path in paths.items():
+                capture[key] = factor * float(result.diagnostics["components"][path]["weight"]) * result.component_results[path].scalar_loss
+            capture["joint_attraction"] = capture["joint_attraction"] * factor
+            capture["joint_separation"] = capture["joint_separation"] * factor
         if family_losses is not None:
             family_losses[family_name] = inclusion_scale * result.scalar_loss
         component_results.update(result.component_results)
@@ -1732,6 +1759,12 @@ def run_post_training(
         config["coherence"], train_dataset.data_spec, train_dataset.normalizer
     )
     families = {name: family.to(device) for name, family in families.items()}
+    round7_log = store.run_dir / "logs/round7_updates.jsonl"
+    if (checkpoint is not None and external_settings is not None
+            and external_settings.get("round7_diagnostics", False) and round7_log.exists()):
+        retained = [line for line in round7_log.read_text().splitlines()
+                    if int(json.loads(line)["step"]) <= start_step]
+        round7_log.write_text("".join(line + "\n" for line in retained))
     coverage_sampler = None
     coverage = config["coherence"].get("query_coverage", {})
     if coverage.get("enabled", False):
@@ -1917,7 +1950,32 @@ def run_post_training(
             else:
                 shared_binding = shared_reference_binding(config, source_hashes=source_hashes_before,
                     family_scales=family_scales, **binding_arguments)
-                reference, reference_bytes = load_shared_reference(shared_path, shared_hash, shared_binding)
+                preference = external_settings.get("direction_preference")
+                topology = config["coherence"].get("families", {}).get("topology", {})
+                fair_shape = topology.get("persistence", {}).get("definition") == "conditional_fixed_transform_fair_v1"
+                child_arm = "P" if preference is not None else ("T" if fair_shape else None)
+                child_digest = None
+                if child_arm is not None:
+                    from .round7_recipe_binding import bind_child, digest
+                    parent_artifact = json.loads(Path(shared_path).read_bytes())
+                    reference, reference_bytes, child_record = bind_child(
+                        shared_path, shared_hash, parent_artifact["binding"], shared_binding,
+                        arm=child_arm, preference=preference,
+                    )
+                    child_digest = digest(child_record)
+                    child_path = store.run_dir / "artifacts/round7_child_binding.json"
+                    if checkpoint is None:
+                        store.write_json("artifacts/round7_child_binding.json", child_record)
+                    else:
+                        manifest = json.loads((store.run_dir / "run_manifest.json").read_text())
+                        if (not child_path.is_file() or json.loads(child_path.read_text()) != child_record
+                                or checkpoint.get("round7_child_binding_sha256") != child_digest
+                                or manifest.get("round7_child_binding_sha256") != child_digest):
+                            raise ValueError("Round 7 child recipe recovery binding mismatch")
+                    store.update_manifest(round7_child_binding_sha256=child_digest,
+                                          round7_child_binding_artifact="artifacts/round7_child_binding.json")
+                else:
+                    reference, reference_bytes = load_shared_reference(shared_path, shared_hash, shared_binding)
             local_shared_path = store.run_dir / "artifacts" / "shared_fidelity_reference.json"
             if checkpoint is None:
                 local_shared_path.write_bytes(reference_bytes)
@@ -1935,6 +1993,8 @@ def run_post_training(
                 )
             policy = ExternalPolicy(external_settings, reference, device)
             policy.shared_fidelity_reference_sha256 = shared_hash
+            if scale_only_supplement is None and child_digest is not None:
+                policy.round7_child_binding_sha256 = child_digest
             if supplement_binding is not None:
                 policy.scale_only_binding_sha256 = digest
             store.update_manifest(
@@ -2434,7 +2494,17 @@ def run_post_training(
                 "native_data_loss_calls": 0,
             }
         if coherence_active or retention_active:
-            step_context = {} if constrained or coverage_sampler is not None else None
+            r7_enabled = bool(policy is not None and policy.settings.get("round7_diagnostics", False))
+            r7_window = epoch in {100, 300, 500, 800, 1000, 1500, 2000}
+            r7_warmup = global_step + 1 in {1, 76}
+            r7_due = r7_enabled and (r7_warmup or r7_window)
+            r7_component = r7_due and (r7_warmup or global_step % steps_per_epoch + 1 in {1, 7, 13})
+            if r7_window and r7_enabled and steps_per_epoch != 13:
+                raise ValueError("Round 7 diagnostics require 13 ordinary updates per reporting epoch")
+            step_context = {} if constrained or coverage_sampler is not None or r7_due else None
+            if r7_due:
+                step_context["round7_scale_components"] = {}
+                step_context["round7_component_probe"] = r7_component
             if coverage_sampler is not None:
                 step_context["query_selection"] = coverage_sampler.select()
             endpoint_context = {} if policy is not None else None
@@ -2605,6 +2675,14 @@ def run_post_training(
                             gradient = policy.update_with_coherence_aggregation(
                                 model, optimizer, families_abt, risks,
                                 config["optimization"].get("grad_clip"), coherence_aggregator,
+                                diagnostic_context=({
+                                    "projection_scales": [1., 1., 1.],
+                                    "components": step_context["round7_scale_components"] if r7_component else None,
+                                    "temperature_field": "T",
+                                    "identity": {**step_context["round7_identity"],
+                                                 "family_scales": dict(family_scales),
+                                                 "projection_basis": "family gradients already calibrated by frozen family scales"},
+                                } if r7_due else None),
                             )
                         finally:
                             policy.force_periodic_refresh = False
@@ -2692,6 +2770,11 @@ def run_post_training(
                 **_family_scalar_report(result),
                 **gradient,
             )
+            if r7_enabled:
+                with round7_log.open("a") as handle:
+                    handle.write(json.dumps(_json_safe({"step": global_step + 1, "epoch": epoch,
+                        "optimizer_lr": float(optimizer.param_groups[0]["lr"]),
+                        "gradient": gradient}), allow_nan=False) + "\n")
             if "lpc_ordered" in gradient:
                 row["objective_semantics"] = "T_over_T0_with_dense_A_B_and_endpoint_constraints"
                 with (store.run_dir / "logs/lpc_ordered_updates.jsonl").open("a") as handle:
@@ -3113,6 +3196,8 @@ def _post_checkpoint_payload(
             payload["scale_only_binding_sha256"] = policy.scale_only_binding_sha256
         if hasattr(policy, "shared_fidelity_reference_sha256"):
             payload["shared_fidelity_reference_sha256"] = policy.shared_fidelity_reference_sha256
+        if hasattr(policy, "round7_child_binding_sha256"):
+            payload["round7_child_binding_sha256"] = policy.round7_child_binding_sha256
         if hasattr(policy, "lpc_ordered"):
             from .lpc_ordered import implementation_binding as ordered_implementation_binding
 

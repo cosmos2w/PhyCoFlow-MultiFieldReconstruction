@@ -112,6 +112,7 @@ class TrainingMonitor:
         self._values: dict[str, list[float]] = defaultdict(list)
         self._coherence_semantics: set[str] = set()
         self._data_semantics: set[str] = set()
+        self._validation_plot_label = "Fixed validation · recorded metric"
         self._epoch_sums: dict[str, float] = defaultdict(float)
         self._epoch_counts: dict[str, int] = defaultdict(int)
         self._epoch_latest: dict[str, Any] = {}
@@ -168,6 +169,8 @@ class TrainingMonitor:
                         self._capture(json.loads(line))
 
     def _capture(self, row: Mapping[str, Any]) -> None:
+        if row.get("validation_plot_label"):
+            self._validation_plot_label = str(row["validation_plot_label"])
         step = int(row.get("step", 0))
         coherence = row.get("coherence_loss")
         if isinstance(coherence, (int, float)) and math.isfinite(float(coherence)):
@@ -385,6 +388,9 @@ class TrainingMonitor:
             "epoch": float(report["training_epoch"]),
             "validation_loss": float(report["loss"]),
             "components": dict(report.get("components", {})),
+            "validation_plot_label": str(report.get(
+                "validation_plot_label", "Fixed validation · recorded metric"
+            )),
         }
         with self.validation_history_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(row, sort_keys=True) + "\n")
@@ -562,7 +568,7 @@ class TrainingMonitor:
                 axis.text(
                     1.0,
                     1.015,
-                    "Native model objective · one fixed validation sample",
+                    self._validation_plot_label,
                     transform=axis.transAxes,
                     ha="right",
                     va="bottom",

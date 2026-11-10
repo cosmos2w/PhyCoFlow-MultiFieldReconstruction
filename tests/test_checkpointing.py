@@ -48,6 +48,29 @@ class _FidelityPreview(_Preview):
         return None
 
 
+def test_extra_fixed_validation_epochs_do_not_follow_recovery_cadence(tmp_path):
+    config = {"stage": "post_training", "checkpointing": {
+        "every_epochs": 25, "validation_every_epochs": 100,
+        "validation_epochs": [750], "selection_metric": "fixed_endpoint"}}
+    store = RunStore.create(tmp_path, "extra_validation", config)
+    manager = PeriodicCheckpointManager(config, store=store, steps_per_epoch=13)
+    model = torch.nn.Linear(1, 1)
+    calls = []
+    class NoPreview:
+        enabled = False
+        def due(self, step): return False
+        def update(self, *args, **kwargs): return None
+    def panel(step):
+        calls.append(step)
+        return {"metrics": {"mse_normalized": 1., "validation_plot_label": "VALIDATION100 · field MSE"}}
+    manager.panel_evaluator = panel
+    for epoch in (725, 750, 775, 800):
+        manager.save({"model": model.state_dict()}, model=model, preview=NoPreview(),
+                     global_step=13 * epoch, fallback_metric=0.)
+    assert calls == [13 * 750, 13 * 800]
+    assert manager.last_validation_report["validation_plot_label"] == "VALIDATION100 · field MSE"
+
+
 def test_reconstruction_panel_is_authoritative_between_validation_epochs(tmp_path):
     config = {"stage": "base_training", "checkpointing": {
         "every_epochs": 1, "validation_every_epochs": 2,

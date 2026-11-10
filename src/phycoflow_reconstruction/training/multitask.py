@@ -338,6 +338,30 @@ class OuterAggregator:
         )
 
 
+def preferred_config_direction(gradients: Tensor, uniform: Tensor, preference: Tensor) -> tuple[Tensor, dict[str, Any]]:
+    """Pinned TorchJD preference on the same FP64 rows, norm matched to uniform."""
+    from torchjd.aggregation import ConFIG
+
+    if gradients.dtype != torch.float64 or preference.shape != (gradients.shape[0],):
+        raise ValueError("preferred ConFIG requires FP64 rows and one preference per row")
+    if not bool(torch.isfinite(preference).all()) or bool((preference <= 0).any()):
+        raise ValueError("ConFIG preferences must be positive and finite")
+    preferred = ConFIG(pref_vector=preference)(gradients)
+    n0 = torch.linalg.vector_norm(uniform)
+    np = torch.linalg.vector_norm(preferred)
+    if not bool(torch.isfinite(uniform).all() and torch.isfinite(preferred).all()) or not bool((n0 > 0) & (np > 0)):
+        raise FloatingPointError("invalid uniform or preferred ConFIG direction")
+    applied = preferred * (n0 / np)
+    products = gradients @ applied
+    tolerance = 64 * torch.finfo(torch.float64).eps * torch.linalg.vector_norm(gradients, dim=1) * n0
+    if not bool(torch.isfinite(applied).all()) or not bool((products > tolerance).all()):
+        raise FloatingPointError("preferred ConFIG direction has nonpositive or numerically unresolved family product")
+    return applied, {"uniform_direction_norm": float(n0), "preferred_direction_norm": float(np),
+                     "uniform_directional_products": (gradients @ uniform).cpu().tolist(),
+                     "positive_product_tolerance": tolerance.cpu().tolist(),
+                     "preferred_directional_products": (gradients @ preferred).cpu().tolist()}
+
+
 def _gradient_diagnostics(
     gradients: Tensor, direction: Tensor, *, method: str,
     row_norms: Tensor | None = None, row_gram: Tensor | None = None,
@@ -373,13 +397,17 @@ def _gradient_diagnostics(
     )).cpu().tolist()
     pairwise_end = count + 1 + count * count
     pairwise = observed[count + 1 : pairwise_end]
+    products = observed[pairwise_end + 1 :]
+    direction_norm = observed[pairwise_end]
     return {
         "method": method,
         "gradient_norms": observed[:count],
         "gradient_cosine": observed[count],
         "pairwise_gradient_cosines": [pairwise[i * count : (i + 1) * count] for i in range(count)],
-        "direction_norm": observed[pairwise_end],
-        "directional_products": observed[pairwise_end + 1 :],
+        "direction_norm": direction_norm,
+        "directional_products": products,
+        "directional_cosines": [p / (n * direction_norm) if n > 0 and direction_norm > 0 else 0.0
+                                for p, n in zip(products, observed[:count])],
     }
 
 

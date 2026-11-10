@@ -86,7 +86,7 @@ def validate_persistence_config(config: Mapping, field_names=None) -> None:
     if set(settings) - PERSISTENCE_KEYS:
         raise ValueError("unknown topology.persistence keys")
     definition = settings.get("definition", "legacy_v3")
-    if definition not in {"legacy_v3", "finite_primary_v1"}:
+    if definition not in {"legacy_v3", "finite_primary_v1", "conditional_fixed_transform_fair_v1"}:
         raise ValueError("unknown persistence.definition")
     if definition == "legacy_v3" and "calibration" in settings:
         raise ValueError("persistence.calibration requires finite_primary_v1")
@@ -183,7 +183,7 @@ def validate_persistence_config(config: Mapping, field_names=None) -> None:
         )
         if not 0 < floor <= 1 or not math.isfinite(extent) or extent < 0:
             raise ValueError("mutual directions must be positive and offsets finite")
-    if definition == "finite_primary_v1":
+    if definition in {"finite_primary_v1", "conditional_fixed_transform_fair_v1"}:
         validate_finite_primary_config(config, fields)
 
 

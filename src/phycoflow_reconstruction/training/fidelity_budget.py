@@ -12,7 +12,7 @@ from torch import Tensor, nn
 
 from .gradient_balance import _assign_flat_gradient, _flat_gradient
 from .gradients import stable_clip_grad_norm_
-from .multitask import OuterAggregator
+from .multitask import OuterAggregator, _gradient_diagnostics, preferred_config_direction
 
 
 def field_error_sums(prediction: Tensor, target: Tensor, mask: Tensor) -> tuple[Tensor, Tensor]:
@@ -366,6 +366,7 @@ class ExternalPolicy:
         risks: Tensor,
         grad_clip: float | None,
         aggregator: OuterAggregator,
+        diagnostic_context: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Apply internal ConFIG over ordered families with one external budget policy.
 
@@ -449,6 +450,21 @@ class ExternalPolicy:
             config_direction, aggregation_diagnostics = aggregator._aggregate(
                 matrix64, row_norms=family_norms, row_gram=gram
             )
+            uniform_direction = config_direction
+            preference = self.settings.get("direction_preference")
+            preference_diagnostics = None
+            if preference is not None:
+                if (tuple(preference.get("family_order", ())) != family_names
+                        or preference.get("norm_match") is not True
+                        or preference.get("vector") != [1.0, 1.2, 1.0]
+                        or getattr(self, "periodic_config", None) is not None):
+                    raise ValueError("ConFIG preference family order or norm match differs")
+                config_direction, preference_diagnostics = preferred_config_direction(
+                    matrix64, config_direction, matrix64.new_tensor(preference["vector"])
+                )
+                aggregation_diagnostics = _gradient_diagnostics(
+                    matrix64, config_direction, method=aggregator.method, row_norms=family_norms, row_gram=gram
+                )
             periodic = getattr(self, "periodic_config", None)
             if periodic is not None:
                 from .periodic_config import extract_config_coefficients
@@ -472,6 +488,10 @@ class ExternalPolicy:
                 aggregation_dtype=str(matrix64.dtype),
                 matrix_rank=matrix_rank,
                 matrix_rank_deficient=matrix_rank < len(family_names),
+                gram_rank_label="rank_deficient" if matrix_rank < len(family_names) else "full_rank",
+                preference_identity="round7_scale_1.2" if preference is not None else "uniform",
+                applied_direction_identity="norm_matched_preferred_config" if preference is not None else "uniform_config",
+                preference_diagnostics=preference_diagnostics,
                 zero_gradient_flags=dict(zip(family_names, (bool(value) for value in zero_flags.cpu()))),
                 gradient_norms_by_family=dict(zip(family_names, aggregation_diagnostics["gradient_norms"])),
                 directional_products_by_family=dict(
@@ -553,7 +573,69 @@ class ExternalPolicy:
             raise FloatingPointError("model gradient norm is non-finite; refusing update")
         clip_coefficient = min(1.0, clip / (norm_value + 1.0e-6)) if clip else 1.0
 
+        if phase == "improve" and self.settings.get("round7_diagnostics", False):
+            applied_gradient = torch.cat([p.grad.detach().reshape(-1).double() for p in parameters])
+            applied_products = matrix64 @ applied_gradient
+            applied_norm = torch.linalg.vector_norm(applied_gradient)
+            if not bool(torch.isfinite(applied_norm)) or not bool(applied_norm > 0):
+                raise FloatingPointError("applied clipped gradient is zero or non-finite")
+            denominators = family_norms * applied_norm
+            aggregation_diagnostics["applied_gradient_products_by_family"] = dict(
+                zip(family_names, applied_products.cpu().tolist()))
+            aggregation_diagnostics["applied_gradient_cosines_by_family"] = dict(
+                zip(family_names, (applied_products / denominators).cpu().tolist()))
+
+        telemetry = None
+        if diagnostic_context is not None:
+            from time import perf_counter
+            from .round7_step_diagnostics import (component_gradients, projected_benefits,
+                                                  shadow_adamw, snapshot)
+            if phase != "improve" or self.method != "lagrangian":
+                raise ValueError("Round 7 telemetry requires the Lagrangian ConFIG route")
+            start = perf_counter()
+            scales = diagnostic_context["projection_scales"]
+            before = snapshot(parameters)
+            probes = {}
+            if diagnostic_context.get("components") is not None:
+                probes = component_gradients(diagnostic_context["components"], parameters, matrix64[1])
+                temperature_index = self.reference.field_names.index(diagnostic_context["temperature_field"])
+                probes["temperature_risk"] = _flat_gradient(risks[temperature_index], parameters).detach().double()
+                probes["temperature_violation"] = _flat_gradient(violations[temperature_index], parameters).detach().double()
+            proposals = {}
+            if preference is None:
+                alternate, _ = preferred_config_direction(matrix64, uniform_direction, matrix64.new_tensor([1., 1.2, 1.]))
+                proposals["preferred"] = alternate / self.reference.objective_scale + constraint_gradient
+            else:
+                proposals["uniform"] = uniform_direction / self.reference.objective_scale + constraint_gradient
+            if probes:
+                proposals["scale_only"] = matrix64[1] / self.reference.objective_scale + constraint_gradient
+            gradient_seconds = perf_counter() - start
+            count = getattr(self, "round7_shadow_count", 0)
+            if count + len(proposals) > 256:
+                raise RuntimeError("Round 7 shadow proposal cap exceeded")
+            shadows = {}
+            for name, proposal in proposals.items():
+                delta, seconds = shadow_adamw(optimizer, parameters, proposal, clip)
+                shadows[name] = {"family_benefits": projected_benefits(matrix64, delta, scales),
+                    "component_products": {k: float(-torch.dot(v, delta)) for k, v in probes.items()},
+                    "seconds": seconds}
+            self.round7_shadow_count = count + len(proposals)
+            telemetry = {"before": before, "matrix": matrix64, "probes": probes, "scales": scales,
+                         "started": start, "shadows": shadows, "gradient_seconds": gradient_seconds}
+
         optimizer.step()
+        if telemetry is not None:
+            from .round7_step_diagnostics import displacement, projected_benefits
+            delta = displacement(parameters, telemetry["before"])
+            policy_diagnostics["round7_actual_step"] = {
+                "family_benefits": projected_benefits(telemetry["matrix"], delta, telemetry["scales"]),
+                "component_products": {k: float(-torch.dot(v, delta)) for k, v in telemetry["probes"].items()},
+                "shadows": telemetry["shadows"], "shadow_count_total": self.round7_shadow_count,
+                "extra_gradient_evaluations": len(telemetry["probes"]),
+                "gradient_and_direction_seconds": telemetry["gradient_seconds"],
+                "diagnostic_seconds": perf_counter() - telemetry["started"],
+                "identity": diagnostic_context["identity"],
+            }
         if not _all_finite(parameters):
             raise FloatingPointError("model optimizer produced non-finite parameters")
         if self.method == "lagrangian":
@@ -678,6 +760,8 @@ class ExternalPolicy:
         }
         if getattr(self, "periodic_config", None) is not None:
             state["periodic_config"] = self.periodic_config.state_dict()
+        if self.settings.get("round7_diagnostics", False):
+            state["round7_shadow_count"] = getattr(self, "round7_shadow_count", 0)
         return state
 
     def load_state_dict(self, state: Mapping[str, Any]) -> None:
@@ -691,6 +775,11 @@ class ExternalPolicy:
         if isinstance(updates, bool) or not isinstance(updates, int) or updates < 0:
             raise ValueError("invalid completed update count")
         self.completed_updates = updates
+        if self.settings.get("round7_diagnostics", False):
+            count = state.get("round7_shadow_count")
+            if isinstance(count, bool) or not isinstance(count, int) or not 0 <= count <= 256:
+                raise ValueError("invalid Round 7 shadow count in checkpoint")
+            self.round7_shadow_count = count
         periodic = getattr(self, "periodic_config", None)
         if (periodic is not None) != ("periodic_config" in state):
             raise ValueError("periodic ConFIG recovery state/configuration mismatch")

@@ -281,6 +281,7 @@ def _validate_common_sections(config: Mapping[str, Any]) -> None:
             "save_epoch_one",
             "selection_metric",
             "validation_every_epochs",
+            "validation_epochs",
         },
         "checkpointing",
     )
@@ -299,6 +300,14 @@ def _validate_common_sections(config: Mapping[str, Any]) -> None:
             raise ValueError("checkpointing.validation_every_epochs must be a positive integer")
         if checkpointing.get("selection_metric") not in {"topology_with_fidelity", "reconstruction_mse", "fixed_endpoint"}:
             raise ValueError("validation_every_epochs requires topology_with_fidelity, reconstruction_mse or fixed_endpoint")
+    if "validation_epochs" in checkpointing:
+        epochs = checkpointing["validation_epochs"]
+        if (not isinstance(epochs, (list, tuple)) or not epochs
+                or any(isinstance(e, bool) or not isinstance(e, int) or e < 1 for e in epochs)
+                or len(set(epochs)) != len(epochs)):
+            raise ValueError("checkpointing.validation_epochs must contain unique positive integer epochs")
+        if checkpointing.get("selection_metric") not in {"topology_with_fidelity", "reconstruction_mse", "fixed_endpoint"}:
+            raise ValueError("validation_epochs requires a fixed-panel selection metric")
     if "epochs" in checkpointing:
         epochs = checkpointing["epochs"]
         if (
@@ -486,12 +495,31 @@ def _validate_external_policy(multitask: Mapping[str, Any]) -> None:
             "optimization.multitask.external_policy.method must be one of "
             f"{sorted(methods)}"
         )
-    allowed = {"method", "vector_reduction", "objective_scale"}
+    allowed = {"method", "vector_reduction", "objective_scale", "direction_preference", "round7_diagnostics"}
     if method == "lagrangian":
         allowed.add("lagrangian")
     elif method == "extended_log_barrier":
         allowed.add("extended_log_barrier")
     _reject_unknown(external, allowed, "optimization.multitask.external_policy")
+    if "round7_diagnostics" in external:
+        if external["round7_diagnostics"] is not True or method != "lagrangian":
+            raise ValueError("round7_diagnostics must be true with Lagrangian policy")
+        if multitask.get("coherence_aggregation", {}).get("method") != "torchjd_config":
+            raise ValueError("round7_diagnostics requires torchjd_config aggregation")
+    preference = external.get("direction_preference")
+    if preference is not None:
+        if not isinstance(preference, Mapping):
+            raise TypeError("direction_preference must be a mapping")
+        _reject_unknown(preference, {"family_order", "vector", "norm_match"}, "direction_preference")
+        vector = preference.get("vector")
+        if (preference.get("family_order") != ["global_distribution", "multiscale_spectrum", "topology"]
+                or not isinstance(vector, list) or len(vector) != 3
+                or any(isinstance(v, bool) or not isinstance(v, (int, float)) for v in vector)
+                or vector != [1.0, 1.2, 1.0]
+                or preference.get("norm_match") is not True):
+            raise ValueError("direction_preference must declare the exact Round 7 ordered preference and norm match")
+        if multitask.get("coherence_aggregation", {}).get("method") != "torchjd_config":
+            raise ValueError("direction_preference requires torchjd_config coherence aggregation")
     if external.get("vector_reduction") != "sum":
         raise ValueError(
             "optimization.multitask.external_policy.vector_reduction must be sum"
@@ -1183,12 +1211,12 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
 
             component_keys = PERSISTENCE_COMPONENT_KEYS
             validate_persistence_config(family, tuple(config["dataset"]["field_names"]))
-            if family.get("persistence", {}).get("definition") == "finite_primary_v1":
+            if family.get("persistence", {}).get("definition") in {"finite_primary_v1", "conditional_fixed_transform_fair_v1"}:
                 optimization_settings = config["optimization"]
                 if optimization_settings.get("execution_strategy") is not None or (
                     optimization_settings.get("lpc_ordered") is not None
                 ):
-                    raise ValueError("finite_primary_v1 requires full direct filtration execution")
+                    raise ValueError("finite and conditional-fair Shape require full direct filtration execution")
         _reject_unknown(components, set(component_keys), f"{family_name}.components")
         for component_name, settings in components.items():
             _reject_unknown(

@@ -29,6 +29,7 @@ class PeriodicCheckpointManager:
         self.every_epochs = int(settings.get("every_epochs", 10))
         self.every_steps = settings.get("every_steps")
         self.validation_every_epochs = settings.get("validation_every_epochs")
+        self.validation_epochs = frozenset(int(e) for e in settings.get("validation_epochs", ()))
         self.save_epoch_one = bool(settings.get("save_epoch_one", False))
         configured_epochs = settings.get("epochs")
         self.checkpoint_epochs = (
@@ -98,8 +99,9 @@ class PeriodicCheckpointManager:
     ) -> bool:
         """Return whether either independent epoch cadence needs saved weights."""
         epoch = self._epoch(global_step)
-        panel_due = (self.enabled and self.validation_every_epochs is not None and epoch is not None
-                     and epoch % int(self.validation_every_epochs) == 0)
+        panel_due = (self.enabled and epoch is not None and (
+            epoch in self.validation_epochs or
+            (self.validation_every_epochs is not None and epoch % int(self.validation_every_epochs) == 0)))
         return self.due(global_step) or preview.due(global_step) or panel_due
 
     def save(
@@ -147,6 +149,7 @@ class PeriodicCheckpointManager:
         epoch = self._epoch(global_step)
         panel_due = (force or self.validation_every_epochs is None or
                      (epoch is not None and epoch % int(self.validation_every_epochs) == 0)
+                     or epoch in self.validation_epochs
                      or (self.selection_metric == "reconstruction_mse"
                          and self.save_epoch_one and epoch == 1))
         if self.selection_metric == "fixed_endpoint":
@@ -159,7 +162,10 @@ class PeriodicCheckpointManager:
                 if reconstruction_report["metrics"] is not None:
                     metric_value = float(reconstruction_report["metrics"]["mse_normalized"])
                     self.last_validation_report = {"global_step": global_step, "loss": metric_value,
-                        "training_epoch": global_step / self.steps_per_epoch}
+                        "training_epoch": global_step / self.steps_per_epoch,
+                        "validation_plot_label": reconstruction_report["metrics"].get(
+                            "validation_plot_label", "Fixed validation · mean field MSE · model units squared"
+                        )}
             eligible_for_best = False
         elif self.selection_metric == "topology_with_fidelity" and not panel_due:
             eligible_for_best = False

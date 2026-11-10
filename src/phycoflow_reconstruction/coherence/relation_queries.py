@@ -70,7 +70,7 @@ def resolve_coverage_config(config, dataset_field_names):
     topology = families.get("topology")
     if (isinstance(topology, dict) and topology.get("enabled", True)
             and topology.get("strategy") == "cubical_persistence"
-            and topology.get("persistence", {}).get("definition") == "finite_primary_v1"):
+            and topology.get("persistence", {}).get("definition") in {"finite_primary_v1", "conditional_fixed_transform_fair_v1"}):
         previous_fields = tuple(topology.get("fields") or dataset_field_names or ())
         changed_fields = previous_fields != fields
         if changed_fields:

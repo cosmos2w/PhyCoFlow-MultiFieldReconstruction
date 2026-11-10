@@ -49,6 +49,7 @@ def test_monitor_loads_history_and_updates_loss_figure(tmp_path):
             "training_epoch": 1.0,
             "loss": 2.5,
             "components": {"data_mse": 2.5},
+            "validation_plot_label": "VALIDATION100 · mean 5-field MSE · model units squared · Q4096",
         }
     )
     monitor.finish_step(checkpoint_checked=True, best_checkpoint_saved=True)
@@ -75,6 +76,11 @@ def test_monitor_loads_history_and_updates_loss_figure(tmp_path):
     assert monitor.last_epoch_report["wall_seconds"] >= monitor.last_epoch_report["train_seconds"]
     validation_history = json.loads((metrics / "validation_history.jsonl").read_text())
     assert validation_history["validation_loss"] == 2.5
+    assert validation_history["validation_plot_label"] == "VALIDATION100 · mean 5-field MSE · model units squared · Q4096"
+    reloaded = TrainingMonitor(tmp_path, start_step=2, final_step=2, configured_steps=2,
+                               steps_per_epoch=2, description="test", enabled=False)
+    assert reloaded._validation_plot_label == validation_history["validation_plot_label"]
+    reloaded.close()
 
 
 def test_loss_figure_uses_independent_panels_without_duplicate_overview(tmp_path):
@@ -126,7 +132,7 @@ def test_loss_figure_uses_independent_panels_without_duplicate_overview(tmp_path
     assert all(axis.get_yscale() == "log" for axis in figure.axes[1:])
     assert validation_axis.lines[0].get_marker() == "o"
     assert [text.get_text() for text in validation_axis.texts] == [
-        "Native model objective · one fixed validation sample"
+        "Fixed validation · recorded metric"
     ]
     figure.canvas.draw()
     assert validation_axis.get_position().width > 1.5 * data_axis.get_position().width

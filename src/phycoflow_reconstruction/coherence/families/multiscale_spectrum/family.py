@@ -970,6 +970,7 @@ class MultiscaleSpectrumFamily(nn.Module):
                     band_weights=self._band_weights(self.compute_dtype, generated.device),
                     piece_measures=self.piece_measures if self.mean_augmented else None,
                     mean_scale=self.piece_mean_scale if self.mean_augmented else None,
+                    diagnostic_context=context.get("round7_scale_components"),
                 )
             per_sample, signed_report = signed.per_sample_cost, signed.report
             results.update(signed.component_results)
@@ -1094,9 +1095,11 @@ class MultiscaleSpectrumFamily(nn.Module):
             self.mean_augmented
             and artifact.get("implementation_identity") != _implementation_identity()
         ):
-            raise ValueError(
-                "multiscale_spectrum mean-augmented implementation/backend identity mismatch"
-            )
+            from .round7_source_compatibility import accepts_prior_scale_identity
+            if not accepts_prior_scale_identity(artifact.get("implementation_identity"), _implementation_identity()):
+                raise ValueError(
+                    "multiscale_spectrum mean-augmented implementation/backend identity mismatch"
+                )
         state = artifact["state_dict"]
         device = self.normalization_offset.device
         for name in {**GEOMETRY_BUFFERS, **CALIBRATION_BUFFERS}:
