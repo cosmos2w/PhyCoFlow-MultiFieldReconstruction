@@ -145,3 +145,26 @@ def test_negative_selection_still_renders_fixed_endpoint_figure(tmp_path):
     from PIL import Image
     with Image.open(tmp_path / 'fixed_endpoint_evidence.png') as image:
         image.verify()
+
+
+def test_s100_evidence_uses_matched_saved_validation_only(tmp_path):
+    from phycoflow_reconstruction.evaluation.round7_report import _s100_validation_evidence
+    artifacts = tmp_path / 'artifacts'
+    artifacts.mkdir()
+    for name in ('SOURCE', 'S100'):
+        (artifacts / f'reference_{name}.json').write_text(json.dumps({
+            'validation': {'reductions': name + '_validation.json'}}))
+    calls = []
+    def summarize(path, fields):
+        calls.append((path, fields))
+        return {'identity': path, 'scores': {'scale': 1.}}
+    def compare(source, candidate):
+        assert source['identity'] == 'SOURCE_validation.json'
+        assert candidate['identity'] == 'S100_validation.json'
+        return {'changes': {'scale': {'reference': 1., 'candidate': .9,
+                                      'raw_change': -.1, 'fractional_change': -.1}}}
+    result = _s100_validation_evidence(tmp_path, ['T'], summarize, compare)
+    assert calls == [('SOURCE_validation.json', ['T']), ('S100_validation.json', ['T'])]
+    assert result['support'] == 'VALIDATION100 Q4096'
+    assert result['source_comparison']['changes']['scale']['raw_change'] == -.1
+    assert result['s100_summary']['identity'] == 'S100_validation.json'

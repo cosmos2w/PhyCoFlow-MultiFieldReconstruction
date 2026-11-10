@@ -215,6 +215,21 @@ def _fixed_panel_evidence(campaign, fields, summarize, compare):
     return result
 
 
+
+def _s100_validation_evidence(campaign, fields, summarize, compare):
+    """Compare the immutable secondary benchmark on the matched Q4096 panel."""
+    source_path = campaign / 'artifacts/reference_SOURCE.json'
+    s100_path = campaign / 'artifacts/reference_S100.json'
+    if not source_path.exists() or not s100_path.exists():
+        return None
+    source_receipt = json.loads(source_path.read_text())
+    s100_receipt = json.loads(s100_path.read_text())
+    source = summarize(source_receipt['validation']['reductions'], fields)
+    s100 = summarize(s100_receipt['validation']['reductions'], fields)
+    return {'support': 'VALIDATION100 Q4096', 'lineage': 'A200-plus-100 secondary benchmark',
+            'source_summary': source, 's100_summary': s100,
+            'source_comparison': compare(source, s100)}
+
 def _test_panel_evidence(entries, test, source, fields, summarize, compare):
     results = {}
     for name, entry in entries.items():
@@ -344,6 +359,7 @@ def generate_report(campaign, test_receipt, selection_path, *, gpu_seconds, atte
     fixed_evidence = _fixed_panel_evidence(campaign, fields, summarize_reductions, compare_summaries)
     test_evidence = _test_panel_evidence(entries, test, source, fields, summarize_reductions, compare_summaries)
     timing = _timing_evidence(campaign, gpu_seconds)
+    s100_evidence = _s100_validation_evidence(campaign, fields, summarize_reductions, compare_summaries)
     q_ratios, native_ratios = {}, {}
     if selected:
         changes = compare_summaries(source, selected)['changes']
@@ -416,11 +432,20 @@ def generate_report(campaign, test_receipt, selection_path, *, gpu_seconds, atte
         lines.extend([f"The matched comparison is incomplete: B stopped at epoch {event['baseline_stopped_epoch']} under the prespecified fidelity rule, before the fixed 500-epoch endpoint.", ''])
     if selection.get('endpoint') and selection['endpoint']['epoch'] > 1000:
         lines.extend([f"The selected recipe continued alone to reporting epoch {selection['endpoint']['epoch']}; its treatment comparison remains the matched epoch-1000 result.", ''])
-    s100_path = campaign / 'artifacts/reference_S100.json'
-    if s100_path.exists():
-        s100 = json.loads(s100_path.read_text())
-        s100_val = summarize_reductions(s100['validation']['reductions'], fields)
-        lines.extend([f"S100's fixed-validation complete Scale was {s100_val['scores']['scale']:.6g}; its earlier A200-plus-100 lineage is a secondary benchmark with different optimizer history.", ''])
+    if s100_evidence:
+        s100_val = s100_evidence['s100_summary']
+        lines.extend(['S100 is the earlier A200-plus-100 secondary benchmark with a different optimizer history, not a SOURCE-start causal control. This comparison uses the matched VALIDATION100 Q4096 panel; no S100 native fidelity was run.', '',
+                      '| VALIDATION100 Q4096 measure | SOURCE | S100 | Raw change | Relative change |',
+                      '| --- | ---: | ---: | ---: | ---: |'])
+        s100_changes = s100_evidence['source_comparison']['changes']
+        for key in ('state', 'scale', 'shape.fair', 'shape.legacy', *('field.' + f + '.mse' for f in fields)):
+            if key not in s100_changes:
+                continue
+            row = s100_changes[key]
+            relative = row.get('fractional_change')
+            relative_text = 'unavailable' if relative is None else f'{relative:+.2%}'
+            lines.append(f"| {key} | {row['reference']:.6g} | {row['candidate']:.6g} | {row['raw_change']:+.6g} | {relative_text} |")
+        lines.append('')
         if selection.get('endpoint'):
             selected_binding = json.loads(Path(selection['endpoint']['binding']).read_text())
             selected_val = summarize_reductions(selected_binding['validation_reductions'], fields)
@@ -550,7 +575,8 @@ def generate_report(campaign, test_receipt, selection_path, *, gpu_seconds, atte
     numeric = {'disposition': disposition, 'test_changes': changes,
         'test_q_mse_ratios': q_ratios, 'test_native_mse_ratios': native_ratios,
         'selected_test_summary': selected, 'source_test_summary': source,
-        'fixed_train_validation_endpoints': fixed_evidence, 'fixed_test_endpoints': test_evidence, 'timing': timing}
+        'fixed_train_validation_endpoints': fixed_evidence, 'fixed_test_endpoints': test_evidence,
+        's100_validation': s100_evidence, 'timing': timing}
     (output / 'numeric_summary.json').write_text(json.dumps(numeric, indent=2, sort_keys=True, allow_nan=False) + '\n')
     report.write_text('\n'.join(lines))
     for target in re.findall(r'\]\(([^)]+)\)', report.read_text()):
