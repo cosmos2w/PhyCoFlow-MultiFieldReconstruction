@@ -378,6 +378,12 @@ def generate_report(campaign, test_receipt, selection_path, *, gpu_seconds, atte
              f'Frozen validation selection: {selection["selected"]}. Operational disposition after the fixed TEST100 guards: {disposition}.', '',
              'SOURCE-start post-training retained complete State and Scale, the original fidelity bounds and C0. P used a fixed norm-matched direction preference; T replaced the Shape target with a fixed-transform conditional fair score. Arm admission and observer choice are recorded in the case artifacts.', '',
              f'The fixed TEST panel contains {source["conditions"]} conditions on Q4096 and 40,300 native spatial sites. TEST was evaluated after endpoint selection and does not rerank endpoints.', '']
+    restore_path = campaign / 'artifacts/qualification_exact_restore.json'
+    original_failure = campaign / 'artifacts/qualification_original_failure.json'
+    if restore_path.exists() and original_failure.exists():
+        restore = json.loads(restore_path.read_text())
+        if restore.get('exact_loaded_state'):
+            lines.extend(['Qualification verified the actual loaded model, AdamW, dual, query, RNG and auxiliary state exactly, followed by a resumed update. An earlier comparison of independent CUDA trajectories diverged before interruption; it did not establish a restoration defect or bitwise trajectory reproducibility. Both records and all charged attempts are retained.', ''])
     for boundary in (500, 1000):
         decision = campaign / 'comparison' / f'decision_{boundary}.json'
         inputs = campaign / 'comparison' / f'decision_input_{boundary}.json'
