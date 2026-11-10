@@ -59,7 +59,7 @@ def eligible(arm: Arm, epoch: int, source_scale: float, window: Sequence[int]) -
     o = arm.observations.get(epoch)
     return bool(o and o.epoch == epoch and _endpoint(o, source_scale) and len(window) == 3 and
                 len(set(window)) == 3 and epoch in window and
-                sum(_common(arm.observations[e]) and
+                sum(arm.observations[e].epoch == e and _common(arm.observations[e]) and
                     arm.observations[e].scale <= source_scale + .02 * SCALE_UNITS
                     for e in window if e in arm.observations) >= 2)
 
