@@ -169,17 +169,39 @@ def _number(value):
     return value
 
 
+def _diagnostic_value(value):
+    """Preserve finite scalar and array reductions without model-sized tensors."""
+    if isinstance(value, torch.Tensor):
+        value = value.detach().cpu().tolist()
+    if isinstance(value, dict):
+        return {k: _diagnostic_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_diagnostic_value(v) for v in value]
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        value = float(value)
+        if math.isfinite(value):
+            return value
+    raise ValueError('non-numeric or nonfinite diagnostic')
+
+
 def _collect_family_result(name, result, losses, component_diagnostics, query_leaf_diagnostics):
     """Keep selected persistence leaves separate from stable training losses."""
     losses[f"{name}.total"] = _number(result.scalar_loss)
     for key, term in result.component_results.items():
         if not term.available:
             continue
-        details = {
-            k: _number(v)
-            for k, v in term.diagnostics.items()
-            if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(float(v))
-        }
+        details = {}
+        for k, v in term.diagnostics.items():
+            try:
+                details[k] = _diagnostic_value(v)
+            except (TypeError, ValueError):
+                continue
+        if all(k in details for k in ('band_weights', 'attraction_per_band', 'repulsion_per_band')):
+            weights, attraction, separation = (details[k] for k in ('band_weights', 'attraction_per_band', 'repulsion_per_band'))
+            if not (len(weights) == len(attraction) == len(separation)):
+                raise ValueError('signed-band diagnostic weights do not align')
+            details['weighted_attraction'] = sum(w * a for w, a in zip(weights, attraction))
+            details['weighted_separation'] = sum(w * a for w, a in zip(weights, separation))
         if name == "topology" and key not in {
             "topology.self.persistence",
             "topology.mutual.persistence",
@@ -204,6 +226,8 @@ def _evaluate_split(
     family_scales=None,
     weight_identity_kind="checkpoint_file_sha256",
     scale_only=False,
+    round7_observers=None,
+    round7_observer_identities=None,
 ):
     """Evaluate and persist one matched split; reuse only identity-matched shards.
 
@@ -227,6 +251,13 @@ def _evaluate_split(
         raise ValueError("expected three retained families and J2")
     if any(f.target_use != "paired_supervised" for f in families.values()):
         raise ValueError("loss-aligned family references must be paired")
+    if round7_observers is not None:
+        if set(round7_observers) not in ({'fair', 'legacy'}, {'legacy'}) or set(round7_observer_identities or {}) != set(round7_observers):
+            raise ValueError('Round 7 needs explicitly bound observer identities')
+        if 'fair' in round7_observers and round7_observers['fair'] is round7_observers['legacy']:
+            raise ValueError('fair and legacy observers must be distinct instances')
+        if any(not isinstance(v, str) or len(v) != 64 or any(c not in '0123456789abcdef' for c in v) for v in round7_observer_identities.values()):
+            raise ValueError('Round 7 observer SHA-256 identities required')
     records = {item["sample_id"]: item for item in manifest["splits"][split]}
     if len(records) != _COUNTS[split]:
         raise ValueError("duplicate manifest condition")
@@ -241,6 +272,9 @@ def _evaluate_split(
         }
     if scale_only:
         signature_inputs["active_families"] = ["multiscale_spectrum"]
+    if round7_observers is not None:
+        signature_inputs['round7_observer_identities'] = round7_observer_identities
+        signature_inputs['reduction_schema'] = 3
     signature = _digest(signature_inputs)
     root = Path(output_dir)
     seen, rows = set(), []
@@ -291,11 +325,13 @@ def _evaluate_split(
                 # support batch; this API intentionally refuses ambiguous inputs.
                 raise ValueError("structured-grid model requires a complete input adapter")
             losses, diagnostics, component_diagnostics, query_leaf_diagnostics = {}, {}, {}, {}
+            family_diagnostics = {}
             base = {
                 "sample_ids": batch.sample_ids,
                 "reference_ids": batch.sample_ids,
                 **batch_measure_context(batch),
             }
+            active_topology_result = None
             for name, family in families.items():
                 context = _family_context(family, base, predictions[1:])
                 if name == "topology":
@@ -306,9 +342,18 @@ def _evaluate_split(
                     coordinates=batch.query_coords,
                     context=context,
                 )
+                if name == 'topology':
+                    active_topology_result = result
                 _collect_family_result(
                     name, result, losses, component_diagnostics, query_leaf_diagnostics
                 )
+                if round7_observers is not None:
+                    family_diagnostics[name] = {}
+                    for key, value in result.diagnostics.items():
+                        try:
+                            family_diagnostics[name][key] = _diagnostic_value(value)
+                        except (TypeError, ValueError):
+                            continue
                 diagnostics[name] = {
                     "weight": float(getattr(family, "family_weight", 1.0)),
                     "calibration_scale": float((family_scales or {}).get(name, 1.0)),
@@ -330,6 +375,41 @@ def _evaluate_split(
                 "query_selection": frozen["query_selection"],
                 "elapsed_seconds": perf_counter() - tick,
             }
+            if round7_observers is not None:
+                from .round7_reductions import j2_field_reductions
+                target_power, _ = field_error_sums(batch.target_fields, torch.zeros_like(batch.target_fields),
+                                                   batch.query_valid_mask)
+                row['reference_power_sums'] = target_power.cpu().tolist()
+                observer_rows = {}
+                for observer_name, observer in round7_observers.items():
+                    observer_context = _family_context(observer, base, predictions[1:])
+                    observer_context['query_selection'] = selection
+                    if observer is families.get('topology'):
+                        result = active_topology_result
+                    else:
+                        result = observer(predictions[0], batch.target_fields,
+                                          coordinates=batch.query_coords, context=observer_context)
+                    values, components, leaves = {}, {}, {}
+                    _collect_family_result('topology', result, values, components, leaves)
+                    observer_diagnostics = {}
+                    for key, value in result.diagnostics.items():
+                        try:
+                            observer_diagnostics[key] = _diagnostic_value(value)
+                        except (TypeError, ValueError):
+                            continue
+                    observer_rows[observer_name] = {'losses': values, 'component_diagnostics': components,
+                                                    'query_leaf_diagnostics': leaves,
+                                                    'diagnostics': observer_diagnostics}
+                row['shape_observers'] = observer_rows
+                row['family_diagnostics'] = family_diagnostics
+                row['j2_unweighted_model_units'] = j2_field_reductions(
+                    predictions[0], predictions[1], batch.target_fields, batch.query_valid_mask)
+                physical_weights = base.get('generated_weights')
+                if physical_weights is None:
+                    raise ValueError('Round 7 requires declared physical measure weights')
+                row['j2_physical_measure_model_units'] = j2_field_reductions(
+                    predictions[0], predictions[1], batch.target_fields, batch.query_valid_mask,
+                    weights=physical_weights)
             _write_json(path, row)
             rows.append(row)
     if seen != set(records):
@@ -338,13 +418,14 @@ def _evaluate_split(
     _write_json(
         root / "reductions.json",
         {
-            "version": "round6_loss_aligned_v1",
+            "version": "round7_loss_aligned_v1" if round7_observers is not None else "round6_loss_aligned_v1",
             "split": split,
             "manifest_sha256": expected_hash,
             "weight_sha256": checkpoint_sha256,
             "weight_identity_kind": weight_identity_kind,
             "signature": signature,
             "provenance": manifest["provenance"],
+            **({'observer_identities': dict(round7_observer_identities)} if round7_observers is not None else {}),
             "rows": ordered,
             "timing": {
                 "invocation_seconds": perf_counter() - started,
@@ -374,6 +455,10 @@ def legacy_metrics(reductions_path, field_names):
         / sum(r["field_error_counts"][i] for r in rows)
         for i, name in enumerate(field_names)
     }
+    reference_power = None
+    if all('reference_power_sums' in row for row in rows):
+        reference_power = {name: sum(row['reference_power_sums'][i] for row in rows)
+                           for i, name in enumerate(field_names)}
     keys = set.intersection(*(set(r["losses"]) for r in rows))
     means = {key: sum(r["losses"][key] for r in rows) / len(rows) for key in keys}
     families = {}
@@ -394,8 +479,14 @@ def legacy_metrics(reductions_path, field_names):
         }
     return {
         "mse_normalized": sum(risks.values()) / len(risks),
+        "validation_plot_label": (f"{payload['split'].upper()}{len(rows)} · mean {len(field_names)}-field MSE · model units squared · Q4096"
+                                  if 'split' in payload else "Fixed validation · recorded metric"),
         "per_field_mse_normalized": risks,
         "endpoint_mse_model_units": risks,
+        **({'primary_rmse_model_units': {name: math.sqrt(value) for name, value in risks.items()},
+            'pooled_relative_l2_model_units': {name: (math.sqrt(sum(row['field_error_sums'][i] for row in rows) / reference_power[name])
+                if reference_power[name] > 0 else None) for i, name in enumerate(field_names)}}
+           if reference_power is not None else {}),
         "coherence": {"families": families},
         "loss_aligned_reductions": str(reductions_path),
     }

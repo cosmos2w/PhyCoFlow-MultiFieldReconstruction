@@ -6,6 +6,31 @@ pytest.importorskip('gudhi')
 from test_topology_finite_primary import config, family, coords, provenance
 
 
+@pytest.mark.parametrize('count', [1, 2, 5, 17])
+def test_fair_definition_preserves_bounded_n_field_population(count):
+    from phycoflow_reconstruction.coherence.relation_queries import QueryBank, resolve_coverage_config
+    from phycoflow_reconstruction.coherence.families.topology.family import TopologyFamily
+    from phycoflow_reconstruction.contracts import DataSpec
+    from phycoflow_reconstruction.data.normalization import FieldNormalizer
+    from phycoflow_reconstruction.training.adaptive_coverage import AdaptiveCoverageSampler
+    fields = tuple(f'f{i:02}' for i in range(count))
+    settings = config()
+    settings['persistence']['definition'] = 'conditional_fixed_transform_fair_v1'
+    coverage = {'query_coverage': {'enabled': True, 'relation_seed': 47},
+                'families': {'topology': settings}}
+    resolved = resolve_coverage_config(coverage, fields)['families']['topology']
+    model = TopologyFamily(resolved, DataSpec(fields, ('1',) * count, 2, (16,)),
+                           FieldNormalizer.identity(count))
+    bank = QueryBank(fields, seed=47)
+    assert bank.pairs == QueryBank(fields[::-1], seed=47).pairs
+    assert len(bank.pairs) == min(count * (count - 1) // 2, 2 * count)
+    assert model.version == '5' and model.conditional_draws == 2
+    assert len(model.spatial_objective.units) == 2 * count + 12 * len(bank.pairs)
+    selected = AdaptiveCoverageSampler(bank, policy='uniform', seed=47).select()
+    assert sum(q.multiplicity for q in selected.queries if q.kind == 'self') == 1
+    assert sum(q.multiplicity for q in selected.queries if q.kind == 'mutual') == (3 if count > 1 else 0)
+
+
 def setup():
     settings = config()
     settings['persistence']['definition'] = 'conditional_fixed_transform_fair_v1'

@@ -25,7 +25,8 @@ def test_matched_shards_bind_condition_draw_and_weight(monkeypatch, tmp_path):
             obs_valid_mask=torch.ones(1, 1, dtype=torch.bool),
             obs_indices=torch.zeros(1, 1, dtype=torch.long),
             logical_shapes=((4096,),),
-            metadata={"query_indices": torch.arange(4096)[None, :]},
+            metadata={"query_indices": torch.arange(4096)[None, :],
+                      "sample_context": {"auxiliary": {"physical_weights": torch.ones(1, 4096)}}},
         )
 
     batches = {split: [batch(split)] for split in aligned._COUNTS}
@@ -102,6 +103,23 @@ def test_matched_shards_bind_condition_draw_and_weight(monkeypatch, tmp_path):
     assert len(calls) == 4
     with pytest.raises(ValueError, match="expected three retained families"):
         aligned.evaluate_split(**{**scale_kwargs, "scale_only": False})
+    observer = families["topology"]
+    fair_observer = Family("topology")
+    dual = aligned.evaluate_split(**{**kwargs, "output_dir": tmp_path / "round7",
+        "round7_observers": {"fair": fair_observer, "legacy": observer},
+        "round7_observer_identities": {"fair": "d" * 64, "legacy": "e" * 64}})
+    payload = json.loads(dual.read_text())
+    assert payload["version"] == "round7_loss_aligned_v1"
+    row = payload["rows"][0]
+    assert set(row["shape_observers"]) == {"fair", "legacy"}
+    assert row["j2_unweighted_model_units"]["variance_proxy"] == [0, 0]
+    assert row["j2_physical_measure_model_units"]["variance_proxy"] == [0, 0]
+    assert row["reference_power_sums"] == [0, 0]
+    assert "VALIDATION1" in aligned.legacy_metrics(dual, bank.field_ids)["validation_plot_label"]
+    with pytest.raises(ValueError, match="incompatible cached"):
+        aligned.evaluate_split(**{**kwargs, "output_dir": tmp_path / "round7",
+            "round7_observers": {"fair": fair_observer, "legacy": observer},
+            "round7_observer_identities": {"fair": "f" * 64, "legacy": "e" * 64}})
     batches["validation"][0].obs_values += 1
     with pytest.raises(ValueError, match="condition identity"):
         aligned.evaluate_split(**kwargs)

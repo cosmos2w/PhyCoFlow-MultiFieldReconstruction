@@ -163,8 +163,6 @@ def _fit_source_calibrations(
                 raise ValueError(f"frozen family SOURCE calibration identity mismatch: {name}")
     if not selected:
         return
-    if any(getattr(f, "version", None) == "5" and getattr(f, "family_name", None) == "topology" for f in selected):
-        raise ValueError("fair Shape requires pre-frozen TRAIN800 transform and SOURCE calibration artifact")
     if train_dataset.split_name != "train":
         raise ValueError("SOURCE descriptor calibration requires TRAIN")
     total = math.prod(train_dataset.data_spec.logical_shape)
