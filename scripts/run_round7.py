@@ -39,6 +39,19 @@ def same_checkpoint_state(left, right):
     return type(left) is type(right) and left == right
 
 
+def exact_restoration(saved, live):
+    """Check actual loaded state; independent CUDA trajectories may differ."""
+    keys = ('global_step', 'model', 'optimizer', 'external_policy', 'query_coverage',
+            'rng_state', 'training_aux_state', 'family_states', 'family_configs',
+            'normalization', 'family_scales', 'source_hashes', 'config_sha256',
+            'coherence_calibration_sha256')
+    for key in keys:
+        if key not in saved or key not in live or not same_checkpoint_state(saved[key], live[key]):
+            raise ValueError('exact checkpoint restoration failed for ' + key)
+    return {'global_step': saved['global_step'], 'exact_keys': list(keys),
+            'exact_loaded_state': True, 'independent_trajectory_bitwise_equality_claimed': False}
+
+
 def verify_endpoint_binding(path, *, model_state_sha256, manifest_sha256, observer_identities):
     """Validate an existing scientific endpoint without rewriting any of its files."""
     binding = read(path)
@@ -324,21 +337,29 @@ def qualify():
     config['output']['experiment_name'] = 'coherence_compute_round7/qualification/resume'
     callback = lambda **_: None
     charge = lambda step: charge_attempt('qualification', 'resume', step)
+    restored = {}
     with full_update_recording():
         resumed = run_post_training(config, case_dir=CASE, max_steps=6, qualification_only=True,
                                    evaluation_callback=callback, update_attempt_callback=charge)
         run_post_training(config, case_dir=CASE, max_steps=6, resume=resumed, qualification_only=True,
-                          evaluation_callback=callback, update_attempt_callback=charge)
+                          evaluation_callback=callback, update_attempt_callback=charge,
+                          resume_state_callback=lambda saved, live: restored.update(exact_restoration(saved, live)))
     continuous = Path(next(item['run'] for item in results if item['arm'] == 'B'))
     left = load_project_checkpoint(resumed / 'checkpoints/last.pt')
     right = load_project_checkpoint(continuous / 'checkpoints/last.pt')
     if left['global_step'] != 12 or right['global_step'] != 12:
         raise ValueError('resume endpoint cursor mismatch')
-    for key in ('model', 'optimizer', 'external_policy', 'query_coverage', 'rng_state', 'training_aux_state'):
-        if key not in left or key not in right or not same_checkpoint_state(left[key], right[key]):
-            raise ValueError(f'resume parity failed for {key}')
+    if not restored.get('exact_loaded_state'):
+        raise ValueError('actual loaded checkpoint state was not verified')
     results.append({'arm': 'B_resume', 'run': str(resumed), 'continuous': str(continuous),
-                    'attempts': 12, 'exact_checkpoint_parity': True})
+                    'attempts': 12, 'restore_evidence': restored})
+    complete_qualification(contract, results, failures)
+
+
+def complete_qualification(contract, results, failures):
+    """Publish only after arm telemetry and a direct exact-restore check pass."""
+    stream_identity = None
+    query_sequence = None
     for item in results:
         if item['arm'] not in contract['arms']:
             continue
@@ -352,6 +373,20 @@ def qualify():
                 raise ValueError('qualification policy or SOURCE C0 mismatch')
         if 'round7_actual_step' not in rows[0]['gradient']:
             raise ValueError('qualification lacks the first actual-step diagnostic')
+        identity = rows[0]['gradient']['round7_actual_step']['identity']
+        matched = {key: identity[key] for key in ('sample_ids', 'query_indices', 'draw_seeds', 'shape_queries')}
+        queries = [{key: row[key] for key in ('step', 'queries', 'self_draws', 'mutual_draws')}
+                   for row in (json.loads(line) for line in
+                       (Path(item['run']) / 'logs/query_coverage.jsonl').read_text().splitlines()) if 'step' in row]
+        if stream_identity is not None and (matched != stream_identity or queries != query_sequence):
+            raise ValueError('qualification condition, observation, draw or query streams differ')
+        stream_identity, query_sequence = matched, queries
+        updates = [json.loads(line) for line in (Path(item['run']) / 'logs/full_updates.jsonl').read_text().splitlines()]
+        if len(updates) != 12 or any(row['native_data_loss'] is not None or row['data_update_weight'] != 0 for row in updates):
+            raise ValueError('qualification history or disabled native-loss replay differs')
+        for suffix in ('png', 'pdf'):
+            if not (Path(item['run']) / 'logs' / ('loss_history.' + suffix)).is_file():
+                raise ValueError('qualification loss curve missing')
     source = read(ART / 'reference_SOURCE.json')
     s100 = read(ART / 'reference_S100.json')
     fair_observer = contract.get('observer_branch', 'fair') == 'fair'
@@ -375,6 +410,63 @@ def qualify():
           'timing_sha256': digest(ART / 'qualification_timing.json'),
           'qualification_contract_sha256': digest(ART / 'qualification_contract.json'),
           'evidence_scope': 'observer source calibration, fixed-domain checks and real-model update/resume; not efficacy'})
+
+
+def repair_qualification():
+    """Reuse completed arm checks and perform one exact-state resumed update."""
+    import shutil
+    import yaml
+    from phycoflow_reconstruction.training.post_training import run_post_training
+    from phycoflow_reconstruction.training.run_store import load_project_checkpoint
+    contract = verify_contract('qualification_contract.json')
+    inputs_path = ART / 'qualification_repair_inputs.json'
+    inputs = read(inputs_path)
+    if (ART / 'qualified.json').exists() or inputs.get('schema') != 'round7_exact_restore_repair_v1':
+        raise ValueError('repair requires the pinned failed qualification evidence')
+    for path, expected in inputs['files'].items():
+        if digest(path) != expected:
+            raise ValueError('original qualification evidence changed: ' + path)
+    with ledger_transaction() as ledger:
+        if ledger['formal_unique'] or ledger['formal_replays'] or ledger['qualification_attempts'] != 48:
+            raise ValueError('one-update repair requires exactly the original 48 qualification attempts')
+    original = Path(inputs['baseline_run'])
+    config = yaml.safe_load((original / 'resolved_config.yaml').read_text())
+    baseline = load_project_checkpoint(original / 'checkpoints/last.pt')
+    if baseline['global_step'] != 12 or not baseline.get('qualification_only'):
+        raise ValueError('repair cannot substitute a formal or different checkpoint')
+    probe = CAMPAIGN / 'qualification' / 'exact_restore_probe' / (time.strftime('%Y%m%dT%H%M%SZ', time.gmtime()) + '_' + uuid.uuid4().hex[:8])
+    probe.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(original, probe)
+    write(probe / 'artifacts/restore_probe_origin.json', {
+        'original_run': str(original), 'original_checkpoint_sha256': digest(original / 'checkpoints/last.pt'),
+        'purpose': 'disposable checkpoint copy; preserve original evidence; one resumed qualification update'})
+    proof = {}
+    def observe(saved, live):
+        if proof:
+            raise ValueError('resume observer invoked more than once')
+        if not same_checkpoint_state(saved['model'], baseline['model']):
+            raise ValueError('probe saved checkpoint differs from pinned B12')
+        proof.update(exact_restoration(saved, live))
+        write(ART / 'qualification_exact_restore.json', {
+            **proof, 'probe_run': str(probe), 'baseline_run': str(original),
+            'baseline_checkpoint_sha256': digest(original / 'checkpoints/last.pt'),
+            'repair_inputs_sha256': digest(inputs_path),
+            'criterion': 'bit-exact loaded state, not equality of independent CUDA trajectories'})
+    with full_update_recording():
+        run_post_training(config, case_dir=CASE, max_steps=1, resume=probe, qualification_only=True,
+            evaluation_callback=lambda **_: None, resume_state_callback=observe,
+            update_attempt_callback=lambda step: charge_attempt('qualification', 'exact_restore_probe', step))
+    endpoint = load_project_checkpoint(probe / 'checkpoints/last.pt')
+    if not proof.get('exact_loaded_state') or endpoint['global_step'] != 13:
+        raise ValueError('repair did not restore exactly and complete the resumed update')
+    rows = [json.loads(line) for line in (probe / 'logs/round7_updates.jsonl').read_text().splitlines()]
+    if rows[-1]['step'] != 13 or not rows[-1]['gradient']['update_accepted']:
+        raise ValueError('resumed qualification update was not accepted')
+    if digest(original / 'checkpoints/last.pt') != inputs['files'][str(original / 'checkpoints/last.pt')]:
+        raise ValueError('original B12 qualification checkpoint changed')
+    results = [*inputs['segments'], {'arm': 'B_exact_restore_probe', 'run': str(probe), 'attempts': 1,
+               'restore_evidence': proof, 'endpoint_step': 13}]
+    complete_qualification(contract, results, [inputs['original_failure']])
 
 
 def bind_projection_scales():
@@ -1108,7 +1200,7 @@ def train_arm(arm, target_epoch, resume, *, recovery_receipt=None):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('stage', choices=['prepare', 'qualify', 'reference', 'freeze-legacy', 'bind-scales', 'measurements', 'forecast', 'train', 'finish', 'report', 'stage-decide', 'close-incomplete'])
+    parser.add_argument('stage', choices=['prepare', 'qualify', 'qualify-repair', 'reference', 'freeze-legacy', 'bind-scales', 'measurements', 'forecast', 'train', 'finish', 'report', 'stage-decide', 'close-incomplete'])
     parser.add_argument('arm', nargs='?', choices=['B', 'P', 'T'])
     parser.add_argument('--target-epoch', type=int)
     parser.add_argument('--resume')
@@ -1143,9 +1235,15 @@ def main():
             write(failure, {'status': 'failed', 'elapsed_seconds': time.time() - started,
                   'error_type': type(exc).__name__, 'message': str(exc), 'optimizer_attempts': 0})
             raise
-    elif args.stage == 'qualify':
-        with occupied('qualify'):
-            qualify()
+    elif args.stage in ('qualify', 'qualify-repair'):
+        try:
+            with occupied(args.stage):
+                (qualify if args.stage == 'qualify' else repair_qualification)()
+        except BaseException as exc:
+            write(ART / f'qualification_failure_{time.time_ns()}.json', {
+                'status': 'failed', 'stage': args.stage,
+                'error_type': type(exc).__name__, 'message': str(exc)})
+            raise
     elif args.stage == 'reference':
         if not args.reference:
             parser.error('reference requires --reference SOURCE or S100')

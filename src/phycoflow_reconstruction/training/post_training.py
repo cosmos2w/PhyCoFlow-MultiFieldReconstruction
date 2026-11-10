@@ -1584,6 +1584,7 @@ def run_post_training(
     max_steps: int | None = None,
     resume: str | Path | None = None,
     checkpoint_callback: Callable[[Path, Path, int], None] | None = None,
+    resume_state_callback: Callable[[Mapping[str, Any], Mapping[str, Any]], None] | None = None,
     update_attempt_callback: Callable[[int], None] | None = None,
     evaluation_callback: Callable[..., Mapping[str, Any] | None] | None = None,
     qualification_only: bool = False,
@@ -1592,7 +1593,9 @@ def run_post_training(
     """Create or resume a child, optionally observing saved recovery boundaries.
 
     The callback may evaluate saved weights; its random draws are isolated from
-    training. It must not mutate training configuration or historical artifacts.
+    training. The optional resume callback receives detached copies of the saved
+    checkpoint and live recovery payload immediately before the training loop.
+    Callbacks must not mutate training configuration or historical artifacts.
     """
     supplement_baseline = None
     supplement_source_metrics = None
@@ -2445,6 +2448,19 @@ def run_post_training(
                 fallback_metric=0.0,
                 force=True,
             )
+    if checkpoint is not None and resume_state_callback is not None:
+        _observe_resume_state(
+            resume_state_callback, checkpoint,
+            lambda: _post_checkpoint_payload(
+                model, optimizer, global_step=start_step, config=config,
+                train_dataset=train_dataset, families=families,
+                source_hashes_before=source_hashes_before, index_generator=index_generator,
+                device=device, config_sha256=store.config_hash,
+                coherence_calibration_sha256=calibration_hash, family_scales=family_scales,
+                controller=controller, scalarizer=scalarizer, policy=policy,
+                coverage_sampler=coverage_sampler, qualification_only=qualification_only,
+            ), device,
+        )
     last_coherence_loss = None
     for offset, batch in enumerate(batch_source):
         global_step = start_step + offset
@@ -3138,6 +3154,14 @@ def run_post_training(
             "post-training reconstruction MSE exceeded the fidelity guard; recovery checkpoint saved"
         )
     return store.run_dir
+
+
+def _observe_resume_state(callback, checkpoint, make_payload, device):
+    """Isolate an optional observer from live state and random streams."""
+    from .coherence_sampling import _preserved_rng
+
+    with _preserved_rng(device):
+        callback(deepcopy(checkpoint), deepcopy(make_payload()))
 
 
 def _post_checkpoint_payload(

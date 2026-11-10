@@ -100,7 +100,7 @@ def _comparison_figures(campaign, output, selection, test_source, test_selected,
     fig, axes = plt.subplots(2, 2, figsize=(11, 7), constrained_layout=True)
     keys = [('signed', 'multiscale_spectrum.signed_band_energy_score.conditional', 1.),
             ('joint', 'multiscale_spectrum.joint_spectral_mean_energy_score.conditional', .25),
-            ('self', 'multiscale_spectrum.relation_self_energy_score.conditional', .025605941746750686),
+            ('self', 'multiscale_spectrum.relation_self_energy_score.conditional', .025605941746750696),
             ('rho', 'multiscale_spectrum.relation_rho_crps.conditional', .21887008719850062)]
     x = list(range(len(keys)))
     for offset, label, panel in ((-.18, 'SOURCE', source_val), (.18, 'selected', selected_val)):
@@ -160,7 +160,7 @@ def _compute_coverage_figure(campaign, output, gpu_seconds, attempt_count):
 _SCALE_TERMS = {
     'signed': ('multiscale_spectrum.signed_band_energy_score.conditional', 1.),
     'joint': ('multiscale_spectrum.joint_spectral_mean_energy_score.conditional', .25),
-    'self': ('multiscale_spectrum.relation_self_energy_score.conditional', .025605941746750686),
+    'self': ('multiscale_spectrum.relation_self_energy_score.conditional', .025605941746750696),
     'rho': ('multiscale_spectrum.relation_rho_crps.conditional', .21887008719850062),
 }
 
@@ -184,7 +184,8 @@ def _panel_snapshot(panel):
             'weighted_scale_terms': terms, 'weighted_scale_attraction_separation': attraction_separation,
             'shape_observers': panel.get('shape_observers', {}),
             'loss_means': losses, 'family_diagnostics': panel.get('family_diagnostics', {}),
-            'component_diagnostics': diagnostics}
+            'component_diagnostics': diagnostics,
+            'j2_physical_measure_model_units': panel.get('j2_physical_measure_model_units', {})}
 
 
 def _fixed_panel_evidence(campaign, fields, summarize, compare):
@@ -204,7 +205,8 @@ def _fixed_panel_evidence(campaign, fields, summarize, compare):
             if not (artifacts / f'{arm}_{epoch}_complete.json').exists():
                 continue
             binding = json.loads((run / 'evaluation' / f'checkpoint_binding_{epoch}.json').read_text())
-            item = {'checkpoint_sha256': binding.get('checkpoint_sha256'), 'splits': {}}
+            item = {'checkpoint_sha256': binding.get('checkpoint_sha256'),
+                    'native_comparison': binding.get('native_comparison'), 'splits': {}}
             for split in ('train', 'validation'):
                 panel = summarize(binding[f'{split}_reductions'], fields)
                 item['splits'][split] = {'summary': _panel_snapshot(panel),
@@ -224,6 +226,76 @@ def _test_panel_evidence(entries, test, source, fields, summarize, compare):
         results[name] = result
     return results
 
+
+
+def _fixed_endpoint_figure(fixed, fields, output):
+    """Render saved VALIDATION100 endpoint evidence, including SOURCE-only decisions."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    import numpy as np
+    endpoints = [('SOURCE', fixed['SOURCE']['validation'], None, None)]
+    for arm in ('B', 'P', 'T'):
+        for epoch, item in fixed.get(arm, {}).items():
+            val = item['splits']['validation']
+            endpoints.append((arm + epoch, val['summary'], val['source_comparison'], item.get('native_comparison')))
+    labels = [item[0] for item in endpoints]
+    x = np.arange(len(endpoints))
+    fig, axes = plt.subplots(3, 2, figsize=(13, 11), constrained_layout=True)
+
+    def scalar(value):
+        while isinstance(value, list) and len(value) == 1:
+            value = value[0]
+        return value if isinstance(value, (int, float)) else None
+
+    def series(ax, title, mapping):
+        for name, values in mapping.items():
+            values = [scalar(v) for v in values]
+            if any(v is not None for v in values):
+                ax.plot(x, [np.nan if v is None else v for v in values], marker='o', markersize=3, label=name)
+        ax.set_title(title, fontsize=10)
+        ax.set_xticks(x, labels, rotation=30, ha='right', fontsize=8)
+        ax.grid(alpha=.2)
+        if ax.lines:
+            ax.legend(fontsize=7, ncol=2)
+
+    series(axes[0, 0], 'Weighted complete Scale terms', {
+        name: [p['weighted_scale_terms'].get(name) for _, p, _, _ in endpoints]
+        for name in ('signed', 'joint', 'self', 'rho')})
+    series(axes[0, 1], 'Joint Scale: attraction and subtracted separation', {
+        part: [p['weighted_scale_attraction_separation']['joint'].get(part) for _, p, _, _ in endpoints]
+        for part in ('attraction', 'separation')})
+    series(axes[1, 0], 'Fair / legacy Shape: self and mutual', {
+        f'{observer} {part}': [p['shape_observers'].get(observer, {}).get('losses', {}).get('topology.' + part + '.persistence')
+                                for _, p, _, _ in endpoints]
+        for observer in ('fair', 'legacy') for part in ('self', 'mutual')})
+    series(axes[1, 1], 'Fair Shape: attraction and subtracted separation', {
+        f'{component} {part}': [p['shape_observers'].get('fair', {}).get('diagnostics', {})
+            .get('component_attraction_separation', {}).get(component + '.persistence', {}).get(part)
+            for _, p, _, _ in endpoints]
+        for component in ('self', 'mutual') for part in ('attraction', 'separation')})
+    series(axes[2, 0], 'J2 generated variance proxy, physical measure', {
+        field: [(p.get('j2_physical_measure_model_units', {}).get('variance_proxy') or [None] * len(fields))[i]
+                for _, p, _, _ in endpoints] for i, field in enumerate(fields)})
+    ax = axes[2, 1]
+    for i, field in enumerate(fields):
+        q, native = [], []
+        for name, _, comparison, native_comparison in endpoints:
+            if name == 'SOURCE':
+                q.append(1.); native.append(1.); continue
+            c = comparison['changes']['field.' + field + '.mse']
+            q.append(c['candidate'] / c['reference'] if c['reference'] else np.nan)
+            lookup = dict(zip(native_comparison['field_names'], native_comparison['primary_mse_ratio'])) if native_comparison else {}
+            native.append(lookup.get(field, np.nan))
+        line, = ax.plot(x, q, marker='o', markersize=3, label=field + ' Q')
+        ax.plot(x, native, linestyle='--', marker='.', color=line.get_color(), label=field + ' native')
+    ax.axhline(1.10, color='black', linewidth=.8, linestyle=':')
+    ax.set_title('Per-field primary MSE / SOURCE (native dashed)', fontsize=10)
+    ax.set_xticks(x, labels, rotation=30, ha='right', fontsize=8)
+    ax.grid(alpha=.2); ax.legend(fontsize=6, ncol=2)
+    fig.savefig(output / 'fixed_endpoint_evidence.pdf')
+    fig.savefig(output / 'fixed_endpoint_evidence.png', dpi=150)
+    plt.close(fig)
 
 def _timing_evidence(campaign, gpu_seconds):
     ledger = campaign / 'artifacts/budget_ledger.json'
@@ -294,6 +366,8 @@ def generate_report(campaign, test_receipt, selection_path, *, gpu_seconds, atte
     figure_dir = output / 'figures'
     figure_dir.mkdir(parents=True, exist_ok=True)
     _compute_coverage_figure(campaign, figure_dir, gpu_seconds, attempt_count)
+    if fixed_evidence:
+        _fixed_endpoint_figure(fixed_evidence, fields, figure_dir)
     analysis = None
     if arms:
         analysis = generate_analysis(arms, figure_dir)
@@ -442,6 +516,9 @@ def generate_report(campaign, test_receipt, selection_path, *, gpu_seconds, atte
                   'Sampled training losses are shown separately from fixed-panel scores. [PDF master](figures/family_training_losses.pdf)', '',
                   '![Actual parameter-step projection distributions](figures/actual_step_projections.png)',
                   'Actual parameter-step products are local projected reductions; they do not establish finite or held-out improvement. [PDF master](figures/actual_step_projections.pdf)', '']
+    if fixed_evidence:
+        lines += ['![Fixed endpoint Scale, Shape, spread and fidelity](figures/fixed_endpoint_evidence.png)',
+                  'Fixed VALIDATION100 endpoints, including retained SOURCE; attraction and separation are shown separately and native fidelity uses all 40,300 sites. [PDF master](figures/fixed_endpoint_evidence.pdf)', '']
     if has_comparison_figures:
         lines += ['![Fixed validation score and fidelity trajectories](figures/validation_trajectory.png)',
                   'Dashed lines show the declared preservation, Scale improvement, and field fidelity thresholds. [PDF master](figures/validation_trajectory.pdf)', '']
@@ -485,6 +562,8 @@ def generate_report(campaign, test_receipt, selection_path, *, gpu_seconds, atte
         names.append('validation_trajectory')
         if selected:
             names.append('matched_components_fidelity')
+    if fixed_evidence:
+        names.append('fixed_endpoint_evidence')
     names.append('compute_coverage')
     for name in names:
         for suffix in ('.png', '.pdf'):

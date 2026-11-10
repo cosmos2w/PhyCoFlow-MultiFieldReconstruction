@@ -8,6 +8,28 @@ runner = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(runner)
 
 
+def test_exact_restoration_checks_actual_loaded_moments_and_rng():
+    import copy
+    import torch
+    state = {key: {} for key in (
+        'model', 'optimizer', 'external_policy', 'query_coverage', 'rng_state',
+        'training_aux_state', 'family_states', 'family_configs', 'normalization',
+        'family_scales', 'source_hashes')}
+    state.update(global_step=12, config_sha256='a', coherence_calibration_sha256='b')
+    state['optimizer'] = {'moment': torch.tensor([.1], dtype=torch.float32)}
+    state['rng_state'] = {'cpu': torch.tensor([1, 2], dtype=torch.uint8)}
+    assert runner.exact_restoration(state, copy.deepcopy(state))['exact_loaded_state']
+    for key in ('optimizer', 'rng_state'):
+        changed = copy.deepcopy(state)
+        changed[key][next(iter(changed[key]))][0] += 1
+        with pytest.raises(ValueError, match=key):
+            runner.exact_restoration(state, changed)
+    changed = copy.deepcopy(state)
+    changed['optimizer']['moment'] = changed['optimizer']['moment'].double()
+    with pytest.raises(ValueError, match='optimizer'):
+        runner.exact_restoration(state, changed)
+
+
 def test_attempt_ledger_counts_replays_and_caps(monkeypatch, tmp_path):
     monkeypatch.setattr(runner, 'ART', tmp_path)
     runner.charge_attempt('formal', 'B', 0)

@@ -118,3 +118,30 @@ def test_report_timing_does_not_sum_overlapping_gpu_intervals(tmp_path):
     assert result['occupied_gpu_union_seconds'] == 15
     assert result['stage_wall_seconds_summed_may_overlap'] == {'prepare': 10, 'qualify': 10}
     assert result['calibration']['elapsed_seconds'] == 10
+
+
+def test_negative_selection_still_renders_fixed_endpoint_figure(tmp_path):
+    from phycoflow_reconstruction.evaluation.round7_report import _fixed_endpoint_figure, _panel_snapshot
+    fields = ['CH4', 'CO', 'T', 'U_1', 'p']
+    panel = _panel_snapshot({
+        'scores': {'scale': 2.},
+        'loss_means': {'multiscale_spectrum.joint_spectral_mean_energy_score.conditional': 4.},
+        'component_diagnostics': {'multiscale_spectrum.joint_spectral_mean_energy_score.conditional':
+                                  {'attraction': 8., 'repulsion': 4.}},
+        'shape_observers': {'fair': {'losses': {'topology.self.persistence': 1., 'topology.mutual.persistence': -.2},
+                                     'diagnostics': {'component_attraction_separation': {
+                                         'self.persistence': {'attraction': [2.], 'separation': [1.]},
+                                         'mutual.persistence': {'attraction': [1.], 'separation': [.5]}}}},
+                            'legacy': {'losses': {'topology.self.persistence': .7, 'topology.mutual.persistence': .2}}},
+        'j2_physical_measure_model_units': {'variance_proxy': [1., 2., 3., 4., 5.]}})
+    changes = {'field.' + f + '.mse': {'candidate': 1.05, 'reference': 1.} for f in fields}
+    item = {'splits': {'validation': {'summary': panel, 'source_comparison': {'changes': changes}}},
+            'native_comparison': {'field_names': fields, 'primary_mse_ratio': [1.02] * 5}}
+    evidence = {'SOURCE': {'validation': panel}, 'B': {'500': item}, 'P': {'500': item}}
+    _fixed_endpoint_figure(evidence, fields, tmp_path)
+    assert panel['j2_physical_measure_model_units']['variance_proxy'][2] == 3.
+    assert (tmp_path / 'fixed_endpoint_evidence.png').stat().st_size > 0
+    assert (tmp_path / 'fixed_endpoint_evidence.pdf').stat().st_size > 0
+    from PIL import Image
+    with Image.open(tmp_path / 'fixed_endpoint_evidence.png') as image:
+        image.verify()
