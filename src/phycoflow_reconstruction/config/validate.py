@@ -495,7 +495,7 @@ def _validate_external_policy(multitask: Mapping[str, Any]) -> None:
             "optimization.multitask.external_policy.method must be one of "
             f"{sorted(methods)}"
         )
-    allowed = {"method", "vector_reduction", "objective_scale", "direction_preference", "round7_diagnostics"}
+    allowed = {"method", "vector_reduction", "objective_scale", "direction_preference", "round7_diagnostics", "round7_projection_scales"}
     if method == "lagrangian":
         allowed.add("lagrangian")
     elif method == "extended_log_barrier":
@@ -506,6 +506,14 @@ def _validate_external_policy(multitask: Mapping[str, Any]) -> None:
             raise ValueError("round7_diagnostics must be true with Lagrangian policy")
         if multitask.get("coherence_aggregation", {}).get("method") != "torchjd_config":
             raise ValueError("round7_diagnostics requires torchjd_config aggregation")
+        scales = external.get("round7_projection_scales")
+        family_names = {"global_distribution", "multiscale_spectrum", "topology"}
+        if (not isinstance(scales, Mapping) or set(scales) != family_names or
+                any(isinstance(v, bool) or not isinstance(v, (int, float)) or
+                    not math.isfinite(v) or v <= 0 for v in scales.values())):
+            raise ValueError("round7_diagnostics requires positive finite SOURCE projection scales for all three families")
+    elif "round7_projection_scales" in external:
+        raise ValueError("round7_projection_scales requires round7_diagnostics")
     preference = external.get("direction_preference")
     if preference is not None:
         if not isinstance(preference, Mapping):

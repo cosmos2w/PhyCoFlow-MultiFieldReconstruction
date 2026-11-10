@@ -47,20 +47,35 @@ def test_policy_round7_probe_records_real_and_shadow_steps_and_recovers_count():
     risk = torch.stack([(x[3] + 2).square()])
     components = {k: c * x[1] for k, c in {'signed': .4, 'joint': .25, 'self': .2, 'rho': .15,
                                              'joint_attraction': .3, 'joint_separation': -.05}.items()}
-    policy = ExternalPolicy({'method': 'lagrangian', 'round7_diagnostics': True},
+    settings = {'method': 'lagrangian', 'round7_diagnostics': True,
+                'round7_projection_scales': dict(zip(['global_distribution', 'multiscale_spectrum', 'topology'], [2., 4., 8.]))}
+    before = model.weight.detach().clone()
+    policy = ExternalPolicy(settings,
                             FidelityBudget.from_reference(['T'], [1.], 1.), 'cpu')
     result = policy.update_with_coherence_aggregation(model, opt, losses, risk, 1.,
         OuterAggregator({'method': 'torchjd_config'}), diagnostic_context={
-            'projection_scales': [1., 1., 1.], 'components': components, 'temperature_field': 'T',
+            'projection_scales': [2., 4., 8.], 'components': components, 'temperature_field': 'T',
             'identity': {'sample_ids': ['sample-1']}})
     data = result['round7_actual_step']
     assert data['shadow_count_total'] == 2
     assert set(data['shadows']) == {'preferred', 'scale_only'}
     assert data['identity']['sample_ids'] == ['sample-1']
     assert data['extra_gradient_evaluations'] == 8
-    restored = ExternalPolicy({'method': 'lagrangian', 'round7_diagnostics': True}, policy.reference, 'cpu')
+    assert data['component_gradient_norms']['signed'] == pytest.approx(.4)
+    assert data['component_gradient_norms']['joint_separation'] == pytest.approx(.05)
+    assert data['component_gradient_norms']['temperature_risk'] > 0
+    delta = (model.weight.detach() - before).reshape(-1)
+    torch.testing.assert_close(torch.tensor(data['family_benefits']), -delta[:3] / torch.tensor([2., 4., 8.]))
+    restored = ExternalPolicy(settings, policy.reference, 'cpu')
     restored.load_state_dict(policy.state_dict())
     assert restored.round7_shadow_count == 2
+    with pytest.raises(ValueError, match='projection scales'):
+        ExternalPolicy({'method': 'lagrangian', 'round7_diagnostics': True}, policy.reference, 'cpu')
+    changed = copy.deepcopy(settings)
+    changed['round7_projection_scales']['topology'] = 9.
+    different = ExternalPolicy(changed, policy.reference, 'cpu')
+    with pytest.raises(ValueError, match='checkpoint does not match'):
+        different.load_state_dict(policy.state_dict())
 
 
 def test_parent_linked_binding_rejects_nonshape_changes(tmp_path):
@@ -109,3 +124,27 @@ def test_scale_live_parts_match_true_provider_gradients():
         'self': .2 * components[SELF_PATH].scalar_loss, 'rho': .3 * components[RHO_PATH].scalar_loss})
     gradients = component_gradients(capture, [x, y], _flat_gradient(result.scalar_loss, [x, y]))
     assert all(torch.isfinite(g).all() for g in gradients.values())
+
+
+def test_reporting_scale_never_changes_live_optimizer_update():
+    pytest.importorskip('torchjd'); pytest.importorskip('cooper')
+    from phycoflow_reconstruction.training.fidelity_budget import FidelityBudget, ExternalPolicy
+    names = ['global_distribution', 'multiscale_spectrum', 'topology']
+    reference = FidelityBudget.from_reference(['T'], [1.], 1.)
+    outputs = []
+    for scales in ([1., 1., 1.], [2., 4., 8.]):
+        model = nn.Linear(4, 1, bias=False)
+        with torch.no_grad(): model.weight.copy_(torch.tensor([[.1, .2, .3, .4]]))
+        optimizer = torch.optim.AdamW(model.parameters(), lr=5e-5, weight_decay=1e-6)
+        x = model.weight.reshape(-1)
+        losses = dict(zip(names, [x[0] + 1, x[1] + 1, x[2] + 1]))
+        settings = {'method': 'lagrangian', 'round7_diagnostics': True,
+                    'round7_projection_scales': dict(zip(names, scales))}
+        policy = ExternalPolicy(settings, reference, 'cpu')
+        result = policy.update_with_coherence_aggregation(model, optimizer, losses,
+            torch.stack([(x[3] + 2).square()]), 1., OuterAggregator({'method': 'torchjd_config'}),
+            diagnostic_context={'projection_scales': scales, 'components': None,
+                                'temperature_field': 'T', 'identity': {}})
+        outputs.append((model.weight.detach().clone(), result['round7_actual_step']['family_benefits']))
+    assert torch.equal(outputs[0][0], outputs[1][0])
+    torch.testing.assert_close(torch.tensor(outputs[0][1]) / torch.tensor([2., 4., 8.]), torch.tensor(outputs[1][1]))

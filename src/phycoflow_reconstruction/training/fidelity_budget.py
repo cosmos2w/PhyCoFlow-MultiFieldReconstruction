@@ -234,6 +234,12 @@ class ExternalPolicy:
         self, settings: Mapping[str, Any], reference: FidelityBudget | Mapping[str, Any], device: torch.device | str
     ) -> None:
         self.settings = dict(settings)
+        if self.settings.get("round7_diagnostics", False):
+            scales = self.settings.get("round7_projection_scales")
+            if (not isinstance(scales, Mapping) or set(scales) != {"global_distribution", "multiscale_spectrum", "topology"}
+                    or any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v <= 0
+                           for v in scales.values())):
+                raise ValueError("Round 7 diagnostics require positive finite SOURCE projection scales")
         self.method = self.settings["method"]
         if self.method not in {"lagrangian", "rectify", "extended_log_barrier"}:
             raise ValueError("unknown external policy method")
@@ -594,6 +600,10 @@ class ExternalPolicy:
                 raise ValueError("Round 7 telemetry requires the Lagrangian ConFIG route")
             start = perf_counter()
             scales = diagnostic_context["projection_scales"]
+            expected_scales = self.settings.get("round7_projection_scales")
+            if (not self.settings.get("round7_diagnostics", False) or
+                    list(scales) != [float(expected_scales[name]) for name in family_names]):
+                raise ValueError("Round 7 projection scales differ from the checkpointed policy settings")
             before = snapshot(parameters)
             probes = {}
             if diagnostic_context.get("components") is not None:
@@ -630,6 +640,8 @@ class ExternalPolicy:
             policy_diagnostics["round7_actual_step"] = {
                 "family_benefits": projected_benefits(telemetry["matrix"], delta, telemetry["scales"]),
                 "component_products": {k: float(-torch.dot(v, delta)) for k, v in telemetry["probes"].items()},
+                "component_gradient_norms": {k: float(torch.linalg.vector_norm(v))
+                                             for k, v in telemetry["probes"].items()},
                 "shadows": telemetry["shadows"], "shadow_count_total": self.round7_shadow_count,
                 "extra_gradient_evaluations": len(telemetry["probes"]),
                 "gradient_and_direction_seconds": telemetry["gradient_seconds"],

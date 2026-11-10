@@ -2676,12 +2676,14 @@ def run_post_training(
                                 model, optimizer, families_abt, risks,
                                 config["optimization"].get("grad_clip"), coherence_aggregator,
                                 diagnostic_context=({
-                                    "projection_scales": [1., 1., 1.],
+                                    "projection_scales": [float(policy.settings["round7_projection_scales"][name])
+                                                          for name in families_abt],
                                     "components": step_context["round7_scale_components"] if r7_component else None,
                                     "temperature_field": "T",
                                     "identity": {**step_context["round7_identity"],
-                                                 "family_scales": dict(family_scales),
-                                                 "projection_basis": "family gradients already calibrated by frozen family scales"},
+                                                 "training_family_scales": dict(family_scales),
+                                                 "projection_scales": dict(policy.settings["round7_projection_scales"]),
+                                                 "projection_basis": "training family gradient divided by frozen SOURCE TRAIN reporting scale"},
                                 } if r7_due else None),
                             )
                         finally:
