@@ -168,3 +168,31 @@ def test_s100_evidence_uses_matched_saved_validation_only(tmp_path):
     assert result['support'] == 'VALIDATION100 Q4096'
     assert result['source_comparison']['changes']['scale']['raw_change'] == -.1
     assert result['s100_summary']['identity'] == 'S100_validation.json'
+
+
+def test_accounting_uses_recorded_counts_and_never_invents_cache_counts(tmp_path):
+    import hashlib
+    import pickle
+    import zipfile
+    from phycoflow_reconstruction.evaluation.round7_report import _accounting_evidence
+    artifacts = tmp_path / 'artifacts'
+    artifacts.mkdir()
+    artifact = artifacts / 'calibration.pt'
+    with zipfile.ZipFile(artifact, 'w') as archive:
+        archive.writestr('fixture/data.pkl', pickle.dumps({'round7_calibration_receipt': {
+            'source_forwards': 800, 'reference_visits': 800,
+            'calibration_endpoint_filtrations': 100, 'calibration_dimension_diagrams': 200}}, protocol=2))
+    (artifacts / 'prepare_complete.json').write_text(json.dumps({'fair_artifact': str(artifact),
+        'fair_sha256': hashlib.sha256(artifact.read_bytes()).hexdigest()}))
+    (artifacts / 'budget_ledger.json').write_text(json.dumps({'intervals': [{'start': 1, 'end': 2}],
+        'attempt_count': 60, 'qualification_attempts': 49, 'formal_unique': 10, 'formal_replays': 1}))
+    (artifacts / 'reference_SOURCE.json').write_text(json.dumps({'train': {'conditions': 800},
+                                                                  'validation': {'conditions': 100}}))
+    (artifacts / 'B_500_complete.json').write_text(json.dumps({'run': 'b', 'epoch': 500,
+        'timing': {'calls': {'reconstruction': 155}}}))
+    result = _accounting_evidence(tmp_path)
+    assert result['optimizer_attempts']['formal_replays'] == 1
+    assert result['calibration_recorded_counts']['source_forwards'] == 800
+    assert result['reference_panels']['SOURCE']['train']['fresh_rollouts'] is None
+    assert result['reference_panels']['SOURCE']['train']['conditional_draws'] is None
+    assert result['completed_formal_segments'][0]['reconstruction_calls'] == 155

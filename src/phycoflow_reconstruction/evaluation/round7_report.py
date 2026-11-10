@@ -6,6 +6,8 @@ import re
 from pathlib import Path
 import subprocess
 import time
+import pickletools
+import zipfile
 
 
 def _file_sha256(path):
@@ -312,6 +314,63 @@ def _fixed_endpoint_figure(fixed, fields, output):
     fig.savefig(output / 'fixed_endpoint_evidence.png', dpi=150)
     plt.close(fig)
 
+
+def _calibration_counts(prepare):
+    """Read numeric receipt fields from a hash-bound torch ZIP without unpickling."""
+    artifact = prepare.get('fair_artifact')
+    if not artifact or not Path(artifact).is_file() or _file_sha256(artifact) != prepare.get('fair_sha256'):
+        return None
+    keys = {'source_forwards', 'reference_visits', 'calibration_endpoint_filtrations', 'calibration_dimension_diagrams'}
+    found = {}
+    try:
+        with zipfile.ZipFile(artifact) as archive:
+            paths = [n for n in archive.namelist() if n.endswith('/data.pkl')]
+            if len(paths) != 1:
+                return None
+            ops = list(pickletools.genops(archive.read(paths[0])))
+        for i, (_, arg, _) in enumerate(ops):
+            if not isinstance(arg, str) or arg not in keys:
+                continue
+            if arg in found:
+                return None
+            following = i + 1
+            while following < len(ops) and ops[following][0].name in ('BINPUT', 'LONG_BINPUT', 'MEMOIZE'):
+                following += 1
+            if following >= len(ops) or ops[following][0].name not in ('BININT', 'BININT1', 'BININT2', 'LONG1', 'LONG4'):
+                return None
+            found[arg] = ops[following][1]
+    except (ValueError, OSError, zipfile.BadZipFile):
+        return None
+    return found if set(found) == keys else None
+
+
+def _accounting_evidence(campaign):
+    artifacts = campaign / 'artifacts'
+    ledger_path = artifacts / 'budget_ledger.json'
+    ledger = json.loads(ledger_path.read_text()) if ledger_path.exists() else {}
+    if any('end' not in item for item in ledger.get('intervals', [])):
+        raise ValueError('final report requires closed GPU intervals')
+    attempts = {key: ledger.get(key) for key in ('attempt_count', 'qualification_attempts', 'formal_unique', 'formal_replays')}
+    prepare_path = artifacts / 'prepare_complete.json'
+    calibration = _calibration_counts(json.loads(prepare_path.read_text())) if prepare_path.exists() else None
+    references = {}
+    for label in ('SOURCE', 'S100'):
+        path = artifacts / f'reference_{label}.json'
+        if path.exists():
+            receipt = json.loads(path.read_text())
+            references[label] = {split: {'conditions_in_saved_panel': receipt[split]['conditions'],
+                'fresh_rollouts': None, 'cached_rollouts': None, 'conditional_draws': None}
+                for split in ('train', 'validation') if split in receipt and 'conditions' in receipt[split]}
+    formal = []
+    for path in sorted(artifacts.glob('*_complete.json')):
+        record = json.loads(path.read_text())
+        if record.get('run') and record.get('epoch') and 'reconstruction' in record.get('timing', {}).get('calls', {}):
+            formal.append({'receipt': str(path), 'epoch': record['epoch'],
+                           'reconstruction_calls': record['timing']['calls']['reconstruction']})
+    return {'optimizer_attempts': attempts, 'calibration_recorded_counts': calibration,
+            'reference_panels': references, 'completed_formal_segments': formal,
+            'scope': 'Calibration source_forwards counts recorded reconstruction calls; reference condition counts are not forward counts. Fresh versus cached reference rollouts, conditional draws actually run, internal model-layer forwards, and failed or partial segment reconstruction calls are not recorded here. Formal HostTiming counts are instrumented reconstruction calls in completed segments, excluding callback scopes.'}
+
 def _timing_evidence(campaign, gpu_seconds):
     ledger = campaign / 'artifacts/budget_ledger.json'
     intervals = json.loads(ledger.read_text()).get('intervals', []) if ledger.exists() else []
@@ -359,6 +418,7 @@ def generate_report(campaign, test_receipt, selection_path, *, gpu_seconds, atte
     fixed_evidence = _fixed_panel_evidence(campaign, fields, summarize_reductions, compare_summaries)
     test_evidence = _test_panel_evidence(entries, test, source, fields, summarize_reductions, compare_summaries)
     timing = _timing_evidence(campaign, gpu_seconds)
+    accounting = _accounting_evidence(campaign)
     s100_evidence = _s100_validation_evidence(campaign, fields, summarize_reductions, compare_summaries)
     q_ratios, native_ratios = {}, {}
     if selected:
@@ -559,6 +619,8 @@ def generate_report(campaign, test_receipt, selection_path, *, gpu_seconds, atte
     lines += ['![Optimizer attempts and fixed-panel coverage](figures/compute_coverage.png)',
               'Attempt counts include qualification and replay; GPU time is the sum of physical-device interval unions. [PDF master](figures/compute_coverage.pdf)', '']
     lines += [f'Charged optimizer attempts: {attempt_count}; occupied physical GPU time: {gpu_seconds / 3600:.3f} hours. Elapsed time from the first to the last recorded GPU stage: {_fmt(timing["elapsed_first_to_last_gpu_stage_seconds"])} seconds. Stage wall times, calibration, evaluation, qualification, and CPU reporting time are recorded in the numerical summary; stage times may overlap.', '']
+    attempts_detail = accounting['optimizer_attempts']
+    lines.extend([f"Optimizer ledger: qualification {attempts_detail['qualification_attempts']}, formal unique {attempts_detail['formal_unique']}, formal replay {attempts_detail['formal_replays']}, total {attempts_detail['attempt_count']}. Calibration/reference recorded counts and completed-segment reconstruction calls are in the numerical summary; unavailable fresh/cache and partial-call counts are not inferred.", ''])
     cost_rows = []
     for path in sorted((campaign / 'artifacts').glob('*_complete.json')):
         record = json.loads(path.read_text())
@@ -576,7 +638,7 @@ def generate_report(campaign, test_receipt, selection_path, *, gpu_seconds, atte
         'test_q_mse_ratios': q_ratios, 'test_native_mse_ratios': native_ratios,
         'selected_test_summary': selected, 'source_test_summary': source,
         'fixed_train_validation_endpoints': fixed_evidence, 'fixed_test_endpoints': test_evidence,
-        's100_validation': s100_evidence, 'timing': timing}
+        's100_validation': s100_evidence, 'timing': timing, 'accounting': accounting}
     (output / 'numeric_summary.json').write_text(json.dumps(numeric, indent=2, sort_keys=True, allow_nan=False) + '\n')
     report.write_text('\n'.join(lines))
     for target in re.findall(r'\]\(([^)]+)\)', report.read_text()):
