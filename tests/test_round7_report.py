@@ -196,3 +196,23 @@ def test_accounting_uses_recorded_counts_and_never_invents_cache_counts(tmp_path
     assert result['reference_panels']['SOURCE']['train']['fresh_rollouts'] is None
     assert result['reference_panels']['SOURCE']['train']['conditional_draws'] is None
     assert result['completed_formal_segments'][0]['reconstruction_calls'] == 155
+
+
+def test_closed_500_narrative_is_specific_and_uses_saved_scores():
+    from phycoflow_reconstruction.evaluation.round7_report import _closed_500_narrative
+    selection = {'selected': 'SOURCE', 'endpoint': None, 'B1000': None}
+    verdict = {'mode': 'close', 'selected': 'SOURCE', 'continue': []}
+    def score(scale, fair=2., legacy=3.):
+        return {'scale': scale, 'shape.fair': fair, 'shape.legacy': legacy}
+    def arm(values):
+        return {'500': {'splits': {'validation': {'summary': {'scores': values}}}}}
+    fixed = {'SOURCE': {'validation': {'scores': score(1.)}},
+             'B': arm(score(1.016)), 'P': arm(score(1.009)), 'T': arm(score(.995, 1.7, 2.85))}
+    observations = [{'name': name, 'observations': {'500': {'q_mse': {'T': 1.11}}}} for name in ('P', 'T')]
+    text = ' '.join(_closed_500_narrative(selection, {'SOURCE': {}}, verdict, fixed, observations))
+    assert 'No 1000-epoch continuation or extension' in text
+    assert 'candidate TEST was not performed' in text
+    assert '0.70% of SOURCE Scale' in text and 'field-fidelity endpoint requirements failed' in text
+    assert 'fair Shape -15.00%' in text and 'legacy paired Shape -5.00%' in text
+    assert _closed_500_narrative(selection, {'SOURCE': {}, 'B1000': {}}, verdict, fixed, observations) == []
+    assert _closed_500_narrative(selection, {'SOURCE': {}}, {**verdict, 'mode': 'eligible'}, fixed, observations) == []

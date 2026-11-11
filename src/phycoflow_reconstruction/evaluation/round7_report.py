@@ -398,6 +398,35 @@ def _timing_evidence(campaign, gpu_seconds):
 def _fmt(value):
     return 'unavailable' if value is None else f'{value:.6g}'
 
+
+def _closed_500_narrative(selection, entries, verdict, fixed, observations):
+    """Summarize only the explicit SOURCE closure on frozen 500 evidence."""
+    if (selection.get('selected') != 'SOURCE' or selection.get('endpoint') is not None
+            or selection.get('B1000') is not None or set(entries) != {'SOURCE'}
+            or verdict.get('mode') != 'close' or verdict.get('selected') != 'SOURCE'
+            or verdict.get('continue') != []):
+        return []
+    lines = ['The frozen epoch-500 efficacy, fidelity and research-trend rules closed learning with SOURCE retained. No 1000-epoch continuation or extension was run. The final TEST endpoint set contains SOURCE only; candidate TEST was not performed and cannot support a candidate TEST claim.', '']
+    if all(name in fixed and '500' in fixed[name] for name in ('B', 'P', 'T')) and 'SOURCE' in fixed:
+        source = fixed['SOURCE']['validation']['scores']
+        panels = {name: fixed[name]['500']['splits']['validation']['summary']['scores'] for name in ('B', 'P', 'T')}
+        source_scale = source['scale']
+        incremental = (panels['B']['scale'] - panels['P']['scale']) / source_scale
+        rows = {item['name']: item['observations']['500'] for item in observations}
+        def failed_fidelity(name):
+            row = rows.get(name, {})
+            return any(value > 1.10 for support in ('train_mse', 'q_mse', 'native_mse')
+                       for value in row.get(support, {}).values())
+        if incremental >= .005 and panels['P']['scale'] > .99 * source_scale and failed_fidelity('P'):
+            lines.extend([f"P improved complete VALIDATION Scale versus B by {incremental:.2%} of SOURCE Scale, meeting the incremental Scale threshold; P's absolute Scale and field-fidelity endpoint requirements failed.", ''])
+        if (all('shape.fair' in panel and 'shape.legacy' in panel for panel in (source, panels['T']))
+                and panels['T']['scale'] > .99 * source_scale and failed_fidelity('T')):
+            fair = (panels['T']['shape.fair'] / source['shape.fair'] - 1) * 100
+            legacy = (panels['T']['shape.legacy'] / source['shape.legacy'] - 1) * 100
+            scale = (panels['T']['scale'] / source_scale - 1) * 100
+            lines.extend([f"T changed VALIDATION fair Shape {fair:+.2f}%, legacy paired Shape {legacy:+.2f}% and complete Scale {scale:+.2f}% versus SOURCE; its endpoint fidelity and absolute Scale requirements failed.", ''])
+    return lines
+
 def generate_report(campaign, test_receipt, selection_path, *, gpu_seconds, attempt_count):
     from .round7_summary import summarize_reductions, compare_summaries
     from .round7_analysis import generate_analysis
@@ -453,7 +482,7 @@ def generate_report(campaign, test_receipt, selection_path, *, gpu_seconds, atte
     lines = ['# Round 7: coherent updates and conditional-target alignment', '',
              f'Frozen validation selection: {selection["selected"]}. Operational disposition after the fixed TEST100 guards: {disposition}.', '',
              'SOURCE-start post-training retained complete State and Scale, the original fidelity bounds and C0. P used a fixed norm-matched direction preference; T replaced the Shape target with a fixed-transform conditional fair score. Arm admission and observer choice are recorded in the case artifacts.', '',
-             f'The fixed TEST panel contains {source["conditions"]} conditions on Q4096 and 40,300 native spatial sites. TEST was evaluated after endpoint selection and does not rerank endpoints.', '']
+             f'The fixed TEST panel contains {source["conditions"]} sampled conditions (approximately 10% of the split), evaluated on Q4096 and all 40,300 native spatial sites within each condition. TEST was evaluated after endpoint selection and does not rerank endpoints.', '']
     restore_path = campaign / 'artifacts/qualification_exact_restore.json'
     original_failure = campaign / 'artifacts/qualification_original_failure.json'
     if restore_path.exists() and original_failure.exists():
@@ -466,6 +495,8 @@ def generate_report(campaign, test_receipt, selection_path, *, gpu_seconds, atte
         if decision.is_file() and inputs.is_file():
             verdict = json.loads(decision.read_text())['decision']
             observations = json.loads(inputs.read_text())['arms']
+            if boundary == 500:
+                lines.extend(_closed_500_narrative(selection, entries, verdict, fixed_evidence, observations))
             values = ', '.join(f"{item['name']} Scale {item['observations'][str(boundary)]['scale']:.6g}" for item in observations)
             lines.extend([f'Epoch {boundary} fixed validation: {values}. Decision: {json.dumps(verdict, sort_keys=True)}.', ''])
             if boundary == 500:
@@ -598,7 +629,7 @@ def generate_report(campaign, test_receipt, selection_path, *, gpu_seconds, atte
             lines.extend([f"Selected VALIDATION {name} Shape self/mutual attraction and separation: {json.dumps(values, sort_keys=True)}.", ''])
         lines += [f'Selected TEST Q4096 J2 physical-measure generated-variance proxy by field: {selected["j2_physical_measure_model_units"]["variance_proxy"]}. The paired bias-plus-reference-variance proxy is {selected["j2_physical_measure_model_units"]["bias_plus_reference_variance_proxy"]}; it is not isolated conditional bias.', '']
     else:
-        lines += ['The planned selection did not establish a candidate endpoint, so no candidate TEST ranking was performed.', '']
+        lines += ['No candidate endpoint was selected for TEST; candidate TEST was not performed.', '']
     if arms:
         for arm, details in analysis['arms'].items():
             lines.extend([f"{arm} actual-step negative-projection flags: {json.dumps(details['negative_at_least_ten_percent'], sort_keys=True)}; Scale-only shadow flag across two assessed windows: {details['scale_only_at_most_half_in_two_windows']}.", ''])
