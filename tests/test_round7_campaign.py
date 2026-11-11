@@ -56,6 +56,9 @@ def test_stage_decision_freezes_proposal_without_inference(monkeypatch, tmp_path
     monkeypatch.setattr(runner, 'ART', tmp_path / 'artifacts')
     monkeypatch.setattr(runner, 'verify_contract', lambda *args: {})
     runner.ART.mkdir()
+    from phycoflow_reconstruction.evaluation import round7_cost_refresh
+    monkeypatch.setattr(round7_cost_refresh, 'verify_cost_receipt', lambda path, epoch, arms: {
+        'arms': {'B': {'decision_seconds_per_attempt': 2, 'forecast_seconds_per_attempt': 2}}})
     measurements = tmp_path / 'measured.json'
     runner.write(measurements, {'update_seconds': {'B': 2}, 'validation_seconds': 1,
                                'training_panel_seconds': 1, 'native_panel_seconds': 1})
@@ -74,10 +77,10 @@ def test_stage_decision_freezes_proposal_without_inference(monkeypatch, tmp_path
                'proposal_context': {key: 'recorded evidence' for key in required}}
     source = tmp_path / 'input.json'
     runner.write(source, payload)
-    assert runner.stage_decide(source)['continue'] == ['B']
+    assert runner.stage_decide(source, 'fixture_cost.json')['continue'] == ['B']
     assert 'Decision: eligible' in (tmp_path / 'FORMAL_PROPOSAL.md').read_text()
     with pytest.raises(FileExistsError):
-        runner.stage_decide(source)
+        runner.stage_decide(source, 'fixture_cost.json')
 
 
 def test_projection_binding_uses_source_attraction_only_for_t(monkeypatch, tmp_path):
@@ -146,6 +149,9 @@ def test_1000_extension_only_when_measured_and_within_budget(monkeypatch, tmp_pa
     monkeypatch.setattr(runner, 'ART', tmp_path / 'artifacts')
     monkeypatch.setattr(runner, 'verify_contract', lambda *args: {})
     runner.ART.mkdir()
+    from phycoflow_reconstruction.evaluation import round7_cost_refresh
+    monkeypatch.setattr(round7_cost_refresh, 'verify_cost_receipt', lambda path, epoch, arms: {
+        'arms': {'B': {'decision_seconds_per_attempt': 2, 'forecast_seconds_per_attempt': 2}}})
     measured = tmp_path / 'measured.json'
     runner.write(measured, {'update_seconds': {'B': 2}, 'validation_seconds': 1,
                             'training_panel_seconds': 1, 'native_panel_seconds': 1})
@@ -160,7 +166,7 @@ def test_1000_extension_only_when_measured_and_within_budget(monkeypatch, tmp_pa
         'manifest_sha256': 'a' * 64, 'observer_sha256': 'b' * 64,
         'arms': [{'name': 'B', 'observations': observations, 'update_seconds': 2,
                   'manifest_sha256': 'a' * 64, 'observer_sha256': 'b' * 64, 'checkpoint_sha256': 'c' * 64}]})
-    decision = runner.stage_decide(source)
+    decision = runner.stage_decide(source, 'fixture_cost.json')
     assert decision['selected'] == 'B' and decision['extension'] == 'B'
     assert runner.read(runner.ART / 'continuation_1250.json')['pinned_1000_fallback'] == 'B'
     assert not (runner.ART / 'final_selection.json').exists()

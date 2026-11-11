@@ -233,7 +233,7 @@ def runtime_source_files():
     paths.extend(package / 'evaluation' / name for name in (
         '__init__.py', 'loss_aligned.py', 'round7_reductions.py', 'round7_source.py',
         'round7_native.py', 'native_coherence.py', 'checkpoint.py', 'round7_decision.py',
-        'round7_summary.py', 'round7_final_test.py'))
+        'round7_summary.py', 'round7_final_test.py', 'round7_cost_refresh.py'))
     return sorted(set(paths))
 
 
@@ -565,7 +565,7 @@ def freeze_legacy_branch(diagnosis_path):
     return branch
 
 
-def stage_decide(path):
+def stage_decide(path, cost_receipt=None):
     """Decide from supplied, previously saved reductions; never perform inference."""
     verify_contract('qualification_contract.json')
     from phycoflow_reconstruction.evaluation.round7_decision import (
@@ -583,6 +583,12 @@ def stage_decide(path):
                 item['update_seconds'], item.get('unchanged_terms', False)) for item in data['arms']]
     validate_field_coverage(arms, ['CH4', 'CO', 'T', 'U_1', 'p'])
     epoch = data['epoch']
+    if not cost_receipt:
+        raise ValueError('fixed-stage hash-bound decision cost receipt required')
+    from phycoflow_reconstruction.evaluation.round7_cost_refresh import verify_cost_receipt
+    costs = verify_cost_receipt(cost_receipt, epoch, [arm.name for arm in arms])
+    if any(arm.update_seconds != costs['arms'][arm.name]['decision_seconds_per_attempt'] for arm in arms):
+        raise ValueError('decision input cost differs from measured whole-stage cost')
     approval_data = None
     if epoch == 500:
         context = data.get('proposal_context', {})
@@ -597,7 +603,7 @@ def stage_decide(path):
             if digest(measurements_path) != resource['measurement_sha256']:
                 raise ValueError('frozen resource measurements changed')
             measured = read(measurements_path)
-            rates = [measured['update_seconds'][name] for name in result['continue']]
+            rates = [costs['arms'][name]['forecast_seconds_per_attempt'] for name in result['continue']]
             n = len(rates)
             projected = (6500 * sum(rates) + (6 * n + 3) * measured['validation_seconds']
                          + (n + 1) * measured['training_panel_seconds']
@@ -628,9 +634,9 @@ def stage_decide(path):
             measured = read(resource['measurements_path'])
             with ledger_transaction() as ledger:
                 remaining = 36 * 3600 - total_seconds(ledger['intervals'])
-            projected = (3250 * measured['update_seconds'][selected.name]
+            projected = (3250 * costs['arms'][selected.name]['forecast_seconds_per_attempt']
                          + 6 * measured['validation_seconds'] + 2 * measured['training_panel_seconds']
-                         + 4 * measured['native_panel_seconds'] + 650 * measured['update_seconds'][selected.name])
+                         + 4 * measured['native_panel_seconds'] + 650 * costs['arms'][selected.name]['forecast_seconds_per_attempt'])
             if projected <= remaining:
                 approval = ART / 'continuation_1250.json'
                 if approval.exists():
@@ -668,7 +674,7 @@ def stage_decide(path):
             if digest(resource['measurements_path']) != resource['measurement_sha256']:
                 raise ValueError('frozen resource measurements changed')
             measured = read(resource['measurements_path'])
-            rate = measured['update_seconds'][arm.name]
+            rate = costs['arms'][arm.name]['forecast_seconds_per_attempt']
             with ledger_transaction() as ledger:
                 remaining = 36 * 3600 - total_seconds(ledger['intervals'])
             projected = (3250 * rate + 6 * measured['validation_seconds'] + 2 * measured['training_panel_seconds']
@@ -752,7 +758,7 @@ def close_incomplete():
     return result
 
 
-def build_decision(epoch):
+def build_decision(epoch, cost_receipt=None):
     """Create decision inputs solely from frozen, matched saved reductions."""
     from phycoflow_reconstruction.evaluation.round7_summary import summarize_reductions, compare_summaries
     from phycoflow_reconstruction.evaluation.round7_native import compare_round7_native
@@ -786,6 +792,10 @@ def build_decision(epoch):
         names, windows = read(ART / f'continuation_{epoch}.json')['arms'], (latest_regular - 100, latest_regular, epoch)
     else:
         raise ValueError('decision endpoint must be 500 or 1000')
+    if not cost_receipt:
+        raise ValueError('fixed-stage hash-bound decision cost receipt required')
+    from phycoflow_reconstruction.evaluation.round7_cost_refresh import verify_cost_receipt
+    costs = verify_cost_receipt(cost_receipt, epoch, names)
     arms, run_dirs, native, shape = [], {}, {}, {}
     for name in names:
         completion = read(ART / f'{name}_{epoch}_complete.json')
@@ -824,13 +834,14 @@ def build_decision(epoch):
                     for observer, values in summary['shape_observers'].items()}
             observations[str(window)] = observation
         arms.append({'name': name, 'observations': observations,
-                     'update_seconds': measurements['update_seconds'][name], 'unchanged_terms': name in ('B', 'P'),
+                     'update_seconds': costs['arms'][name]['decision_seconds_per_attempt'], 'unchanged_terms': name in ('B', 'P'),
                      'manifest_sha256': source_val['manifest_sha256'],
                      'observer_sha256': observer_sha,
                      'checkpoint_sha256': binding['checkpoint_sha256']})
     data = {'epoch': epoch, 'source_validation_scale': source_val['scores']['scale'],
             'manifest_sha256': source_val['manifest_sha256'],
-            'observer_sha256': observer_sha, 'arms': arms}
+            'observer_sha256': observer_sha, 'arms': arms,
+            'decision_cost': {'receipt': str(Path(cost_receipt).resolve()), 'sha256': digest(cost_receipt)}}
     if epoch == 500:
         data['protectively_stopped_arms'] = stopped
     if epoch == 500:
@@ -842,7 +853,9 @@ def build_decision(epoch):
                             'scale_only_two_windows': details['scale_only_at_most_half_in_two_windows']}
                       for arm, details in analysis['arms'].items()}},
             'shape_attraction_separation': shape, 'native_field_checks': native,
-            'measured_cost': {'forecast_measurements_sha256': resource['measurement_sha256']},
+            'measured_cost': {'decision_cost_receipt': str(cost_receipt), 'decision_cost_sha256': digest(cost_receipt),
+                'tie_cost_basis': costs['tie_cost_basis'], 'qualification_device_uuid': costs['qualification_device_uuid'],
+                'arms': costs['arms'], 'forecast_measurements_sha256': resource['measurement_sha256']},
             'remaining_budget': {'gpu_seconds_used': total_seconds(read(ART / 'budget_ledger.json')['intervals']),
                                  'gpu_seconds_cap': 36 * 3600},
             'continued_run_identities': {name: str(path) for name, path in run_dirs.items()}}
@@ -850,7 +863,7 @@ def build_decision(epoch):
     if path.exists():
         raise FileExistsError('fixed decision input already exists')
     write(path, data)
-    return stage_decide(path)
+    return stage_decide(path, cost_receipt)
 
 
 def forecast(path):
@@ -1210,6 +1223,7 @@ def main():
     parser.add_argument('--reductions', help='saved decision input JSON')
     parser.add_argument('--reference', choices=['SOURCE', 'S100'])
     parser.add_argument('--measurements', help='measured full-panel and update timings JSON')
+    parser.add_argument('--decision-cost-receipt', help='closed fixed-stage measured cost receipt')
     parser.add_argument('--diagnosis', help='case-owned observer failure diagnosis')
     args = parser.parse_args()
     if args.stage == 'prepare':
@@ -1272,9 +1286,9 @@ def main():
             raise
     elif args.stage == 'stage-decide':
         if args.reductions:
-            result = stage_decide(args.reductions)
+            result = stage_decide(args.reductions, args.decision_cost_receipt)
         elif args.target_epoch in (500, 1000, 1250, 1500, 1750, 2000):
-            result = build_decision(args.target_epoch)
+            result = build_decision(args.target_epoch, args.decision_cost_receipt)
         else:
             parser.error('stage-decide requires saved reductions or a planned target epoch')
         print(json.dumps(result, sort_keys=True))
