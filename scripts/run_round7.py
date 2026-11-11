@@ -963,7 +963,91 @@ def build_measurements():
     return data
 
 
-def train_arm(arm, target_epoch, resume, *, recovery_receipt=None):
+def verify_user_continuation(path, *, arm, target_epoch, resume, contract):
+    """Validate the single user-authorized T500→2000 same-run continuation."""
+    import math
+    receipt_path = Path(path).resolve()
+    if not receipt_path.is_relative_to(ART.resolve()) or not receipt_path.is_file():
+        raise ValueError('user continuation receipt must be case-owned')
+    receipt = read(receipt_path)
+    if (receipt.get('schema') != 'round7_user_continuation_v1'
+            or receipt.get('status') != 'user_authorized'
+            or receipt.get('arm') != 'T' or arm != 'T'
+            or receipt.get('start_epoch') != 500 or receipt.get('target_epoch') != 2000
+            or target_epoch != 2000):
+        raise ValueError('user continuation authorizes only T500 to T2000')
+    owned = read(ART / 'owned_run_T.json')
+    run = Path(owned['run']).resolve()
+    if not run.is_relative_to((CAMPAIGN / 'T').resolve()):
+        raise ValueError('user continuation run is outside the owned T campaign')
+    if (Path(receipt['run']).resolve() != run or (resume is not None and Path(resume).resolve() != run)
+            or owned['config_sha256'] != digest(contract['configs']['T'])
+            or receipt.get('config_sha256') != owned['config_sha256']):
+        raise ValueError('user continuation run or config differs from the owned T run')
+    binding = read(run / 'evaluation/checkpoint_binding_500.json')
+    complete = read(ART / 'T_500_complete.json')
+    checkpoint = Path(binding['checkpoint']).resolve()
+    if (complete.get('status') != 'completed' or complete.get('epoch') != 500
+            or Path(complete['run']).resolve() != run
+            or Path(receipt['checkpoint_500']).resolve() != checkpoint
+            or receipt.get('checkpoint_500_sha256') != binding['checkpoint_sha256']
+            or complete['last_checkpoint_sha256'] != binding['checkpoint_sha256']
+            or digest(checkpoint) != binding['checkpoint_sha256']):
+        raise ValueError('user continuation does not bind the completed T500 checkpoint')
+    numbers = [receipt.get(k) for k in ('update_seconds', 'fixed_overhead_seconds',
+                                       'replay_reserve_seconds', 'projected_gpu_seconds')]
+    if (not all(isinstance(v, (float, int)) and not isinstance(v, bool) and math.isfinite(v) for v in numbers)
+            or numbers[0] <= 0 or any(v < 0 for v in numbers[1:])
+            or receipt.get('gpu_cap_seconds') != 36 * 3600
+            or numbers[3] < 19500 * numbers[0] + numbers[1] + numbers[2]):
+        raise ValueError('user continuation needs a conservative measured budget forecast')
+    return receipt
+
+
+def verify_user_continuation_budget(receipt, *, start_step, ledger):
+    """Reserve measured remaining work within the existing shared hard caps."""
+    if not 6500 <= start_step < 26000:
+        raise ValueError('user continuation cursor is outside T500 to T2000')
+    remaining_updates = 26000 - start_step
+    projected = max(remaining_updates * receipt['update_seconds'] + receipt['fixed_overhead_seconds']
+                    + receipt['replay_reserve_seconds'], receipt['projected_gpu_seconds']
+                    - (start_step - 6500) * receipt['update_seconds'])
+    replayed_positions = max(0, min(26000, ledger['arm_last_step'].get('T', -1) + 1) - start_step)
+    if (ledger['attempt_count'] + remaining_updates > 46214
+            or ledger['formal_replays'] + replayed_positions > 650
+            or ledger['formal_unique'] + max(0, 25999 - ledger['arm_last_step'].get('T', -1)) > 45500
+            or total_seconds(ledger['intervals']) + projected > receipt['gpu_cap_seconds']):
+        raise ValueError('user continuation cannot fit the shared attempt or GPU budget')
+    return projected
+
+
+def verify_continuation_state(checkpoint, pinned, *, strict=False):
+    """Compare saved live state against the pinned boundary before resuming."""
+    keys = ['model', 'optimizer', 'external_policy', 'query_coverage', 'rng_state', 'training_aux_state']
+    if strict:
+        keys.extend(('global_step', 'family_states', 'family_configs', 'normalization',
+                     'family_scales', 'source_hashes', 'config_sha256', 'coherence_calibration_sha256'))
+        keys.extend(key for key in ('component_controller', 'family_scalarizer', 'execution_strategy',
+                     'scale_only_binding_sha256', 'shared_fidelity_reference_sha256',
+                     'round7_child_binding_sha256', 'training_subset_sha256')
+                    if key in checkpoint or key in pinned)
+    for key in keys:
+        if key not in checkpoint or key not in pinned or not same_checkpoint_state(checkpoint[key], pinned[key]):
+            raise ValueError(f'continuation state differs from the pinned boundary: {key}')
+
+
+def consecutive_fidelity_breach(rows, fields, limit):
+    return len(rows) >= 2 and any(
+        all(row['source_ratios'][field] > limit for row in rows[-2:]) for field in fields)
+
+
+def extension_fidelity_breach(rows, fields, target_epoch, user_continuation):
+    return (not user_continuation and target_epoch > 1000
+            and consecutive_fidelity_breach(rows, fields, 1.10))
+
+
+
+def train_arm(arm, target_epoch, resume, *, recovery_receipt=None, user_continuation=None):
     """Continue a frozen arm, evaluating only its predeclared fixed panels."""
     import copy
     import torch
@@ -993,7 +1077,10 @@ def train_arm(arm, target_epoch, resume, *, recovery_receipt=None):
         raise ValueError('initial matched learning starts at SOURCE')
     if target_epoch > 500 and resume is None and not recovering:
         raise ValueError('continuation requires the existing run and state')
-    if target_epoch > 500:
+    user_receipt = (verify_user_continuation(user_continuation, arm=arm, target_epoch=target_epoch,
+                                             resume=resume, contract=contract)
+                    if user_continuation else None)
+    if target_epoch > 500 and user_receipt is None:
         approval = read(ART / f'continuation_{target_epoch}.json')
         if arm not in approval['arms'] or approval.get('status') != 'approved_by_frozen_rules':
             raise ValueError('continuation is not authorized by the saved decision and budget')
@@ -1007,7 +1094,8 @@ def train_arm(arm, target_epoch, resume, *, recovery_receipt=None):
         owned = read(owned_path)
         if (failure.get('status') != 'failed' or failure.get('arm') != arm
                 or failure.get('target_epoch') != target_epoch
-                or owned.get('config_sha256') != digest(contract['configs'][arm])):
+                or owned.get('config_sha256') != digest(contract['configs'][arm])
+                or (user_receipt is not None and failure.get('user_continuation_sha256') != digest(user_continuation))):
             raise ValueError('recovery receipt, arm or frozen config mismatch')
         owned_run = Path(owned['run']).resolve()
         if not owned_run.is_relative_to((CAMPAIGN / arm).resolve()):
@@ -1038,7 +1126,7 @@ def train_arm(arm, target_epoch, resume, *, recovery_receipt=None):
     if resume is not None:
         checkpoint = load_project_checkpoint(Path(resume) / 'checkpoints/last.pt')
         start_step = int(checkpoint['global_step'])
-        previous = 0 if target_epoch == 500 else target_epoch - (500 if target_epoch == 1000 else 250)
+        previous = 500 if user_receipt is not None else (0 if target_epoch == 500 else target_epoch - (500 if target_epoch == 1000 else 250))
         if recovering:
             if not previous * 13 <= start_step < target_epoch * 13:
                 raise ValueError('recovery checkpoint is outside the failed stage')
@@ -1049,9 +1137,10 @@ def train_arm(arm, target_epoch, resume, *, recovery_receipt=None):
             if digest(prior_binding['checkpoint']) != prior_binding['checkpoint_sha256']:
                 raise ValueError('prior fixed checkpoint bytes changed')
             pinned = load_project_checkpoint(prior_binding['checkpoint'])
-            for key in ('model', 'optimizer', 'external_policy', 'query_coverage', 'rng_state', 'training_aux_state'):
-                if key not in checkpoint or key not in pinned or not same_checkpoint_state(checkpoint[key], pinned[key]):
-                    raise ValueError(f'continuation state differs from the pinned boundary: {key}')
+            verify_continuation_state(checkpoint, pinned, strict=user_receipt is not None)
+        if user_receipt is not None:
+            with ledger_transaction() as ledger:
+                verify_user_continuation_budget(user_receipt, start_step=start_step, ledger=ledger)
         if recovering:
             import shutil
             archive = Path(resume) / 'logs' / f'recovery_archive_{time.time_ns()}'
@@ -1137,8 +1226,7 @@ def train_arm(arm, target_epoch, resume, *, recovery_receipt=None):
             raise ValueError('evaluation and saved checkpoint weights differ')
         log = run / 'logs/loss_aligned_validation.jsonl'
         rows = [json.loads(line) for line in log.read_text().splitlines()]
-        if (target_epoch > 1000 and len(rows) >= 2
-                and any(all(row['source_ratios'][field] > 1.10 for row in rows[-2:]) for field in train.field_names)):
+        if extension_fidelity_breach(rows, train.field_names, target_epoch, user_receipt is not None):
             interruption = {'arm': arm, 'observed_epoch': epoch, 'checkpoint': str(checkpoint_path),
                             'checkpoint_sha256': digest(checkpoint_path),
                             'reason': 'same-field validation MSE ratio above 1.10 on two consecutive scheduled checks'}
@@ -1146,7 +1234,7 @@ def train_arm(arm, target_epoch, resume, *, recovery_receipt=None):
             fallback = read(ART / 'continuation_1250.json')['pinned_1000_fallback']
             freeze_final_selection(fallback, 1000, CAMPAIGN / 'comparison/decision_input_1000.json')
             raise RuntimeError('extension stopped by consecutive validation fidelity guard; pinned 1000 fallback retained')
-        if len(rows) >= 2 and any(all(row['source_ratios'][field] > 1.25 for row in rows[-2:]) for field in train.field_names):
+        if consecutive_fidelity_breach(rows, train.field_names, 1.25):
             write(ART / f'{arm}_protective_stop.json', {'arm': arm, 'epoch': epoch,
                   'checkpoint': str(checkpoint_path), 'checkpoint_sha256': digest(checkpoint_path),
                   'reason': 'same-field Q4096 validation MSE ratio above 1.25 at two consecutive scheduled checks',
@@ -1205,7 +1293,9 @@ def train_arm(arm, target_epoch, resume, *, recovery_receipt=None):
             raise ValueError('completed run does not reach fixed stage boundary')
         write(ART / f'{arm}_{target_epoch}_complete.json', {'status': 'completed', 'run': str(run),
             'epoch': target_epoch, 'last_checkpoint_sha256': digest(run / 'checkpoints/last.pt'),
-            'elapsed_seconds': time.time() - started, 'timing': timer.report()})
+            'elapsed_seconds': time.time() - started, 'timing': timer.report(),
+            **({'user_continuation': str(Path(user_continuation).resolve()),
+                'user_continuation_sha256': digest(user_continuation)} if user_receipt is not None else {})})
     finally:
         train.close()
         validation.close()
@@ -1218,6 +1308,7 @@ def main():
     parser.add_argument('--target-epoch', type=int)
     parser.add_argument('--resume')
     parser.add_argument('--recover', help='specific prior failure receipt for same-run recovery')
+    parser.add_argument('--user-continuation', help='case-owned authority for the exact T500 to T2000 continuation')
     parser.add_argument('--floor', type=float)
     parser.add_argument('--floor-units')
     parser.add_argument('--reductions', help='saved decision input JSON')
@@ -1312,12 +1403,15 @@ def main():
         started = time.time()
         try:
             with occupied(f'{args.arm}_{args.target_epoch}'):
-                train_arm(args.arm, args.target_epoch, args.resume, recovery_receipt=args.recover)
+                train_arm(args.arm, args.target_epoch, args.resume, recovery_receipt=args.recover,
+                          user_continuation=args.user_continuation)
         except BaseException as exc:
             write(ART / f'{args.arm}_{args.target_epoch}_failure_{time.time_ns()}.json',
                   {'status': 'failed', 'arm': args.arm, 'target_epoch': args.target_epoch,
                    'elapsed_seconds': time.time() - started,
-                   'error_type': type(exc).__name__, 'message': str(exc)})
+                   'error_type': type(exc).__name__, 'message': str(exc),
+                   **({'user_continuation_sha256': digest(args.user_continuation)}
+                      if args.user_continuation and Path(args.user_continuation).is_file() else {})})
             raise
     elif args.stage == 'finish':
         import yaml
