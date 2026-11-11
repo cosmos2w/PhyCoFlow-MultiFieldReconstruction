@@ -544,15 +544,26 @@ def generate_report(campaign, test_receipt, selection_path, *, gpu_seconds, atte
             lines.extend([f"Selected validation Scale versus S100 plus 0.02 frozen Scale units: {'retained' if retained else 'not retained'}.", ''])
     if fixed_evidence:
         lines.extend(['Fixed TRAIN and VALIDATION observer scores and weighted Scale components (A/R and full Shape decompositions are recorded in the linked numerical summary).', '',
-                      '| Endpoint | Panel | State | Scale | Fair Shape | Legacy Shape | Signed | Joint | Self | Rho |',
-                      '| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |'])
+                      '| Endpoint | Panel | State | Scale | Fair Shape | Legacy Shape |',
+                      '| --- | --- | ---: | ---: | ---: | ---: |'])
         for name, data in fixed_evidence.items():
             groups = [('SOURCE', data)] if name == 'SOURCE' else [(f'{name} {epoch}', item['splits']) for epoch, item in data.items()]
             for endpoint, splits in groups:
                 for split, item in splits.items():
                     panel = item if name == 'SOURCE' else item['summary']
-                    scores, terms = panel['scores'], panel['weighted_scale_terms']
-                    vals = [scores.get(k) for k in ('state', 'scale', 'shape.fair', 'shape.legacy')] + [terms.get(k) for k in ('signed', 'joint', 'self', 'rho')]
+                    scores = panel['scores']
+                    vals = [scores.get(k) for k in ('state', 'scale', 'shape.fair', 'shape.legacy')]
+                    lines.append('| ' + endpoint + ' | ' + split + ' | ' + ' | '.join(_fmt(v) for v in vals) + ' |')
+        lines.extend(['', 'Weighted complete Scale contributions.', '',
+                      '| Endpoint | Panel | Signed | Joint | Self | Rho |',
+                      '| --- | --- | ---: | ---: | ---: | ---: |'])
+        for name, data in fixed_evidence.items():
+            groups = [('SOURCE', data)] if name == 'SOURCE' else [(f'{name} {epoch}', item['splits']) for epoch, item in data.items()]
+            for endpoint, splits in groups:
+                for split, item in splits.items():
+                    panel = item if name == 'SOURCE' else item['summary']
+                    terms = panel['weighted_scale_terms']
+                    vals = [terms.get(k) for k in ('signed', 'joint', 'self', 'rho')]
                     lines.append('| ' + endpoint + ' | ' + split + ' | ' + ' | '.join(_fmt(v) for v in vals) + ' |')
         lines.extend(['', 'Weighted Scale attraction / separation (unavailable where the observer did not record a component).', '',
                       '| Endpoint | Panel | Signed A/R | Joint A/R | Self A/R | Rho A/R |',
