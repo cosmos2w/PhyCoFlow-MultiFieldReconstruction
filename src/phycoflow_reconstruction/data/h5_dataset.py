@@ -161,9 +161,7 @@ class H5FieldDataset(Dataset[FieldSample]):
             coordinate_dim = 2
             spatial_x = self.raw_spatial_coords[:, 0]
             time_grid, space_grid = torch.meshgrid(self.times, spatial_x, indexing="ij")
-            self.space_time_coords_raw = torch.stack(
-                (time_grid, space_grid), dim=-1
-            ).reshape(-1, 2)
+            self.space_time_coords_raw = torch.stack((time_grid, space_grid), dim=-1).reshape(-1, 2)
             self.space_time_coords = _normalize_coordinates(self.space_time_coords_raw)
         else:
             raise ValueError(f"unsupported reconstruction_unit={reconstruction_unit!r}")
@@ -180,10 +178,16 @@ class H5FieldDataset(Dataset[FieldSample]):
         )
         self.data_spec.validate()
         if self.augmentation:
-            if (self.augmentation.get("kind") != "periodic_translate_rot90"
-                    or self.reconstruction_unit != "snapshot" or len(self.grid_shape) != 2
-                    or self.grid_shape[0] != self.grid_shape[1] or self.include_temporal_derivative):
-                raise ValueError("augmentation requires periodic square snapshots without temporal derivatives")
+            if (
+                self.augmentation.get("kind") != "periodic_translate_rot90"
+                or self.reconstruction_unit != "snapshot"
+                or len(self.grid_shape) != 2
+                or self.grid_shape[0] != self.grid_shape[1]
+                or self.include_temporal_derivative
+            ):
+                raise ValueError(
+                    "augmentation requires periodic square snapshots without temporal derivatives"
+                )
             names = self.augmentation.get("vector_fields", [])
             if len(names) != 2 or len(set(names)) != 2 or not set(names) <= set(self.field_names):
                 raise ValueError("augmentation.vector_fields requires two ordered velocity fields")
@@ -268,6 +272,9 @@ class H5FieldDataset(Dataset[FieldSample]):
             sample = self._space_time_sample(trajectory_index)
         else:
             sample = self._snapshot_sample(trajectory_index, time_index)
+        from .physical_measure import attach_sample_measure
+
+        attach_sample_measure(self, sample)
         sample.validate()
         return sample
 
@@ -289,9 +296,14 @@ class H5FieldDataset(Dataset[FieldSample]):
             from .augmentation import periodic_translate_rot90
 
             if any(metadata.get(key) for key in ("physics", "auxiliary")):
-                raise ValueError("augmentation of point-aligned auxiliary/physics fields is unsupported")
-            values = periodic_translate_rot90(values, self.grid_shape, tuple(
-                self.field_names.index(name) for name in self.augmentation["vector_fields"]))
+                raise ValueError(
+                    "augmentation of point-aligned auxiliary/physics fields is unsupported"
+                )
+            values = periodic_translate_rot90(
+                values,
+                self.grid_shape,
+                tuple(self.field_names.index(name) for name in self.augmentation["vector_fields"]),
+            )
         if self.include_temporal_derivative:
             if self.selection.strategy == "chronological_frames_80_10_10":
                 first_allowed = self.selection.frame_indices[0]

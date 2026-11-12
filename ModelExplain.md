@@ -7,7 +7,7 @@ This document describes the mathematical contract implemented by `phycoflow_reco
 - [0. Current implementation and settings](#0-current-implementation-and-settings)
   - [0.1 Registered model map](#01-registered-model-map)
   - [0.2 Canonical model settings](#02-canonical-model-settings)
-  - [0.3 Current turbulent-combustion coherence settings](#03-current-turbulent-combustion-coherence-settings)
+  - [0.3 Recommended coherence profile and saved examples](#03-recommended-coherence-profile-and-saved-examples)
   - [0.4 End-to-end code path](#04-end-to-end-code-path)
 - [1. Reconstruction problem and notation](#1-reconstruction-problem-and-notation)
 - [2. Shared coordinate and observation features](#2-shared-coordinate-and-observation-features)
@@ -29,12 +29,12 @@ This document describes the mathematical contract implemented by `phycoflow_reco
 - [6. Base-training objectives](#6-base-training-objectives)
 - [7. Data-driven coherence model](#7-data-driven-coherence-model)
   - [7.1 Unified objective](#71-unified-objective)
-  - [7.2 Global-distribution coherence](#72-global-distribution-coherence)
+  - [7.2 State: occupation geometry and scoring](#72-state-occupation-geometry-and-scoring)
     - [Marginal Wasserstein term](#marginal-wasserstein-term)
     - [Pairwise sliced Wasserstein term](#pairwise-sliced-wasserstein-term)
     - [Joint top-tail sliced Wasserstein term](#joint-top-tail-sliced-wasserstein-term)
-  - [7.3 Graph cross-spectrum coherence](#73-graph-cross-spectrum-coherence)
-  - [7.4 Topology coherence](#74-topology-coherence)
+  - [7.3 Scale: signed fields and complete anchors](#73-scale-signed-fields-and-complete-anchors)
+  - [7.4 Shape: fixed-transform persistence](#74-shape-fixed-transform-persistence)
   - [7.5 Reference policies and target leakage boundary](#75-reference-policies-and-target-leakage-boundary)
   - [7.6 Coherence training-history monitoring](#76-coherence-training-history-monitoring)
 - [8. Differentiable reconstruction and observation consistency](#8-differentiable-reconstruction-and-observation-consistency)
@@ -96,7 +96,22 @@ The canonical [`gl_rbf_cq.yaml`](configs/models/gl_rbf_cq.yaml) is the current h
 
 These settings map through `_portable_config` in the adapter to the preserved portable core in [`core/portable_core.py`](src/phycoflow_reconstruction/models/flows/pointcloud/core/portable_core.py). The adapter registers the portable children directly so existing checkpoint state-dict keys remain loadable. Native and coherence training gradients update the live parameters; evaluation and reconstruction previews enter the adapter's configured EMA weight context because `model_ema_eval: true`.
 
-### 0.3 Current turbulent-combustion coherence settings
+### 0.3 Recommended coherence profile and saved examples
+
+The recommended new profile is **Scalable Anchored Coherence**, configured through [the shared fragment](configs/defaults/scalable_anchored_coherence.yaml). Scientific meaning stays with the case: field names and units, physical geometry/measure, finite observer resolution, task floors, SOURCE identity and acceptable fidelity change. [The guide](docs/Scalable_Anchored_Coherence.md) connects these choices to fitting, training and inference.
+
+| View or stage | Recommended computation |
+|---|---|
+| State | Keep every field marginal; freeze up to eight TRAIN/SOURCE mixed directions, with four diversity and four hardness selections |
+| Scale | Importance-correct shared sampled signed/rho queries; retain the complete signed fluctuation plus connected-piece-mean joint vector and complete log-power-self vector |
+| Shape | Use the same outer field/pair queries as Scale; construct selected signs/lines only; freeze pooled TRAIN calibration categories |
+| Internal calibration | Measure coherent semantic-block parameter gradients at epochs 1, 3, 6, 8 and 10; freeze positive internal coefficients after epoch 10 |
+| Training | Shared observation-consistent endpoints; one optimizer step; advance sampler/controller state only after a successful update |
+| Inference | Explicitly qualified SOURCE/child output blend; record matched coupling and the measured two-model cost |
+
+Conditional scores use independent members of the same observation-conditioned model. Deterministic models use a separately identified paired point score. A full-query reference retains the larger fixed State direction bank and complete queries; it measures the effect of approximation on a new case. Existing saved configurations keep their original definitions.
+
+#### Saved turbulent-combustion example
 
 The source profile is [`gl_rbf_cq_cached_kv_5000ep.yaml`](cases/turbulent_combustion/configs/base/gl_rbf_cq_cached_kv_5000ep.yaml). It trains the canonical `gl_rbf_cq` model for 5000 epochs with AdamW batch size 128, learning rate $10^{-4}$, weight decay $10^{-6}$, and clip norm 1.0. The state has five output fields in order `CH4, CO, T, U_1, p` on a $100\times403$ grid with training mean/std normalization. Its only sparse input field is `T`, sampled uniformly at 192--384 locations per snapshot. Base training uses 4096 queries and an RFF rectified-flow source; configured evaluation uses four Euler generation steps and EMA weights.
 
@@ -122,7 +137,7 @@ The correlation between configuration, model, and coherence code is:
 
 1. [`config/load.py`](src/phycoflow_reconstruction/config/load.py) composes defaults; source loading in [`training/source.py`](src/phycoflow_reconstruction/training/source.py) restores the immutable base model, dataset, and observation contract.
 2. `build_model` in [`models/__init__.py`](src/phycoflow_reconstruction/models/__init__.py) selects the adapter. For `gl_rbf_cq`, the adapter supplies native `training_loss`, flow source/velocity hooks, streamed reconstruction, EMA, and observation-clamp behavior.
-3. [`training/post_training.py`](src/phycoflow_reconstruction/training/post_training.py) computes the adapter's native loss from the target-bearing training batch, removes `target_fields` before differentiable reconstruction, and reuses one generated endpoint across every enabled coherence family.
+3. [`training/post_training.py`](src/phycoflow_reconstruction/training/post_training.py) removes `target_fields` before differentiable reconstruction and shares the generated endpoints across enabled families. Native-retention routes also compute the adapter's native loss; an external fidelity policy uses endpoint risks instead.
 4. [`coherence/compose.py`](src/phycoflow_reconstruction/coherence/compose.py) and [`coherence/registry.py`](src/phycoflow_reconstruction/coherence/registry.py) instantiate only enabled families. Their component paths correspond to the mathematical terms in Section 7.
 5. For `paired_supervised`, the target is introduced only after reconstruction as the reference argument to the family loss. For `training_reference`, [`coherence/reference_bank.py`](src/phycoflow_reconstruction/coherence/reference_bank.py) selects a distinct training-only empirical reference and validates fixed geometry where required.
 6. [`training/coherence_calibration.py`](src/phycoflow_reconstruction/training/coherence_calibration.py) optionally fixes between-family scales; then [`training/gradient_balance.py`](src/phycoflow_reconstruction/training/gradient_balance.py) combines the weighted native-data gradient with the already-aggregated coherence gradient and performs one optimizer update.
@@ -776,14 +791,16 @@ Thus “data loss” in later coherence post-training means the source adapter's
 
 ### 7.1 Unified objective
 
-The implemented data-driven families are
+The recommended State, Scale and Shape families are
 
 $$
 \mathfrak F=
-\{\text{global distribution},\text{cross-spectrum},\text{topology}\}.
+\{\text{State},\text{Scale},\text{Shape}\}.
 $$
 
-The YAML-to-code-to-math mapping is exact:
+The recommended implementation maps `global_distribution` to physical occupation geometry, `multiscale_spectrum` to signed multiscale geometry, and `topology` to raster persistence. The fixed representations and their finite resolutions define what each score observes. Section 7.2–7.4 gives their deterministic and conditional interpretations. Family ConFIG receives three family gradients; its recorded sum is a diagnostic, while the update is a parameter direction. The scalar sum below describes scalarization routes.
+
+The following table records the legacy YAML component mapping, retained for saved runs:
 
 | YAML component | Implementation | Quantity described below |
 |---|---|---|
@@ -839,9 +856,31 @@ $$
 
 with the maximum weight used directly when $E_w=0$. If coherence is evaluated only every $K$ optimizer steps, optional interval rescaling multiplies the sampled coherence loss by $K$.
 
-One differentiable reconstructed endpoint is reused by every enabled family in an update. `self`, `mutual`, and `cross` name components inside a family; they are not separate top-level coherence families. Observation consistency is a reconstruction constraint, and PDE loss is case physics, so neither belongs in $\mathfrak F$.
+The same differentiable reconstruction draws are reused by every enabled family in an update. `self`, `mutual`, and `cross` name components inside a family; they are not separate top-level coherence families. Observation consistency is a reconstruction constraint, and PDE loss is case physics, so neither belongs in $\mathfrak F$.
 
-### 7.2 Global-distribution coherence
+### 7.2 State: occupation geometry and scoring
+
+For field vector $X_n$ at spatial site $n$, declared nonnegative physical masses $m_n$ define the occupation law $\mu_X=\sum_n q_n\delta_{X_n}$, where $q_n=m_n/\sum_r m_r$. It describes which multi-field values occupy the domain; it discards their spatial location. `marginal_mixed_weighted_v3` combines all field marginal $W_2^2$ distances and the mean projected $W_2^2$ over a fixed mixed direction bank. Marginal channel weights and mixed direction weights are positive and normalized within their blocks. Unlike a top-tail score, this observer uses the same directions for every pair.
+
+Weighted one-dimensional transport integrates the squared difference of inverse CDFs over their merged breakpoints. This remains exact for unequal endpoint masses and point counts. [`base.py`](src/phycoflow_reconstruction/coherence/base.py) implements the distance; [`state_compute.py`](src/phycoflow_reconstruction/coherence/state_compute.py) sorts each endpoint once and reuses a common finite Hilbert embedding. Cache reuse requires matching values, masses, field order, transforms, directions and support identity. It does not replace weighted transport with unweighted ranks.
+
+Let $D_s^2$ and $D_m^2$ be the marginal and mixed occupation distances. The conditional observer uses the **unsquared common norm**
+
+$$
+d_\Phi(X,Y)=\sqrt{c_s\lambda_s D_s^2(X,Y)+c_m\lambda_m D_m^2(X,Y)}.
+$$
+
+For independent generated members $X_1,\ldots,X_J$ and paired reference $Y$,
+
+$$
+S_d(X_{1:J},Y)=\frac1J\sum_jd(X_j,Y)-\frac{1}{J(J-1)}\sum_{j<k}d(X_j,X_k).
+$$
+
+`conditional_quantile_fair_v1` is the fixed-bank conditional definition; the scalable score uses its separately bound selected direction bank. The attraction and member separation use exactly the same measure, transform, directions and positive coefficients. Finite-sample scores may be negative. Coincident endpoints use a zero norm subgradient. Paired squared occupation distance and paired norm are separately identified deterministic interpretations; copying a deterministic prediction twice does not create independent draws. With one field the mixed channel is absent and the marginal remains active.
+
+The scalable bank starts from seeded unit directions. It removes sign-equivalent duplicates, selects four farthest-first angular directions, then four high-discrepancy directions with a diversity penalty. Hardness is mean projected weighted $W_2^2$ measured on matched TRAIN/SOURCE outputs. The frozen artifact records directions, selected IDs, field order, seed and identities. Every field marginal remains present. The finite observer identifies its represented law; it does not determine the full multi-field physical law.
+
+#### Legacy distribution components
 
 Let generated and reference empirical states be
 
@@ -903,7 +942,26 @@ Current drawbacks:
 - Every term ignores where values occur, so spatially permuted fields can have perfect distribution coherence.
 - Equal empirical point counts are required; the current estimator does not solve unequal-weight or unequal-cardinality optimal transport.
 
-### 7.3 Graph cross-spectrum coherence
+### 7.3 Scale: signed fields and complete anchors
+
+[`multiscale_spectrum/`](src/phycoflow_reconstruction/coherence/families/multiscale_spectrum/README.md) fits a mass-orthonormal spatial basis and fixed smooth bands. Each connected piece has its mass-weighted mean removed before spectral analysis. For coefficient vector $a_{kc}$, band filter $g_b(k)$, frozen positive TRAIN scale $s_{bc}$ and total mass $M$, the signed band representation is $g_b(k)a_{kc}/(s_{bc}\sqrt M)$. Signed axis and $(e_f\pm e_g)/\sqrt2$ pair projections retain signs and represented spatial arrangement.
+
+The joint vector in `signed_spectral_mean_augmented_v4` contains **all signed band coefficients and all connected-piece means**. Its distance is
+
+$$
+d_{\rm joint}^2(X,Y)=\frac1M\sum_{k,c,b}g_b(k)^2\frac{(a_{kc}(X)-a_{kc}(Y))^2}{s_{bc}^2}
++\lambda_\mu\sum_{p,c}\pi_p\frac{(\mu_{pc}(X)-\mu_{pc}(Y))^2}{s_{\mu,pc}^2},
+$$
+
+where $\pi_p=M_p/M$. Frozen mean scales use TRAIN variance and explicit positive field-unit floors. A positive complete joint weight preserves dependence between represented fluctuations and piece means. Coefficient-space evaluation is algebraically identical to synthesizing these band fields; differences are formed before norms to preserve exact coincident values and gradients.
+
+The conditional score applies $S_d$ above to signed projections and the full joint vector. The additional complete log-power-self energy score and signed normalized band relation $\rho_{bfg}=G_{bfg}/\sqrt{(P_{bf}+\delta_{bf})(P_{bg}+\delta_{bg})}$ provide complementary views. Improving self-power or rho cannot substitute for preserving signed/joint scores. Deterministic `paired_signed_spectral_mean_v1` uses one point distance with the same signed and joint representation; the sampled deterministic extension also retains the self/rho views.
+
+The scalable query implementation samples only additive signed and rho terms. The full joint norm, connected-piece means and full log-power vector are evaluated intact. With $C$ fields, the signed axis mean has weight $1/C$ and the signed pair mean $1-1/C$. An implicit $C(C-1)/2$ pair population provides sampling support for every pair without storing a quadratic bank. For $K$ draws, population $P$, proposal probability $p_i>0$ and multiplicity $n_i$, the population-mean coefficient is $n_i/(KPp_i)$. This corrects additive values and gradients before nonlinear gradient aggregation; it does not make the entire training trajectory unbiased.
+
+Physical finite-element mass, a graph fallback, retained modes, wavelength/band conventions and disconnected-piece handling are explicit in the family artifact. A graph-scale index is not automatically a physical wavelength. Complete anchors and reconstruction retain their dependence on field count and spatial resolution.
+
+#### Legacy graph cross-spectrum
 
 All states must share identical coordinates and node ordering. A Gaussian $k$-nearest-neighbor graph uses
 
@@ -996,7 +1054,17 @@ Current drawbacks:
 - These are ensemble estimators: same-frequency mode requires $B\ge2$ and cross-frequency mode requires $B\ge3$, while small batches yield noisy covariance estimates.
 - Graph construction/eigendecomposition is preprocessing overhead, and the stored basis scales with $NK$.
 
-### 7.4 Topology coherence
+### 7.4 Shape: fixed-transform persistence
+
+The formal paired definition is `finite_primary_v1`; the conditional definition is `conditional_fixed_transform_fair_v1`. The scalable pooled observer has a separate version because its normalization pools TRAIN discrepancies across fields/pairs. All retain explicit unary positive/negative signs, four mutual sign combinations, three fixed positive pair lines, H0/H1 finite birth–death pairs, and essential births. Their implementation and category conventions are described in [the Shape reference](src/phycoflow_reconstruction/coherence/families/topology/README.md).
+
+For the conditional fixed-transform and pooled observers, first apply a frozen TRAIN field/descriptor transform. The paired `finite_primary_v1` observer instead uses per-snapshot paired-reference mean/std with TRAIN-frozen loss scales. A signed pair $(\sigma_f z_f,\sigma_g z_g)$ and positive line $(a,b)$ give the scalar filtration $h=\max_i(\sigma_i z_i-b_i)/a_i$. The same transform, line, domain and positive scales apply to member/reference and member/member distances. Finite diagrams use fixed-angle sliced Wasserstein with diagonal augmentation and valid-raster-vertex-count normalization; essential births are retained separately with their declared count convention. The pooled observer divides finite and essential discrepancies by positive category-specific TRAIN scales, averages H0/H1, and combines finite/essential categories with weights 0.9/0.1. Conditional scoring uses $(d(X_1,Y)+d(X_2,Y)-d(X_1,X_2))/2$; the paired interpretation uses $d(X,Y)$.
+
+The pooled categories distinguish unary/mutual, sign, line, homology dimension and finite/essential status. They are fitted from a fixed bounded uniform TRAIN/SOURCE query sample and then frozen. Scale and Shape share outer field/pair IDs and proposal probabilities. Shape additionally samples its signs/lines with the declared reference probabilities and builds only those filtrations. Full-query scoring is a useful reference on small systems; all-pair support does not imply every pair is visited in a finite run.
+
+Raster dimensions, physical cell-overlap or fixed interpolation, smoothing, valid mask and periodicity are part of the definition. A sparse/reduced raster measures that raster's topology. A fixed mask has fixed essential-class counts; unsupported mask/boundary combinations fail explicitly. TRAIN transforms and positive floors never depend on the current prediction or held-out data. Exact pairing/cache reuse requires the same raster values, mask, boundary, homology and filtration definition.
+
+#### Legacy topology strategies
 
 The current method explicitly selects `strategy: cubical_persistence` and `persistence.distance: sliced_wasserstein`. It compares full finite H0/H1 persistence diagrams and essential births rather than sampled Betti-curve values. [`topology/family.py`](src/phycoflow_reconstruction/coherence/families/topology/family.py) maps values onto a fixed two-dimensional raster; [`persistence_objective.py`](src/phycoflow_reconstruction/coherence/families/topology/persistence_objective.py) constructs the self and mutual filtrations; and [`persistence.py`](src/phycoflow_reconstruction/coherence/families/topology/persistence.py) obtains pairings and diagram distances.
 
@@ -1078,6 +1146,10 @@ The reference is supplied only after reconstruction to compute $\mathcal L_{\mat
 
 ### 7.6 Coherence training-history monitoring
 
+New histories and PDF/PNG curves are written to the run-owned `logs/` directory; readers also accept legacy `metrics/` files. Curves refresh at the first available history, every 10 completed epochs, validation, pause and completion. A checkpoint restores the successful-update cursor, independent draw/query RNG, fitted geometry/transforms, sampler and internal calibration state. Recovery archives records beyond the saved cursor before replay.
+
+The internal calibration uses the eight coherent semantic blocks: State marginal/mixed metric channels, Scale signed/joint/log-power-self/rho, and Shape self/mutual. Parameter-gradient norms are measured on the first ordinary training batch at epochs 1, 3, 6, 8 and 10, using shared reconstruction graphs and an isolated query RNG. The journal records the probe sample IDs and support. Within a family, EMA-smoothed norms produce median-relative coefficients clipped to [0.5,2], with unresolved near-zero channels kept at 1. State coefficients are placed inside its common square root, consistently for every score pair. Coefficients freeze after epoch 10. This changes the internal objective geometry before ConFIG.
+
 At every recorded epoch, post-training retains each executed component's raw scalar and its additive contribution to the aggregate coherence objective. For component $k$ in family $F$, the history contract records
 
 $$
@@ -1140,6 +1212,16 @@ Current drawbacks:
 - Gaussian maps use one coordinate-space bandwidth and are built under `no_grad`; their construction and bandwidth are not learned.
 - Smooth blending can bias unobserved neighbors toward a kernel interpolant and can be physically inappropriate across discontinuities or non-Euclidean boundaries.
 - Exact clamping is index-based, so it does not apply when sensors and queries represent coincident coordinates with unrelated point IDs.
+
+### SOURCE-output anchoring
+
+[`evaluation/source_anchor.py`](src/phycoflow_reconstruction/evaluation/source_anchor.py) exposes matched-output composition:
+
+$$
+X_\alpha=(1-\alpha)X_{\rm SOURCE}+\alpha X_{\rm child},\qquad 0\le\alpha\le1.
+$$
+
+A qualification record binds the coefficient to TRAIN evidence and checkpoint identities. The outputs must share observations, sample/draw order, prior/latent realization, solver, field order, normalizer, spatial support and clamp semantics. Hard observations preserved by both endpoints remain preserved by the blend. Models and checkpoint parameter keys are unchanged. The caller supplies the matched outputs; the interface records the measured cost of running both models. Each new case qualifies its own coefficient and then assesses that fixed choice on matched held-out samples.
 
 ## 9. Physics post-training
 

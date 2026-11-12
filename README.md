@@ -1,8 +1,10 @@
 # PhyCoFlow Multi-Field Reconstruction
 
-> **UPDATE — flexible post-training:** Choose how to scalarize coherence families and how to aggregate their gradients with the native reconstruction loss. Alternatively, replace the native loss with SOURCE-relative, per-field endpoint-fidelity feedback. The same interface works with your own case, dataset and trained model; configurations without `optimization.multitask` retain their legacy behavior. See [the method selectors](#62-choose-scalarization-gradient-balancing-and-fidelity-feedback).
+> **UPDATE — State, Scale and Shape for your own data:** The new **Scalable Anchored Coherence** profile adds physical-measure State distances, signed multiscale fields with complete joint anchors, and fixed-transform persistence. It shares sampled field/pair queries between Scale and Shape, freezes informative State directions from TRAIN/SOURCE, and calibrates internal gradient strengths during the first 10 epochs. See [the profile guide](docs/Scalable_Anchored_Coherence.md) and [the mathematical definitions](ModelExplain.md#7-data-driven-coherence-model).
 
-> <strong style="color: #d1242f;">🔴 Recommended starting recipe: dense Lagrangian fidelity feedback, with family ConFIG when using all three families.</strong> [Configure it for your own data](#62-choose-scalarization-gradient-balancing-and-fidelity-feedback).
+> <strong style="color: #d1242f;">🔴 Recommended new profile: Scalable Anchored Coherence, with dense SOURCE-relative Lagrangian fidelity and three-family ConFIG.</strong> Start from [the shared fragment](configs/defaults/scalable_anchored_coherence.yaml); supply your case's fields, geometry, physical measure, units and completed SOURCE. Existing profiles retain their definitions and behavior.
+
+> **Check before using a new dataset:** Fit and freeze the representations on TRAIN, verify field order and spatial support, choose physical floors and a fidelity allowance, and assess matched held-out samples. Qualify your own SOURCE-output anchoring coefficient and record the cost of evaluating both models. The research coefficient is an example, not a setting for a new case.
 
 > **Development and reference status:** The model choices in [§5.2](#52-select-a-model) describe available interfaces and reference configurations; they do not establish an accuracy ranking or efficacy on your dataset. The new `fast_lagrangian`, `lpc_ordered`, and `execution_strategy` methods remain [experimental development/testing routes](docs/posttraining/FAST_LAGRANGIAN_LPC_USER_GUIDE.md). The EDM DiffusionPDE workflow also needs fresh training and case-specific evaluation.
 
@@ -70,7 +72,7 @@ python -m pip install -e '.[dev]'
 The optional `multitask` extra provides TorchJD ConFIG, UPGrad and CAGrad; `posttrain_constraints` provides Cooper for Lagrangian fidelity feedback. For these methods and saved-run figures, install:
 
 ```bash
-python -m pip install -e '.[dev,multitask,posttrain_constraints,plot]'
+python -m pip install -e '.[dev,multitask,posttrain_constraints,topology,plot]'
 ```
 
 `topology` adds GUDHI when using persistence losses; `keops` is needed only for source models configured with that neighbor backend. `plot` supports saved-run figures. The separate `posttrain` extra provides the older `conflictfree` ConFIG route; it is not a substitute for `multitask`. `operator` supplies GeoFNO/FNO backbones, and `legacy` supports the optional Demo50 neighbor-search path. Install the extras required by your selected source model and strategy.
@@ -133,7 +135,7 @@ The reusable implementation is under `src/phycoflow_reconstruction/`:
 - `contracts.py` defines dataset, observation, reconstruction, loss, capability, coherence, and physics boundaries;
 - `data/` handles payload adapters, normalization, splits, manifests, and sensor protocols;
 - `models/` contains deterministic, generative, operator, flow, and isolated historical-compatibility adapters;
-- `coherence/` contains reference banks, family composition, observation consistency, and the global-distribution, cross-spectrum, and topology families;
+- `coherence/` contains reference banks, family composition, observation consistency, and the State, signed multiscale Scale, legacy cross-spectrum, and Shape families;
 - `training/` owns base training, coherence/physics post-training, direct physics, checkpoints, rollout, previews, and monitoring;
 - `evaluation/`, `physics/`, `config/`, and `cli.py` provide shared evaluation, case-independent physics interfaces, config composition, and command routing.
 
@@ -353,7 +355,9 @@ Post-training creates a child from your completed, immutable **SOURCE** run. Its
 
 ### 6.1 Prepare a portable configuration
 
-Keep reusable family definitions in `cases/<case>/configs/coherence/` and launch profiles in `cases/<case>/configs/posttrain/`. Commit reusable configuration with `source_run: null`; supply your local SOURCE at launch. Choose the fields, field pairs, query geometry and statistical targets appropriate to your own data. The available families are `global_distribution`, `cross_spectrum` and `topology`; they share one differentiable reconstruction.
+For a new three-family case, use [Scalable Anchored Coherence](docs/Scalable_Anchored_Coherence.md). Its shared fragment selects the scalable computation profile; your case supplies the scientific settings. The full-query reference and existing family profiles remain useful for qualification. The templates below also describe the established configuration interface and legacy routes.
+
+Keep reusable family definitions in `cases/<case>/configs/coherence/` and launch profiles in `cases/<case>/configs/posttrain/`. Commit reusable configuration with `source_run: null`; supply your local SOURCE at launch. Choose the fields, field pairs, query geometry and statistical targets appropriate to your own data. The State, Scale and Shape registry names are `global_distribution`, `multiscale_spectrum` and `topology`; legacy `cross_spectrum` remains available. They share reconstruction draws from the same observation batch.
 
 The common file owns the source contract, optimizer, runtime, rollout, evaluation, and shared coherence compute budget. This template starts with native reconstruction loss plus coherence. Replace `<case>` and field placeholders, choose budgets for your data, and add a selector block from §6.2:
 
@@ -528,6 +532,8 @@ python scripts/posttraining/summarize_runs.py \
 ```
 
 An unchanged resume restores optimizer, policy, calibration, family/RNG/EMA state and warm-up progress. For a different method, budget, SOURCE or scientific definition, create a fresh child; extending a saved horizon is a separate [continuation operation](docs/Posttraining_Strategies.md). The evaluation above measures reconstruction on validation; use the coherence assessments in §7 as well, and match evaluation budgets and weight selection to your protocol. Inspect per-field fidelity as well as aggregate scores: a TRAIN allowance is not a held-out guarantee, and `best_fidelity.pt` need not meet every field's guard. Keep TEST separate from checkpoint selection.
+
+New histories and curve PDF/PNG files are stored under the run's `logs/` directory. Readers also accept older `metrics/` histories. Curves refresh when history first becomes available, every 10 completed epochs, and at validation, pause and completion. Resume restores query and calibration state with the optimizer and archives records beyond the recovered checkpoint.
 
 Histories, checkpoints, datasets and generated reports stay local. Share portable profiles, code and tests, and exchange resolved configurations and checkpoint identities alongside results. A dataset-specific [dense Lagrangian/ConFIG profile](cases/turbulent_combustion/configs/posttrain/fidelity_budget/lagrangian_config_warmup.yaml) and [measured results](docs/Posttraining_Results.md) are available as worked examples; adapt their fields, geometry and budgets rather than copying their experiment settings unchanged.
 

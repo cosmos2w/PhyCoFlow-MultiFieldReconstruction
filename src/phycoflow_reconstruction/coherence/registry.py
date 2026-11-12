@@ -10,6 +10,14 @@ from ..data.normalization import FieldNormalizer
 from ..registry import COHERENCE_FAMILY_REGISTRY
 from .families.cross_spectrum import CrossSpectrumFamily
 from .families.global_distribution import GlobalDistributionFamily
+from .families.multiscale_spectrum import MultiscaleSpectrumFamily
+from .families.multiscale_spectrum.config import OBJECTIVES
+from .families.multiscale_spectrum.objectives import (
+    BAND_COHERENCE_PATH,
+    ENERGY_SCORE_PATH,
+    JOINT_ENERGY_PATH,
+    SIGNED_BAND_PATH,
+)
 from .families.topology import TopologyFamily
 
 RESERVED_FAMILIES: dict[str, str] = {}
@@ -45,6 +53,25 @@ def _register_defaults() -> None:
                 "aggregation": "ensemble",
             },
         )
+    if "multiscale_spectrum" not in COHERENCE_FAMILY_REGISTRY.names():
+        COHERENCE_FAMILY_REGISTRY.register(
+            "multiscale_spectrum",
+            MultiscaleSpectrumFamily,
+            version=MultiscaleSpectrumFamily.version,
+            metadata={
+                "components": (
+                    "log_band_power.squared_error",
+                    "signed_band_cospectrum.squared_error",
+                    "third_order_product_moments.squared_error",
+                    ENERGY_SCORE_PATH,
+                    SIGNED_BAND_PATH,
+                    JOINT_ENERGY_PATH,
+                    BAND_COHERENCE_PATH,
+                ),
+                "aggregation": "per_sample",
+                "objectives": OBJECTIVES,
+            },
+        )
     if "topology" not in COHERENCE_FAMILY_REGISTRY.names():
         COHERENCE_FAMILY_REGISTRY.register(
             "topology",
@@ -54,8 +81,12 @@ def _register_defaults() -> None:
                 "components": (
                     "self.betti_curves",
                     "mutual.fibered_betti_curves",
-                    "self.region", "self.connectivity", "anchor_self.spatial", "mutual.spatial",
-                    "self.persistence", "mutual.persistence",
+                    "self.region",
+                    "self.connectivity",
+                    "anchor_self.spatial",
+                    "mutual.spatial",
+                    "self.persistence",
+                    "mutual.persistence",
                 ),
                 "aggregation": "per_sample",
                 "strategies": ("betti_curves", "spatial_self_mutual", "cubical_persistence"),
@@ -71,6 +102,17 @@ def build_coherence_family(
 ):
     _register_defaults()
     normalized = str(name).strip().lower()
+    if (
+        normalized == "global_distribution"
+        and config.get("definition") == "conditional_quantile_fair_v1"
+    ):
+        from .families.global_distribution.conditional import ConditionalQuantileFairFamily
+
+        return ConditionalQuantileFairFamily(config, data_spec, normalizer)
+    if normalized == "multiscale_spectrum" and "relation_extension" in config:
+        from .families.multiscale_relation import MultiscaleRelationFamily
+
+        return MultiscaleRelationFamily(config, data_spec, normalizer)
     return COHERENCE_FAMILY_REGISTRY.build(
         normalized,
         config=config,

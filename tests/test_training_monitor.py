@@ -9,25 +9,37 @@ from phycoflow_reconstruction.training.monitoring import TrainingMonitor
 
 def test_sparse_coherence_epochs_ignore_missing_gradients_and_count_updates(tmp_path):
     (tmp_path / "metrics").mkdir()
-    monitor = TrainingMonitor(tmp_path, start_step=0, final_step=3, configured_steps=3,
-                              steps_per_epoch=3, description="test", enabled=False)
-    for step, value in enumerate((float("nan"), 2., None), 1):
-        monitor._accumulate_epoch({"step": step, "coherence_grad_norm": value,
-                                  "coherence_applied": step == 2,
-                                  "update_mode": "weighted_sum" if step == 2 else "data_only"})
+    monitor = TrainingMonitor(
+        tmp_path,
+        start_step=0,
+        final_step=3,
+        configured_steps=3,
+        steps_per_epoch=3,
+        description="test",
+        enabled=False,
+    )
+    for step, value in enumerate((float("nan"), 2.0, None), 1):
+        monitor._accumulate_epoch(
+            {
+                "step": step,
+                "coherence_grad_norm": value,
+                "coherence_applied": step == 2,
+                "update_mode": "weighted_sum" if step == 2 else "data_only",
+            }
+        )
     row = monitor._flush_epoch(epoch=1, step=3)
-    assert row["coherence_grad_norm"] == 2.
+    assert row["coherence_grad_norm"] == 2.0
     assert row["finite_counts"]["coherence_grad_norm"] == 1
     assert row["coherence_applied"] is True
-    assert row["coherence_applied_fraction"] == pytest.approx(1/3)
+    assert row["coherence_applied_fraction"] == pytest.approx(1 / 3)
     assert row["update_mode"] == "mixed"
     assert row["update_mode_counts"] == {"weighted_sum": 1, "data_only": 2}
-    assert "NaN" not in (tmp_path / "metrics/history.jsonl").read_text()
+    assert "NaN" not in (tmp_path / "logs/history.jsonl").read_text()
     monitor.close()
 
 
 def test_monitor_loads_history_and_updates_loss_figure(tmp_path):
-    metrics = tmp_path / "metrics"
+    metrics = tmp_path / "logs"
     metrics.mkdir()
     monitor = TrainingMonitor(
         tmp_path,
@@ -49,6 +61,7 @@ def test_monitor_loads_history_and_updates_loss_figure(tmp_path):
             "training_epoch": 1.0,
             "loss": 2.5,
             "components": {"data_mse": 2.5},
+            "validation_plot_label": "VALIDATION100 · mean 5-field MSE · model units squared · Q4096",
         }
     )
     monitor.finish_step(checkpoint_checked=True, best_checkpoint_saved=True)
@@ -65,7 +78,7 @@ def test_monitor_loads_history_and_updates_loss_figure(tmp_path):
         "finite_counts": {"total": 2, "coherence_loss": 1},
         "update_mode_counts": {},
     }
-    assert (tmp_path / "loss_history.png").stat().st_size > 0
+    assert (tmp_path / "logs/loss_history.png").stat().st_size > 0
     assert monitor.last_epoch_report is not None
     assert monitor.last_epoch_report["total"] == 2.0
     assert monitor.last_epoch_report["coherence_loss"] == 4.0
@@ -75,6 +88,21 @@ def test_monitor_loads_history_and_updates_loss_figure(tmp_path):
     assert monitor.last_epoch_report["wall_seconds"] >= monitor.last_epoch_report["train_seconds"]
     validation_history = json.loads((metrics / "validation_history.jsonl").read_text())
     assert validation_history["validation_loss"] == 2.5
+    assert (
+        validation_history["validation_plot_label"]
+        == "VALIDATION100 · mean 5-field MSE · model units squared · Q4096"
+    )
+    reloaded = TrainingMonitor(
+        tmp_path,
+        start_step=2,
+        final_step=2,
+        configured_steps=2,
+        steps_per_epoch=2,
+        description="test",
+        enabled=False,
+    )
+    assert reloaded._validation_plot_label == validation_history["validation_plot_label"]
+    reloaded.close()
 
 
 def test_loss_figure_uses_independent_panels_without_duplicate_overview(tmp_path):
@@ -126,14 +154,14 @@ def test_loss_figure_uses_independent_panels_without_duplicate_overview(tmp_path
     assert all(axis.get_yscale() == "log" for axis in figure.axes[1:])
     assert validation_axis.lines[0].get_marker() == "o"
     assert [text.get_text() for text in validation_axis.texts] == [
-        "Native model objective · one fixed validation sample"
+        "Fixed validation · recorded metric"
     ]
     figure.canvas.draw()
     assert validation_axis.get_position().width > 1.5 * data_axis.get_position().width
     plt.close(figure)
 
     monitor._plot()
-    assert [path.name for path in tmp_path.glob("*.png")] == ["loss_history.png"]
+    assert [path.name for path in (tmp_path / "logs").glob("*.png")] == ["loss_history.png"]
     monitor.close()
 
 
@@ -169,7 +197,11 @@ def test_loss_figure_keeps_family_breakdown_in_the_coherence_figure(tmp_path):
     figure = monitor._build_loss_figure(plt)
     coherence_axis = next(axis for axis in figure.axes if axis.get_title(loc="left") == "Coherence")
     assert len(coherence_axis.lines) == 1
-    assert not any(line.get_label().startswith("coherence_family/") for axis in figure.axes for line in axis.lines)
+    assert not any(
+        line.get_label().startswith("coherence_family/")
+        for axis in figure.axes
+        for line in axis.lines
+    )
     assert coherence_axis.get_yscale() == "log"
     plt.close(figure)
     monitor.close()
@@ -269,8 +301,7 @@ def test_plot_interval_is_measured_in_epochs(tmp_path):
 
     assert plotted_at == [3, 9, 12]
     history = [
-        json.loads(line)
-        for line in (tmp_path / "metrics" / "history.jsonl").read_text().splitlines()
+        json.loads(line) for line in (tmp_path / "logs" / "history.jsonl").read_text().splitlines()
     ]
     assert [row["epoch"] for row in history] == [1, 2, 3, 4]
     assert [row["total"] for row in history] == [2.0, 5.0, 8.0, 11.0]
@@ -292,9 +323,153 @@ def test_truncated_epoch_writes_one_explicit_partial_history_row(tmp_path):
     monitor.record({"step": 1, "total": 4.0, "update_mode": "weighted_sum"})
     monitor.record({"step": 2, "total": 2.0, "update_mode": "weighted_sum"})
 
-    history = json.loads((tmp_path / "metrics" / "history.jsonl").read_text())
+    history = json.loads((tmp_path / "logs" / "history.jsonl").read_text())
     assert history["epoch"] == 1
     assert history["batches"] == 2
     assert history["epoch_complete"] is False
     assert history["total"] == 3.0
     assert history["update_mode"] == "weighted_sum"
+
+
+def test_config_singleton_monitor_uses_recorded_diagnostics_and_visible_marks(tmp_path):
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    (tmp_path / "metrics").mkdir()
+    monitor = TrainingMonitor(
+        tmp_path,
+        start_step=0,
+        final_step=1,
+        configured_steps=1,
+        steps_per_epoch=1,
+        description="post_training:test",
+        enabled=False,
+    )
+    monitor._capture(
+        {
+            "step": 1,
+            "data_loss": 0.02,
+            "coherence_loss": 0.5,
+            "data_retention_objective": "paired_endpoint_field_budget",
+            "total_semantics": "parameter_direction_without_scalar_objective",
+        }
+    )
+    figure = monitor._build_loss_figure(plt)
+    assert figure.axes[0].texts[0].get_text() == "Post-training diagnostics"
+    assert [axis.get_title(loc="left") for axis in figure.axes[1:]] == [
+        "Sampled TRAIN paired-endpoint data diagnostic",
+        "Coherence reporting sum",
+    ]
+    assert all(axis.lines[0].get_marker() == "o" for axis in figure.axes[1:])
+    assert [list(axis.lines[0].get_ydata()) for axis in figure.axes[1:]] == [[0.02], [0.5]]
+    assert all(axis.get_ylabel() == "Recorded value" for axis in figure.axes[1:])
+    plt.close(figure)
+    monitor.close()
+
+
+def test_mixed_coherence_monitor_does_not_label_config_reporting_sum_as_objective(tmp_path):
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    (tmp_path / "metrics").mkdir()
+    monitor = TrainingMonitor(
+        tmp_path,
+        start_step=0,
+        final_step=2,
+        configured_steps=2,
+        steps_per_epoch=1,
+        description="post_training:test",
+        enabled=False,
+    )
+    monitor._capture({"step": 1, "coherence_loss": 1.0})
+    monitor._capture(
+        {
+            "step": 2,
+            "coherence_loss": 0.5,
+            "total_semantics": "parameter_direction_without_scalar_objective",
+        }
+    )
+    figure = monitor._build_loss_figure(plt)
+    assert figure.axes[1].get_title(loc="left") == "Coherence values · includes reporting sums"
+    assert figure.axes[1].get_ylabel() == "Recorded value"
+    plt.close(figure)
+    monitor.close()
+
+
+def test_config_semantics_are_restored_from_history_on_resume(tmp_path):
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    (tmp_path / "metrics").mkdir()
+    (tmp_path / "metrics/history.jsonl").write_text(
+        json.dumps(
+            {
+                "step": 1,
+                "coherence_loss": 0.5,
+                "data_loss": 0.02,
+                "data_retention_objective": "paired_endpoint_field_budget",
+                "total_semantics": "parameter_direction_without_scalar_objective",
+            }
+        )
+        + "\n"
+    )
+    monitor = TrainingMonitor(
+        tmp_path,
+        start_step=1,
+        final_step=2,
+        configured_steps=2,
+        steps_per_epoch=1,
+        description="post_training:test",
+        enabled=False,
+    )
+    assert monitor._coherence_semantics == {"direction"}
+    assert monitor._data_semantics == {"paired"}
+    figure = monitor._build_loss_figure(plt)
+    assert [axis.get_title(loc="left") for axis in figure.axes[1:]] == [
+        "Sampled TRAIN paired-endpoint data diagnostic",
+        "Coherence reporting sum",
+    ]
+    plt.close(figure)
+    monitor.close()
+
+
+def test_resume_combines_legacy_and_current_history_and_deduplicates_symlinks(tmp_path):
+    from phycoflow_reconstruction.run_logs import history_paths
+    from phycoflow_reconstruction.training.run_store import RunStore
+
+    metrics = tmp_path / "metrics"
+    metrics.mkdir()
+    legacy = metrics / "history.jsonl"
+    original = json.dumps({"step": 1, "epoch": 1, "total": 3.0}) + "\n"
+    legacy.write_text(original)
+    monitor = TrainingMonitor(
+        tmp_path,
+        start_step=1,
+        final_step=2,
+        configured_steps=2,
+        steps_per_epoch=1,
+        description="test",
+        enabled=False,
+    )
+    monitor.record({"step": 2, "total": 2.0})
+    monitor.close()
+    assert monitor._values["total"] == [3.0, 2.0]
+    assert legacy.read_text().startswith(original)
+    assert legacy.read_text().count("\n") == 2
+    current = tmp_path / "logs/history.jsonl"
+    assert current.is_symlink() and current.samefile(legacy)
+    assert len(history_paths(tmp_path, "history.jsonl")) == 1
+    assert (tmp_path / "logs/loss_history.pdf").read_bytes().startswith(b"%PDF")
+    RunStore(tmp_path, {}).recover_metric_histories(1)
+    assert current.is_symlink()
+    assert legacy.read_text() == original
+
+    # New runs expose the legacy location as an alias in the other direction.
+    store = RunStore.create(tmp_path, "new", {})
+    store.append_history({"step": 1})
+    alias = store.run_dir / "metrics/history.jsonl"
+    assert alias.is_symlink() and alias.samefile(store.run_dir / "logs/history.jsonl")
+    assert len(history_paths(store.run_dir, "history.jsonl")) == 1

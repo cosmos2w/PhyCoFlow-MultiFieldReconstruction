@@ -1,0 +1,29 @@
+# Generic fields are resolved from dataset order. Set geometry and task-unit floors for the dataset.
+# Equal self/rho weights are initial priorities; choose case-specific values before TRAIN calibration.
+# The configurable joint anchor weight is 0.25; field_unit_floor is an illustrative model-unit tolerance.
+coherence:
+  families:
+    multiscale_spectrum:
+      enabled: true
+      weight: 1.0
+      target_use: paired_supervised
+      units: model_units
+      geometry: {operator: fem_p1, coordinate_scaling: none}
+      bands: {count: 2}
+      calibration: {field_unit_floor: 0.0001}
+      numerics: {dtype: float64}
+      objective:
+        kind: signed_band_energy_score
+        conditional_draws: 2
+        almost_fair_alpha: 1.0
+        joint_energy_score_weight: 0.25
+        score_definition_version: signed_spectral_mean_augmented_v4
+      components:
+        signed_band_cospectrum: {enabled: false}
+      relation_extension:
+        implicit_pairs: true
+        definition: self_rho_fair_v1
+        self_weight: 1.0
+        rho_weight: 1.0
+        std_floor: 0.001
+        relative_std_floor: 0.05

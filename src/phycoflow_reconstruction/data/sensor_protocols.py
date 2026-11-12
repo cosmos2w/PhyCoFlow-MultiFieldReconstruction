@@ -27,7 +27,12 @@ class SensorProtocol:
     shared_locations: bool = False
 
     def validate(self) -> None:
-        if self.name not in {"random_uniform", "structured_stride", "uniform_spacetime_stride", "structured_block_mean"}:
+        if self.name not in {
+            "random_uniform",
+            "structured_stride",
+            "uniform_spacetime_stride",
+            "structured_block_mean",
+        }:
             raise ValueError(f"unsupported sensor protocol {self.name!r}")
         if self.name == "structured_block_mean" and (
             not self.field_counts or self.field_count_ranges or self.phase != 0
@@ -138,23 +143,39 @@ def _block_mean_observations(sample: FieldSample, protocol: SensorProtocol):
         raise ValueError("structured_block_mean requires every grid point to be valid")
     coords = sample.coordinates.reshape(height, width, -1)
     # Require the stored grid order to describe Cartesian rows and columns.
-    if not torch.allclose(coords[..., 0], coords[:1, :, 0].expand(height, width)) or not torch.allclose(
-        coords[..., 1], coords[:, :1, 1].expand(height, width)
-    ):
+    if not torch.allclose(
+        coords[..., 0], coords[:1, :, 0].expand(height, width)
+    ) or not torch.allclose(coords[..., 1], coords[:, :1, 1].expand(height, width)):
         raise ValueError("structured_block_mean requires stored Cartesian y/x order")
     result = {}
     for name, count in protocol.field_counts.items():
         field_id = sample.field_names.index(name)
         stride = isqrt(height * width // int(count))
-        if stride < 1 or height % stride or width % stride or (height // stride) * (width // stride) != int(count):
+        if (
+            stride < 1
+            or height % stride
+            or width % stride
+            or (height // stride) * (width // stride) != int(count)
+        ):
             raise ValueError(f"{name}: field count does not define complete square blocks")
         values = sample.values[:, field_id].reshape(height, width)
-        pooled_values = values.double().reshape(height // stride, stride, width // stride, stride).mean((1, 3))
-        pooled_coords = coords.double().reshape(height // stride, stride, width // stride, stride, -1).mean((1, 3))
+        pooled_values = (
+            values.double().reshape(height // stride, stride, width // stride, stride).mean((1, 3))
+        )
+        pooled_coords = (
+            coords.double()
+            .reshape(height // stride, stride, width // stride, stride, -1)
+            .mean((1, 3))
+        )
         for row in range(height // stride):
             for column in range(width // stride):
-                point_id = (row * stride + (stride - 1) // 2) * width + column * stride + (stride - 1) // 2
-                result[(point_id, field_id)] = (pooled_coords[row, column].float(), pooled_values[row, column].float().reshape(1))
+                point_id = (
+                    (row * stride + (stride - 1) // 2) * width + column * stride + (stride - 1) // 2
+                )
+                result[(point_id, field_id)] = (
+                    pooled_coords[row, column].float(),
+                    pooled_values[row, column].float().reshape(1),
+                )
     return result
 
 
@@ -185,7 +206,11 @@ def build_observation_batch(
     for sample_index, sample in enumerate(samples):
         sample.validate()
         sample_id = f"{sample.trajectory_id}:{sample.time_index if sample.time_index is not None else 'all'}"
-        pooled = _block_mean_observations(sample, protocol) if protocol.name == "structured_block_mean" else None
+        pooled = (
+            _block_mean_observations(sample, protocol)
+            if protocol.name == "structured_block_mean"
+            else None
+        )
         if manifest_indices and sample_id in manifest_indices:
             pairs = [(int(item[0]), int(item[1])) for item in manifest_indices[sample_id]]
         elif pooled is not None:
@@ -211,17 +236,19 @@ def build_observation_batch(
             raise ValueError("block-mean manifest contains an invalid block identifier")
         obs_payloads.append(
             (
-                torch.stack([pooled[pair][0] for pair in pairs]) if pooled is not None else sample.coordinates[point_ids],
-                torch.stack([pooled[pair][1] for pair in pairs]) if pooled is not None else sample.values[point_ids, field_ids].unsqueeze(-1),
+                torch.stack([pooled[pair][0] for pair in pairs])
+                if pooled is not None
+                else sample.coordinates[point_ids],
+                torch.stack([pooled[pair][1] for pair in pairs])
+                if pooled is not None
+                else sample.values[point_ids, field_ids].unsqueeze(-1),
                 field_ids,
                 point_ids,
             )
         )
 
         provided_query_indices = (
-            query_indices.get(sample_id)
-            if isinstance(query_indices, Mapping)
-            else query_indices
+            query_indices.get(sample_id) if isinstance(query_indices, Mapping) else query_indices
         )
         if provided_query_indices is not None:
             query_ids = torch.as_tensor(provided_query_indices, dtype=torch.long)
@@ -303,7 +330,8 @@ def build_observation_batch(
         count_q = coords_q.shape[0]
         query_coords[batch_index, :count_q] = coords_q
         query_values[batch_index, :count_q] = values_q
-        query_mask[batch_index, :count_q] = True
+        sample_valid = samples[batch_index].valid_points
+        query_mask[batch_index, :count_q] = True if sample_valid is None else sample_valid[ids_q]
         query_indices[batch_index, :count_q] = ids_q
 
     context: dict[str, object] = {}
@@ -340,5 +368,13 @@ def build_observation_batch(
             "sample_context": context,
         },
     )
+    receipts = [sample.metadata.get("measure_metadata") for sample in samples]
+    if receipts[0] is not None:
+        if any(receipt != receipts[0] for receipt in receipts):
+            raise ValueError("a batch must share its native physical measure")
+        batch.metadata["measure_metadata"] = {
+            "native_measure_sha256": receipts[0]["sha256"],
+            "query_policy": "native_nodal_mass_self_normalized",
+        }
     batch.validate()
     return batch

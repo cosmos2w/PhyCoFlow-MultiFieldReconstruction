@@ -114,9 +114,7 @@ def _random_observation_plan(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     names, lookup, fixed, ranges = _field_settings(protocol, field_names)
     counts = [
-        _counts_for_field(
-            name, batch_size, fixed, ranges, device=device, generator=generator
-        )
+        _counts_for_field(name, batch_size, fixed, ranges, device=device, generator=generator)
         for name in names
     ]
     shared = None
@@ -202,9 +200,9 @@ def _assemble_random_batch(
         )
         query_coordinates = coordinates[None, :, :].expand(batch_size, -1, -1)
         query_values = values
-        query_mask = torch.ones(
-            1, point_count, device=values.device, dtype=torch.bool
-        ).expand(batch_size, -1)
+        query_mask = torch.ones(1, point_count, device=values.device, dtype=torch.bool).expand(
+            batch_size, -1
+        )
     elif fixed_query_indices is not None:
         shared = fixed_query_indices.to(device=values.device, dtype=torch.long)
         if shared.numel() != query_count:
@@ -304,9 +302,7 @@ class ResidentH5BatchSource(nn.Module):
                     if not identity:
                         raw = raw[:, permutation]
                     count = raw.shape[0]
-                    fields[cursor : cursor + count].copy_(
-                        torch.from_numpy(raw), non_blocking=False
-                    )
+                    fields[cursor : cursor + count].copy_(torch.from_numpy(raw), non_blocking=False)
                     cursor += count
         offset = dataset.normalizer.offset.to(device)
         scale = dataset.normalizer.scale.to(device)
@@ -314,14 +310,16 @@ class ResidentH5BatchSource(nn.Module):
         active = dataset.data_spec.coordinate_dim
         self.register_buffer("fields", fields.contiguous(), persistent=False)
         self.register_buffer(
-            "coordinates", dataset.spatial_coords[:, :active].to(device).contiguous(), persistent=False
+            "coordinates",
+            dataset.spatial_coords[:, :active].to(device).contiguous(),
+            persistent=False,
         )
         item_conditions = torch.stack(
             [dataset.conditions[trajectory] for trajectory, _ in dataset._items]
         ).to(device)
-        item_times = torch.stack(
-            [dataset.times[int(frame)] for _, frame in dataset._items]
-        ).to(device)
+        item_times = torch.stack([dataset.times[int(frame)] for _, frame in dataset._items]).to(
+            device
+        )
         self.register_buffer("conditions", item_conditions, persistent=False)
         self.register_buffer("times", item_times, persistent=False)
 
@@ -336,10 +334,12 @@ class ResidentH5BatchSource(nn.Module):
             query_generator = torch.Generator(device=self.device).manual_seed(
                 self.protocol.seed + 100_003 + global_step
             )
-            yield _assemble_random_batch(
+            batch = _assemble_random_batch(
                 values,
                 self.coordinates,
-                SensorProtocol(**{**self.protocol.to_dict(), "seed": self.protocol.seed + global_step}),
+                SensorProtocol(
+                    **{**self.protocol.to_dict(), "seed": self.protocol.seed + global_step}
+                ),
                 self.dataset.field_names,
                 query_points=self.query_points,
                 generator=generator,
@@ -354,6 +354,9 @@ class ResidentH5BatchSource(nn.Module):
                 # contract checks after validating the first batch.
                 validate=offset == 0,
             )
+            from .physical_measure import attach_batch_measure
+
+            yield attach_batch_measure(self.dataset, batch)
 
     def close(self) -> None:
         self.fields = torch.empty(0, device=self.device)
@@ -388,9 +391,7 @@ class _CompactH5Dataset(Dataset):
         point_count = int(math.prod(self.dataset.grid_shape))
         device = torch.device("cpu")
         generator = torch.Generator().manual_seed(self.protocol.seed + global_step)
-        query_generator = torch.Generator().manual_seed(
-            self.protocol.seed + 100_003 + global_step
-        )
+        query_generator = torch.Generator().manual_seed(self.protocol.seed + 100_003 + global_step)
         obs_indices, obs_fields, obs_mask = _random_observation_plan(
             self.protocol,
             self.dataset.field_names,
@@ -399,7 +400,9 @@ class _CompactH5Dataset(Dataset):
             device=device,
             generator=generator,
         )
-        query_count = point_count if self.query_points is None else min(self.query_points, point_count)
+        query_count = (
+            point_count if self.query_points is None else min(self.query_points, point_count)
+        )
         query_indices = (
             torch.arange(point_count).expand(batch_size, -1)
             if query_count == point_count
@@ -437,12 +440,10 @@ class _CompactH5Dataset(Dataset):
             offsets = torch.arange(group_size)[:, None] * point_count
             flat = raw.reshape(group_size * point_count, channels)
             selected_obs = self.dataset.normalizer.encode(flat[group_obs + offsets])
-            obs_values[rows, :, 0] = torch.gather(
-                selected_obs, 2, obs_fields[rows, :, None]
-            )[:, :, 0]
-            query_values[rows] = self.dataset.normalizer.encode(
-                flat[group_queries + offsets]
-            )
+            obs_values[rows, :, 0] = torch.gather(selected_obs, 2, obs_fields[rows, :, None])[
+                :, :, 0
+            ]
+            query_values[rows] = self.dataset.normalizer.encode(flat[group_queries + offsets])
         trajectory_indices = torch.tensor(
             [int(trajectory) for trajectory, _ in item_pairs], dtype=torch.long
         )
@@ -473,6 +474,9 @@ class _CompactH5Dataset(Dataset):
                 },
             },
         )
+        from .physical_measure import attach_batch_measure
+
+        attach_batch_measure(self.dataset, batch)
         batch.validate()
         return [batch]
 
@@ -529,8 +533,11 @@ class AsyncCompactH5BatchSource:
             pin_memory_device=str(device) if device.type == "cuda" else "",
             # Worker creation must not consume the model's RF/noise RNG stream
             # on each resume or evaluation boundary.
-            generator=(torch.Generator().manual_seed(protocol.seed + start_step)
-                       if isolate_model_rng else None),
+            generator=(
+                torch.Generator().manual_seed(protocol.seed + start_step)
+                if isolate_model_rng
+                else None
+            ),
         )
 
     def __iter__(self) -> Iterator[ObservationBatch]:
@@ -571,8 +578,11 @@ class LegacyBatchSource:
             num_workers=num_workers,
             collate_fn=_identity_samples,
             persistent_workers=bool(num_workers),
-            generator=(torch.Generator().manual_seed(protocol.seed + start_step)
-                       if isolate_model_rng else None),
+            generator=(
+                torch.Generator().manual_seed(protocol.seed + start_step)
+                if isolate_model_rng
+                else None
+            ),
         )
 
     def __iter__(self):

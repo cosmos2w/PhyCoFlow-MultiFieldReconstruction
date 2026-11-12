@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import load_config
+from ..run_logs import history_paths, log_path
 from .history_plotting import (
     HISTORY_MUTED_TEXT_COLOR,
     HISTORY_TEXT_COLOR,
@@ -46,6 +47,8 @@ class CoherenceHistoryData:
     total_epochs: tuple[float, ...]
     total_values: tuple[float, ...]
     family_totals: dict[str, tuple[tuple[float, ...], tuple[float, ...]]]
+    state_definition: str | None = None
+    coherence_semantics: str = "scalar"
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -216,12 +219,28 @@ def extract_coherence_history(
         }
         if points:
             family_totals[family] = _ordered_points(points)
+    observed_semantics = {
+        "direction"
+        if row.get("total_semantics") == "parameter_direction_without_scalar_objective"
+        else "scalar"
+        for row in rows
+        if _finite_number(row.get("coherence_loss")) is not None
+    }
+    semantics = "mixed" if len(observed_semantics) > 1 else next(iter(observed_semantics), "scalar")
+    state_definition = (
+        config.get("coherence", {})
+        .get("families", {})
+        .get("global_distribution", {})
+        .get("definition")
+    )
     return CoherenceHistoryData(
         components=tuple(components),
         family_order=tuple(family_order),
         total_epochs=total_epochs,
         total_values=total_values,
         family_totals=family_totals,
+        state_definition=state_definition,
+        coherence_semantics=semantics,
     )
 
 
@@ -234,8 +253,46 @@ def _display_name(value: str) -> str:
     return f"{label[:1].upper()}{label[1:]}"
 
 
-def _component_label(component: str) -> str:
+def _view_label(family: str) -> str:
+    return {
+        "global_distribution": "State",
+        "multiscale_spectrum": "Scale",
+        "topology": "Shape",
+    }.get(family, _display_name(family))
+
+
+def _component_label(component: str, *, family: str, definition: str | None) -> str:
+    if family == "global_distribution" and definition == "conditional_quantile_fair_v1":
+        if component == "self.marginal_w2":
+            return "Paired squared self diagnostic"
+        if component == "cross.joint_topk_swd":
+            return "Paired squared mixed diagnostic"
+    if family == "global_distribution" and definition in {
+        "marginal_mixed_mean_v2",
+        "marginal_mixed_weighted_v3",
+    }:
+        measure = "Measure-weighted" if definition == "marginal_mixed_weighted_v3" else "Equal-node"
+        if component == "self.marginal_w2":
+            return f"{measure} marginal W2² mean"
+        if component == "cross.joint_topk_swd":
+            return f"{measure} mixed-projection W2² mean"
     return " · ".join(_display_name(part) for part in component.split("."))
+
+
+def _wrap_component_label(label: str) -> str:
+    """Keep long, dot-separated leaf identities inside their panel."""
+    if len(label) <= 42:
+        return label
+    lines: list[str] = []
+    current = ""
+    for part in label.split(" · "):
+        joined = f"{current} · {part}" if current else part
+        if current and len(joined) > 36:
+            lines.append(current)
+            current = part
+        else:
+            current = joined
+    return "\n".join((*lines, current))
 
 
 def _rolling_median(values: tuple[float, ...]) -> tuple[float, ...]:
@@ -257,8 +314,17 @@ def _stage_label(description: str) -> str:
     return stage.title() or "Training"
 
 
-def build_coherence_history_figure(data: CoherenceHistoryData, plt, *, description: str):
+def _build_detailed_coherence_figure(data: CoherenceHistoryData, plt, *, description: str):
     """Build a compact family-grouped figure of weighted and raw diagnostics."""
+    from matplotlib.ticker import (
+        FuncFormatter,
+        LogFormatterMathtext,
+        LogFormatterSciNotation,
+        LogLocator,
+        MaxNLocator,
+        NullFormatter,
+    )
+
     by_family = {
         family: tuple(component for component in data.components if component.family == family)
         for family in data.family_order
@@ -276,15 +342,19 @@ def build_coherence_history_figure(data: CoherenceHistoryData, plt, *, descripti
     for component in data.components:
         all_epochs.extend(component.epochs)
     epoch_max = max(all_epochs, default=1.0)
+    summary_height, component_height = (3.5, 2.05) if total_component_rows > 3 else (2.5, 1.9)
     figure = plt.figure(
-        figsize=(12.6, 2.5 + 1.9 * total_component_rows + 0.45 * len(by_family)),
+        figsize=(
+            12.6,
+            summary_height + component_height * total_component_rows + 0.45 * len(by_family),
+        ),
         constrained_layout=True,
         facecolor="white",
     )
     subfigures = figure.subfigures(
         1 + len(by_family),
         1,
-        height_ratios=[1.15, *(family_rows.values())],
+        height_ratios=[1.65, *(family_rows.values())],
         squeeze=False,
     ).ravel()
     figure.suptitle(
@@ -297,20 +367,53 @@ def build_coherence_history_figure(data: CoherenceHistoryData, plt, *, descripti
     total_axis, family_axis = subfigures[0].subplots(
         1, 2, gridspec_kw={"width_ratios": [1.0, 1.55], "wspace": 0.22}
     )
+    direction = data.coherence_semantics == "direction"
+    mixed = data.coherence_semantics == "mixed"
+    if direction:
+        total_title, total_ylabel, total_label = (
+            "Coherence reporting sum",
+            "Reporting sum\nnot optimized scalar",
+            "Reporting sum",
+        )
+        family_title, family_ylabel = "Weighted family reporting values", "Weighted reporting value"
+    elif mixed:
+        total_title, total_ylabel, total_label = (
+            "Coherence values · includes reporting sums",
+            "Recorded value",
+            "Recorded coherence",
+        )
+        family_title, family_ylabel = "Weighted family values", "Recorded weighted value"
+    else:
+        total_title, total_ylabel, total_label = (
+            "Total coherence",
+            "Weighted objective",
+            "Total coherence",
+        )
+        family_title, family_ylabel = "Weighted family contributions", "Weighted objective"
     if data.total_values:
         total_axis.plot(
             data.total_epochs,
             data.total_values,
             color=_SUMMARY_COLOR,
             linewidth=2.2,
-            label="Total coherence",
+            marker="o" if len(data.total_epochs) == 1 else None,
+            markersize=4.3 if len(data.total_epochs) == 1 else None,
+            label=total_label,
         )
     total_axis.set_title(
-        "Total coherence", loc="left", color=HISTORY_TEXT_COLOR,
-        fontsize=11.5, fontweight="medium", pad=8,
+        total_title,
+        loc="left",
+        color=HISTORY_TEXT_COLOR,
+        fontsize=11.5,
+        fontweight="medium",
+        pad=8,
     )
-    total_axis.set_xlabel("Training epoch")
-    total_axis.set_ylabel("Weighted objective")
+    total_axis.set_xlabel(
+        "Training epoch\nComponent panels: light = raw; dark = rolling median"
+        if any(len(component.raw) >= 8 for component in data.components)
+        else "Training epoch"
+    )
+    total_axis.set_ylabel(total_ylabel)
     style_history_axis(total_axis, data.total_values, x_max=epoch_max)
 
     family_values: list[float] = []
@@ -327,18 +430,23 @@ def build_coherence_history_figure(data: CoherenceHistoryData, plt, *, descripti
                 color=color,
                 linestyle=linestyle,
                 linewidth=1.8,
+                marker="o" if len(epochs) == 1 else None,
+                markersize=4.3 if len(epochs) == 1 else None,
                 label=_display_name(family),
             )
     family_axis.set_title(
-        "Weighted family contributions",
+        family_title,
         loc="left",
         color=HISTORY_TEXT_COLOR,
         fontsize=11.5,
         fontweight="medium",
         pad=8,
     )
-    family_axis.set_xlabel("Training epoch")
-    family_axis.set_ylabel("Weighted objective")
+    family_axis.set_xlabel(
+        "Training epoch\nFamily values use distinct scales; magnitudes do not measure gradient influence"
+        "\nA weighted-zero leaf does not establish zero gradient influence"
+    )
+    family_axis.set_ylabel(family_ylabel)
     style_history_axis(family_axis, family_values, x_max=epoch_max)
     if family_axis.lines:
         family_axis.legend(
@@ -371,8 +479,7 @@ def build_coherence_history_figure(data: CoherenceHistoryData, plt, *, descripti
             column = component_index % columns
             cell = (
                 grid[row, :]
-                if component_index == len(components) - 1
-                and len(components) % columns == 1
+                if component_index == len(components) - 1 and len(components) % columns == 1
                 else grid[row, column]
             )
             axes.append(subfigure.add_subplot(cell))
@@ -410,8 +517,11 @@ def build_coherence_history_figure(data: CoherenceHistoryData, plt, *, descripti
                     s=28,
                     zorder=3,
                 )
+            label = _component_label(
+                component.component, family=family, definition=data.state_definition
+            )
             axis.set_title(
-                _component_label(component.component),
+                _wrap_component_label(label) if columns == 3 else label,
                 loc="left",
                 color=HISTORY_TEXT_COLOR,
                 fontsize=9.4,
@@ -432,6 +542,144 @@ def build_coherence_history_figure(data: CoherenceHistoryData, plt, *, descripti
             axis.set_xlabel("Epoch", labelpad=2)
             axis.set_ylabel("Raw loss", labelpad=2)
             style_history_axis(axis, component.raw, x_max=epoch_max)
+            decades = (
+                math.log10(max(component.raw)) - math.log10(min(component.raw))
+                if axis.get_yscale() == "log"
+                else 0.0
+            )
+            if 1 <= decades < 2:
+                axis.yaxis.set_major_locator(LogLocator(base=10, subs=(1, 2, 5), numticks=6))
+                axis.yaxis.set_major_formatter(
+                    LogFormatterSciNotation(
+                        base=10, labelOnlyBase=False, minor_thresholds=(math.inf, math.inf)
+                    )
+                )
+            elif decades >= 2:
+                axis.yaxis.set_major_locator(LogLocator(base=10, numticks=5))
+                axis.yaxis.set_major_formatter(LogFormatterMathtext(base=10))
+            else:
+                axis.yaxis.set_major_locator(MaxNLocator(nbins=4))
+                axis.yaxis.set_major_formatter(FuncFormatter(lambda value, _: f"{value:.3g}"))
+            axis.yaxis.set_minor_formatter(NullFormatter())
+    return figure
+
+
+def build_coherence_history_figure(
+    data: CoherenceHistoryData, plt, *, description: str, detailed: bool = False
+):
+    """Show recorded family objectives and selected aggregate diagnostics.
+
+    Detailed mode displays every recorded component, including structural zeros.
+    State paired squared values are diagnostics, not pieces of its fair score.
+    """
+    if detailed:
+        return _build_detailed_coherence_figure(data, plt, description=description)
+    selected = {
+        "global_distribution": {
+            "self.marginal_w2",
+            "cross.joint_topk_swd",
+            "mutual.pairwise_swd",
+            "selected_state_fair",
+            "selected_state_paired",
+            "scalable_fair",
+            "scalable_paired",
+        },
+        "multiscale_spectrum": {
+            "log_band_power.squared_error",
+            "signed_band_cospectrum.squared_error",
+            "gram_self_energy_score.conditional",
+            "gram_mutual_energy_score.conditional",
+            "relation_self_energy_score.conditional",
+            "relation_rho_crps.conditional",
+            "signed_anchor_total.conditional",
+            "signed",
+            "joint",
+            "log_power_self",
+            "rho",
+        },
+        "topology": {
+            "self.persistence",
+            "mutual.persistence",
+            "self.betti_curves",
+            "mutual.fibered_betti_curves",
+            "self",
+            "mutual",
+        },
+        "cross_spectrum": {"self_spectrum.auto_spectrum", "cross_spectrum.cross_spectrum"},
+    }
+    groups = {
+        family: [
+            c
+            for c in data.components
+            if c.family == family and c.component in selected.get(family, set())
+        ]
+        for family in data.family_order
+    }
+    groups = {family: components for family, components in groups.items() if components}
+    figure, axes = plt.subplots(
+        1 + len(groups),
+        1,
+        figsize=(10.5, 2.8 + 2.35 * len(groups)),
+        squeeze=False,
+        constrained_layout=True,
+    )
+    figure.suptitle(f"{_stage_label(description)} coherence history", fontsize=14)
+    summary = axes[0, 0]
+    values = []
+    for index, family in enumerate(data.family_order):
+        if family not in data.family_totals:
+            continue
+        epochs, series = data.family_totals[family]
+        values.extend(series)
+        color, linestyle = history_family_style(family, index)
+        summary.plot(
+            epochs,
+            series,
+            label=_view_label(family),
+            color=color,
+            linestyle=linestyle,
+            marker="o" if len(epochs) == 1 else None,
+        )
+    title = (
+        "Weighted family objectives"
+        if data.coherence_semantics == "scalar"
+        else "Weighted family reporting values · not a scalar ConFIG objective"
+    )
+    summary.set_title(title, loc="left")
+    summary.set_ylabel("Recorded weighted value")
+    summary.set_xlabel("Training epoch")
+    style_history_axis(
+        summary, values, x_max=max((e for c in data.components for e in c.epochs), default=1)
+    )
+    if summary.lines:
+        summary.legend(fontsize=8)
+    for index, (family, components) in enumerate(groups.items(), 1):
+        axis = axes[index, 0]
+        values = []
+        for component in components:
+            values.extend(component.raw)
+            label = _component_label(
+                component.component, family=family, definition=data.state_definition
+            )
+            axis.plot(
+                component.epochs,
+                component.raw,
+                label=label,
+                marker="o" if len(component.epochs) == 1 else None,
+            )
+        title = f"{_view_label(family)} · recorded aggregate diagnostics"
+        if (
+            family == "global_distribution"
+            and data.state_definition == "conditional_quantile_fair_v1"
+        ):
+            title += " · paired squared, separate from joint fair objective"
+        axis.set_title(title, loc="left", fontsize=10)
+        axis.set_ylabel("Raw diagnostic")
+        axis.set_xlabel("Training epoch")
+        style_history_axis(
+            axis, values, x_max=max((e for c in components for e in c.epochs), default=1)
+        )
+        axis.legend(fontsize=8, ncol=2)
     return figure
 
 
@@ -441,10 +689,11 @@ def render_coherence_history(
     description: str | None = None,
     output_path: str | Path | None = None,
     pyplot=None,
+    detailed: bool = False,
 ) -> Path | None:
     """Render ``coherence_history.png`` from run metadata without loading a model."""
     run_dir = Path(run_dir)
-    rows = _read_jsonl(run_dir / "metrics" / "history.jsonl")
+    rows = [row for path in history_paths(run_dir, "history.jsonl") for row in _read_jsonl(path)]
     config_path = run_dir / "resolved_config.yaml"
     config = load_config(config_path) if config_path.is_file() else {}
     data = extract_coherence_history(rows, config)
@@ -467,13 +716,28 @@ def render_coherence_history(
         stage = str(config.get("stage", "training")).replace("_training", "")
         model = str(config.get("model", {}).get("name", "model"))
         description = f"{stage}:{model}"
-    figure = build_coherence_history_figure(data, pyplot, description=description)
+    figure = build_coherence_history_figure(
+        data, pyplot, description=description, detailed=detailed
+    )
     destination = (
-        Path(output_path) if output_path is not None else run_dir / "coherence_history.png"
+        Path(output_path)
+        if output_path is not None
+        else log_path(
+            run_dir, "coherence_history_detailed.png" if detailed else "coherence_history.png"
+        )
     )
     destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = destination.with_name(f".{destination.name}.tmp")
+    if destination.suffix.lower() == ".pdf":
+        pdf_destination = destination
+        png_destination = destination.with_suffix(".png")
+    else:
+        png_destination = destination
+        pdf_destination = destination.with_suffix(".pdf")
+    temporary = png_destination.with_name(f".{png_destination.name}.tmp")
+    pdf_temporary = pdf_destination.with_name(f".{pdf_destination.name}.tmp")
     figure.savefig(temporary, dpi=180, format="png")
+    figure.savefig(pdf_temporary, format="pdf")
     pyplot.close(figure)
-    os.replace(temporary, destination)
+    os.replace(pdf_temporary, pdf_destination)
+    os.replace(temporary, png_destination)
     return destination

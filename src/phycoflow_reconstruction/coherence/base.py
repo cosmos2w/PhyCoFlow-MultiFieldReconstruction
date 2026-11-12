@@ -29,6 +29,68 @@ def empirical_w2_columns(generated: torch.Tensor, reference: torch.Tensor) -> to
     return (generated_sorted - reference_sorted).square().mean(dim=0)
 
 
+def weighted_w2_columns(
+    generated: torch.Tensor,
+    reference: torch.Tensor,
+    generated_weights: torch.Tensor,
+    reference_weights: torch.Tensor,
+) -> torch.Tensor:
+    """Integrate the exact weighted 1-D quantile gap for columns `[N,K]`.
+
+    Endpoint masses are fixed, nonnegative and independently normalized. Each
+    set of values carries its masses through its own sort. The merged CDF
+    breakpoints define intervals on which both quantiles are constant. Values
+    are differentiable away from sort ties; the fixed masses have no gradient.
+    """
+    if generated.ndim != 2 or reference.ndim != 2 or generated.shape[1] != reference.shape[1]:
+        raise ValueError("weighted Wasserstein inputs must have shapes [N,K] and [M,K]")
+    if generated.device != reference.device or generated.dtype != reference.dtype:
+        raise ValueError("weighted Wasserstein inputs must share device and dtype")
+    if not generated.is_floating_point() or generated.shape[0] == 0 or reference.shape[0] == 0:
+        raise ValueError("weighted Wasserstein inputs must be nonempty floating-point tensors")
+    if not torch.isfinite(generated).all() or not torch.isfinite(reference).all():
+        raise ValueError("weighted Wasserstein values must be finite")
+
+    def mass(value: torch.Tensor, count: int) -> torch.Tensor:
+        value = torch.as_tensor(value, device=generated.device, dtype=generated.dtype).detach()
+        if value.ndim != 1 or value.numel() != count:
+            raise ValueError("each weighted Wasserstein mass must align with its endpoint points")
+        if not torch.isfinite(value).all() or torch.any(value < 0) or not bool(value.sum() > 0):
+            raise ValueError("weighted Wasserstein masses must be finite, nonnegative and nonzero")
+        return value / value.sum()
+
+    left = mass(generated_weights, generated.shape[0])
+    right = mass(reference_weights, reference.shape[0])
+    # Reproduce the historical equal-node calculation bit for bit.
+    if (
+        generated.shape == reference.shape
+        and bool(torch.all(left == left[0]))
+        and bool(torch.all(right == right[0]))
+    ):
+        return empirical_w2_columns(generated, reference)
+
+    generated_sorted, generated_order = generated.sort(dim=0, stable=True)
+    reference_sorted, reference_order = reference.sort(dim=0, stable=True)
+    left_sorted = left[:, None].expand_as(generated).gather(0, generated_order)
+    right_sorted = right[:, None].expand_as(reference).gather(0, reference_order)
+
+    def cumulative(weights: torch.Tensor) -> torch.Tensor:
+        # The final breakpoint is exactly one even after floating-point sums.
+        cdf = weights.cumsum(dim=0).clamp(max=1.0)
+        return torch.cat((cdf[:-1], torch.ones_like(cdf[-1:])), dim=0)
+
+    left_cdf, right_cdf = cumulative(left_sorted), cumulative(right_sorted)
+    breaks = torch.cat((left_cdf, right_cdf), dim=0).sort(dim=0).values
+    widths = torch.diff(breaks, dim=0, prepend=torch.zeros_like(breaks[:1]))
+    # `searchsorted` works row-wise, hence the transpose to [K,N].
+    query = breaks.T.contiguous()
+    left_index = torch.searchsorted(left_cdf.T.contiguous(), query).T
+    right_index = torch.searchsorted(right_cdf.T.contiguous(), query).T
+    left_values = generated_sorted.gather(0, left_index.clamp_max(generated.shape[0] - 1))
+    right_values = reference_sorted.gather(0, right_index.clamp_max(reference.shape[0] - 1))
+    return (widths * (left_values - right_values).square()).sum(dim=0)
+
+
 def normalize_directions(directions: torch.Tensor) -> torch.Tensor:
     return directions / directions.norm(dim=-1, keepdim=True).clamp_min(1e-12)
 
