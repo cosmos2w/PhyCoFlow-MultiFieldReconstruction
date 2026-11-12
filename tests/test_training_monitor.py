@@ -151,7 +151,7 @@ def test_loss_figure_uses_independent_panels_without_duplicate_overview(tmp_path
         "Fixed validation objective",
     ]
     assert all(len(axis.lines) == 1 for axis in figure.axes[1:])
-    assert all(axis.get_yscale() == "log" for axis in figure.axes[1:])
+    assert all(axis.get_yscale() == "linear" for axis in figure.axes[1:])
     assert validation_axis.lines[0].get_marker() == "o"
     assert [text.get_text() for text in validation_axis.texts] == [
         "Fixed validation · recorded metric"
@@ -202,7 +202,7 @@ def test_loss_figure_keeps_family_breakdown_in_the_coherence_figure(tmp_path):
         for axis in figure.axes
         for line in axis.lines
     )
-    assert coherence_axis.get_yscale() == "log"
+    assert coherence_axis.get_yscale() == "linear"
     plt.close(figure)
     monitor.close()
 

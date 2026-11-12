@@ -18,6 +18,9 @@ from ..run_logs import history_paths, log_path
 from .history_plotting import (
     HISTORY_MUTED_TEXT_COLOR,
     HISTORY_TEXT_COLOR,
+    find_calibration_freeze,
+    mark_calibration_freeze,
+    plot_recorded_trend,
     style_history_axis,
 )
 
@@ -125,6 +128,12 @@ class TrainingMonitor:
         self._pending_epoch_report: dict[str, Any] | None = None
         self.last_epoch_report: dict[str, Any] | None = None
         self._plot_available = True
+        self._calibration_freeze_epoch = None
+        config_path = self.run_dir / "resolved_config.yaml"
+        if config_path.is_file():
+            from ..config import load_config
+
+            self._calibration_freeze_epoch = find_calibration_freeze([], load_config(config_path))
         self._load_existing_history()
         self._load_existing_validation_history()
         self.active_epoch = int(start_step) // self.steps_per_epoch + 1
@@ -169,6 +178,9 @@ class TrainingMonitor:
                         self._capture(json.loads(line))
 
     def _capture(self, row: Mapping[str, Any]) -> None:
+        freeze = find_calibration_freeze([dict(row)])
+        if freeze is not None:
+            self._calibration_freeze_epoch = min(freeze, self._calibration_freeze_epoch or freeze)
         if row.get("validation_plot_label"):
             self._validation_plot_label = str(row["validation_plot_label"])
         step = int(row.get("step", 0))
@@ -445,8 +457,7 @@ class TrainingMonitor:
     def _shown_loss_series(self, key: str) -> tuple[list[float], list[float]]:
         values = self._values[key]
         steps = self._steps[key]
-        stride = max(1, math.ceil(len(values) / 4000))
-        return self._epoch_coordinates(steps[::stride]), values[::stride]
+        return self._epoch_coordinates(steps), values
 
     def _stage_label(self) -> str:
         stage = self.description.partition(":")[0].replace("_", " ").strip()
@@ -522,17 +533,17 @@ class TrainingMonitor:
             )
             axis = figure.add_subplot(grid_cell)
             shown_epochs, shown_values = self._shown_loss_series(key)
-            axis.plot(
-                shown_epochs,
-                shown_values,
-                color=_LOSS_COLORS[key],
-                linewidth=1.7,
-                marker="o" if key == "validation_loss" or len(shown_values) == 1 else None,
-                markersize=4.3 if key == "validation_loss" or len(shown_values) == 1 else None,
-                markerfacecolor="white" if key == "validation_loss" else None,
-                markeredgewidth=1.1 if key == "validation_loss" else None,
+            plot_recorded_trend(axis, shown_epochs, shown_values, color=_LOSS_COLORS[key])
+            axis.set_xlabel(
+                "Training epoch"
+                + (
+                    f" · dotted: freeze at epoch {self._calibration_freeze_epoch:g}"
+                    if self._calibration_freeze_epoch is not None
+                    and epoch_max >= self._calibration_freeze_epoch
+                    else ""
+                ),
+                labelpad=3,
             )
-            axis.set_xlabel("Training epoch", labelpad=3)
             axis.set_ylabel("Objective value", labelpad=3)
             if key == "validation_loss":
                 title = "Fixed validation objective"
@@ -545,6 +556,9 @@ class TrainingMonitor:
                 axis.set_ylabel("Recorded value", labelpad=3)
             elif key == "data_loss" and self._data_semantics == {"paired"}:
                 title = "Sampled TRAIN paired-endpoint data diagnostic"
+                axis.set_ylabel("Recorded value", labelpad=3)
+            elif post_training and key == "total" and has_direction:
+                title = "Combined reporting value · not an optimized scalar"
                 axis.set_ylabel("Recorded value", labelpad=3)
             elif post_training and key == "total":
                 title = "Weighted combined objective"
@@ -563,6 +577,9 @@ class TrainingMonitor:
                 pad=7,
             )
             style_history_axis(axis, shown_values, x_max=epoch_max)
+            mark_calibration_freeze(axis, self._calibration_freeze_epoch, x_max=epoch_max)
+            if len(shown_values) >= 8:
+                axis.legend(loc="best", frameon=False, fontsize=7)
             if key == "validation_loss":
                 axis.text(
                     1.0,

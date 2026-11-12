@@ -203,11 +203,23 @@ def _validate_common_sections(config: Mapping[str, Any]) -> None:
             "sample_selection",
             "native_topology",
             "group_size",
+            "batch_size",
             "reconstruction_panel",
         },
         "evaluation",
     )
     group_size = config.get("evaluation", {}).get("group_size")
+    evaluation_batch_size = evaluation.get("batch_size")
+    if evaluation_batch_size is not None and (
+        isinstance(evaluation_batch_size, bool)
+        or not isinstance(evaluation_batch_size, int)
+        or evaluation_batch_size < 1
+    ):
+        raise ValueError("evaluation.batch_size must be a positive integer")
+    if evaluation_batch_size is not None and not config.get("coherence", {}).get(
+        "scalable_anchored_coherence", {}
+    ).get("enabled", False):
+        raise ValueError("evaluation.batch_size requires independent scalable coherence scores")
     if group_size is not None and (
         isinstance(group_size, bool)
         or not isinstance(group_size, int)
@@ -1259,9 +1271,19 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
                     "periods",
                     "allow_projected_collisions",
                     "antialias_downsample",
+                    "raster_mapping",
                 },
                 "topology.geometry",
             )
+            raster_mapping = geometry.get("raster_mapping", "legacy_v1")
+            if raster_mapping not in {"legacy_v1", "physical_cell_overlap_v1"}:
+                raise ValueError("unknown topology geometry.raster_mapping")
+            if raster_mapping == "physical_cell_overlap_v1" and (
+                geometry.get("periodic", False) or geometry.get("antialias_downsample", False)
+            ):
+                raise ValueError(
+                    "physical_cell_overlap_v1 requires a complete nonperiodic grid and excludes legacy antialias"
+                )
             if not isinstance(geometry.get("antialias_downsample", False), bool):
                 raise ValueError("topology geometry.antialias_downsample must be boolean")
             if geometry.get("antialias_downsample", False) and topology_strategy == "betti_curves":
@@ -1586,6 +1608,7 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
             "sample_selection",
             "native_topology",
             "group_size",
+            "batch_size",
         },
         "evaluation",
     )

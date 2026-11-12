@@ -84,6 +84,8 @@ Sampler observations, controller state and calibration advance only with success
 
 Run-owned `logs/` contains complete histories and curve PNG/PDF files. Curves refresh at first available history, every 10 completed epochs, validation, pause and completion. Readers accept legacy `metrics/` histories. Recovery preserves an immutable digest-named copy before removing records beyond the checkpoint. ConFIG family values, sampled TRAIN diagnostics, held-out metrics and actual optimizer-step diagnostics are labeled separately.
 
+History figures give each family and raw component its own scale. Recorded values remain visible beneath an explicitly labeled centered-median trend; modest changes use padded linear axes, while genuinely wide positive ranges use logarithmic axes. The epoch-10 calibration freeze is marked where applicable. These views describe the recorded training batches; they do not replace a fixed held-out comparison.
+
 ## SOURCE-output anchoring
 
 [`coherence/physical_risk.py`](../src/phycoflow_reconstruction/coherence/physical_risk.py) supplies linear physical-field MSE and the exact blend-risk quadratic on a declared matched support. It separates full quadrature, without-replacement inclusion correction and with-replacement proposal correction.
@@ -101,6 +103,8 @@ A convex blend preserves hard sensor values when both endpoints obey the same ha
 ## Matched evaluation
 
 Use `FrozenCoherenceObserver` from `phycoflow_reconstruction.evaluation.frozen_coherence` for a common comparison on saved outputs. Its constructor fixes the TRAIN artifact identity, fitted families, reference tensor, ordered sample IDs, coordinates, endpoint masses and a uniform shared query pack. Use one common positive coefficient set across every compared model; the default is unit coefficients. `.score(members)` accepts `[J, B, N, C]` tensors, with one deterministic member or two independent conditional members, and returns per-sample scores plus definition and observer-receipt identities. It performs no inference, fitting or training-state updates. This Python interface lets a case own its evaluation coverage and coupling.
+
+For the independent scalable scores, `evaluation.batch_size` limits inference and scoring memory without reducing the selected sample panel. Keep its value and sample order identical across compared models: the receipt records each batch's draw seed and the fixed common observer-query seed. Scores and per-condition errors are pooled by sample count; observed/unobserved entry errors use their actual entry counts, including a shorter final batch. This setting is separate from `evaluation.group_size`, which defines ensembles for the existing covariance workflows.
 
 ## Measured research example
 

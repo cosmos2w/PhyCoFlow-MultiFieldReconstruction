@@ -208,7 +208,7 @@ def test_adaptive_figure_uses_family_groups_and_independent_component_scales() -
         "Same frequency · Magnitude squared",
         "Cross frequency · Band energy coupling",
     ]
-    assert all(axis.get_yscale() == "log" for axis in (figure.axes[0], *figure.axes[2:]))
+    assert all(axis.get_yscale() == "linear" for axis in (figure.axes[0], *figure.axes[2:]))
     assert figure.axes[1].get_yscale() == "linear"  # legacy rows have no family totals
     assert len(figure.subfigs) == 2
     assert figure.subfigs[1]._suptitle.get_text() == "Cross spectrum"
@@ -478,16 +478,57 @@ def test_compact_sss_preserves_raw_leaves_and_separates_paired_state():
     data = extract_coherence_history([row], config)
     assert len(data.components) == 8
     figure = build_coherence_history_figure(data, plt, description="post:test")
-    assert len(figure.axes) == 4
-    assert "not a scalar ConFIG objective" in figure.axes[0].get_title(loc="left")
-    assert [line.get_label() for line in figure.axes[0].lines] == ["State", "Scale", "Shape"]
-    assert "paired squared, separate from joint fair objective" in figure.axes[1].get_title(
-        loc="left"
-    )
-    assert sorted(line.get_ydata()[0] for line in figure.axes[1].lines) == [4.0, 5.0]
-    assert sorted(line.get_ydata()[0] for line in figure.axes[3].lines) == [0.0, 1.0]
+    visible = [axis for axis in figure.axes if axis.get_visible()]
+    assert "not a ConFIG scalar objective" in figure._suptitle.get_text()
+    assert len(visible) == 10  # three weighted families and seven raw components
+    assert [axis.get_ylabel() for axis in visible].count("Weighted value") == 3
+    assert [axis.get_ylabel() for axis in visible].count("Raw score") == 7
+    assert sorted(
+        axis.lines[0].get_ydata()[0] for axis in visible if axis.get_ylabel() == "Raw score"
+    ) == [0.0, 1.0, 4.0, 5.0, 6.0, 7.0, 8.0]
     plt.close(figure)
     detailed = build_coherence_history_figure(data, plt, description="post:test", detailed=True)
-    assert len(detailed.axes) > len(figure.axes)
     assert any("Field" in axis.get_title(loc="left") for axis in detailed.axes)
     plt.close(detailed)
+
+
+def test_axis_scale_trend_and_freeze_marker_preserve_observations():
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    from matplotlib import pyplot as plt
+
+    from phycoflow_reconstruction.training.history_plotting import (
+        plot_recorded_trend,
+        style_history_axis,
+    )
+
+    fig, axes = plt.subplots(1, 3)
+    for axis, values, expected in zip(
+        axes, ([1.0, 1.1], [1.0, 1000.0], [-1000.0, 0.01]), ("linear", "log", "symlog")
+    ):
+        axis.plot([1, 2], values)
+        style_history_axis(axis, values, x_max=10)
+        assert axis.get_yscale() == expected
+        assert axis.get_ylim()[0] <= min(values) and axis.get_ylim()[1] >= max(values)
+    values = [float(i % 3) for i in range(20)]
+    plot_recorded_trend(axes[0], list(range(20)), values, color="red")
+    assert list(axes[0].lines[-2].get_ydata()) == values
+    assert "Centered median" in axes[0].lines[-1].get_label()
+    plt.close(fig)
+    rows = [
+        {
+            "epoch": e,
+            "coherence_loss": 1.0,
+            "scalable": {"calibration_frozen": e >= 10},
+            "coherence_component/global_distribution/scalable_fair/raw": 1.0,
+        }
+        for e in range(1, 12)
+    ]
+    data = extract_coherence_history(rows, {"coherence": {"families": {"global_distribution": {}}}})
+    assert data.calibration_freeze_epoch == 10
+    figure = build_coherence_history_figure(data, plt, description="post:test")
+    assert any(
+        line.get_linestyle() == ":" and list(line.get_xdata()) == [10.0, 10.0]
+        for line in figure.axes[0].lines
+    )
+    plt.close(figure)

@@ -21,6 +21,7 @@ def reconstruction_metrics(
     field_names: Sequence[str],
     *,
     normalizer=None,
+    include_counts: bool = False,
 ) -> dict[str, float | dict[str, float] | None]:
     squared = (prediction - target).square()
     valid = batch.query_valid_mask.unsqueeze(-1).expand_as(squared)
@@ -77,24 +78,20 @@ def reconstruction_metrics(
             float(squared[unobserved].mean().cpu()) if unobserved.any() else None
         ),
     }
+    if include_counts:
+        report["observed_entry_count"] = int(observed.sum())
+        report["unobserved_entry_count"] = int(unobserved.sum())
     if normalizer is not None:
         prediction_physical = normalizer.decode(prediction)
         target_physical = normalizer.decode(target)
         physical_squared = (prediction_physical - target_physical).square()
         physical_error_sq = (physical_squared * valid_float.unsqueeze(-1)).sum(dim=(1, 2))
-        physical_target_sq = (
-            target_physical.square() * valid_float.unsqueeze(-1)
-        ).sum(dim=(1, 2))
+        physical_target_sq = (target_physical.square() * valid_float.unsqueeze(-1)).sum(dim=(1, 2))
         physical_relative = torch.sqrt(
-            physical_error_sq
-            / physical_target_sq.clamp_min(torch.finfo(prediction.dtype).eps)
+            physical_error_sq / physical_target_sq.clamp_min(torch.finfo(prediction.dtype).eps)
         )
-        physical_field_error_sq = (
-            physical_squared * valid_float.unsqueeze(-1)
-        ).sum(dim=1)
-        physical_field_target_sq = (
-            target_physical.square() * valid_float.unsqueeze(-1)
-        ).sum(dim=1)
+        physical_field_error_sq = (physical_squared * valid_float.unsqueeze(-1)).sum(dim=1)
+        physical_field_target_sq = (target_physical.square() * valid_float.unsqueeze(-1)).sum(dim=1)
         physical_field_relative = torch.sqrt(
             physical_field_error_sq
             / physical_field_target_sq.clamp_min(torch.finfo(prediction.dtype).eps)
@@ -103,9 +100,7 @@ def reconstruction_metrics(
             mse_physical=float(physical_squared[valid].mean().cpu()),
             mean_relative_l2_physical=float(physical_relative.mean().cpu()),
             per_field_mse_physical={
-                str(name): float(
-                    physical_squared[..., field][batch.query_valid_mask].mean().cpu()
-                )
+                str(name): float(physical_squared[..., field][batch.query_valid_mask].mean().cpu())
                 for field, name in enumerate(field_names)
             },
             per_field_relative_l2_physical={

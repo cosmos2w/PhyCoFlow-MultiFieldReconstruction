@@ -37,7 +37,7 @@ def test_tiny_scalable_profile_prefit_train_and_resume(tmp_path, deterministic):
     post["coherence"]["families"]["multiscale_spectrum"]["bands"]["count"] = 1
     post["coherence"]["families"]["topology"]["geometry"]["grid_shape"] = [4, 4]
     post["coherence"]["families"]["topology"]["persistence"]["projections"] = 4
-    post["evaluation"].update(query_points=16, preview={"enabled": False})
+    post["evaluation"].update(query_points=16, batch_size=1, preview={"enabled": False})
     post["observation_consistency"] = {"mode": "hard", "final_clamp": True}
     post["checkpointing"] = {"every_epochs": 1, "selection_metric": "reconstruction_mse"}
     post["runtime"]["progress"] = False

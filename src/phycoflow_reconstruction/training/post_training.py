@@ -1316,7 +1316,26 @@ def _evaluate(
     normalizer=None,
     family_scales: Mapping[str, float] | None = None,
     scalable_runtime=None,
+    _generation_seed=None,
 ) -> dict[str, Any]:
+    if scalable_runtime is not None and config.get("evaluation", {}).get("batch_size") is not None:
+        from ..evaluation.scalable_batches import evaluate_scalable_batches
+
+        result = evaluate_scalable_batches(
+            _evaluate,
+            model,
+            complete_batch,
+            comparison_batch,
+            family,
+            bank,
+            field_names,
+            config,
+            normalizer=normalizer,
+            family_scales=family_scales,
+            scalable_runtime=scalable_runtime,
+        )
+        result.update(_evaluation_completion_clock())
+        return result
     if scalable_runtime is not None and config.get("evaluation", {}).get("group_size") is not None:
         raise ValueError("scalable observer does not support grouped evaluation")
     if config.get("evaluation", {}).get("group_size") is not None:
@@ -1345,6 +1364,7 @@ def _evaluate(
     inference_batch = _without_target(model_batch)
     evaluation = config.get("evaluation", {})
     evaluation_seed = int(evaluation.get("seed", 2027))
+    draw_seed = evaluation_seed if _generation_seed is None else int(_generation_seed)
     external = bool(config["optimization"].get("multitask", {}).get("external_policy"))
 
     def reconstruct(draw_generator):
@@ -1365,13 +1385,11 @@ def _evaluate(
             generator=draw_generator,
         ).prediction
 
-    generator = torch.Generator(device=complete_batch.query_coords.device).manual_seed(
-        evaluation_seed
-    )
+    generator = torch.Generator(device=complete_batch.query_coords.device).manual_seed(draw_seed)
     model.eval()
     with evaluation_weight_context(model), torch.no_grad():
         warmup_generator = torch.Generator(device=complete_batch.query_coords.device).manual_seed(
-            evaluation_seed + 1
+            draw_seed + 1
         )
         reconstruct(warmup_generator)
     if complete_batch.query_coords.device.type == "cuda":
@@ -1390,6 +1408,7 @@ def _evaluate(
             comparison_batch,
             field_names,
             normalizer=normalizer,
+            include_counts=scalable_runtime is not None,
         )
         if config["optimization"].get("multitask", {}).get("external_policy"):
             # A separate fixed validation SOURCE baseline; TRAIN calibration
@@ -1410,7 +1429,7 @@ def _evaluate(
         )
         for draw in range(1, draw_count):
             draw_generator = torch.Generator(device=prediction.device).manual_seed(
-                _conditional_draw_seed(evaluation_seed, draw)
+                _conditional_draw_seed(draw_seed, draw)
             )
             value = reconstruct(draw_generator)
             if model.capabilities.structured_grid_required:
@@ -1632,7 +1651,7 @@ def _evaluate(
             if isinstance(comparison_batch.metadata.get("query_indices"), torch.Tensor)
             else None
         ),
-        "generation_seed": evaluation_seed,
+        "generation_seed": draw_seed,
         "generation_steps": int(evaluation.get("generation_steps", 2)),
         "evaluation_weight_source": "configured_evaluation_weights",
     }

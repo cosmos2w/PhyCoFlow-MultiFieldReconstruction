@@ -11,7 +11,13 @@ from typing import Any
 
 from ..config import load_config
 from ..run_logs import history_paths
-from .history_plotting import HISTORY_MUTED_TEXT_COLOR, HISTORY_TEXT_COLOR, style_history_axis
+from .history_plotting import (
+    HISTORY_MUTED_TEXT_COLOR,
+    HISTORY_TEXT_COLOR,
+    find_calibration_freeze,
+    mark_calibration_freeze,
+    style_history_axis,
+)
 
 _FIELD_COLORS = {
     "total": "#202733",
@@ -105,12 +111,12 @@ def build_fidelity_history_figure(
         field_names = ["total", *(name for name in field_names if name != "total")]
     epoch_max = max(record["x"] for record in records)
     score_values = [record["metric"] for record in records]
-    figure = pyplot.figure(figsize=(12.4, 10.2), constrained_layout=True, facecolor="white")
-    grid = figure.add_gridspec(4, 1, height_ratios=(0.78, 1.0, 1.05, 0.13))
+    figure = pyplot.figure(figsize=(12.4, 7.4), constrained_layout=True, facecolor="white")
+    grid = figure.add_gridspec(3, 2, height_ratios=(1.0, 1.0, 0.13))
     score_axis = figure.add_subplot(grid[0, 0])
-    full_range_axis = figure.add_subplot(grid[1, 0], sharex=score_axis)
-    gate_axis = figure.add_subplot(grid[2, 0], sharex=score_axis)
-    legend_axis = figure.add_subplot(grid[3, 0])
+    full_range_axis = figure.add_subplot(grid[0, 1], sharex=score_axis)
+    gate_axis = figure.add_subplot(grid[1, :], sharex=score_axis)
+    legend_axis = figure.add_subplot(grid[2, :])
     legend_axis.set_axis_off()
     figure.suptitle(
         "Checkpoint fidelity and topology score",
@@ -336,6 +342,12 @@ def build_fidelity_history_figure(
         handlelength=2.0,
         columnspacing=1.5,
     )
+    freeze = find_calibration_freeze(training_rows)
+    if "epoch" in x_label.lower() and freeze is not None:
+        for axis in (score_axis, full_range_axis, gate_axis):
+            mark_calibration_freeze(axis, freeze, x_max=epoch_max)
+        if epoch_max >= freeze:
+            gate_axis.set_xlabel(f"{x_label} · dotted: calibration frozen at epoch {freeze:g}")
     return figure
 
 

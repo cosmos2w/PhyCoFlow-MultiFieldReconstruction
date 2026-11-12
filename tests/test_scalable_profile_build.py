@@ -52,3 +52,40 @@ def test_three_family_order_preserves_legacy_and_new_scale(scale):
         three_family_order(
             ["topology", "cross_spectrum", "multiscale_spectrum", "global_distribution"]
         )
+
+
+def test_project_config_preserves_physical_cell_overlap(tmp_path):
+    from copy import deepcopy
+
+    from helpers.coherence import _post_config
+
+    from phycoflow_reconstruction.config.load import deep_merge
+    from phycoflow_reconstruction.config.validate import validate_config
+
+    config = _post_config(tmp_path / "fixture.h5", tmp_path / "source")
+    config = deep_merge(
+        config, load_config(ROOT / "configs/defaults/scalable_anchored_coherence.yaml")
+    )
+    config["coherence"]["families"].pop("cross_spectrum", None)
+    config["coherence"]["families"]["topology"]["geometry"]["raster_mapping"] = (
+        "physical_cell_overlap_v1"
+    )
+    config["checkpointing"] = {"selection_metric": "reconstruction_mse"}
+    config["evaluation"]["preview"] = {"enabled": False}
+    config["evaluation"]["query_points"] = config["coherence"]["compute_budget"]["point_count"]
+    config["evaluation"]["batch_size"] = 4
+    validate_config(config)
+    for size in (True, 0):
+        invalid = deepcopy(config)
+        invalid["evaluation"]["batch_size"] = size
+        with pytest.raises(ValueError, match="evaluation.batch_size must be a positive integer"):
+            validate_config(invalid)
+    for key in ("periodic", "antialias_downsample"):
+        invalid = deepcopy(config)
+        invalid["coherence"]["families"]["topology"]["geometry"][key] = True
+        with pytest.raises(ValueError, match="physical_cell_overlap"):
+            validate_config(invalid)
+    invalid = deepcopy(config)
+    invalid["coherence"]["families"]["topology"]["geometry"]["raster_mapping"] = "unknown"
+    with pytest.raises(ValueError, match="raster_mapping"):
+        validate_config(invalid)

@@ -16,7 +16,10 @@ from ..run_logs import history_paths, log_path
 from .history_plotting import (
     HISTORY_MUTED_TEXT_COLOR,
     HISTORY_TEXT_COLOR,
+    find_calibration_freeze,
     history_family_style,
+    mark_calibration_freeze,
+    plot_recorded_trend,
     style_history_axis,
 )
 
@@ -49,6 +52,7 @@ class CoherenceHistoryData:
     family_totals: dict[str, tuple[tuple[float, ...], tuple[float, ...]]]
     state_definition: str | None = None
     coherence_semantics: str = "scalar"
+    calibration_freeze_epoch: float | None = None
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -241,6 +245,7 @@ def extract_coherence_history(
         family_totals=family_totals,
         state_definition=state_definition,
         coherence_semantics=semantics,
+        calibration_freeze_epoch=find_calibration_freeze(rows, config),
     )
 
 
@@ -573,12 +578,16 @@ def build_coherence_history_figure(
     State paired squared values are diagnostics, not pieces of its fair score.
     """
     if detailed:
-        return _build_detailed_coherence_figure(data, plt, description=description)
+        figure = _build_detailed_coherence_figure(data, plt, description=description)
+        for axis in figure.axes:
+            mark_calibration_freeze(axis, data.calibration_freeze_epoch, x_max=axis.get_xlim()[1])
+        return figure
     selected = {
         "global_distribution": {
             "self.marginal_w2",
             "cross.joint_topk_swd",
             "mutual.pairwise_swd",
+            "conditional_quantile_fair",
             "selected_state_fair",
             "selected_state_paired",
             "scalable_fair",
@@ -615,71 +624,96 @@ def build_coherence_history_figure(
         ]
         for family in data.family_order
     }
-    groups = {family: components for family, components in groups.items() if components}
-    figure, axes = plt.subplots(
-        1 + len(groups),
-        1,
-        figsize=(10.5, 2.8 + 2.35 * len(groups)),
-        squeeze=False,
-        constrained_layout=True,
-    )
-    figure.suptitle(f"{_stage_label(description)} coherence history", fontsize=14)
-    summary = axes[0, 0]
-    values = []
-    for index, family in enumerate(data.family_order):
-        if family not in data.family_totals:
-            continue
-        epochs, series = data.family_totals[family]
-        values.extend(series)
-        color, linestyle = history_family_style(family, index)
-        summary.plot(
-            epochs,
-            series,
-            label=_view_label(family),
-            color=color,
-            linestyle=linestyle,
-            marker="o" if len(epochs) == 1 else None,
-        )
-    title = (
-        "Weighted family objectives"
-        if data.coherence_semantics == "scalar"
-        else "Weighted family reporting values · not a scalar ConFIG objective"
-    )
-    summary.set_title(title, loc="left")
-    summary.set_ylabel("Recorded weighted value")
-    summary.set_xlabel("Training epoch")
-    style_history_axis(
-        summary, values, x_max=max((e for c in data.components for e in c.epochs), default=1)
-    )
-    if summary.lines:
-        summary.legend(fontsize=8)
-    for index, (family, components) in enumerate(groups.items(), 1):
-        axis = axes[index, 0]
-        values = []
-        for component in components:
-            values.extend(component.raw)
+    panels = []
+    for family in data.family_order:
+        if family in data.family_totals:
+            epochs, values = data.family_totals[family]
+            panels.append(
+                (
+                    family,
+                    f"{_view_label(family)} · weighted family value",
+                    "Weighted value",
+                    epochs,
+                    values,
+                    (),
+                )
+            )
+        for component in groups.get(family, ()):
             label = _component_label(
                 component.component, family=family, definition=data.state_definition
             )
-            axis.plot(
-                component.epochs,
-                component.raw,
-                label=label,
-                marker="o" if len(component.epochs) == 1 else None,
+            panels.append(
+                (
+                    family,
+                    f"{_view_label(family)} · {label}",
+                    "Raw score",
+                    component.epochs,
+                    component.raw,
+                    component.partial_epochs,
+                )
             )
-        title = f"{_view_label(family)} · recorded aggregate diagnostics"
-        if (
-            family == "global_distribution"
-            and data.state_definition == "conditional_quantile_fair_v1"
-        ):
-            title += " · paired squared, separate from joint fair objective"
-        axis.set_title(title, loc="left", fontsize=10)
-        axis.set_ylabel("Raw diagnostic")
-        axis.set_xlabel("Training epoch")
-        style_history_axis(
-            axis, values, x_max=max((e for c in components for e in c.epochs), default=1)
+    if not panels:
+        panels = [
+            (
+                "coherence",
+                "Coherence · recorded value",
+                "Recorded value",
+                data.total_epochs,
+                data.total_values,
+                (),
+            )
+        ]
+    columns = min(3, len(panels))
+    rows = math.ceil(len(panels) / columns)
+    figure, axes = plt.subplots(
+        rows,
+        columns,
+        figsize=(4.4 * columns, 1.1 + 2.7 * rows),
+        squeeze=False,
+        constrained_layout=True,
+        facecolor="white",
+    )
+    direction = data.coherence_semantics != "scalar"
+    figure.suptitle(
+        f"{_stage_label(description)} coherence history · sampled TRAIN"
+        + (" · family values are not a ConFIG scalar objective" if direction else ""),
+        fontsize=13,
+    )
+    for index, (family, title, ylabel, epochs, values, partial) in enumerate(panels):
+        axis = axes.flat[index]
+        color, _ = history_family_style(
+            family, data.family_order.index(family) if family in data.family_order else 0
         )
-        axis.legend(fontsize=8, ncol=2)
+        plot_recorded_trend(axis, epochs, values, color=color)
+        if partial:
+            lookup = dict(zip(epochs, values))
+            visible = [epoch for epoch in partial if epoch in lookup]
+            axis.scatter(
+                visible,
+                [lookup[epoch] for epoch in visible],
+                facecolors="white",
+                edgecolors=color,
+                s=24,
+                zorder=4,
+            )
+        epoch_max = max(epochs, default=1.0)
+        style_history_axis(axis, values, x_max=epoch_max)
+        mark_calibration_freeze(axis, data.calibration_freeze_epoch, x_max=epoch_max)
+        axis.set_title(_wrap_component_label(title), loc="left", fontsize=9.6)
+        axis.set_ylabel(ylabel)
+        axis.set_xlabel(
+            "Training epoch"
+            + (
+                f" · dotted: freeze at epoch {data.calibration_freeze_epoch:g}"
+                if data.calibration_freeze_epoch is not None
+                and epoch_max >= data.calibration_freeze_epoch
+                else ""
+            )
+        )
+        if len(values) >= 8:
+            axis.legend(loc="best", frameon=False, fontsize=7)
+    for axis in list(axes.flat)[len(panels) :]:
+        axis.set_visible(False)
     return figure
 
 
