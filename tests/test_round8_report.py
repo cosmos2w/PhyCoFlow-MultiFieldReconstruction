@@ -103,3 +103,122 @@ def test_non_nominated_endpoint_still_reports_source_scores_and_raw_native_risks
     assert '| C8 | SOURCE | state | unavailable | 0.75 |' in text
     assert '| a | 0 | 0.2 | unavailable | unavailable |' in text
     assert '| T | 1 | 1.21 | 1.21 | 10.00% |' in text
+
+
+def test_amplitude_frontier_uses_saved_points_and_renders(tmp_path):
+    from phycoflow_reconstruction.evaluation.round8_campaign import file_hash
+    from phycoflow_reconstruction.evaluation.round8_decision import KEYS
+    identity={'config_sha256':'config','frozen_family_artifacts_sha256':'family',
+              'fair_shape_artifact_sha256':'shape','native_observer_identity':{'mesh':'native'}}
+    policy={'schema':'round8_frozen_policy_v1','endpoint':'C8','alpha':.37,
+            'score_floors':{'state':.1,'scale':.1,'shape':.1}}
+    pp=tmp_path/'policy.json'; pp.write_text(json.dumps(policy)); policy_hash=file_hash(pp)
+    def write_score(alpha):
+        values={'state':2-.2*alpha,'scale':1-.1*alpha,'shape':-2-.4*alpha}
+        risk=[1+.2*alpha,.05*alpha]
+        obj={'schema':'round8_common_observers_v1','population':'ASSESS','alpha':alpha,
+             'source_panel_sha256':'source','endpoint_panel_sha256':'endpoint',
+             'assessment_policy_sha256':policy_hash,'member_risk_physical':risk,
+             'rows':[{'sample_id':'fixed','losses':{KEYS[k]:v for k,v in values.items()}}],**identity}
+        path=tmp_path/f'score_{alpha}.json';path.write_text(json.dumps(obj))
+        return path,values,risk
+    frontier={}
+    for alpha in (0.,.25,.5,.75,1.):
+        path,values,risk=write_score(alpha)
+        frontier[str(alpha)]={'path':str(path),'sha256':file_hash(path),'scores':values,'member_risk_physical':risk}
+    selected,_,_=write_score(.37)
+    assessment={'schema':'round8_assessment_v1','endpoint':'C8','alpha':.37,'policy_sha256':policy_hash,
+                'source_report':frontier['0.0']['path'],'selected_report':str(selected),
+                'frontier':frontier,'observer_identity':identity,'field_names':['T','CO']}
+    ap=tmp_path/'assessment.json';ap.write_text(json.dumps(assessment))
+    out=report.build_report(tmp_path/'report',assessment_paths={'C8':ap},policy_paths={'C8':pp})
+    data=out['amplitude_frontier']['C8']; point=data['selected']
+    assert point['alpha']==.37 and point['gains']['state']==pytest.approx(.037)
+    assert point['gains']['shape']==pytest.approx(.074)
+    assert point['max_defined_risk_ratio']==pytest.approx(1.074)
+    assert point['zero_source_risk_fields'][0]['absolute_risk']==pytest.approx(.0185)
+    assert point['zero_source_risk_fields'][0]['violates_zero_bound']
+    assert data['score_denominators']=={'state':2,'scale':1,'shape':2}
+    assert out['verification']['png_images_decoded']==1
+    text=Path(out['markdown']).read_text()
+    assert 'figures/amplitude_frontier.png' in text and 'figures/amplitude_frontier.pdf' in text
+    assert 'SOURCE scores and positive denominators' in text
+    frontier['0.5']['sha256']='invalid';ap.write_text(json.dumps(assessment))
+    with pytest.raises(ValueError,match='hash differs'):
+        report._frontier_data({'C8':assessment},{'C8':policy},{'C8':pp})
+
+
+def test_amplitude_frontier_all_zero_source_risks_are_undefined():
+    from phycoflow_reconstruction.evaluation.round8_decision import KEYS
+    score={'alpha':.5,'member_risk_physical':[0.,.1],
+           'rows':[{'losses':dict.fromkeys(KEYS.values(),1.)}]}
+    point=report._frontier_point(score,dict.fromkeys(KEYS,1.),dict.fromkeys(KEYS,1.),[0.,0.],['A','B'])
+    assert point['max_defined_risk_ratio'] is None
+    assert [x['violates_zero_bound'] for x in point['zero_source_risk_fields']]==[False,True]
+    assert point['zero_source_risk_fields'][1]['absolute_risk']==.1
+
+
+def _decomposition_row():
+    return {'sample_id':'sample','losses':{'global_distribution.total':1.5,'multiscale_spectrum.total':2.75,'topology.total':1.},
+            'diagnostics':{'global_distribution':{'attraction':2.,'separation':.5},
+                'topology':{'attraction_per_sample':[1.5],'separation_per_sample':[.5]},
+                'multiscale_spectrum':{'components':{
+                    'signed':{'weight':1.,'executed':True},
+                    'joint':{'weight':.25,'executed':True},
+                    'inactive':{'weight':0.,'executed':False}}}},
+            'components':{'signed':{'weighted_attraction':3.,'weighted_separation':1.},
+                          'joint':{'attraction':4.,'repulsion':1.}}}
+
+
+def test_scale_complete_weighted_attraction_and_missing_refusal():
+    row=_decomposition_row()
+    assert report._family_attraction_separation(row,'scale')==pytest.approx((4.,1.25))
+    assert report._family_attraction_separation(row,'state')==pytest.approx((2.,.5))
+    assert report._family_attraction_separation(row,'shape')==pytest.approx((1.5,.5))
+    del row['components']['joint']['repulsion']
+    assert report._family_attraction_separation(row,'scale') is None
+    row=_decomposition_row(); row['losses']['multiscale_spectrum.total']=10.
+    assert report._family_attraction_separation(row,'scale') is None
+
+
+def test_assessment_figures_render_two_supports(tmp_path):
+    series=[]
+    for population in ('TRAIN','ASSESS'):
+        for epoch in (1,10):
+            path=tmp_path/f'{population}_{epoch}.json'
+            path.write_text(json.dumps({'schema':'round8_common_observers_v1','population':population,
+                'alpha':.5,'rows':[_decomposition_row()]}))
+            series.append({'endpoint':'C8','population':population,'epoch':epoch,'path':str(path)})
+    out=report.build_report(tmp_path/'result',assessment_history=series)
+    assert out['verification']['png_images_decoded']==2
+    assert out['verification']['pdf_pages_decoded']==2
+    assert 'Complete recorded family-total attraction and separation' in Path(out['markdown']).read_text()
+
+
+def test_scale_fallback_uses_hash_verified_scientific_config(tmp_path):
+    from phycoflow_reconstruction.evaluation.round8_campaign import canonical_hash
+    import yaml
+    config={'dataset':{},'rollout':{},'observation_consistency':{},'coherence':{'families':{'multiscale_spectrum':{
+        'objective':{'kind':'signed_band_energy_score','score_definition_version':'signed_spectral_mean_augmented_v4',
+                     'joint_energy_score_weight':.25},
+        'relation_extension':{'definition':'self_rho_fair_v1','self_weight':.5,'rho_weight':.25}}}}}
+    cfg=tmp_path/'config.yaml'; cfg.write_text(yaml.safe_dump(config))
+    row=_decomposition_row();row['diagnostics']['multiscale_spectrum']={}
+    prefix='multiscale_spectrum.'
+    row['components']={prefix+'signed_band_energy_score.conditional':{'weighted_attraction':3.,'weighted_separation':1.},
+        prefix+'joint_spectral_mean_energy_score.conditional':{'attraction':4.,'repulsion':1.},
+        prefix+'relation_self_energy_score.conditional':{'attraction':2.,'repulsion':1.},
+        prefix+'relation_rho_crps.conditional':{'attraction':2.,'repulsion':1.}}
+    row['losses']['multiscale_spectrum.total']=3.5
+    weights=report._scale_weights_from_config(config)
+    assert report._family_attraction_separation(row,'scale',weights)==pytest.approx((5.5,2.))
+    del row['components'][prefix+'relation_rho_crps.conditional']
+    assert report._family_attraction_separation(row,'scale',weights) is None
+    config['coherence']['families']['multiscale_spectrum']['objective']['coherence_crps_weight']=.1
+    assert report._scale_weights_from_config(config) is None
+    score=tmp_path/'score.json';score.write_text(json.dumps({'schema':'round8_common_observers_v1','population':'TRAIN','alpha':.5,
+        'config_sha256':'bad','rows':[row]}))
+    with pytest.raises(ValueError,match='scientific config hash differs'):
+        report._assessment_figure([{'endpoint':'C8','population':'TRAIN','epoch':1,'path':str(score),'config_path':str(cfg)}],tmp_path/'figures')
+    obj=json.loads(score.read_text());obj['config_sha256']=canonical_hash(yaml.safe_load(cfg.read_text()));score.write_text(json.dumps(obj))
+    assert report._assessment_figure([{'endpoint':'C8','population':'TRAIN','epoch':1,'path':str(score),'config_path':str(cfg)}],tmp_path/'figures')

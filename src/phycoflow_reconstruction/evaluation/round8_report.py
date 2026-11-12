@@ -39,6 +39,103 @@ def _save_figure(fig,directory,stem):
     plt.close(fig)
     return f'figures/{stem}.png',f'figures/{stem}.pdf'
 
+def _frontier_point(report, source_scores, units, source_risk, fields):
+    scores=_mean_scores(report)
+    risks=np.asarray(report['member_risk_physical'],dtype=float)
+    baseline=np.asarray(source_risk,dtype=float)
+    if risks.shape!=baseline.shape or risks.ndim!=1 or not np.isfinite(risks).all() or (risks<0).any():
+        raise ValueError('invalid frontier member risks')
+    defined=baseline>0
+    zeros=[{'field':fields[i], 'index':i, 'absolute_risk':float(risks[i]),
+            'violates_zero_bound':bool(risks[i]>0)} for i in range(len(fields)) if not defined[i]]
+    return {'alpha':float(report['alpha']), 'scores':scores,
+            'gains':{k:(source_scores[k]-scores[k])/units[k] for k in KEYS},
+            'member_risk_physical':risks.tolist(),
+            'max_defined_risk_ratio':float(np.max(risks[defined]/baseline[defined])) if defined.any() else None,
+            'zero_source_risk_fields':zeros}
+
+
+def _frontier_data(assessments,policies,policy_paths):
+    """Validate saved scores and preserve the measured five-point frontier."""
+    from .round8_decision import _check_report
+    result={}; common=None
+    for name in ('T2000','B8','C8'):
+        a=assessments.get(name); p=policies.get(name)
+        if not a or not p or not a.get('frontier'): continue
+        policy_hash=file_hash(policy_paths[name])
+        if a.get('policy_sha256')!=policy_hash or a.get('alpha')!=p.get('alpha'):
+            raise ValueError('frontier frozen policy differs')
+        source=_json(a['source_report']); source_hash=source['source_panel_sha256']; endpoint_hash=source['endpoint_panel_sha256']
+        identity=_check_report(source,source_hash,endpoint_hash,'ASSESS',0.)
+        if a.get('observer_identity') is not None and identity!=a['observer_identity']:
+            raise ValueError('frontier observer identity differs')
+        for key in ('config_sha256','frozen_family_artifacts_sha256','fair_shape_artifact_sha256'):
+            if key in p.get('observer_identity',{}) and p['observer_identity'][key]!=identity[key]:
+                raise ValueError('TRAIN and ASSESS observer identity differs')
+        ids=[row['sample_id'] for row in source['rows']]
+        baseline=_mean_scores(source); risk=np.asarray(source['member_risk_physical'],dtype=float)
+        if risk.ndim!=1 or not len(risk) or not np.isfinite(risk).all() or (risk<0).any():
+            raise ValueError('invalid SOURCE member risks')
+        fields=a.get('field_names') or [f'field {i+1}' for i in range(len(risk))]
+        if len(fields)!=len(risk): raise ValueError('frontier field names differ')
+        floors=p['score_floors']
+        units={k:max(abs(baseline[k]),float(floors[k])) for k in KEYS}
+        if any(not math.isfinite(units[k]) or units[k]<=0 or not math.isfinite(float(floors[k])) or float(floors[k])<=0 for k in KEYS):
+            raise ValueError('frontier score floors must be positive')
+        cohort=(source_hash,identity,ids,risk.tolist(),baseline)
+        if common is not None and cohort!=common: raise ValueError('frontier SOURCE cohort or observer differs')
+        common=cohort
+        def read(path,alpha,sha=None):
+            if sha is not None and file_hash(path)!=sha: raise ValueError('frontier score report hash differs')
+            report=_json(path)
+            _check_report(report,source_hash,endpoint_hash,'ASSESS',alpha,observer=identity)
+            if report.get('assessment_policy_sha256')!=policy_hash or [r['sample_id'] for r in report['rows']]!=ids:
+                raise ValueError('frontier score policy or cohort differs')
+            return report
+        points=[]
+        for alpha in (0.,.25,.5,.75,1.):
+            item=a['frontier'].get(str(alpha))
+            if item is None: raise ValueError('missing frontier score')
+            r=read(item['path'],alpha,item['sha256']); point=_frontier_point(r,baseline,units,risk,fields)
+            if any(not math.isclose(point['scores'][k],float(item['scores'][k]),rel_tol=1e-10,abs_tol=1e-12) for k in KEYS) or not np.allclose(point['member_risk_physical'],item['member_risk_physical'],rtol=1e-10,atol=1e-12):
+                raise ValueError('frontier summary differs from score report')
+            point.update({'path':str(item['path']),'sha256':item['sha256']}); points.append(point)
+        if file_hash(a['source_report'])!=a['frontier']['0.0']['sha256']:
+            raise ValueError('frontier SOURCE report differs')
+        selected=None
+        if p.get('alpha') is not None:
+            path=a['selected_report']; r=read(path,p['alpha']); selected=_frontier_point(r,baseline,units,risk,fields)
+            selected.update({'path':str(path),'sha256':file_hash(path)})
+        result[name]={'source_scores':baseline,'score_denominators':units,'train_score_floors':floors,
+                      'source_member_risk_physical':risk.tolist(),'field_names':fields,'sample_count':len(ids),
+                      'source_report':str(a['source_report']),'source_report_sha256':file_hash(a['source_report']),
+                      'policy_sha256':policy_hash,'observer_identity':identity,'frontier':points,'selected':selected}
+    return result
+
+
+def _frontier_figure(data,figures):
+    import matplotlib.pyplot as plt
+    styles={'T2000':('#2878b5','o'),'B8':('#dd8452','s'),'C8':('#4c9a65','^')}
+    fig,axes=plt.subplots(2,2,figsize=(9,7),layout='constrained')
+    for ax,key,title in zip(axes.flat,('state','scale','shape','risk'),('State','Scale','Shape','Member MSE')):
+        for name,item in data.items():
+            color,marker=styles[name]; points=item['frontier']
+            value=lambda x: x['max_defined_risk_ratio'] if key=='risk' else x['gains'][key]
+            xs=[p['alpha'] for p in points if value(p) is not None]; ys=[value(p) for p in points if value(p) is not None]
+            ax.scatter(xs,ys,color=color,marker=marker,s=40,label=name,zorder=3)
+            selected=item['selected']
+            if selected is not None and value(selected) is not None:
+                ax.scatter([selected['alpha']],[value(selected)],marker='*',s=190,color=color,edgecolors='black',linewidths=.8,zorder=5)
+        ax.axhline(1.10 if key=='risk' else 0,color='0.45',ls='--',lw=.8)
+        ax.set_title(title); ax.set_xlabel('SOURCE-to-endpoint coefficient α')
+        ax.set_ylabel('Max defined pooled field MSE ratio' if key=='risk' else 'Gain in positive SOURCE units')
+        ax.set_xticks((0,.25,.5,.75,1)); ax.grid(alpha=.2)
+        if key=='risk' and not any(p['max_defined_risk_ratio'] is not None for item in data.values() for p in item['frontier']):
+            ax.text(.5,.5,'All SOURCE risks zero; ratios undefined',transform=ax.transAxes,ha='center',va='center')
+    axes.flat[0].legend(title='Endpoint',fontsize=8)
+    fig.suptitle('ASSESS amplitude frontier (points only; star: frozen nomination)')
+    return _save_figure(fig,figures,'amplitude_frontier')
+
 
 def _training_figure(histories,figures):
     """Read actual run log round8.scores; never synthesize a ConFIG total."""
@@ -85,43 +182,121 @@ def _diagnostic_values(value, terms):
     return result
 
 
+def _scale_weights_from_config(config):
+    """Resolve the declared signed/mean-joint/relation observer, else refuse it."""
+    try:
+        family=config['coherence']['families']['multiscale_spectrum']
+        objective=family['objective']; relation=family['relation_extension']
+        if (objective.get('kind')!='signed_band_energy_score'
+                or objective.get('score_definition_version')!='signed_spectral_mean_augmented_v4'
+                or relation.get('definition')!='self_rho_fair_v1'
+                or 'gram_extension' in family
+                or float(objective.get('coherence_crps_weight',0))!=0
+                or float(objective.get('joint_distance_weight',0))!=0):
+            return None
+        weights={'multiscale_spectrum.signed_band_energy_score.conditional':1.,
+                 'multiscale_spectrum.joint_spectral_mean_energy_score.conditional':float(objective.get('joint_energy_score_weight',0)),
+                 'multiscale_spectrum.relation_self_energy_score.conditional':float(relation['self_weight']),
+                 'multiscale_spectrum.relation_rho_crps.conditional':float(relation['rho_weight'])}
+        if any(not math.isfinite(w) or w<0 for w in weights.values()): return None
+        return {path:{'weight':weight,'executed':True} for path,weight in weights.items() if weight>0}
+    except (KeyError,TypeError,ValueError): return None
+
+
+def _family_attraction_separation(row,family,scale_components=None):
+    """Return only a complete family decomposition matching its recorded total."""
+    diag=row.get('diagnostics',{}).get({'state':'global_distribution','scale':'multiscale_spectrum','shape':'topology'}[family],{})
+    def number(v):
+        try:
+            x=np.asarray(v,dtype=float)
+            return float(x.mean()) if x.size and np.isfinite(x).all() else None
+        except (TypeError,ValueError): return None
+    if family=='state':
+        attraction=number(diag.get('attraction')); separation=number(diag.get('separation'))
+    elif family=='shape':
+        attraction=number(diag.get('attraction_per_sample')); separation=number(diag.get('separation_per_sample'))
+    else:
+        components=diag.get('components')
+        if not isinstance(components,dict) or not components: components=scale_components
+        if not isinstance(components,dict) or not components: return None
+        attraction=separation=0.; active=0
+        for path,info in components.items():
+            weight=number(info.get('weight'))
+            if weight is None: return None
+            if weight==0: continue
+            active+=1
+            if not info.get('executed',False): return None
+            terms=row.get('components',{}).get(path,{})
+            if 'weighted_attraction' in terms and 'weighted_separation' in terms:
+                a=number(terms['weighted_attraction']); s=number(terms['weighted_separation'])
+            else:
+                a=number(terms.get('attraction')); s=number(terms.get('repulsion'))
+            if a is None or s is None: return None
+            attraction+=weight*a; separation+=weight*s
+        if not active: return None
+    if attraction is None or separation is None: return None
+    total=number(row.get('losses',{}).get(KEYS[family]))
+    if total is None or not math.isclose(attraction-separation,total,rel_tol=2e-5,abs_tol=2e-6): return None
+    return attraction,separation
+
+
 def _assessment_figure(series,figures):
-    """Rows: {'endpoint','epoch','population','path'} to common score reports."""
+    """Render scores and complete family decompositions on their own supports."""
     import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
     points=[]; diagnostics=[]
     for item in series:
         report=_json(item['path'])
-        if report.get('schema')!='round8_common_observers_v1' or report.get('population')!=item['population']:
+        if report.get('schema')!='round8_common_observers_v1' or report.get('population')!=item['population'] or item['population'] not in ('TRAIN','ASSESS'):
             raise ValueError('assessment history report identity mismatch')
         if 'alpha' in item and not math.isclose(float(item['alpha']),float(report['alpha']),abs_tol=1e-12): raise ValueError('assessment history alpha mismatch')
-        means=_mean_scores(report)
-        for family in KEYS: points.append((item['endpoint'],item['population'],family,float(item['epoch']),means[family],float(report['alpha'])))
-        for family in ('global_distribution','multiscale_spectrum','topology'):
-            columns={}
-            for row in report['rows']:
-                for key,value in _diagnostic_values(row.get('diagnostics',{}).get(family,{}),{'attraction','separation','repulsion','attraction_per_sample','separation_per_sample','repulsion_per_sample','weighted_attraction','weighted_separation'}).items(): columns.setdefault(key,[]).append(value)
-            for key,values in columns.items():
-                if len(values)==len(report['rows']): diagnostics.append((item['endpoint'],item['population'],family,key,float(item['epoch']),float(np.mean(values)),float(report['alpha'])))
+        scale_components=None
+        if item.get('config_path'):
+            from ..config import load_config
+            from .round8_campaign import canonical_hash
+            config=load_config(item['config_path'])
+            scientific={key:config[key] for key in ('dataset','coherence','rollout','observation_consistency')}
+            if canonical_hash(scientific)!=report.get('config_sha256'):
+                raise ValueError('assessment history scientific config hash differs')
+            scale_components=_scale_weights_from_config(config)
+        means=_mean_scores(report); alpha=float(report['alpha']); epoch=float(item['epoch'])
+        for family in KEYS:
+            points.append((item['endpoint'],item['population'],family,epoch,means[family],alpha))
+            terms=[_family_attraction_separation(row,family,scale_components) for row in report['rows']]
+            if all(term is not None for term in terms):
+                for i,kind in enumerate(('Attraction','Separation')):
+                    diagnostics.append((item['endpoint'],item['population'],family,epoch,float(np.mean([term[i] for term in terms])),alpha,kind))
     if not points: return []
-    fig,axes=plt.subplots(3,1,figsize=(8,8),sharex=True,layout='constrained')
-    for ax,family in zip(axes,('state','scale','shape')):
-        labels=sorted({(a,p,alpha) for a,p,f,_,_,alpha in points if f==family})
-        for arm,pop,alpha in labels:
-            xy=sorted((epoch,value) for a,p,f,epoch,value,al in points if (a,p,f,al)==(arm,pop,family,alpha))
-            if xy: ax.plot(*zip(*xy),marker='o',label=f'{arm} {pop} α={alpha:g}',lw=1)
-        ax.set_ylabel(family);ax.grid(alpha=.2);ax.legend(fontsize=6,ncol=2)
-    axes[-1].set_xlabel('Epoch');fig.suptitle('Common observer assessments on declared panel/support')
-    output=[('assessments',_save_figure(fig,figures,'assessment_scores'))]
+    arms=sorted({p[0] for p in points}); alphas=sorted({p[5] for p in points})
+    colors={'T2000':'#2878b5','B8':'#dd8452','C8':'#4c9a65','SOURCE':'#777777'}
+    fallback=('#9467bd','#8c564b','#17becf')
+    for i,arm in enumerate(arms): colors.setdefault(arm,fallback[i%len(fallback)])
+    markers=('o','s','^','D','v','P','X')
+    alpha_markers={a:markers[i%len(markers)] for i,a in enumerate(alphas)}
+    def draw(data,stem,title,decomposition):
+        fig,axes=plt.subplots(3,2,figsize=(10,8),layout='constrained',sharex=True)
+        for i,family in enumerate(KEYS):
+            for j,pop in enumerate(('TRAIN','ASSESS')):
+                ax=axes[i,j]; selected=[p for p in data if p[1]==pop and p[2]==family]
+                labels=sorted({(p[0],p[5],p[6] if decomposition else '') for p in selected})
+                for arm,alpha,kind in labels:
+                    xy=sorted((p[3],p[4]) for p in selected if p[0]==arm and p[5]==alpha and (not decomposition or p[6]==kind))
+                    ax.plot(*zip(*xy),color=colors[arm],marker=alpha_markers[alpha],markersize=4,
+                            linestyle='--' if kind=='Separation' else '-',linewidth=1)
+                if not labels: ax.text(.5,.5,'Unavailable',ha='center',va='center',transform=ax.transAxes)
+                ax.set_title(f'{family.title()} · {pop} · '+('Q4096 proxy' if pop=='TRAIN' else 'native support'),fontsize=9)
+                ax.set_ylabel('Family observer units');ax.grid(alpha=.2)
+                if i==2: ax.set_xlabel('Epoch')
+        handles=[Line2D([],[],color=colors[a],label=a) for a in arms]
+        handles += [Line2D([],[],color='0.25',marker=alpha_markers[a],linestyle='None',label=f'α={a:g}') for a in alphas]
+        if decomposition: handles += [Line2D([],[],color='0.25',linestyle=style,label=kind) for kind,style in (('Attraction','-'),('Separation','--'))]
+        fig.legend(handles=handles,loc='outside lower center',ncol=min(5,len(handles)),fontsize=8)
+        fig.suptitle(title)
+        return _save_figure(fig,figures,stem)
+    output=[('assessments',draw(points,'assessment_scores','Common observer scores by population and support',False))]
     if diagnostics:
-        fig,ax=plt.subplots(figsize=(8,4),layout='constrained')
-        labels=sorted({(a,p,f,k,al) for a,p,f,k,_,_,al in diagnostics})
-        for arm,pop,family,key,alpha in labels:
-            xy=sorted((epoch,value) for a,p,f,k,epoch,value,al in diagnostics if (a,p,f,k,al)==(arm,pop,family,key,alpha))
-            ax.plot(*zip(*xy),marker='o',label=f'{arm} {pop} {family} {key} α={alpha:g}',lw=1)
-        ax.set(xlabel='Epoch',ylabel='Recorded diagnostic',title='Recorded attraction and separation diagnostics');ax.legend(fontsize=5,ncol=2);ax.grid(alpha=.2)
-        output.append(('attraction_separation',_save_figure(fig,figures,'attraction_separation')))
+        output.append(('attraction_separation',draw(diagnostics,'attraction_separation','Complete family attraction and separation by support',True)))
     return output
-
 
 def _reconstruction(spec,figures,index):
     """One condition/field/member native scatter from matched cached endpoints."""
@@ -347,7 +522,8 @@ def build_report(output_dir, *, decision_path=None, assessment_paths=None, polic
     ``assessment_paths`` and ``policy_paths`` map endpoint names to JSON files;
     ``histories`` maps arm names to training JSONL; ``assessment_history`` is a
     list of {endpoint, epoch, population, path, optional alpha} common score
-    report references. ``reconstructions`` lists {source_panel, endpoint_panel,
+    report references, optionally with ``config_path`` for hash-verified Scale
+    decomposition. ``reconstructions`` lists {source_panel, endpoint_panel,
     sample_id, field, alpha, optional member} against actual paired NPZ panels.
     ``field_panels`` are {endpoint, source_panel, endpoint_panel, alpha,
     optional regime_manifest or regime_by_id} cached-field inputs. ``exposure_logs`` maps arm to
@@ -512,10 +688,19 @@ def build_report(output_dir, *, decision_path=None, assessment_paths=None, polic
         lines.append('')
     (output/'cached_field_diagnostics.json').write_text(json.dumps(field_details,indent=2,allow_nan=False)+'\n')
     entries=[]
+    frontier_data=_frontier_data(assessments,policies,policy_paths)
+    (output/'amplitude_frontier_data.json').write_text(json.dumps(frontier_data,indent=2,allow_nan=False)+'\n')
+    if frontier_data:
+        detail='; '.join(f"{name}: scores [{', '.join(_num(item['source_scores'][k]) for k in KEYS)}], denominators [{', '.join(_num(item['score_denominators'][k]) for k in KEYS)}]" for name,item in frontier_data.items())
+        zero_detail='; '.join(f"{name}: {sum(z['violates_zero_bound'] for point in item['frontier'] for z in point['zero_source_risk_fields'])} zero-bound violations across five points" for name,item in frontier_data.items() if any(point['zero_source_risk_fields'] for point in item['frontier']))
+        caption=('Descriptive ASSESS points only; stars mark actual TRAIN-frozen nominations, including off-grid selections. The dashed risk guide is 1.10. Zero SOURCE-risk fields have undefined ratios; absolute risks and violations are in amplitude_frontier_data.json. '+(zero_detail+'. ' if zero_detail else '')+'SOURCE scores and positive denominators in State / Scale / Shape order: '+detail+'.')
+        entries.append(('amplitude_frontier',_frontier_figure(frontier_data,figures),caption))
+    else:
+        lines += ['Amplitude frontier: unavailable; matched saved ASSESS frontier and TRAIN policy inputs were not supplied.','']
     training=_training_figure(histories,figures) if histories else None
     if training: entries.append(('training_scores',training,'Sampled TRAIN family scores are plotted separately as raw and calibrated values. They are not a scalar ConFIG objective.'))
     for kind,paths in _assessment_figure(assessment_history,figures):
-        entries.append((kind,paths,'Recorded common-observer scores on the indicated population and repair coefficient.' if kind=='assessments' else 'Recorded attraction, separation, or repulsion diagnostics; only available saved scalar entries are shown.'))
+        entries.append((kind,paths,'Recorded common-observer scores on the indicated population and repair coefficient.' if kind=='assessments' else 'Complete recorded family-total attraction and separation, checked against the family score; missing or inconsistent decompositions are omitted. Repulsion is the positive subtracted separation.'))
     sss_metadata=[]
     if not sss_figures: lines += ['Common State/Scale/Shape descriptor figure: unavailable; no matched scored condition and frozen observer inputs were supplied.','']
     if sss_figures:
@@ -541,6 +726,7 @@ def build_report(output_dir, *, decision_path=None, assessment_paths=None, polic
     inputs={**{f'assessment:{k}':str(v) for k,v in assessment_paths.items()},**{f'policy:{k}':str(v) for k,v in policy_paths.items()},**{f'history:{k}':str(v) for k,v in histories.items()}}
     if decision_path is not None: inputs['decision']=str(decision_path)
     inputs.update({f"assessment_history:{i}":str(v['path']) for i,v in enumerate(assessment_history)})
+    inputs.update({f"assessment_history_config:{i}":str(v['config_path']) for i,v in enumerate(assessment_history) if v.get('config_path')})
     for i,v in enumerate(field_panels):
         inputs[f'field_source_panel:{i}']=str(v['source_panel'])
         inputs[f'field_endpoint_panel:{i}']=str(v['endpoint_panel'])
@@ -557,4 +743,4 @@ def build_report(output_dir, *, decision_path=None, assessment_paths=None, polic
     lines.append('')
     (output/'REPORT.md').write_text('\n'.join(lines))
     verification=validate_report(output)
-    return {'markdown':str(output/'REPORT.md'),'html':str(output/'REPORT.html'),'pdf':str(output/'REPORT.pdf'),'verification':verification,'reconstructions':reconstruction_metadata,'sss_figures':sss_metadata}
+    return {'markdown':str(output/'REPORT.md'),'html':str(output/'REPORT.html'),'pdf':str(output/'REPORT.pdf'),'verification':verification,'reconstructions':reconstruction_metadata,'sss_figures':sss_metadata,'amplitude_frontier':frontier_data}
