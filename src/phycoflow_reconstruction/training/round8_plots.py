@@ -141,19 +141,20 @@ def refresh(run_dir, steps_per_epoch, force=False):
         ('state_channels', 'State gradient-channel chain-rule surrogates (not additive losses)', 'Gradient-channel surrogate'),
     )
     for ax, (key, title, ylabel) in zip(axes, panels):
-        ax.set_title(title, loc='left', fontsize=10); ax.set_ylabel(ylabel)
+        ax.set_title(title, loc='left', fontsize=11); ax.set_ylabel(ylabel)
         ax.axhline(0, color='0.75', linewidth=.6)
         if step / steps_per_epoch >= 10:
             ax.axvline(10, color='0.4', linestyle=':', linewidth=.8)
         for label, (x, y) in series[key].items():
             ax.plot(x, y, label=label, linewidth=1., linestyle='--' if 'raw' in label else '-')
-        if series[key]: ax.legend(fontsize=7, ncol=2, loc='best')
+        if series[key]: ax.legend(fontsize=10, ncol=2, loc='best')
         else: ax.text(.5, .5, 'No recorded values', ha='center', va='center', transform=ax.transAxes, color='0.45')
         ax.grid(alpha=.15)
     axes[-1].set_xlabel('Completed epoch equivalent (updates / steps per epoch)')
     if step / steps_per_epoch >= 10:
-        axes[0].text(10, 1.01, 'Calibration freezes / common fork', fontsize=7,
-                     transform=axes[0].get_xaxis_transform(), ha='left')
+        axes[0].text(10, .98, 'Epoch 10: calibration freezes / common fork', fontsize=10,
+                     transform=axes[0].get_xaxis_transform(), ha='left', va='top',
+                     bbox={'facecolor':'white', 'edgecolor':'none', 'alpha':.85})
     fig.suptitle('Round 8 sampled training history; curves are not a ConFIG scalar objective', fontsize=11)
     try:
         for target, fmt in ((png, 'png'), (pdf, 'pdf')):

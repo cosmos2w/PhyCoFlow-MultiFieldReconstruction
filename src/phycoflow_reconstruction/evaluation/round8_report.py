@@ -416,10 +416,11 @@ def _reconstruction(spec,figures,index):
         fig,axes=plt.subplots(1,3,figsize=(11,3.5),layout='constrained')
         low,high=float(min(truth.min(),pred.min())),float(max(truth.max(),pred.max()))
         unit_label='units unknown' if unit.strip().lower() in ('', 'unknown', 'none') else unit
-        for ax,data,title in zip(axes,(truth,pred,pred-truth),('Reference','Reconstruction',f'Error\nWeighted RMSE={rmse:.4g} ({unit_label})')):
+        for ax,data,title in zip(axes,(truth,pred,pred-truth),('Reference','Reconstruction',f'Error\nWeighted RMSE={rmse:.4g}\n({unit_label})')):
             kwargs={'vmin':low,'vmax':high} if not title.startswith('Error') else {}
             im=ax.scatter(coords[:,0],coords[:,1],c=data,s=3,cmap='viridis' if kwargs else 'coolwarm',**kwargs)
-            ax.set_title(title,fontsize=9);ax.set_aspect('equal');fig.colorbar(im,ax=ax,shrink=.8)
+            ax.set_title(title,fontsize=12);ax.set_aspect('equal');ax.tick_params(labelsize=11)
+            colorbar=fig.colorbar(im,ax=ax,shrink=.8);colorbar.ax.tick_params(labelsize=11)
         label=str(spec.get('label', endpoint.get('endpoint','Reconstruction')))
         fig.suptitle(f"{label}: {field}, {source_id}, member {member}, α={alpha:g}; {'native physical mask' if source['population']=='ASSESS' else 'sampled physical mask'}")
     return _save_figure(fig,figures,f'reconstruction_{index:02d}'),{'label':label,'rmse':rmse,'field':field,'units':unit,'sample_id':source_id,'support':source['population'],'alpha':alpha,'member':member}
