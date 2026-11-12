@@ -592,7 +592,7 @@ class ExternalPolicy:
                 zip(family_names, (applied_products / denominators).cpu().tolist()))
 
         telemetry = None
-        if diagnostic_context is not None:
+        if diagnostic_context is not None and diagnostic_context.get("schema") != "round8_actual_step_v1":
             from time import perf_counter
             from .round7_step_diagnostics import (component_gradients, projected_benefits,
                                                   shadow_adamw, snapshot)
@@ -633,7 +633,64 @@ class ExternalPolicy:
             telemetry = {"before": before, "matrix": matrix64, "probes": probes, "scales": scales,
                          "started": start, "shadows": shadows, "gradient_seconds": gradient_seconds}
 
+        round8_telemetry = None
+        if diagnostic_context is not None and diagnostic_context.get("schema") == "round8_actual_step_v1":
+            from time import perf_counter
+            from .round7_step_diagnostics import snapshot
+            if phase != "improve" or self.method != "lagrangian" or not isinstance(optimizer, torch.optim.AdamW):
+                raise ValueError("Round 8 diagnostics require Lagrangian ConFIG with AdamW")
+            started = perf_counter()
+            components = diagnostic_context.get("blocks")
+            allowed = {"state.marginal", "state.mixed", "scale.signed", "scale.joint", "scale.log_power_self", "scale.rho", "shape.self", "shape.mutual"}
+            if not isinstance(components, Mapping) or not set(components) <= allowed:
+                raise ValueError("invalid Round 8 diagnostic block set")
+            probes = {}
+            for name, loss in components.items():
+                if not isinstance(loss, Tensor) or loss.numel() != 1 or not bool(torch.isfinite(loss)):
+                    raise ValueError(f"Round 8 diagnostic block {name} must be a finite scalar")
+                # Empty persistence categories and exact zero-distance State
+                # channels can be constant zero while their family is active.
+                # Their exact parameter derivative is zero.
+                if loss.requires_grad:
+                    probes[name] = _flat_gradient(loss.reshape(()), parameters).detach().double()
+                elif bool(loss == 0):
+                    probes[name] = torch.zeros_like(matrix64[0])
+                else:
+                    raise ValueError(f"Round 8 diagnostic block {name} is a detached nonzero scalar")
+                if not bool(torch.isfinite(probes[name]).all()):
+                    raise FloatingPointError("nonfinite Round 8 block gradient")
+            groups = {"global_distribution": "state.", "multiscale_spectrum": "scale.", "topology": "shape."}
+            for index, name in enumerate(family_names):
+                if name not in groups: raise ValueError("unexpected Round 8 family")
+                selected = [v for key, v in probes.items() if key.startswith(groups[name])]
+                if not selected: raise ValueError(f"missing Round 8 blocks for {name}")
+                total = torch.stack(selected).sum(0)
+                if not bool(torch.linalg.vector_norm(total - matrix64[index]) <= 1e-9 + 2e-5 * torch.linalg.vector_norm(matrix64[index])):
+                    raise FloatingPointError(f"Round 8 {name} block gradients do not sum to family gradient")
+            round8_telemetry = {"before": snapshot(parameters), "matrix": matrix64,
+                                "probes": probes, "started": started,
+                                "identity": diagnostic_context.get("identity", {})}
+
         optimizer.step()
+        if round8_telemetry is not None:
+            from time import perf_counter
+            from .round7_step_diagnostics import displacement
+            delta = displacement(parameters, round8_telemetry["before"])
+            rows = round8_telemetry["matrix"]
+            policy_diagnostics["round8_actual_step"] = {
+                "schema": "round8_actual_step_v1",
+                "family_gradient_norms": dict(zip(family_names, torch.linalg.vector_norm(rows, dim=1).cpu().tolist())),
+                "family_negative_gradient_dot_displacement": dict(zip(family_names, (-(rows @ delta)).cpu().tolist())),
+                "block_gradient_norms": {k: float(torch.linalg.vector_norm(v)) for k, v in round8_telemetry["probes"].items()},
+                "block_negative_gradient_dot_displacement": {k: float(-torch.dot(v, delta)) for k, v in round8_telemetry["probes"].items()},
+                "config_direction_norm": float(torch.linalg.vector_norm(config_direction)),
+                "family_gradient_dot_config_direction": dict(zip(family_names, (rows @ config_direction).cpu().tolist())),
+                "block_gradient_dot_config_direction": {k: float(torch.dot(v, config_direction)) for k, v in round8_telemetry["probes"].items()},
+                "actual_displacement_norm": float(torch.linalg.vector_norm(delta)),
+                "extra_gradient_evaluations": len(round8_telemetry["probes"]),
+                "diagnostic_seconds": perf_counter() - round8_telemetry["started"],
+                "identity": round8_telemetry["identity"],
+            }
         if telemetry is not None:
             from .round7_step_diagnostics import displacement, projected_benefits
             delta = displacement(parameters, telemetry["before"])

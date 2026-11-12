@@ -271,6 +271,7 @@ def _coherence_objective(
     family_losses: dict[str, torch.Tensor] | None = None,
     endpoint_context: dict | None = None,
     execution: Mapping[str, Any] | None = None,
+    round8_runtime=None,
 ) -> tuple[FamilyResult, tuple[str, ...]]:
     compute = config["coherence"]["compute_budget"]
     selected = _slice_batch(batch, int(compute["batch_size"]))
@@ -319,6 +320,11 @@ def _coherence_objective(
         endpoint_context.update(
             prediction=prediction, target=selected.target_fields, mask=selected.query_valid_mask
         )
+        if round8_runtime is not None:
+            endpoint_context.update(
+                members=(prediction, *conditional_draws), batch=selected,
+                measure=batch_measure_context(selected),
+            )
     if step_context is not None:
         step_context.setdefault("persistence_cache", {})
         if "round7_scale_components" in step_context:
@@ -438,25 +444,31 @@ def _coherence_objective(
                 bank_rows=bank_rows,
             )
         family_call = family_callable(family_module, within)
-        result = family_call(
-            prediction,
-            reference,
-            coordinates=selected.query_coords,
-            context=_family_context(
-                family_module,
-                {
-                    "sample_ids": selected.sample_ids,
-                    "reference_ids": reference_ids,
-                    **batch_measure_context(selected),
-                    **(
-                        {"persistence_cache": step_context["persistence_cache"], **({"query_selection": step_context["query_selection"]} if "query_selection" in step_context else {}), **({"round7_scale_components": step_context["round7_scale_components"]} if family_name == "multiscale_spectrum" and "round7_scale_components" in step_context else {})}
-                        if step_context is not None
-                        else {}
-                    ),
-                },
-                conditional_draws,
-            ),
+        call_context = _family_context(
+            family_module,
+            {
+                "sample_ids": selected.sample_ids,
+                "reference_ids": reference_ids,
+                **batch_measure_context(selected),
+                **(
+                    {"persistence_cache": step_context["persistence_cache"], **({"query_selection": step_context["query_selection"]} if "query_selection" in step_context else {}), **({"round7_scale_components": step_context["round7_scale_components"]} if family_name == "multiscale_spectrum" and "round7_scale_components" in step_context else {})}
+                    if step_context is not None else {}
+                ),
+            },
+            conditional_draws,
         )
+        if round8_runtime is not None:
+            result = round8_runtime.score_family(
+                family_name, family_module, prediction, reference,
+                coordinates=selected.query_coords, context=call_context,
+            )
+        else:
+            result = family_call(
+                prediction,
+                reference,
+                coordinates=selected.query_coords,
+                context=call_context,
+            )
         family_results[family_name] = result
         inclusion_scale = 1.0 / probability
         if (family_name == "multiscale_spectrum" and step_context is not None
@@ -1589,6 +1601,7 @@ def run_post_training(
     evaluation_callback: Callable[..., Mapping[str, Any] | None] | None = None,
     qualification_only: bool = False,
     scale_only_supplement: Mapping[str, Any] | None = None,
+    round8_runtime=None,
 ) -> Path:
     """Create or resume a child, optionally observing saved recovery boundaries.
 
@@ -1624,7 +1637,9 @@ def run_post_training(
         # Direct Python callers use the same method and geometry validation as the CLI.
         from ..config.validate import validate_config
 
-        validate_config(config)
+        validate_config(config, precomputed_fidelity_reference=(
+            None if round8_runtime is None else round8_runtime.artifacts["fidelity_reference"]
+        ))
     if config["stage"] != "post_training":
         raise ValueError("run_post_training accepts only stage=post_training")
     if qualification_only and (max_steps is None or max_steps > 26 or evaluation_callback is None):
@@ -1770,7 +1785,9 @@ def run_post_training(
         round7_log.write_text("".join(line + "\n" for line in retained))
     coverage_sampler = None
     coverage = config["coherence"].get("query_coverage", {})
-    if coverage.get("enabled", False):
+    if coverage.get("enabled", False) and not (
+        round8_runtime is not None and round8_runtime.manages_queries
+    ):
         from ..coherence.relation_queries import QueryBank
         from .adaptive_coverage import AdaptiveCoverageSampler
 
@@ -1805,7 +1822,7 @@ def run_post_training(
         if len(scale.field_names) != 5 or len(scale.coverage_pairs) != 10:
             raise ValueError("supplement requires the complete five-field relation bank")
         store.write_json("artifacts/query_bank.json", bank.manifest())
-    elif checkpoint is not None and "query_coverage" in checkpoint:
+    elif checkpoint is not None and "query_coverage" in checkpoint and round8_runtime is None:
         raise ValueError("cannot resume coverage checkpoint without query coverage")
     if _conditional_draw_count(families) > 1 and not model.capabilities.generative:
         raise ValueError("conditional-draw coherence objectives require a generative source model")
@@ -1907,6 +1924,8 @@ def run_post_training(
         fidelity_settings = config["optimization"]["multitask"].get("fidelity_budget", {})
         shared_path = fidelity_settings.get("reference_artifact")
         shared_hash = fidelity_settings.get("reference_sha256")
+        if round8_runtime is not None and shared_path is not None:
+            raise ValueError("Round 8 requires its corrected physical-risk reference, not a legacy shared reference")
         if (shared_path is None) != (shared_hash is None):
             raise ValueError("shared fidelity reference requires both artifact path and SHA-256")
         if checkpoint is not None and bool(shared_path) != bool(checkpoint.get("shared_fidelity_reference_sha256")):
@@ -2004,6 +2023,28 @@ def run_post_training(
                 shared_fidelity_reference_sha256=shared_hash,
                 shared_fidelity_reference_artifact="artifacts/shared_fidelity_reference.json",
             )
+        elif round8_runtime is not None:
+            artifact = round8_runtime.artifacts
+            provenance = artifact["provenance"]
+            if (provenance.get("split") != "train"
+                    or provenance.get("source_checkpoint_sha256") != source_hashes_before["checkpoint"]
+                    or provenance.get("normalizer_sha256") != train_dataset.normalizer.digest()):
+                raise ValueError("Round 8 physical-risk reference provenance differs")
+            reference = FidelityBudget.from_state_dict(artifact["fidelity_reference"])
+            if (reference.field_names != tuple(train_dataset.field_names)
+                    or reference.relative_increase != 0.10 or reference.absolute_allowance != 0.0):
+                raise ValueError("Round 8 requires uniform ten-percent field-risk bounds with zero absolute allowance")
+            policy = ExternalPolicy(external_settings, reference, device)
+            if checkpoint is not None:
+                saved_policy = checkpoint["external_policy"]
+                if saved_policy["reference"] != reference.state_dict():
+                    raise ValueError("Round 8 recovered physical-risk reference differs")
+            else:
+                store.write_json("artifacts/fidelity_budget_reference.json", {
+                    "settings": dict(fidelity_settings), "reference": reference.state_dict(),
+                    "source": "Round8 TRAIN800 J2 physical-area Horvitz-Thompson member risk in field-normalized units",
+                    "provenance": dict(provenance),
+                })
         elif checkpoint is None:
             ordered_means = {} if ordered_settings is not None else None
             reference, reference_report = _calibrate_fidelity_budget(
@@ -2122,6 +2163,23 @@ def run_post_training(
             for path in history_paths(store.run_dir, "constraint_updates.jsonl"):
                 restore_constraint_audit(path.resolve(), start_step)
     calibration_hash = file_sha256(calibration_path)
+    if round8_runtime is not None:
+        if policy is None:
+            raise ValueError("Round 8 requires the shared target-risk external policy")
+        round8_runtime.initialize(
+            model=model, dataset=train_dataset, families=families, config=config,
+            run_dir=store.run_dir, start_step=start_step,
+            saved_state=None if checkpoint is None else checkpoint.get("round8_runtime"),
+        )
+        train_dataset.round8_runtime = round8_runtime
+        if resume is not None:
+            from .round8_plots import restore_history as restore_round8_history
+            restored_history = restore_round8_history(store.run_dir, start_step)
+            if restored_history["archived_rows"] and start_step:
+                from .round8_plots import refresh as refresh_round8_curves
+                refresh_round8_curves(store.run_dir, round8_runtime.steps_per_epoch, force=True)
+    elif checkpoint is not None and "round8_runtime" in checkpoint:
+        raise ValueError("Round 8 recovery requires its runtime")
     store.save_artifact("normalization.pt", train_dataset.normalizer.state_dict())
     store.write_json("artifacts/trainable_parameters.json", {"names": list(trainable_names)})
     store.write_json(
@@ -2232,7 +2290,7 @@ def run_post_training(
                 with _preserved_rng(device):
                     value = evaluation_callback(model=model, families=families, config=config,
                         run_dir=store.run_dir, global_step=step, source=source)
-                    if value is None and not qualification_only:
+                    if value is None and not qualification_only and round8_runtime is None:
                         raise ValueError("formal evaluation callback returned no metrics")
                     return None if value is None else dict(value)
             finally:
@@ -2243,7 +2301,7 @@ def run_post_training(
             if scale_only_supplement is not None:
                 before_metrics["weight_provenance"] = "A200_live_initializer"
             store.write_json("evaluation/before.json", before_metrics)
-    source_metrics = (None if qualification_only else (
+    source_metrics = (None if qualification_only or round8_runtime is not None else (
         supplement_source_metrics if scale_only_supplement is not None else
         before_metrics if before_metrics is not None else
         json.loads((store.run_dir / "evaluation" / "before.json").read_text(encoding="utf-8"))))
@@ -2469,6 +2527,9 @@ def run_post_training(
         if not full_pass:
             torch.randperm(len(train_dataset), generator=index_generator)
         epoch = global_step // steps_per_epoch + 1
+        if round8_runtime is not None:
+            round8_runtime.begin_step(step=global_step, epoch=epoch)
+            batch = round8_runtime.training_batch(batch)
         post_training_mode(model, config)
         step_started = perf_counter()
         scheduled_lr = _scheduled_model_lr(config["optimization"], global_step)
@@ -2517,7 +2578,7 @@ def run_post_training(
             r7_component = r7_due and (r7_warmup or global_step % steps_per_epoch + 1 in {1, 7, 13})
             if r7_window and r7_enabled and steps_per_epoch != 13:
                 raise ValueError("Round 7 diagnostics require 13 ordinary updates per reporting epoch")
-            step_context = {} if constrained or coverage_sampler is not None or r7_due else None
+            step_context = {} if constrained or coverage_sampler is not None or r7_due or round8_runtime is not None else None
             if r7_due:
                 step_context["round7_scale_components"] = {}
                 step_context["round7_component_probe"] = r7_component
@@ -2534,7 +2595,8 @@ def run_post_training(
             )
             raw_family_losses = {} if scalarizer is not None or diagnostic_due else None
             rollout_generator = torch.Generator(device=device).manual_seed(
-                seed + 1_000_003 + global_step
+                round8_runtime.rollout_seed(seed + 1_000_003 + global_step)
+                if round8_runtime is not None else seed + 1_000_003 + global_step
             )
             execution = (execution_runtime.decision(global_step) if execution_runtime is not None
                          else training_execution(config, global_step))
@@ -2553,7 +2615,10 @@ def run_post_training(
                 family_losses=raw_family_losses,
                 endpoint_context=endpoint_context,
                 execution=execution,
+                round8_runtime=round8_runtime,
             )
+            if round8_runtime is not None:
+                round8_runtime.after_objective(model=model, endpoint=endpoint_context, result=result)
             for name, loss in retention_losses.items():
                 # Retention has the same sparse cadence as the shared rollout.
                 factor = (
@@ -2631,10 +2696,10 @@ def run_post_training(
                         ordered_losses, objective_scale=policy.reference.objective_scale
                     )
                     row["ordered_primary_surrogate"] = float(coherence_loss.detach().cpu())
-                risks = field_mse(
+                risks = (round8_runtime.risks(endpoint_context) if round8_runtime is not None else field_mse(
                     endpoint_context["prediction"], endpoint_context["target"],
                     endpoint_context["mask"],
-                )
+                ))
                 if coherence_aggregator is not None:
                     # Preserve historical A/B/T order and include every active family.
                     family_order = (
@@ -2691,7 +2756,9 @@ def run_post_training(
                             gradient = policy.update_with_coherence_aggregation(
                                 model, optimizer, families_abt, risks,
                                 config["optimization"].get("grad_clip"), coherence_aggregator,
-                                diagnostic_context=({
+                                diagnostic_context=(round8_runtime.diagnostic_context(
+                                    families_abt, family_scales=family_scales
+                                ) if round8_runtime is not None else {
                                     "projection_scales": [float(policy.settings["round7_projection_scales"][name])
                                                           for name in families_abt],
                                     "components": step_context["round7_scale_components"] if r7_component else None,
@@ -2860,6 +2927,8 @@ def run_post_training(
             )
         if row.get("update_accepted", True):
             after_optimizer_step(model)
+        if round8_runtime is not None:
+            round8_runtime.after_step(row)
         if coverage_sampler is not None and (global_step + 1) % steps_per_epoch == 0:
             coverage_sampler.finalize_epoch()
             coverage_state = coverage_sampler.state_dict()
@@ -2908,6 +2977,11 @@ def run_post_training(
                 every if config["coherence"]["schedule"].get("interval_rescale", False) else 1
             )
         row["optimizer_lr"] = float(optimizer.param_groups[0]["lr"])
+        if round8_runtime is not None:
+            with (store.run_dir / "logs/full_updates.jsonl").open("a") as handle:
+                handle.write(json.dumps(_json_safe(row), allow_nan=False) + "\n")
+            from .round8_plots import refresh as refresh_round8_curves
+            refresh_round8_curves(store.run_dir, steps_per_epoch)
         if scheduled_lr is not None and global_step < int(
             config["optimization"]["lr_warmup"]["updates"]
         ):
@@ -2968,6 +3042,8 @@ def run_post_training(
                 from .coherence_sampling import _preserved_rng
                 with _preserved_rng(device):
                     checkpoint_callback(store.run_dir, saved_path, global_step + 1)
+                if round8_runtime is not None:
+                    refresh_round8_curves(store.run_dir, steps_per_epoch, force=True)
         if checkpoint_result is not None:
             monitor.record_validation(checkpoint_manager.last_validation_report)
             store.write_json(
@@ -3069,13 +3145,22 @@ def run_post_training(
         )
     elif policy is not None and checkpoint_manager.selection_metric == "reconstruction_mse":
         checkpoint_manager.panel_evaluator = lambda step: {"metrics": after_metrics}
+    if round8_runtime is not None and final_step % steps_per_epoch == 0:
+        final_epoch = final_step // steps_per_epoch
+        milestone = store.run_dir / "checkpoints" / f"epoch_{final_epoch:03d}.pt"
+        if milestone.is_file() and checkpoint_manager.checkpoint_epochs is not None:
+            # A scheduled callback has already bound these exact bytes. The
+            # terminal rolling save must not rewrite that immutable endpoint.
+            checkpoint_manager.checkpoint_epochs = frozenset(
+                e for e in checkpoint_manager.checkpoint_epochs if e != final_epoch)
     saved = checkpoint_manager.save(
         checkpoint_payload,
         model=model,
         preview=preview,
         global_step=final_step,
         fallback_metric=(
-            float(after_metrics["mse_normalized"]) if reporting_only and after_metrics is not None else float(row["data_loss"])
+            float(after_metrics["mse_normalized"]) if reporting_only and after_metrics is not None
+            else 0.0 if reporting_only else float(row["data_loss"])
         ),
         force=True,
     )
@@ -3094,6 +3179,9 @@ def run_post_training(
         checkpoint_checked=True,
         best_checkpoint_saved=best_checkpoint_saved,
     )
+    if round8_runtime is not None:
+        from .round8_plots import refresh as refresh_round8_curves
+        refresh_round8_curves(store.run_dir, steps_per_epoch, force=True)
     preview.close()
     source_hashes_after = source_hashes(config)
     if source_hashes_after != source_hashes_before:
@@ -3210,6 +3298,8 @@ def _post_checkpoint_payload(
     }
     if qualification_only:
         payload["qualification_only"] = True
+    if hasattr(train_dataset, "round8_runtime"):
+        payload["round8_runtime"] = train_dataset.round8_runtime.state_dict()
     if coverage_sampler is not None:
         payload["query_coverage"] = coverage_sampler.state_dict()
     if controller is not None:

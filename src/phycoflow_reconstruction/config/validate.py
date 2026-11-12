@@ -501,8 +501,10 @@ def _validate_external_policy(multitask: Mapping[str, Any]) -> None:
     elif method == "extended_log_barrier":
         allowed.add("extended_log_barrier")
     _reject_unknown(external, allowed, "optimization.multitask.external_policy")
-    if "round7_diagnostics" in external:
-        if external["round7_diagnostics"] is not True or method != "lagrangian":
+    if "round7_diagnostics" in external and not isinstance(external["round7_diagnostics"], bool):
+        raise TypeError("round7_diagnostics must be boolean")
+    if external.get("round7_diagnostics", False):
+        if method != "lagrangian":
             raise ValueError("round7_diagnostics must be true with Lagrangian policy")
         if multitask.get("coherence_aggregation", {}).get("method") != "torchjd_config":
             raise ValueError("round7_diagnostics requires torchjd_config aggregation")
@@ -773,13 +775,34 @@ def _validate_base_training(config: Mapping[str, Any]) -> None:
     _validate_optimization_values(optimization)
 
 
-def _validate_post_training(config: Mapping[str, Any]) -> None:
+def _validate_post_training(config: Mapping[str, Any], *, precomputed_fidelity_reference: Mapping[str, Any] | None = None) -> None:
     if "coherence" in config:
         from ..coherence.relation_queries import resolve_coverage_config
 
         config = dict(config)
         config["coherence"] = resolve_coverage_config(
             config["coherence"], config.get("dataset", {}).get("field_names", ()))
+    if precomputed_fidelity_reference is not None:
+        from ..training.fidelity_budget import FidelityBudget
+        if not isinstance(precomputed_fidelity_reference, Mapping):
+            raise TypeError("precomputed fidelity reference must be a FidelityBudget state mapping")
+        multitask = config.get("optimization", {}).get("multitask", {})
+        if not isinstance(multitask, Mapping) or multitask.get("external_policy") is None:
+            raise ValueError("precomputed fidelity reference requires an external policy")
+        budget = multitask.get("fidelity_budget", {})
+        if not isinstance(budget, Mapping):
+            raise TypeError("fidelity_budget must be a mapping")
+        if {"reference_artifact", "reference_sha256"} & budget.keys():
+            raise ValueError("precomputed and shared fidelity references are mutually exclusive")
+        try:
+            reference = FidelityBudget.from_state_dict(precomputed_fidelity_reference)
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError("invalid precomputed FidelityBudget state") from error
+        if reference.field_names != tuple(config.get("dataset", {}).get("field_names", ())):
+            raise ValueError("precomputed fidelity reference field order differs from dataset")
+        for key, default in (("relative_increase", 0.05), ("absolute_allowance", 0.0), ("denominator_floor", 1e-8)):
+            if getattr(reference, key) != float(budget.get(key, default)):
+                raise ValueError(f"precomputed fidelity reference {key} differs from config")
     if "coherence" in config and "physics" in config:
         raise ValueError("post_training must select exactly one of coherence or physics")
     if not config.get("source_run") or not config.get("source_checkpoint"):
@@ -1061,7 +1084,8 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
                     parse_relation_extension_config(family, tuple(field_names))
                 multitask = config["optimization"].get("multitask", {})
                 if (family.get("enabled", True) and multitask.get("external_policy") is not None
-                        and "reference_artifact" not in multitask.get("fidelity_budget", {})):
+                        and "reference_artifact" not in multitask.get("fidelity_budget", {})
+                        and precomputed_fidelity_reference is None):
                     raise ValueError("relation_extension with external_policy requires a shared SOURCE reference_artifact")
             elif "gram_extension" in family:
                 from ..coherence.families.multiscale_gram import parse_gram_extension_config
@@ -1069,7 +1093,8 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
                 parse_gram_extension_config(family, tuple(field_names))
                 multitask = config["optimization"].get("multitask", {})
                 if (family.get("enabled", True) and multitask.get("external_policy") is not None
-                        and "reference_artifact" not in multitask.get("fidelity_budget", {})):
+                        and "reference_artifact" not in multitask.get("fidelity_budget", {})
+                        and precomputed_fidelity_reference is None):
                     raise ValueError("gram_extension with external_policy requires a shared SOURCE reference_artifact")
             else:
                 parse_multiscale_config(family, tuple(field_names))
@@ -1821,7 +1846,7 @@ def _validate_direct_physics(config: Mapping[str, Any]) -> None:
     _reject_unknown(config["output"], {"experiment_name"}, "output")
 
 
-def validate_config(config: Mapping[str, Any]) -> None:
+def validate_config(config: Mapping[str, Any], *, precomputed_fidelity_reference: Mapping[str, Any] | None = None) -> None:
     stage = config.get("stage")
     if stage not in STAGE_SCHEMAS:
         raise ValueError(f"stage must be one of {sorted(STAGE_SCHEMAS)}, got {stage!r}")
@@ -1838,6 +1863,8 @@ def validate_config(config: Mapping[str, Any]) -> None:
     if schema.requires_one_of and not (schema.requires_one_of & config.keys()):
         raise ValueError(f"{stage} requires one of {sorted(schema.requires_one_of)}")
 
+    if precomputed_fidelity_reference is not None and stage != "post_training":
+        raise ValueError("precomputed fidelity reference is only valid for post_training")
     _validate_common_sections(config)
 
     model = config["model"]
@@ -2024,6 +2051,6 @@ def validate_config(config: Mapping[str, Any]) -> None:
     if stage == "base_training":
         _validate_base_training(config)
     elif stage == "post_training":
-        _validate_post_training(config)
+        _validate_post_training(config, precomputed_fidelity_reference=precomputed_fidelity_reference)
     elif stage == "direct_physics":
         _validate_direct_physics(config)
