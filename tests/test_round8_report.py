@@ -222,3 +222,50 @@ def test_scale_fallback_uses_hash_verified_scientific_config(tmp_path):
         report._assessment_figure([{'endpoint':'C8','population':'TRAIN','epoch':1,'path':str(score),'config_path':str(cfg)}],tmp_path/'figures')
     obj=json.loads(score.read_text());obj['config_sha256']=canonical_hash(yaml.safe_load(cfg.read_text()));score.write_text(json.dumps(obj))
     assert report._assessment_figure([{'endpoint':'C8','population':'TRAIN','epoch':1,'path':str(score),'config_path':str(cfg)}],tmp_path/'figures')
+
+
+def test_parameter_diagnostics_preserve_measured_values_and_require_complete(tmp_path):
+    from phycoflow_reconstruction.training.round8_calibration import BLOCKS, InternalCalibration
+    blocks=[f'{family}.{block}' for family,names in BLOCKS.items() for block in names]
+    calibration=InternalCalibration({k:1. for k in blocks},{k:2. for k in blocks},{k:True for k in blocks})
+    for epoch in (1,3,6,8,10): calibration.observe(epoch,{k:float(i+epoch) for i,k in enumerate(blocks)})
+    calibration.freeze(10)
+    log=tmp_path/'calibration.jsonl'
+    rows=calibration.records+[{'event':'frozen','epoch':10,'coefficients':dict(calibration.coefficients),'units':calibration.units,'priorities':calibration.priorities}]
+    log.write_text(''.join(json.dumps(row)+'\n' for row in rows))
+    families=['global_distribution','multiscale_spectrum','topology']
+    history=tmp_path/'full_updates.jsonl'
+    def row(epoch):
+        diag={'schema':'round8_actual_step_v1','identity':{'epoch':epoch}}
+        for level,names in (('block',blocks),('family',families)):
+            for suffix,base in (('gradient_norms',1),('gradient_dot_config_direction',-2),('negative_gradient_dot_displacement',3)):
+                diag[f'{level}_{suffix}']={k:float(base+i) for i,k in enumerate(names)}
+        return {'epoch':epoch,'step':epoch*13,'round8_actual_step':diag}
+    history.write_text(''.join(json.dumps(row(e))+'\n' for e in (100,500,1000)))
+    data=report._parameter_diagnostics({'C8':history},calibration.state_dict(),log,require_complete=True)
+    assert data['calibration']['records'][2]['epoch']==6
+    assert data['actual_steps']['C8']['500']['block_gradient_dot_config_direction'][blocks[0]]==-2
+    text='\n'.join(report._parameter_diagnostic_lines(data))
+    assert 'State: marginal' in text and 'chain-rule gradient contributions' in text and 'C8 epoch 1000, update 13000' in text
+    history.write_text(json.dumps(row(100))+'\n')
+    with pytest.raises(ValueError,match='missing scheduled'): report._parameter_diagnostics({'C8':history},calibration.state_dict(),log,require_complete=True)
+    rows[-1]['coefficients'][blocks[0]]=100
+    log.write_text(''.join(json.dumps(item)+'\n' for item in rows))
+    with pytest.raises(ValueError,match='differs from checkpoint'): report._parameter_diagnostics({},calibration.state_dict(),log)
+
+
+def test_copied_history_requires_complete_history_and_indexes_figures(tmp_path,monkeypatch):
+    import matplotlib.pyplot as plt
+    logs=tmp_path/'logs'; logs.mkdir()
+    history=logs/'full_updates.jsonl'; history.write_text(json.dumps({'step':130})+'\n')
+    (logs/'round8_history_state.json').write_text(json.dumps({'last_step':130,'history_rows':1}))
+    fig,ax=plt.subplots(); ax.plot([1,10],[0,1]); fig.savefig(logs/'round8_history.png'); fig.savefig(logs/'round8_history.pdf'); plt.close(fig)
+    monkeypatch.setattr(report,'validate_report',lambda *_:{})
+    result=report.build_report(tmp_path/'report',histories={'C8':history})
+    text=Path(result['markdown']).read_text()
+    assert 'training_components_c8' in text and 'epoch-10 calibration freeze' in text
+    assert (tmp_path/'report/figures/training_components_c8.pdf').read_bytes()==(logs/'round8_history.pdf').read_bytes()
+    provenance=json.loads((tmp_path/'report/input_provenance.json').read_text())
+    assert provenance['training_history_png:C8']['sha256']==report.file_hash(logs/'round8_history.png')
+    (logs/'round8_history_state.json').write_text(json.dumps({'last_step':129,'history_rows':1}))
+    with pytest.raises(ValueError,match='does not cover'): report._copy_training_history_figures({'C8':history},tmp_path/'other',require_complete=True)

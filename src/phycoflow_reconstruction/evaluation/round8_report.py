@@ -9,6 +9,7 @@ import html
 import json
 import math
 import re
+import shutil
 import subprocess
 from html.parser import HTMLParser
 from pathlib import Path
@@ -166,6 +167,101 @@ def _training_figure(histories,figures):
     return _save_figure(fig,figures,'training_scores')
 
 
+def _parameter_diagnostics(histories, calibration, calibration_log, *, require_complete=False):
+    """Extract persisted actual-update telemetry and validate the shared warmup."""
+    from ..training.round8_calibration import BLOCKS, PROBES, InternalCalibration
+    blocks={f'{family}.{name}' for family,names in BLOCKS.items() for name in names}
+    families={'global_distribution','multiscale_spectrum','topology'}
+    output={'calibration':None,'actual_steps':{}}
+    if calibration is not None:
+        validated=InternalCalibration.from_state_dict(calibration)
+        if validated.coefficients is None or tuple(r['epoch'] for r in validated.records)!=PROBES:
+            raise ValueError('complete frozen calibration required')
+        if calibration_log is not None:
+            with Path(calibration_log).open() as stream: rows=[json.loads(line) for line in stream if line.strip()]
+            probes=[{'epoch':r['epoch'],'norms':r['norms']} for r in rows if 'norms' in r]
+            frozen=[r for r in rows if r.get('event')=='frozen']
+            if probes!=validated.records or len(frozen)!=1 or frozen[0].get('coefficients')!=validated.coefficients or frozen[0].get('units')!=validated.units or frozen[0].get('priorities')!=validated.priorities:
+                raise ValueError('calibration log differs from checkpoint')
+        output['calibration']={'records':validated.records,'coefficients':validated.coefficients,
+                               'units':validated.units,'priorities':validated.priorities,'active':validated.active,
+                               'ema':validated.ema}
+    for arm,path in histories.items():
+        found={}
+        with Path(path).open() as stream:
+            for line in stream:
+                if not line.strip(): continue
+                row=json.loads(line); diag=row.get('round8_actual_step')
+                if diag is None: continue
+                epoch=diag.get('identity',{}).get('epoch')
+                if epoch not in (100,500,1000): continue
+                if epoch in found or row.get('epoch')!=epoch or diag.get('schema')!='round8_actual_step_v1':
+                    raise ValueError('duplicate or inconsistent actual-step diagnostic')
+                for prefix,keys in (('block',blocks),('family',families)):
+                    for suffix in ('gradient_norms','gradient_dot_config_direction','negative_gradient_dot_displacement'):
+                        values=diag.get(f'{prefix}_{suffix}',{})
+                        # Inactive semantic blocks are absent, not measured zeros.
+                        expected={k for k in keys if calibration is None or prefix=='family' or validated.active[k]}
+                        if set(values)!=expected or any(isinstance(v,bool) or not isinstance(v,(int,float)) or not math.isfinite(v) for v in values.values()):
+                            raise ValueError('incomplete or nonfinite actual-step diagnostic')
+                found[epoch]={'step':row['step'],**diag}
+        if require_complete and set(found)!={100,500,1000}: raise ValueError(f'{arm} missing scheduled actual-step diagnostics')
+        output['actual_steps'][arm]={str(k):v for k,v in sorted(found.items())}
+    if require_complete and (calibration is None or calibration_log is None): raise ValueError('shared calibration evidence required')
+    return output
+
+
+def _parameter_diagnostic_lines(data):
+    labels={'global_distribution':'State family','multiscale_spectrum':'Scale family','topology':'Shape family',
+            'state.marginal':'State: marginal','state.mixed':'State: mixed',
+            'scale.signed':'Scale: signed','scale.joint':'Scale: joint',
+            'scale.log_power_self':'Scale: log-power self','scale.rho':'Scale: rho',
+            'shape.self':'Shape: self','shape.mutual':'Shape: mutual'}
+    lines=['## Parameter diagnostics','']
+    cal=data['calibration']
+    if cal is None: lines += ['Shared warmup calibration: unavailable.','']
+    else:
+        lines += ['The five fixed common-stream warmup probes report gradient norms after division by frozen TRAIN units. Coefficients were frozen at epoch 10. Inactive blocks have no measured norm.','','| Block | Epoch 1 | Epoch 3 | Epoch 6 | Epoch 8 | Epoch 10 | Coefficient |','|---|---:|---:|---:|---:|---:|---:|']
+        for block in sorted(cal['coefficients']):
+            vals=' | '.join(_num(r['norms'].get(block)) for r in cal['records'])
+            lines.append(f"| {_escape(labels[block])} | {vals} | {_num(cal['coefficients'][block])} |")
+        lines += ['', '| Block | Active | TRAIN unit |','|---|---|---:|']
+        for block in sorted(cal['coefficients']):
+            lines.append(f"| {_escape(labels[block])} | {cal['active'][block]} | {_num(cal['units'][block])} |")
+        lines.append('')
+    lines += ['The following are measured on one actual update at each scheduled epoch. Direction products are gradient dot ConFIG direction; step products are negative gradient dot actual AdamW parameter displacement. Positive step products indicate first-order decrease for that block or family. State channels are chain-rule gradient contributions, not additive State losses.','']
+    count=0
+    for arm,epochs in data['actual_steps'].items():
+        for epoch,diag in epochs.items():
+            lines += [f"| {_escape(arm)} epoch {epoch}, update {diag['step']} | Gradient norm | Gradient dot ConFIG direction | Negative gradient dot AdamW displacement |",'|---|---:|---:|---:|']
+            for level in ('family','block'):
+                for name,norm in sorted(diag[f'{level}_gradient_norms'].items()):
+                    count+=1
+                    lines.append(f"| {_escape(labels[name])} | {_num(norm)} | {_num(diag[f'{level}_gradient_dot_config_direction'][name])} | {_num(diag[f'{level}_negative_gradient_dot_displacement'][name])} |")
+            lines.append('')
+    if not count: lines += ['Actual-step diagnostics: unavailable.','']
+    lines += ['[Full recorded parameter diagnostics and identity](parameter_diagnostics.json).','']
+    return lines
+
+
+def _copy_training_history_figures(histories, figures, *, require_complete=False):
+    entries=[]
+    for arm,path in histories.items():
+        log=Path(path).parent; state_path=log/'round8_history_state.json'
+        sources=[log/'round8_history.png',log/'round8_history.pdf']
+        if not state_path.is_file() or not all(p.is_file() for p in sources):
+            if require_complete: raise ValueError(f'{arm} missing recorded history figures')
+            continue
+        state=_json(state_path)
+        with Path(path).open() as stream: rows=[json.loads(line) for line in stream if line.strip()]
+        if not rows or state.get('last_step')!=rows[-1].get('step') or state.get('history_rows')!=len(rows):
+            raise ValueError(f'{arm} history figure does not cover saved updates')
+        figures.mkdir(parents=True,exist_ok=True); stem=f'training_components_{arm.lower()}'
+        for source in sources: shutil.copyfile(source,figures/(stem+source.suffix))
+        entries.append((stem,(f'figures/{stem}.png',f'figures/{stem}.pdf'),f'{arm} recorded sampled TRAIN family and component histories. The dotted line marks the epoch-10 calibration freeze; State channels are chain-rule surrogates, not additive losses.'))
+    return entries
+
+
 def _diagnostic_values(value, terms):
     """Find explicitly named scalar diagnostics without deriving missing values."""
     result={}
@@ -319,10 +415,11 @@ def _reconstruction(spec,figures,index):
         unit=str(a['field_units'][fi]); source_id=str(s['sample_id'])
         fig,axes=plt.subplots(1,3,figsize=(11,3.5),layout='constrained')
         low,high=float(min(truth.min(),pred.min())),float(max(truth.max(),pred.max()))
-        for ax,data,title in zip(axes,(truth,pred,pred-truth),('Reference','Reconstruction',f'Error; weighted RMSE={rmse:.4g} {unit}')):
-            kwargs={'vmin':low,'vmax':high} if title!='Error' and not title.startswith('Error;') else {}
+        unit_label='units unknown' if unit.strip().lower() in ('', 'unknown', 'none') else unit
+        for ax,data,title in zip(axes,(truth,pred,pred-truth),('Reference','Reconstruction',f'Error\nWeighted RMSE={rmse:.4g} ({unit_label})')):
+            kwargs={'vmin':low,'vmax':high} if not title.startswith('Error') else {}
             im=ax.scatter(coords[:,0],coords[:,1],c=data,s=3,cmap='viridis' if kwargs else 'coolwarm',**kwargs)
-            ax.set_title(title);ax.set_aspect('equal');fig.colorbar(im,ax=ax,shrink=.8)
+            ax.set_title(title,fontsize=9);ax.set_aspect('equal');fig.colorbar(im,ax=ax,shrink=.8)
         label=str(spec.get('label', endpoint.get('endpoint','Reconstruction')))
         fig.suptitle(f"{label}: {field}, {source_id}, member {member}, α={alpha:g}; {'native physical mask' if source['population']=='ASSESS' else 'sampled physical mask'}")
     return _save_figure(fig,figures,f'reconstruction_{index:02d}'),{'label':label,'rmse':rmse,'field':field,'units':unit,'sample_id':source_id,'support':source['population'],'alpha':alpha,'member':member}
@@ -470,7 +567,7 @@ def validate_report(directory):
     print_input = root / '.report_print.md'
     print_input.write_text(print_text)
     try:
-        subprocess.run(['pandoc', str(print_input.resolve()), '-o', str((root/'REPORT.pdf').resolve()),
+        subprocess.run(['pandoc', '-f', 'markdown-implicit_figures', str(print_input.resolve()), '-o', str((root/'REPORT.pdf').resolve()),
                         '--pdf-engine=pdflatex', '-V', 'geometry:margin=0.7in',
                         '-V', 'fontsize=10pt'], cwd=root, check=True,
                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -516,7 +613,7 @@ def validate_report(directory):
 
 def build_report(output_dir, *, decision_path=None, assessment_paths=None, policy_paths=None,
                  histories=None, assessment_history=None, reconstructions=None, field_panels=None,
-                 exposure_logs=None, cost_ledger=None, sss_figures=None, title='Round 8 comparison'):
+                 exposure_logs=None, cost_ledger=None, sss_figures=None, calibration=None, calibration_log=None, calibration_source=None, require_training_diagnostics=False, title='Round 8 comparison'):
     """Build report from actual saved artifacts, including optional evidence.
 
     ``assessment_paths`` and ``policy_paths`` map endpoint names to JSON files;
@@ -687,7 +784,10 @@ def build_report(output_dir, *, decision_path=None, assessment_paths=None, polic
         for stage,seconds in sorted(ledger['seconds_by_stage'].items()): lines.append(f"| {_escape(stage)} | {_num(seconds)} |")
         lines.append('')
     (output/'cached_field_diagnostics.json').write_text(json.dumps(field_details,indent=2,allow_nan=False)+'\n')
-    entries=[]
+    diagnostics=_parameter_diagnostics(histories,calibration,calibration_log,require_complete=require_training_diagnostics)
+    (output/'parameter_diagnostics.json').write_text(json.dumps(diagnostics,indent=2,allow_nan=False)+'\n')
+    lines += _parameter_diagnostic_lines(diagnostics)
+    entries=_copy_training_history_figures(histories,figures,require_complete=require_training_diagnostics)
     frontier_data=_frontier_data(assessments,policies,policy_paths)
     (output/'amplitude_frontier_data.json').write_text(json.dumps(frontier_data,indent=2,allow_nan=False)+'\n')
     if frontier_data:
@@ -733,14 +833,21 @@ def build_report(output_dir, *, decision_path=None, assessment_paths=None, polic
         if v.get('regime_manifest'): inputs[f'field_regime_manifest:{i}']=str(v['regime_manifest'])
     for arm,spec in exposure_logs.items(): inputs[f'exposure:{arm}']=str(spec['path'])
     if cost_ledger is not None: inputs['cost_ledger']=str(cost_ledger)
+    if calibration_log is not None: inputs['calibration_log']=str(calibration_log)
+    if calibration_source is not None: inputs['calibration_checkpoint']=str(calibration_source)
+    for arm,path in histories.items():
+        for suffix in ('png','pdf','json'):
+            source=Path(path).parent/('round8_history_state.json' if suffix=='json' else f'round8_history.{suffix}')
+            if source.is_file(): inputs[f'training_history_{suffix}:{arm}']=str(source)
     for i,v in enumerate(sss_figures):
         for key in ('source_panel','endpoint_panel','score_report','fair_shape_artifact','native_bundle'):
             if v.get(key): inputs[f'sss_{i}:{key}']=str(v[key])
     for i,v in enumerate(reconstructions):
         inputs[f'reconstruction_source_panel:{i}']=str(v['source_panel'])
         inputs[f'reconstruction_endpoint_panel:{i}']=str(v['endpoint_panel'])
-    for key,path in inputs.items(): lines.append(f'- {_escape(key)}: `{_escape(path)}`; SHA-256 `{file_hash(path)}`.')
-    lines.append('')
+    provenance={key:{'path':path,'sha256':file_hash(path)} for key,path in inputs.items()}
+    (output/'input_provenance.json').write_text(json.dumps(provenance,indent=2,sort_keys=True,allow_nan=False)+'\n')
+    lines += [f'{len(provenance)} source artifact identities and complete paths are recorded in [input provenance](input_provenance.json).','']
     (output/'REPORT.md').write_text('\n'.join(lines))
     verification=validate_report(output)
     return {'markdown':str(output/'REPORT.md'),'html':str(output/'REPORT.html'),'pdf':str(output/'REPORT.pdf'),'verification':verification,'reconstructions':reconstruction_metadata,'sss_figures':sss_metadata,'amplitude_frontier':frontier_data}
