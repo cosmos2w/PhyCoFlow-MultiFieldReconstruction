@@ -105,6 +105,19 @@ def test_non_nominated_endpoint_still_reports_source_scores_and_raw_native_risks
     assert '| T | 1 | 1.21 | 1.21 | 10.00% |' in text
 
 
+def test_report_displays_saved_condition_distributions_without_new_gates(tmp_path,monkeypatch):
+    summary={'mean':.12,'q05':-.4,'median':.1,'q95':.7,'condition_standard_error':.03,'n':200}
+    assessment=tmp_path/'assessment.json'
+    assessment.write_text(json.dumps({'schema':'round8_assessment_v1','endpoint':'C8',
+        'eligible':True,'pooled':{'score_gain':{'shape':summary},'field_risk_delta':{'T':summary}}}))
+    monkeypatch.setattr(report,'validate_report',lambda *_:{})
+    result=report.build_report(tmp_path/'report',assessment_paths={'C8':assessment})
+    text=Path(result['markdown']).read_text()
+    assert '| shape | 0.12 | -0.4 | 0.1 | 0.7 | 0.03 |' in text
+    assert '| T | 0.12 | -0.4 | 0.1 | 0.7 | 0.03 |' in text
+    assert 'no framewise rejection or independence claim' in text
+
+
 def test_amplitude_frontier_uses_saved_points_and_renders(tmp_path):
     from phycoflow_reconstruction.evaluation.round8_campaign import file_hash
     from phycoflow_reconstruction.evaluation.round8_decision import KEYS

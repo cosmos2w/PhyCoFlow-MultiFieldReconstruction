@@ -715,6 +715,18 @@ def build_report(output_dir, *, decision_path=None, assessment_paths=None, polic
             for field,source_risk,blend_risk,ratio,change in zip(names,a['source_risk'],a['blend_risk'],a['risk_ratio'],a['rmse_change']):
                 lines.append(f"| {_escape(field)} | {_num(source_risk)} | {_num(blend_risk)} | {_num(ratio)} | {'unavailable' if change is None else format(100*change,'.2f')+'%'} |")
             lines.append('')
+        pooled=a.get('pooled',{})
+        for key,label,description in (
+            ('score_gain','Family','SOURCE-normalized family gain; positive improves the frozen common score'),
+            ('field_risk_delta','Field','physical member-MSE change from SOURCE; negative reduces error')):
+            if not pooled.get(key): continue
+            lines += [f'Pooled per-condition distribution: {description}.','',
+                      f'| {label} | Mean | 5th percentile | Median | 95th percentile | Frame SE |',
+                      '|---|---:|---:|---:|---:|---:|']
+            for name,summary in pooled[key].items():
+                values=' | '.join(_num(summary.get(term)) for term in ('mean','q05','median','q95','condition_standard_error'))
+                lines.append(f'| {_escape(name)} | {values} |')
+            lines += ['', 'These are descriptive condition distributions on the same fixed panel. They introduce no framewise rejection or independence claim.','']
         for category,groups in a.get('groups',{}).items():
             lines += [f"{_escape(category)} subgroup diagnostics:",'', '| Group | n | State gain | Scale gain | Shape gain |','|---|---:|---:|---:|---:|']
             for group,values in groups.items():
