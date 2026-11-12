@@ -42,7 +42,8 @@ def _render(data, png, pdf):
     axes[1,0].set_xticks(range(len(data['band_names'])),data['band_names'],rotation=30,ha='right')
     axes[1,0].set(ylabel='TRAIN-normalized log band power',title='Scale: frozen spectral descriptor');axes[1,0].grid(alpha=.2)
     lo,hi=axes[1,1].get_xlim();lo2,hi2=axes[1,1].get_ylim(); lower=min(lo,lo2);upper=max(hi,hi2);axes[1,1].plot([lower,upper],[lower,upper],color='0.6',lw=.7)
-    axes[1,1].set(xlabel='Birth (frozen transform units)',ylabel='Death (frozen transform units)',title=f"Shape: {data['shape_unit']} H{data['dimension']} finite bars");axes[1,1].legend(fontsize=6)
+    grid='x'.join(str(v) for v in data['shape_grid_shape'])
+    axes[1,1].set(xlabel='Birth (frozen transform units)',ylabel='Death (frozen transform units)',title=f"Shape: {data['shape_unit']} H{data['dimension']}\n{grid} raster; finite bars");axes[1,1].legend(fontsize=6)
     fig.suptitle(f"{data['label']}: common SSS descriptors, {data['sample_id']}, {data['field']}, {data['support']}, alpha={data['alpha']:g}")
     for path in (png,pdf):fig.savefig(path,dpi=170,bbox_inches='tight')
     plt.close(fig)
@@ -123,6 +124,7 @@ def build_sss_figure(spec, *, png_path, pdf_path):
                 diagram=diagrams[tuple(objective.dimensions).index(dimension)]
                 results[name]={'marginal':marginal,'mixed':projected,'scale':band_values,'finite':diagram.finite.detach().cpu().tolist(),'essential_count':int(diagram.essential.numel())}
         data={'schema':'round8_common_sss_descriptors_v1','label':str(spec.get('label',endpoint.get('endpoint','Endpoint'))),'sample_id':sample_id,'field':field,'alpha':alpha,'support':'Q4096' if source['population']=='TRAIN' else 'native physical mask','state_units':state.units,'band_names':bands,'shape_unit':objective.units[unit_index][1],'dimension':dimension,'direction_index':None if mixed is None else direction_index,'direction':None if mixed is None else mixed[direction_index].detach().cpu().tolist(),'endpoints':results}
+        data['shape_grid_shape']=list(shape.grid_shape)
         png_path,pdf_path=Path(png_path),Path(pdf_path);png_path.parent.mkdir(parents=True,exist_ok=True);pdf_path.parent.mkdir(parents=True,exist_ok=True)
         _render(data,png_path,pdf_path)
         return {k:v for k,v in data.items() if k!='endpoints'} | {'score_report_sha256':file_hash(spec['score_report']),'fair_shape_artifact_sha256':file_hash(spec['fair_shape_artifact'])}

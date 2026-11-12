@@ -23,6 +23,7 @@ def test_sss_uses_frozen_observer_descriptor_interfaces(tmp_path,monkeypatch):
     state=SimpleNamespace(units='model_units',field_ids=(0,1),components_by_key={'cross_joint_topk_swd':SimpleNamespace(directions=torch.tensor([[.6,.8]]))},_in_declared_units=lambda x,y:(x,y))
     scale=SimpleNamespace(settings=SimpleNamespace(bands=SimpleNamespace(names=('low','high'))),field_ids=(0,1),field_names=('a','b'))
     class Shape:
+        grid_shape=(32,128)
         spatial_objective=SimpleNamespace(transform_frozen=torch.tensor(True),calibrated=torch.tensor(True),fields=('a','b'),units=(('self.persistence','self.a.positive',(0,),(1,),None),),dimensions=(0,),_diagrams=lambda grid,indices,mask:([SimpleNamespace(finite=torch.tensor([[float(grid.mean()),float(grid.mean())+1]]),essential=torch.tensor([0.]))],None))
         native_masked=False
         def load_state_artifact(self,artifact): self.loaded=artifact
@@ -42,6 +43,7 @@ def test_sss_uses_frozen_observer_descriptor_interfaces(tmp_path,monkeypatch):
     assert meta['direction']==pytest.approx([.6,.8]) and meta['shape_unit']=='self.a.positive'
     assert meta['band_names']==['low','high'] and shape.loaded=={'frozen':True}
     assert meta['label']=='C8 reference-only'
+    assert meta['shape_grid_shape']==[32,128]
     assert (tmp_path/'sss.png').is_file() and (tmp_path/'sss.pdf').read_bytes().startswith(b'%PDF')
     with pytest.raises(ValueError,match='score report differ'):
         sss.build_sss_figure({**spec,'alpha':.25},png_path=tmp_path/'bad.png',pdf_path=tmp_path/'bad.pdf')

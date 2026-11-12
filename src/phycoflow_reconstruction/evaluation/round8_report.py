@@ -819,7 +819,8 @@ def build_report(output_dir, *, decision_path=None, assessment_paths=None, polic
         from .round8_sss_figure import build_sss_figure
         for i,spec in enumerate(sss_figures,1):
             stem=f'sss_{i:02d}'; metadata=build_sss_figure(spec,png_path=figures/(stem+'.png'),pdf_path=figures/(stem+'.pdf')); sss_metadata.append(metadata)
-            caption=(f"{metadata['label']}: common frozen descriptors for {metadata['sample_id']} ({metadata['support']}), {metadata['field']}, alpha={metadata['alpha']:g}: weighted State marginal and fixed-direction quantiles, normalized spectral band-power descriptor, and {metadata['shape_unit']} H{metadata['dimension']} persistence diagrams. SOURCE and blend members are paired; these panels display descriptors, not physical field errors.")
+            raster='x'.join(str(v) for v in metadata['shape_grid_shape'])
+            caption=(f"{metadata['label']}: common frozen descriptors for {metadata['sample_id']} ({metadata['support']}), {metadata['field']}, alpha={metadata['alpha']:g}: weighted State marginal and fixed-direction quantiles, normalized spectral band-power descriptor, and {metadata['shape_unit']} H{metadata['dimension']} persistence diagrams on the frozen {raster} physical-overlap raster. Native input coverage is separate from this descriptor resolution. SOURCE and blend members are paired; these panels display descriptors, not physical field errors.")
             entries.append((stem,(f'figures/{stem}.png',f'figures/{stem}.pdf'),caption))
     (output/'sss_figure_provenance.json').write_text(json.dumps(sss_metadata,indent=2,allow_nan=False)+'\n')
     reconstruction_metadata=[]
