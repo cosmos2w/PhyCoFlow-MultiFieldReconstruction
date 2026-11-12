@@ -61,10 +61,6 @@ def test_warmup_probes_freeze_resume_and_candidate(tmp_path,monkeypatch):
     for step in range(10):
         warm.begin_step(step=step,epoch=step+1)
         x=model(torch.ones(1,1)); endpoint={'members':(x,x*2),'target':torch.zeros_like(x),'measure':{},'batch':warm.probe_batch}
-        ordinary=object()
-        assert (warm.training_batch(ordinary) is warm.probe_batch) == (step+1 in (1,3,6,8,10))
-        if step+1 in (1,3,6,8,10): assert warm.rollout_seed(12) == 1800050
-        else: assert warm.rollout_seed(12) == 12
         warm.after_objective(model=model,endpoint=endpoint,result=None)
         warm.after_step({'step':step+1})
     assert [r['epoch'] for r in warm.calibration.records] == [1,3,6,8,10]
@@ -123,8 +119,10 @@ def test_fork_copies_exact_complete_checkpoint_and_rejects_bad_boundary(tmp_path
     cal=InternalCalibration({k:1. for k in keys},{k:1. for k in keys},{k:True for k in keys})
     for epoch in PROBES: cal.observe(epoch,{k:float(i+1) for i,k in enumerate(keys)})
     cal.freeze(10)
-    runtime={'version':'round8_training_runtime_v1','mode':'warmup','step':130,'artifact_identity':'a'*64,
-             'calibration':cal.state_dict(),'sampler':SharedQuerySampler(['a','b']).state_dict()}
+    from phycoflow_reconstruction.training.round8_runtime import VERSION
+    runtime={'version':VERSION,'mode':'warmup','step':130,'artifact_identity':'a'*64,
+             'calibration':cal.state_dict(),'sampler':SharedQuerySampler(['a','b']).state_dict(),
+             'stream_protocol':{'version':'round8_common_warmup_stream_v1'}}
     payload={'model':{'w':torch.tensor([1.])},'optimizer':{'state':{0:{'step':torch.tensor(130.),'exp_avg':torch.tensor([.1])}},'param_groups':[]},
              'external_policy':{'dual':torch.tensor([.2,.3])}, 'rng_state':{'torch_cpu':torch.get_rng_state(), 'index_generator':torch.Generator().get_state()},
              'global_step':130,'config_sha256':'old', 'round8_runtime':runtime,
@@ -133,6 +131,12 @@ def test_fork_copies_exact_complete_checkpoint_and_rejects_bad_boundary(tmp_path
     torch.save(payload,warm/'checkpoints'/'last.pt')
     config={'stage':'post_training','case':'synthetic','optimization':{'steps_per_epoch':13,'lr_warmup':{'updates':76},'multitask':{'fidelity_budget':{},'external_policy':{}}},
             'runtime':{},'output':{},'checkpointing':{},'coherence':{'compute_budget':{'point_count':4096}}}
+    payload['round8_runtime']['version'] = 'round8_training_runtime_v1'
+    torch.save(payload,warm/'checkpoints'/'last.pt')
+    with pytest.raises(ValueError,match='fresh warmup'):
+        fork_warmup(warm,case_dir=tmp_path,retained_config=config)
+    payload['round8_runtime']['version'] = VERSION
+    torch.save(payload,warm/'checkpoints'/'last.pt')
     result=fork_warmup(warm,case_dir=tmp_path,retained_config=config)
     assert result['shared_updates'] == 130
     for arm in ('B8','C8'):
@@ -187,3 +191,58 @@ def test_candidate_raw_state_telemetry_is_no_grad_without_detaching_objective():
     assert result.scalar_loss.requires_grad
     assert runtime.raw_blocks['state.marginal'].requires_grad is False
     assert torch.autograd.grad(result.scalar_loss,prediction)[0].item()==4.
+
+
+def test_shared_graph_probe_preserves_common_stream_update_and_rng(tmp_path, monkeypatch):
+    import random
+    import numpy as np
+    artifacts, model, families, make = fixture(tmp_path, monkeypatch)
+    initial = copy.deepcopy(model.state_dict())
+    def run(enabled):
+        random.seed(17); np.random.seed(17); torch.manual_seed(17)
+        model.load_state_dict(initial)
+        runtime = make("warmup")
+        runtime.begin_step(step=0, epoch=1)
+        ordinary_batch = object()
+        selected = runtime.training_batch(ordinary_batch)
+        assert selected is runtime.probe_batch
+        optimizer = torch.optim.AdamW(model.parameters(), lr=.01)
+        dual = torch.tensor(.3)
+        calls = []
+        hook = model.register_forward_hook(lambda *args: calls.append(1))
+        # One ordinary model forward provides both training and calibration.
+        x = model(torch.ones(1, 1)) * (torch.rand(()) + random.random() + float(np.random.rand()))
+        endpoint = {"members": (x, x * 2), "target": torch.zeros_like(x),
+                    "measure": {}, "batch": selected}
+        loss = x.square().sum() + dual * x.sum()
+        if enabled:
+            runtime.after_objective(model=model, endpoint=endpoint, result=None)
+        optimizer.zero_grad(); loss.backward(); optimizer.step()
+        dual = dual + .1 * x.detach().sum()
+        hook.remove()
+        assert len(calls) == 1
+        adam = optimizer.state[model.weight]
+        return (model.weight.detach().clone(), dual, adam["step"].clone(),
+                adam["exp_avg"].clone(), adam["exp_avg_sq"].clone(),
+                torch.rand(()), random.random(), np.random.rand(), runtime.calibration.records)
+    baseline, probed = run(False), run(True)
+    for a, b in zip(baseline[:-1], probed[:-1]):
+        assert a == b
+    assert baseline[-1] == [] and len(probed[-1]) == 1
+
+
+@pytest.mark.parametrize("mode", ["warmup", "control"])
+def test_retained_family_scores_are_recorded(mode):
+    runtime = Round8Runtime.__new__(Round8Runtime)
+    runtime.mode = mode; runtime.manages_queries = False
+    runtime.epoch = 1; runtime.step = 0; runtime.steps_per_epoch = 13
+    runtime.family_scores = {}
+    value = torch.tensor(2., requires_grad=True)
+    result = FamilyResult({}, value.reshape(1), value, {})
+    runtime._state_control = lambda *args: (result, {})
+    family = lambda *args, **kwargs: result
+    for name in ("global_distribution", "multiscale_spectrum", "topology"):
+        assert runtime.score_family(name, family, value, value, coordinates=None, context={}) is result
+    assert runtime.family_scores == {name: {"raw": 2., "calibrated": 2.}
+                                     for name in ("state", "scale", "shape")}
+    assert result.scalar_loss.requires_grad

@@ -2595,8 +2595,7 @@ def run_post_training(
             )
             raw_family_losses = {} if scalarizer is not None or diagnostic_due else None
             rollout_generator = torch.Generator(device=device).manual_seed(
-                round8_runtime.rollout_seed(seed + 1_000_003 + global_step)
-                if round8_runtime is not None else seed + 1_000_003 + global_step
+                seed + 1_000_003 + global_step
             )
             execution = (execution_runtime.decision(global_step) if execution_runtime is not None
                          else training_execution(config, global_step))

@@ -148,8 +148,9 @@ def _reconstruction(spec,figures,index):
             kwargs={'vmin':low,'vmax':high} if title!='Error' and not title.startswith('Error;') else {}
             im=ax.scatter(coords[:,0],coords[:,1],c=data,s=3,cmap='viridis' if kwargs else 'coolwarm',**kwargs)
             ax.set_title(title);ax.set_aspect('equal');fig.colorbar(im,ax=ax,shrink=.8)
-        fig.suptitle(f"{field}, {source_id}, member {member}, α={alpha:g}; {'native physical mask' if source['population']=='ASSESS' else 'sampled physical mask'}")
-    return _save_figure(fig,figures,f'reconstruction_{index:02d}'),{'rmse':rmse,'field':field,'units':unit,'sample_id':source_id,'support':source['population'],'alpha':alpha,'member':member}
+        label=str(spec.get('label', endpoint.get('endpoint','Reconstruction')))
+        fig.suptitle(f"{label}: {field}, {source_id}, member {member}, α={alpha:g}; {'native physical mask' if source['population']=='ASSESS' else 'sampled physical mask'}")
+    return _save_figure(fig,figures,f'reconstruction_{index:02d}'),{'label':label,'rmse':rmse,'field':field,'units':unit,'sample_id':source_id,'support':source['population'],'alpha':alpha,'member':member}
 
 
 def _condition_summary(values, *, bootstrap_samples=1000, seed=47):
@@ -226,7 +227,7 @@ def cached_field_diagnostics(spec):
             out['relationships'][key]={'fields':relation['fields'],'units':units[fields.index(relation['fields'][0])]+' * '+units[fields.index(relation['fields'][1])], 'source_absolute_error':_condition_summary([abs(r['relationships'][index]['source_error']) for r in selected]),'blend_absolute_error':_condition_summary([abs(r['relationships'][index]['blend_error']) for r in selected]),'paired_absolute_error_change':_condition_summary([abs(r['relationships'][index]['blend_error'])-abs(r['relationships'][index]['source_error']) for r in selected])}
         return out
     groups={category:{value:summarize([r for r in rows if r[category]==value]) for value in sorted({r[category] for r in rows})} for category in ('legacy_source','regime')}
-    return {'schema':'round8_cached_field_diagnostics_v1','endpoint':spec['endpoint'],'population':source['population'],'alpha':alpha,'source_panel_sha256':file_hash(spec['source_panel']),'endpoint_panel_sha256':file_hash(spec['endpoint_panel']),'field_names':fields,'regime_provenance':regime_provenance,'pooled':summarize(rows),'groups':groups,'per_condition':rows,'support':'native physical mask' if source['population']=='ASSESS' else 'fixed Q spatial Horvitz-Thompson proxy','uncertainty':'95% frame-bootstrap intervals are descriptive; correlated frames are not independent realizations.','relationship_definition':'physical area mean of member cross-products minus target cross-product, per field pair'}
+    return {'schema':'round8_cached_field_diagnostics_v1','endpoint':spec['endpoint'],'label':str(spec.get('label',spec['endpoint'])),'population':source['population'],'alpha':alpha,'source_panel_sha256':file_hash(spec['source_panel']),'endpoint_panel_sha256':file_hash(spec['endpoint_panel']),'field_names':fields,'regime_provenance':regime_provenance,'pooled':summarize(rows),'groups':groups,'per_condition':rows,'support':'native physical mask' if source['population']=='ASSESS' else 'fixed Q spatial Horvitz-Thompson proxy','uncertainty':'95% frame-bootstrap intervals are descriptive; correlated frames are not independent realizations.','relationship_definition':'physical area mean of member cross-products minus target cross-product, per field pair'}
 
 
 def exposure_diagnostics(path,field_names):
@@ -366,6 +367,10 @@ def build_report(output_dir, *, decision_path=None, assessment_paths=None, polic
         if k in policies and v['policy_sha256']!=file_hash(policy_paths[k]): raise ValueError('assessment policy hash mismatch')
     for k,v in policies.items():
         if v.get('schema')!='round8_frozen_policy_v1' or v.get('endpoint')!=k: raise ValueError('invalid TRAIN policy')
+    field_names_by_endpoint={k:v.get('field_names') for k,v in assessments.items()}
+    for spec in field_panels:
+        if not field_names_by_endpoint.get(spec['endpoint']):
+            field_names_by_endpoint[spec['endpoint']]=_json(spec['source_panel'])['field_names']
     lines=[f'# {_escape(title)}','', 'The results below use the frozen TRAIN and ASSESS condition panels. TRAIN uses the declared Q4096 physical-weight proxy; ASSESS uses the native physical mask. Values are unavailable where an input artifact is absent.','']
     if decisions is None: lines+=['Operational and computation decisions: unavailable; no campaign decision artifact was supplied.','']
     else:
@@ -400,7 +405,7 @@ def build_report(output_dir, *, decision_path=None, assessment_paths=None, polic
                 raise ValueError('invalid ASSESS raw score report')
             raw_assess=_mean_scores(raw_report)
         for representation,train_scores,assess_scores in (
-            ('SOURCE',None if p is None else p.get('train_source_scores'),None if a is None else a.get('source_scores')),
+            ('SOURCE',None if p is None else p.get('train_source_scores'),None if a is None else (a.get('source_scores') or (_mean_scores(_json(a['source_report'])) if a.get('source_report') else None))),
             ('Raw endpoint',None if p is None else p.get('train_raw_scores'),raw_assess),
             ('Selected blend',selected,None if a is None else a.get('blend_scores'))):
             for family in ('state','scale','shape'):
@@ -410,7 +415,7 @@ def build_report(output_dir, *, decision_path=None, assessment_paths=None, polic
     for name,p in policies.items():
         if p.get('risk_quadratic') and p.get('train_source_risk'):
             r0=np.asarray(p['train_source_risk'],dtype=float); b=np.asarray(p['risk_quadratic']['b'],dtype=float); q=np.asarray(p['risk_quadratic']['a'],dtype=float)
-            names=assessments.get(name,{}).get('field_names',[str(i) for i in range(len(r0))])
+            names=field_names_by_endpoint.get(name) or [str(i) for i in range(len(r0))]
             lines += [f'### {_escape(name)} TRAIN member risks','', '| Field | SOURCE MSE | Raw endpoint MSE | Selected blend MSE |','|---|---:|---:|---:|']
             for i,field in enumerate(names):
                 blend=None if p.get('alpha') is None else r0[i]+2*p['alpha']*b[i]+p['alpha']**2*q[i]
@@ -418,6 +423,19 @@ def build_report(output_dir, *, decision_path=None, assessment_paths=None, polic
             lines += ['', 'TRAIN field risks are physical member MSE estimated on the fixed Q support; selected values use the saved quadratic.','']
     for name,a in assessments.items():
         lines += [f'### {_escape(name)} assessment','',f"Eligible: **{a.get('eligible',False)}**; qualifying frozen families: {_escape(', '.join(a.get('qualifying_families',[])) or 'none')}. {_escape(a.get('reason',''))}",'']
+        if a.get('source_report') and a.get('raw_report'):
+            baseline=_json(a['source_report']).get('member_risk_physical')
+            raw_risk=_json(a['raw_report']).get('member_risk_physical')
+            if baseline is not None and raw_risk is not None:
+                if len(baseline)!=len(raw_risk): raise ValueError('raw assessment field-risk dimensions differ')
+                names=field_names_by_endpoint.get(name) or [str(i) for i in range(len(baseline))]
+                if len(names)!=len(baseline): raise ValueError('raw assessment field names differ')
+                lines += ['Raw endpoint native member risk:','','| Field | SOURCE MSE | Raw endpoint MSE | MSE ratio | RMSE change |','|---|---:|---:|---:|---:|']
+                for field,r0,r1 in zip(names,baseline,raw_risk):
+                    ratio=None if r0==0 else r1/r0
+                    change=None if ratio is None else np.sqrt(ratio)-1
+                    lines.append(f"| {_escape(field)} | {_num(r0)} | {_num(r1)} | {_num(ratio)} | {'unavailable' if change is None else format(100*change,'.2f')+'%'} |")
+                lines += ['', 'These raw endpoint risks remain distinct from the frozen deployment-blend guards.','']
         if 'risk_ratio' in a:
             names=a.get('field_names',[str(i) for i in range(len(a['risk_ratio']))])
             lines += ['| Field | SOURCE member MSE | Blend member MSE | MSE ratio | RMSE change |','|---|---:|---:|---:|---:|']
@@ -453,7 +471,7 @@ def build_report(output_dir, *, decision_path=None, assessment_paths=None, polic
     if not field_details:
         lines += ['Cached field diagnostics: unavailable; no matched field panels were supplied.','']
     for detail in field_details:
-        lines += [f"### {_escape(detail['endpoint'])} {_escape(detail['population'])}, alpha={detail['alpha']:g}",'',f"Support: {detail['support']}. {detail['uncertainty']}",'', '| Field | Units | SOURCE J2 RMS spread | Blend J2 RMS spread | RMS SOURCE displacement | Ensemble mean error | Spread variance change [95% interval] |','|---|---|---:|---:|---:|---:|---:|']
+        lines += [f"### {_escape(detail['label'])} {_escape(detail['population'])}, alpha={detail['alpha']:g}",'',f"Support: {detail['support']}. {detail['uncertainty']}",'', '| Field | Units | SOURCE J2 RMS spread | Blend J2 RMS spread | RMS SOURCE displacement | Ensemble mean error | Spread variance change [95% interval] |','|---|---|---:|---:|---:|---:|---:|']
         for field,row in detail['pooled']['fields'].items():
             spread=row['spread_variance_change']; bounds=spread['frame_bootstrap_95']
             interval='unavailable' if bounds is None else f"[{_num(bounds[0])}, {_num(bounds[1])}]"
@@ -504,14 +522,14 @@ def build_report(output_dir, *, decision_path=None, assessment_paths=None, polic
         from .round8_sss_figure import build_sss_figure
         for i,spec in enumerate(sss_figures,1):
             stem=f'sss_{i:02d}'; metadata=build_sss_figure(spec,png_path=figures/(stem+'.png'),pdf_path=figures/(stem+'.pdf')); sss_metadata.append(metadata)
-            caption=(f"Common frozen descriptors for {metadata['sample_id']} ({metadata['support']}), {metadata['field']}, alpha={metadata['alpha']:g}: weighted State marginal and fixed-direction quantiles, normalized spectral band-power descriptor, and {metadata['shape_unit']} H{metadata['dimension']} persistence diagrams. SOURCE and blend members are paired; these panels display descriptors, not physical field errors.")
+            caption=(f"{metadata['label']}: common frozen descriptors for {metadata['sample_id']} ({metadata['support']}), {metadata['field']}, alpha={metadata['alpha']:g}: weighted State marginal and fixed-direction quantiles, normalized spectral band-power descriptor, and {metadata['shape_unit']} H{metadata['dimension']} persistence diagrams. SOURCE and blend members are paired; these panels display descriptors, not physical field errors.")
             entries.append((stem,(f'figures/{stem}.png',f'figures/{stem}.pdf'),caption))
     (output/'sss_figure_provenance.json').write_text(json.dumps(sss_metadata,indent=2,allow_nan=False)+'\n')
     reconstruction_metadata=[]
     for i,spec in enumerate(reconstructions,1):
         paths,metadata=_reconstruction(spec,figures,i); reconstruction_metadata.append(metadata)
         support='native' if metadata['support']=='ASSESS' else 'sampled, self-normalized plotted support'
-        entries.append((f'reconstruction_{i:02d}',paths,f"{metadata['field']} for {metadata['sample_id']}, member {metadata['member']}, α={metadata['alpha']:g}; weighted RMSE is computed from the displayed physical field on the {support}."))
+        entries.append((f'reconstruction_{i:02d}',paths,f"{metadata['label']}: {metadata['field']} for {metadata['sample_id']}, member {metadata['member']}, α={metadata['alpha']:g}; weighted RMSE is computed from the displayed physical field on the {support}."))
     lines+=['## Figure index','']
     if not entries: lines+=['No figure input artifacts were supplied.','']
     for number,(name,(png,pdf),caption) in enumerate(entries,1):

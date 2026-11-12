@@ -14,7 +14,7 @@ import torch
 from ..evaluation.round8_campaign import file_hash, canonical_hash
 from ..evaluation.round8_inference import infer_panel, score_cached_panel, validate_panel, validate_matched_panels
 from .post_training import run_post_training
-from .round8_runtime import Round8Runtime
+from .round8_runtime import Round8Runtime, VERSION as RUNTIME_VERSION
 from .round8_campaign import fork_warmup, resolved_config, equal_state
 from .run_store import load_project_checkpoint
 
@@ -71,6 +71,11 @@ def require_formal_admission(campaign, *, artifacts_path, config, manifest_path)
                for name in ("qualified", "resource_forecast", "stage0_complete")}
     if records["qualified"].get("status") != "completed":
         raise ValueError("formal launch requires completed numerical/real-model qualification")
+    if records["qualified"].get("runtime_version") != RUNTIME_VERSION:
+        raise ValueError("formal launch requires qualification of the current runtime protocol")
+    fitted = torch.load(artifacts_path, map_location="cpu", weights_only=True)
+    if records["qualified"].get("common_stream") != Round8Runtime.stream_protocol(fitted):
+        raise ValueError("formal launch requires qualification of the frozen common warmup stream")
     if records["stage0_complete"].get("status") != "completed":
         raise ValueError("formal launch requires the fixed T2000 anchoring intervention")
     forecast = records["resource_forecast"]
@@ -354,6 +359,8 @@ def qualify(retained_config, *, case_dir, artifacts, campaign, charge_attempt, m
         segments[arm] = {"run": str(run), "seconds": time.perf_counter() - start,
                          "update_seconds": measured, "seconds_per_update": sum(measured) / 2}
     result = {"schema": "round8_disposable_qualification_v1", "status": "completed",
+              "runtime_version": RUNTIME_VERSION,
+              "common_stream": Round8Runtime.stream_protocol(artifacts),
               "warmup": str(warmup), "fork": fork, "resume": restored,
               "optimizer_attempts": 14, "seconds": time.perf_counter() - started,
               "segments": segments, "callback_memory_qualification": memory_profile, "efficacy_claim": False,

@@ -16,8 +16,12 @@ def test_formal_admission_binds_resource_forecast_to_current_qualification(tmp_p
     artifacts, manifest, profile = [directory/name for name in ('runtime.pt', 'manifest.json', 'profile.json')]
     for path in (artifacts, manifest, profile):
         path.write_text(path.name)
+    fitted={'probe_query_indices':torch.tensor([[0,1]]), 'probe_sample_ids':['a'],
+            'probe_dataset_indices':[0], 'probe_seed':42}
+    torch.save(fitted, artifacts)
     qualification = directory/'qualified.json'
-    qualification.write_text(json.dumps({'status':'completed', 'callback_memory_qualification':{
+    qualification.write_text(json.dumps({'status':'completed', 'runtime_version':execution.RUNTIME_VERSION,
+        'common_stream':execution.Round8Runtime.stream_protocol(fitted), 'callback_memory_qualification':{
         'status':'completed', 'device_name':'same-class', 'device_total_bytes':1000,
         'training_and_optimizer_resident':True, 'second_source_model':True,
         'native_sites':40300, 'members':2, 'manifest_sha256':file_hash(manifest),
@@ -33,6 +37,13 @@ def test_formal_admission_binds_resource_forecast_to_current_qualification(tmp_p
     execution.require_formal_admission(tmp_path, artifacts_path=artifacts, config=config, manifest_path=manifest)
     qualification.write_text(qualification.read_text()+'\n')
     with pytest.raises(ValueError, match='current timing qualification'):
+        execution.require_formal_admission(tmp_path, artifacts_path=artifacts, config=config, manifest_path=manifest)
+    obsolete = json.loads(qualification.read_text())
+    obsolete['runtime_version'] = 'obsolete-probe-protocol'
+    qualification.write_text(json.dumps(obsolete))
+    forecast['qualification_sha256'] = file_hash(qualification)
+    forecast_path.write_text(json.dumps(forecast))
+    with pytest.raises(ValueError, match='current runtime protocol'):
         execution.require_formal_admission(tmp_path, artifacts_path=artifacts, config=config, manifest_path=manifest)
 
 

@@ -37,10 +37,11 @@ def test_sss_uses_frozen_observer_descriptor_interfaces(tmp_path,monkeypatch):
     config={'dataset':{},'coherence':{'families':{'topology':{'persistence':{}}}},'rollout':{},'observation_consistency':{}}
     saved={'schema':'round8_common_observers_v1','population':'TRAIN','source_panel_sha256':file_hash(dirs[0]/'panel.json'),'endpoint_panel_sha256':file_hash(dirs[1]/'panel.json'),'alpha':.5,'config_sha256':canonical_hash(config),'frozen_family_artifacts_sha256':{},'fair_shape_artifact_sha256':file_hash(fair),'native_observer_identity':None,'rows':[{'sample_id':'x'}]}
     score=tmp_path/'score.json';score.write_text(json.dumps(saved))
-    spec={'config':config,'source_panel':dirs[0]/'panel.json','endpoint_panel':dirs[1]/'panel.json','score_report':score,'fair_shape_artifact':fair,'sample_id':'x','field':'a','alpha':.5}
+    spec={'config':config,'source_panel':dirs[0]/'panel.json','endpoint_panel':dirs[1]/'panel.json','score_report':score,'fair_shape_artifact':fair,'sample_id':'x','field':'a','alpha':.5,'label':'C8 reference-only'}
     meta=sss.build_sss_figure(spec,png_path=tmp_path/'sss.png',pdf_path=tmp_path/'sss.pdf')
     assert meta['direction']==pytest.approx([.6,.8]) and meta['shape_unit']=='self.a.positive'
     assert meta['band_names']==['low','high'] and shape.loaded=={'frozen':True}
+    assert meta['label']=='C8 reference-only'
     assert (tmp_path/'sss.png').is_file() and (tmp_path/'sss.pdf').read_bytes().startswith(b'%PDF')
     with pytest.raises(ValueError,match='score report differ'):
         sss.build_sss_figure({**spec,'alpha':.25},png_path=tmp_path/'bad.png',pdf_path=tmp_path/'bad.pdf')

@@ -60,6 +60,12 @@ def fork_warmup(warmup_dir, *, case_dir, retained_config, qualification=False):
             or bool(checkpoint.get("qualification_only", False)) != qualification):
         raise ValueError("shared warmup must contain exactly ten completed epochs in its declared qualification/formal mode")
     runtime = checkpoint["round8_runtime"]
+    from .round8_runtime import VERSION as runtime_version
+    from ..coherence.round8_queries import VERSION as query_version
+    if runtime.get("version") != runtime_version or runtime.get("sampler", {}).get("version") != query_version:
+        raise ValueError("warmup probe/runtime protocol differs; fresh warmup required")
+    if runtime.get("stream_protocol", {}).get("version") != "round8_common_warmup_stream_v1":
+        raise ValueError("warmup common stream protocol differs; fresh warmup required")
     calibration = runtime["calibration"]
     if (runtime["mode"] != "warmup" or runtime["step"] != expected_step
             or calibration["coefficients"] is None

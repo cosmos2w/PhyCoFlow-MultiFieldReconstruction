@@ -241,8 +241,9 @@ def computation_decision(source_report, b8_raw, c8_raw, *, floors, b8_cost, c8_c
 
     Each cost has per-update GPU seconds including callbacks, calibration and
     half shared warmup, actual update count, measurement device identity and
-    campaign GPU seconds. Different devices require caller-supplied same-device
-    amortized measurements with a shared comparison_device.
+    campaign GPU seconds. Same-class devices use their actual occupied times;
+    different device types require caller-supplied same-device amortized
+    measurements with a shared comparison_device.
     """
     if b8_raw['alpha']!=1 or c8_raw['alpha']!=1: raise ValueError('raw endpoint scores required')
     reports=(source_report,b8_raw,c8_raw)
@@ -259,7 +260,7 @@ def computation_decision(source_report, b8_raw, c8_raw, *, floors, b8_cost, c8_c
     gain=any(-change[k]>=MATERIALITY[k] for k in KEYS)
     for cost in (b8_cost,c8_cost):
         if cost['actual_updates']<=0 or cost['amortized_seconds_per_update']<=0 or cost['campaign_gpu_seconds']<0 or not cost.get('comparison_device'): raise ValueError('complete positive cost measurements required')
-    if b8_cost['comparison_device']!=c8_cost['comparison_device'] or b8_cost['actual_updates']!=c8_cost['actual_updates']: raise ValueError('same-device comparison and matched updates required')
+    if b8_cost['comparison_device']!=c8_cost['comparison_device'] or b8_cost['actual_updates']!=c8_cost['actual_updates']: raise ValueError('same-class or normalized same-device comparison and matched updates required')
     ratio=c8_cost['amortized_seconds_per_update']/b8_cost['amortized_seconds_per_update']
     adopted=quality and (ratio<=.9 or (gain and ratio<=1.1))
     return {'retain_c8_default':adopted,'quality_preserved':quality,'qualifying_quality_gain':gain,'score_change':change,'field_risk_increase':(rc-rb).tolist(),'cost_ratio':ratio,'b8_cost':b8_cost,'c8_cost':c8_cost}

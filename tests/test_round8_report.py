@@ -19,12 +19,13 @@ def test_report_render_and_field_error_annotation(tmp_path,monkeypatch):
     history.write_text('\n'.join(json.dumps({'epoch':e,'round8':{'scores':{'state':{'raw':2/e,'calibrated':1/e},'shape':{'raw':3/e,'calibrated':2/e}}}}) for e in (1,10,20)))
     decision=tmp_path/'decision.json'
     decision.write_text(json.dumps({'schema':'round8_campaign_decision_v1','operational':{'choice':'SOURCE'},'computation_by_population':{}}))
-    result=report.build_report(tmp_path/'result',decision_path=decision,histories={'C8':history},reconstructions=[{'source_panel':folders[0]/'panel.json','endpoint_panel':folders[1]/'panel.json','sample_id':'x','field':'T','alpha':.5,'member':0}])
+    result=report.build_report(tmp_path/'result',decision_path=decision,histories={'C8':history},reconstructions=[{'source_panel':folders[0]/'panel.json','endpoint_panel':folders[1]/'panel.json','sample_id':'x','field':'T','alpha':.5,'member':0,'label':'C8 reference-only'}])
     assert result['reconstructions'][0]['rmse']==pytest.approx(.5)
     assert result['verification']['png_images_decoded']==2
     assert result['verification']['pdf_pages_decoded']==2
     content=Path(result['markdown']).read_text()
     assert 'weighted RMSE' in content and 'TRAIN' in content and 'SOURCE' in content
+    assert result['reconstructions'][0]['label']=='C8 reference-only' and 'C8 reference-only' in content
     assert (tmp_path/'result/REPORT.html').is_file()
     with pytest.raises(FileExistsError): report.build_report(tmp_path/'result')
 
@@ -82,3 +83,23 @@ def test_report_includes_fixed_source_raw_and_selected_values(tmp_path):
     text=Path(out['markdown']).read_text()
     assert 'Raw endpoint' in text and 'SOURCE-normalized gains' in text and 'TRAIN member risks' in text
     assert Path(out['pdf']).is_file()
+
+
+def test_non_nominated_endpoint_still_reports_source_scores_and_raw_native_risks(tmp_path,monkeypatch):
+    from phycoflow_reconstruction.evaluation.round8_decision import KEYS
+    def score(name, alpha, risk):
+        path=tmp_path/name
+        path.write_text(json.dumps({'schema':'round8_common_observers_v1','population':'ASSESS',
+            'alpha':alpha,'member_risk_physical':risk,'rows':[{'losses':dict.fromkeys(KEYS.values(),.75)}]}))
+        return path
+    source=score('source.json',0.,[0.,1.]);raw=score('raw.json',1.,[.2,1.21])
+    assessment=tmp_path/'assessment.json'
+    assessment.write_text(json.dumps({'schema':'round8_assessment_v1','endpoint':'C8','alpha':None,
+        'eligible':False,'reason':'no TRAIN-nominated blend','field_names':['a','T'],
+        'source_report':str(source),'raw_report':str(raw)}))
+    monkeypatch.setattr(report,'validate_report',lambda output:{})
+    result=report.build_report(tmp_path/'result',assessment_paths={'C8':assessment})
+    text=Path(result['markdown']).read_text()
+    assert '| C8 | SOURCE | state | unavailable | 0.75 |' in text
+    assert '| a | 0 | 0.2 | unavailable | unavailable |' in text
+    assert '| T | 1 | 1.21 | 1.21 | 10.00% |' in text

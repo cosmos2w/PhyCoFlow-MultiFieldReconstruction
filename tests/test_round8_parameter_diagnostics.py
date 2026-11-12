@@ -54,7 +54,7 @@ def test_control_shape_and_scale_live_blocks_reproduce_family_gradients():
     from phycoflow_reconstruction.training.round8_runtime import Round8Runtime
     runtime=Round8Runtime.__new__(Round8Runtime)
     runtime.mode='control'; runtime.manages_queries=False; runtime.epoch=100; runtime.step=99; runtime.steps_per_epoch=1
-    runtime.fields=('a','b'); runtime.blocks={}
+    runtime.fields=('a','b'); runtime.blocks={}; runtime.family_scores={}
     shape, x, y, coords=setup()
     first=x.detach().requires_grad_(); second=(x*.8+.1).detach().requires_grad_()
     actual=runtime.score_family('topology',shape,first,y,coordinates=coords,context={'conditional_draws':(second,)})

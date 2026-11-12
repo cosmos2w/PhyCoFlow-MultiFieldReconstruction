@@ -19,7 +19,7 @@ from ..coherence.round8_state import score_family as state_score
 from .round8_calibration import InternalCalibration, PROBES, gradient_norm
 from .round8_policy import physical_risk
 
-VERSION = "round8_training_runtime_v1"
+VERSION = "round8_training_runtime_v3_common_stream"
 
 
 class Round8Runtime:
@@ -134,11 +134,20 @@ class Round8Runtime:
     def _probe_due(self):
         return self.mode == "warmup" and self.epoch in PROBES and self.step % self.steps_per_epoch == 0
 
-    def training_batch(self, ordinary_batch):
-        return self.probe_batch if self._probe_due() else ordinary_batch
+    @staticmethod
+    def stream_protocol(artifacts):
+        indices = artifacts["probe_query_indices"].detach().cpu().contiguous()
+        return {"version": "round8_common_warmup_stream_v1",
+                "fixed_batch_epochs": list(PROBES), "position": "first_update",
+                "sample_ids": list(artifacts["probe_sample_ids"]),
+                "dataset_indices": list(artifacts["probe_dataset_indices"]),
+                "query_indices_sha256": hashlib.sha256(indices.numpy().tobytes()).hexdigest(),
+                "sensor_seed": int(artifacts.get("probe_seed", 800047)),
+                "rollout_seed": "ordinary_step_schedule", "probe": "ordinary_output_graph"}
 
-    def rollout_seed(self, ordinary_seed):
-        return int(self.artifacts.get("probe_seed", 800047)) + 1_000_003 if self._probe_due() else ordinary_seed
+    def training_batch(self, ordinary_batch):
+        """Apply the declared common stream independently of probe execution."""
+        return self.probe_batch if self._probe_due() else ordinary_batch
 
     def _state_with_bank(self, family, prediction, reference, context, coefficients, bank):
         from ..coherence.base import require_field_tensor
@@ -211,6 +220,10 @@ class Round8Runtime:
                 result, state_blocks = self._state_control(family, prediction, reference, context)
             else:
                 result = family(prediction, reference, coordinates=coordinates, context=context)
+            label = {"global_distribution": "state", "multiscale_spectrum": "scale", "topology": "shape"}.get(name)
+            if label is not None:
+                value = float(result.scalar_loss.detach())
+                self.family_scores[label] = {"raw": value, "calibrated": value}
             if self._diagnostic_due():
                 self.diagnostic_identity = {"sample_ids": list(context.get("sample_ids", ())), "field_order": list(self.fields)}
                 if name == "global_distribution":
@@ -285,8 +298,7 @@ class Round8Runtime:
             return
         if any(row["epoch"] == self.epoch for row in self.calibration.records):
             return
-        # The predeclared first ordinary batch of each probe epoch is reused;
-        # no new model forward, training RNG change or optimizer update occurs.
+        # The fixed common-stream batch reuses the ordinary output graph.
         if self.step % self.steps_per_epoch:
             raise ValueError("missing predeclared first-batch calibration probe")
         probe_batch = endpoint["batch"]
@@ -404,12 +416,15 @@ class Round8Runtime:
     def state_dict(self):
         return {"version": VERSION, "mode": self.mode, "step": self.step,
                 "artifact_identity": self._artifact_identity(),
+                "stream_protocol": self.stream_protocol(self.artifacts),
                 "calibration": self.calibration.state_dict(),
                 "sampler": self.sampler.state_dict()}
 
     def load_state_dict(self, state):
         if state["version"] != VERSION or state["artifact_identity"] != self._artifact_identity():
             raise ValueError("Round 8 runtime implementation/artifact identity differs")
+        if state.get("stream_protocol") != self.stream_protocol(self.artifacts):
+            raise ValueError("Round 8 common warmup stream differs")
         # A fork must also originate from probes using this exact query protocol.
         from ..coherence.round8_queries import VERSION as query_version
         if state["sampler"].get("version") != query_version:
