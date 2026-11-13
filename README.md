@@ -4,7 +4,7 @@
 
 > <strong style="color: #d1242f;">🔴 Recommended new profile: Scalable Anchored Coherence, with dense SOURCE-relative Lagrangian fidelity and three-family ConFIG.</strong> Start from [the shared fragment](configs/defaults/scalable_anchored_coherence.yaml); supply your case's fields, geometry, physical measure, units and completed SOURCE. Existing profiles retain their definitions and behavior.
 
-> **Check before using a new dataset:** Fit and freeze the representations on TRAIN, verify field order and spatial support, choose physical floors and a fidelity allowance, and assess matched held-out samples. Qualify your own SOURCE-output anchoring coefficient and record the cost of evaluating both models. The research coefficient is an example, not a setting for a new case.
+> **Have a dataset and a trained SOURCE?** Follow [the recommended profile](#611-start-with-the-recommended-profile), then [validate and launch](#63-validate-launch-and-resume-on-your-data). `post-train` automatically fits the coherence representations on TRAIN before its first optimizer update; no separate fit script is needed. You supply the physical measure, geometry, task floors and fidelity allowance.
 
 > **Development and reference status:** The model choices in [§5.2](#52-select-a-model) describe available interfaces and reference configurations; they do not establish an accuracy ranking or efficacy on your dataset. The new `fast_lagrangian`, `lpc_ordered`, and `execution_strategy` methods remain [experimental development/testing routes](docs/posttraining/FAST_LAGRANGIAN_LPC_USER_GUIDE.md). The EDM DiffusionPDE workflow also needs fresh training and case-specific evaluation.
 
@@ -43,6 +43,9 @@ Physics-informed training and historical compatibility routes are available, but
   - [5.4 Model-specific examples](#54-model-specific-examples)
 - [6. Coherence post-training](#6-coherence-post-training)
   - [6.1 Prepare a portable configuration](#61-prepare-a-portable-configuration)
+    - [6.1.1 Start with the recommended profile](#611-start-with-the-recommended-profile)
+    - [6.1.2 What the trainer fits automatically](#612-what-the-trainer-fits-automatically)
+    - [6.1.3 Configure alternative family profiles](#613-configure-alternative-family-profiles)
   - [6.2 Choose scalarization, gradient balancing and fidelity feedback](#62-choose-scalarization-gradient-balancing-and-fidelity-feedback)
   - [6.3 Validate, launch and resume on your data](#63-validate-launch-and-resume-on-your-data)
   - [6.4 Physics post-training and direct training](#64-physics-post-training-and-direct-training)
@@ -351,11 +354,102 @@ Stage 2 strictly loads and freezes the Stage-1 autoencoder. It is the sparse rec
 
 ## 6. Coherence post-training
 
-Post-training creates a child from your completed, immutable **SOURCE** run. Its dataset, model, observations and normalization are inherited from `resolved_config.yaml`, and the selected checkpoint is loaded strictly. The SOURCE is hashed before and after training and remains unchanged. First prepare your dataset and case (§3–4) and train a base model (§5); no shared research dataset or another user's run directory is required.
+Post-training creates a child from your completed **SOURCE** run. Have your case launcher, dataset and SOURCE run directory ready; the directory supplies `resolved_config.yaml` and the chosen file under `checkpoints/`. If you are starting with a new dataset, register its case and data contract in §3–4 and train its SOURCE using §5. If your SOURCE is already trained, start below.
+
+The child inherits the SOURCE's dataset, model, observations and normalization. You configure its coherence geometry, physical measure and training settings. On a fresh child, `post-train` fits and saves the TRAIN representations automatically before the first optimizer update. The SOURCE checkpoint is hashed before and after training and remains unchanged.
 
 ### 6.1 Prepare a portable configuration
 
-For a new three-family case, use [Scalable Anchored Coherence](docs/Scalable_Anchored_Coherence.md). Its shared fragment selects the scalable computation profile; your case supplies the scientific settings. The full-query reference and existing family profiles remain useful for qualification. The templates below also describe the established configuration interface and legacy routes.
+#### 6.1.1 Start with the recommended profile
+
+Create `cases/<case>/configs/posttrain/scalable_coherence.yaml` using this standalone profile. Replace `<case>` with your registered case name. The shared fragment defines State, Scale and Shape, their sampled computation, family ConFIG and dense SOURCE-relative fidelity feedback. All fields come from your dataset's ordered field list; the single-field case automatically omits mutual terms.
+
+```yaml
+# cases/<case>/configs/posttrain/scalable_coherence.yaml
+defaults:
+  - ../../../../configs/defaults/scalable_anchored_coherence.yaml
+
+stage: post_training
+case: <case>
+source_run: null                  # supplied at launch
+source_checkpoint: last.pt
+inherit_base_config: true
+source: {kind: native_run, allow_integration_source: false}
+
+# Example for a complete rectilinear snapshot domain.
+dataset: {physical_measure: native_rectilinear_area}
+
+# Set these to your intended SOURCE reconstruction protocol.
+rollout: {steps: 2, solver: euler}
+observation_consistency: {mode: endpoint_smooth, strength: 1.0, sigma: 0.05, schedule_power: 2.0, final_clamp: true, chunk_size: 4096}
+
+optimization:
+  epochs: 100
+  batch_size: 16
+  train_fraction: 0.2
+  lr: 5.0e-5
+  weight_decay: 1.0e-6
+  grad_clip: 1.0
+  gradient_balance: weighted_sum
+  multitask:
+    fidelity_budget: {relative_increase: 0.10}
+
+coherence:
+  family_balance: {mode: none}
+  compute_budget: {batch_size: 16, point_count: 4096, query_seed: 100045}
+  families:
+    multiscale_spectrum:
+      geometry: {operator: fem_p1, coordinate_scaling: none}
+      bands: {count: 2}
+      calibration: {field_unit_floor: 0.0001}
+    topology:
+      geometry: {grid_shape: [32, 32]}
+
+runtime: {seed: 42, device: cuda:0, deterministic: true, num_workers: 0, data_strategy: async_cpu, progress: true}
+evaluation: {split: validation, max_samples: 32, query_points: 4096, generation_steps: 2, seed: 2027}
+checkpointing: {enabled: true, every_epochs: 10, save_epoch_one: true, selection_metric: reconstruction_mse}
+output: {experiment_name: coherence_posttraining}
+```
+
+Choose the example's budgets for your data: set `evaluation.max_samples` to approximately 10% of the validation conditions and use matched sample IDs across comparisons. Set `point_count` and `evaluation.query_points` to the same supported spatial query budget, and keep `generation_steps` aligned with the rollout. `train_fraction` controls training exposure, independently of evaluation coverage. Loss curves refresh every 10 completed epochs through the shared fragment.
+
+| You provide | The trainer computes |
+|---|---|
+| SOURCE run and checkpoint, with its dataset/model/observation contract | Strict SOURCE loading and shared reconstruction endpoints |
+| Physical integration measure: native nodal area weights for the example, or explicit native weights with a geometry/units receipt | Weighted occupation distances and sampling-corrected field risks |
+| Scale coordinate units, geometry, bands and positive field-unit floors | TRAIN spectral representation, scales and connected-piece means |
+| Shape raster, boundary/periodicity and interpolation or physical-overlap mapping | Fixed TRAIN transforms and pooled persistence-distance scales |
+| Epoch horizon, learning rate, batch/query budgets and per-field fidelity allowance | Internal gradient calibration, query sampling and online fidelity feedback |
+
+The automatic profile operates on snapshot data with compact valid query points and a differentiable SOURCE that accepts selected-query inference; Shape uses a two-dimensional raster. Choose the geometry, boundary conventions and floors in the [profile guide](docs/Scalable_Anchored_Coherence.md) for your domain. With `inherit_base_config: true`, dataset, model and observation settings come from the SOURCE; the child's explicit `dataset.physical_measure` is retained. Fields, units and dataset paths therefore belong in the SOURCE's case contract.
+
+Use this standalone file when moving from an older profile: YAML defaults merge recursively, so an old common file can carry additional families or optimizer settings into the new method. The [alternative profiles below](#613-configure-alternative-family-profiles) and §6.2 describe those choices separately; the shared fragment already supplies the recommended optimizer policy.
+
+#### 6.1.2 What the trainer fits automatically
+
+Run the commands in §6.3 after choosing the case settings above. `validate` checks the resolved configuration and dataset. The first `post-train` creates a child and performs the following sequence:
+
+1. Load the selected SOURCE and TRAIN data. Fit family geometry and reference scales, select informative State directions from matched TRAIN/SOURCE reconstructions, and fit Shape transforms and pooled scales. Scalable prefit uses a reproducible bounded TRAIN sample: up to `min(32, ceil(0.1 * TRAIN conditions))` by default; `coherence.scalable_anchored_coherence.max_samples` changes its cap.
+2. Save the fitted representations in the child's `artifacts/` directory, freeze them, and calibrate the SOURCE-relative field-risk reference. These preparation stages perform no optimizer updates.
+3. Begin child training. The model adapter automatically selects two independent members and fair scores for generative models, or one prediction and paired distances for deterministic models. Every family shares the same reconstructed members. `target_use: paired_supervised` means each condition has a dense reference; it supports either scoring mode.
+4. Probe internal component gradients on the first ordinary training batch at epochs 1, 3, 6, 8 and 10. Freeze those coefficients after epoch 10 and continue training with them. This early-training calibration is separate from the representation fitting completed before training.
+
+No separate fit command or manual fair/paired switch is needed. The profile fits from TRAIN data and the completed SOURCE; validation is used for assessment and checkpoint selection.
+
+| Child output | Purpose |
+|---|---|
+| `artifacts/global_distribution_family.pt`, `artifacts/multiscale_spectrum_family.pt`, `artifacts/topology_family.pt` | Fitted family definitions, geometry and reference scales |
+| `artifacts/scalable_coherence.pt` | Frozen State direction bank, pooled Shape calibration and TRAIN/SOURCE/data identities |
+| `artifacts/scalable_fit_cost.json` | Scalable prefit sample count, SOURCE forward count and elapsed time |
+| `artifacts/fidelity_budget_reference.json` | Per-field SOURCE risk reference and fidelity-budget settings |
+| `logs/history.jsonl`, `logs/scalable_updates.jsonl` and curve PNG/PDF files in `logs/` | Recorded training losses, sampler/calibration journal and loss curves |
+| `checkpoints/last.pt` | Recovery model, optimizer, sampler, controller, calibration and random states |
+
+Resume the same child with the same profile and SOURCE to reload its fitted artifacts and continue its saved calibration/training state. Keep the whole child run directory when moving a run. For several pretrained SOURCEs, launch a fresh child for each: every child creates its own fit files binding the SOURCE checkpoint, field order, normalization, TRAIN data and query support.
+
+#### 6.1.3 Configure alternative family profiles
+
+The following templates cover custom family subsets and the established configuration routes. For the recommended three-family method, use §6.1.1 and proceed directly to §6.3. Full-query references and detailed definitions are described in the [Scalable Anchored Coherence guide](docs/Scalable_Anchored_Coherence.md).
 
 Keep reusable family definitions in `cases/<case>/configs/coherence/` and launch profiles in `cases/<case>/configs/posttrain/`. Commit reusable configuration with `source_run: null`; supply your local SOURCE at launch. Choose the fields, field pairs, query geometry and statistical targets appropriate to your own data. The State, Scale and Shape registry names are `global_distribution`, `multiscale_spectrum` and `topology`; legacy `cross_spectrum` remains available. They share reconstruction draws from the same observation batch.
 
@@ -418,6 +512,8 @@ For `target_use: paired_supervised`, disable the reference bank and supply each 
 Use `coherence.family_balance.mode: none` for unit family scales, or `initial_grad_norm` for one-time SOURCE gradient calibration. These scales and `coherence.families.<name>.weight` set relative family contributions; they are separate from the scalarization and gradient algorithms below. Adapt rollout settings to the source model's reconstruction contract; the example's two Euler steps are a budget choice, not a requirement for every architecture.
 
 ### 6.2 Choose scalarization, gradient balancing and fidelity feedback
+
+The recommended profile in §6.1.1 already selects three-family ConFIG and dense Lagrangian feedback with physical-measure field risks. Use this section when configuring another aggregation or fidelity route; its standalone examples use the established endpoint-MSE metric.
 
 Set `optimization.gradient_balance: weighted_sum` when using the explicit `optimization.multitask` interface. Choose one of the following routes; native reconstruction loss means the source model's own training loss, which can differ across architectures.
 
@@ -486,11 +582,11 @@ For `rectify` or the barrier, replace the entire `external_policy` map and use o
 
 ### 6.3 Validate, launch and resume on your data
 
-Run these commands from the repository root after creating the profile above. Replace the values with your case, local completed SOURCE and available device. Config and relative run paths are resolved against `cases/$CASE_NAME/`; absolute SOURCE paths also work. Choose `best.pt` or `last.pt` deliberately and keep that choice fixed for the experiment.
+Run these commands from the repository root after saving the profile in §6.1.1. Install the post-training extras from §1 first. Replace the values with your case, completed SOURCE and available device. Config paths and relative SOURCE paths resolve against `cases/$CASE_NAME/`. Use the printed absolute child directory for resume and assessment below. Choose `best.pt` or `last.pt` and keep that checkpoint fixed for the child.
 
 ```bash
 CASE_NAME=your_case
-PROFILE=configs/posttrain/your_profile.yaml
+PROFILE=configs/posttrain/scalable_coherence.yaml
 SOURCE_RUN=/absolute/path/to/your/completed/base-run
 DEVICE=cuda:0
 
@@ -503,35 +599,46 @@ python "cases/$CASE_NAME/run.py" post-train \
   --override source_checkpoint=last.pt --override runtime.device="$DEVICE" \
   --override output.experiment_name=posttraining_smoke --max-steps 1
 
-# Start a fresh full child after the bounded smoke succeeds.
+# Start a fresh child for the configured epoch horizon.
 python "cases/$CASE_NAME/run.py" post-train \
   --config "$PROFILE" --override source_run="$SOURCE_RUN" \
   --override source_checkpoint=last.pt --override runtime.device="$DEVICE" \
-  --override output.experiment_name=posttraining
+  --override output.experiment_name=coherence_posttraining
 ```
 
-Validation checks the composed config, inherited contracts and dataset; the bounded smoke additionally loads the model and executes an update. Keep smoke outputs separate from full experiments. Save the full child's printed directory, then use it for continuation and evaluation:
+`validate` checks the composed configuration, inherited contracts and dataset without fitting or training. The smoke command performs the automatic TRAIN fit and then one optimizer update; its preparation cost depends on the SOURCE, data and geometry. The full child performs its own fit and trains for `optimization.epochs`. Save the printed child directory and inspect its `artifacts/`, `logs/` and checkpoints using the output table in §6.1.2.
+
+After completion, `evaluation/before.json` assesses SOURCE and `evaluation/after.json` assesses the final child state on the matched panel, including the scalable observer's family scores and physical field-risk comparisons. Use the same declared support, weight selection and sample identities when comparing children. The profile's fidelity allowance controls online TRAIN feedback; use the held-out family scores and per-field errors to choose an output.
+
+To resume an interrupted child or render its saved history:
 
 ```bash
-CHILD_RUN=runs/posttraining/CHILD_ID
+CHILD_RUN=/absolute/path/to/the/printed/child-directory
 # Resume only if interrupted; retain the same SOURCE, profile and overrides.
 python "cases/$CASE_NAME/run.py" post-train \
   --config "$PROFILE" --override source_run="$SOURCE_RUN" \
   --override source_checkpoint=last.pt --override runtime.device="$DEVICE" \
-  --override output.experiment_name=posttraining --resume "$CHILD_RUN"
+  --override output.experiment_name=coherence_posttraining --resume "$CHILD_RUN"
 
+# Use the same assessment budgets selected in your profile.
+EVAL_SAMPLES=32                    # approximately 10% of validation conditions
+QUERY_POINTS=4096
+GENERATION_STEPS=2
 python "cases/$CASE_NAME/run.py" evaluate-run \
   --run "$CHILD_RUN" --checkpoint best --split validation \
-  --max-samples 32 --query-points 4096 --generation-steps 2 \
+  --max-samples "$EVAL_SAMPLES" --query-points "$QUERY_POINTS" \
+  --generation-steps "$GENERATION_STEPS" \
   --device "$DEVICE" --weight-selection live --report-name selected_validation
 
 python "cases/$CASE_NAME/run.py" render-history --run "$CHILD_RUN"
 python scripts/posttraining/summarize_runs.py \
-  --run my_method="cases/$CASE_NAME/$CHILD_RUN" \
+  --run "my_method=$CHILD_RUN" \
   --output reports/my_posttraining_summary
 ```
 
-An unchanged resume restores optimizer, policy, calibration, family/RNG/EMA state and warm-up progress. For a different method, budget, SOURCE or scientific definition, create a fresh child; extending a saved horizon is a separate [continuation operation](docs/Posttraining_Strategies.md). The evaluation above measures reconstruction on validation; use the coherence assessments in §7 as well, and match evaluation budgets and weight selection to your protocol. Inspect per-field fidelity as well as aggregate scores: a TRAIN allowance is not a held-out guarantee, and `best_fidelity.pt` need not meet every field's guard. Keep TEST separate from checkpoint selection.
+An unchanged resume reuses the saved TRAIN fit and restores optimizer, policy, calibration, family/RNG/EMA state and warm-up progress. For a different method, budget, SOURCE or scientific definition, create a fresh child; extending a saved horizon is a separate [continuation operation](docs/Posttraining_Strategies.md). `evaluate-run --checkpoint best` reports reconstruction errors for the selected checkpoint; the automatic before/after assessment reports coherence scores for SOURCE and the final child. Use the [frozen-observer interface](docs/Scalable_Anchored_Coherence.md#matched-evaluation) for a common comparison of saved outputs across models, and §7 for additional family-specific views. Keep TEST separate from checkpoint selection.
+
+For optional SOURCE-output anchoring, use the [matched-output interface](docs/Scalable_Anchored_Coherence.md#source-output-anchoring): choose the blend coefficient on TRAIN, freeze it, then assess the blended output on held-out samples. Record the cost of running SOURCE and child. Output blending is a separate assessment/inference step; the post-training command trains the child.
 
 New histories and curve PDF/PNG files are stored under the run's `logs/` directory. Readers also accept older `metrics/` histories. Curves refresh when history first becomes available, every 10 completed epochs, and at validation, pause and completion. Resume restores query and calibration state with the optimizer and archives records beyond the recovered checkpoint.
 
@@ -862,16 +969,20 @@ For new `self_spectrum` or topology methods, use a focused branch and experiment
 6. Run the repository checks below, review `git diff --check`, and inspect the final diff for local paths, payloads, run IDs, and generated artifacts.
 7. Commit logical units and open a pull request to `main`. Describe scientific intent, test evidence, and compatibility impact.
 
-The local acceptance checks are:
+For documentation-only edits, check the rendered text, local links and any changed command/config examples. CI keeps the required `cpu-contracts` check and skips Python setup, dependency installation and the CPU suite for documentation-only diffs. Code, configuration, dependency and workflow changes run the full checks; a manual workflow dispatch also runs them.
+
+For implementation changes, run Ruff and focused tests for the affected behavior locally. CI runs the full CPU suite with CPU-only PyTorch and reports the slowest tests. Canonical case configuration validation is included in that suite.
 
 ```bash
 ruff check src tests scripts cases benchmarks
-pytest
 ```
 
 Useful focused checks include:
 
 ```bash
+# Run the relevant test module (configuration example).
+pytest tests/test_config_contracts.py
+
 # Validate a changed launch profile.
 python cases/<case>/run.py validate --config configs/<stage>/<profile>.yaml
 

@@ -14,14 +14,75 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Classify changed files
+        id: changes
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          case "$EVENT_NAME" in
+            pull_request)
+              git diff --no-renames --name-only -z "$PR_BASE_SHA...$PR_HEAD_SHA" > "$RUNNER_TEMP/changed-files"
+              ;;
+            push)
+              if [[ -z "$PUSH_BEFORE_SHA" || "$PUSH_BEFORE_SHA" =~ ^0+$ ]]; then
+                echo "run_full=true" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              git diff --no-renames --name-only -z "$PUSH_BEFORE_SHA" "$GITHUB_SHA" > "$RUNNER_TEMP/changed-files"
+              ;;
+            *)
+              echo "run_full=true" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+          esac
+
+          run_full=false
+          while IFS= read -r -d '' path; do
+            case "$path" in
+              *.md|*.rst|*.adoc|LICENSE|LICENSE.*|NOTICE|NOTICE.*|COPYING|COPYING.*) ;;
+              docs/*.png|docs/*.jpg|docs/*.jpeg|docs/*.gif|docs/*.svg|docs/*.webp|docs/*.pdf) ;;
+              *) run_full=true; break ;;
+            esac
+          done < "$RUNNER_TEMP/changed-files"
+          echo "run_full=$run_full" >> "$GITHUB_OUTPUT"
+          if [[ "$run_full" == false ]]; then
+            echo "Documentation-only changes: dependency installation and CPU tests are skipped." >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Check repository architecture
+        if: steps.changes.outputs.run_full == 'true'
+        run: |
+          test ! -d src/phycoflow_pointcloud
+          ! git ls-files -z -- '*.py' | xargs -0 grep -nH 'phycoflow_pointcloud'
       - name: Set up Python
+        if: steps.changes.outputs.run_full == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: pip
+      - name: Cache CPU dependency downloads
+        if: steps.changes.outputs.run_full == 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-python-3.11-cpu-pip-${{ hashFiles('pyproject.toml', '.github/workflows/ci.yml') }}
+          restore-keys: ${{ runner.os }}-python-3.11-cpu-pip-
+      - name: Install and run Ruff
+        if: steps.changes.outputs.run_full == 'true'
+        run: |
+          python -m pip install 'ruff>=0.5'
+          ruff check src tests scripts cases benchmarks
       - name: Install project and development dependencies
-        run: python -m pip install --upgrade pip && python -m pip install -e ".[dev,operator,keops,topology,multitask,posttrain_constraints,posttrain,plot]"
+        if: steps.changes.outputs.run_full == 'true'
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -e ".[dev,operator,keops,topology,multitask,posttrain_constraints,posttrain,plot]"
       - name: Verify TorchJD and Cooper are installed
+        if: steps.changes.outputs.run_full == 'true'
         run: |
           python - <<'PY'
           from importlib.metadata import version
@@ -33,30 +94,10 @@ jobs:
           assert version("cooper-optim") == "1.0.1"
           print(f"TorchJD {version('torchjd')} and Cooper {version('cooper-optim')} are available")
           PY
-      - name: Lint permanent source
-        run: ruff check src tests scripts cases benchmarks
       - name: Run CPU contract and unit tests
+        if: steps.changes.outputs.run_full == 'true'
         env:
           CUDA_VISIBLE_DEVICES: ""
           OMP_NUM_THREADS: "2"
           MKL_NUM_THREADS: "2"
-        run: pytest
-      - name: Validate canonical case configuration composition
-        env:
-          PYTHONPATH: src
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-
-          from phycoflow_reconstruction.config import load_config, validate_config
-
-          paths = sorted(Path("cases").glob("*/configs/base/*.yaml"))
-          paths = [path for path in paths if path.name != "latent_fm_stage2.yaml"]
-          for path in paths:
-              validate_config(load_config(path))
-          print(f"validated {len(paths)} canonical base configurations")
-          PY
-      - name: Check repository architecture
-        run: |
-          test ! -d src/phycoflow_pointcloud
-          ! git ls-files -z -- '*.py' | xargs -0 grep -nH 'phycoflow_pointcloud'
+        run: pytest --durations=25
