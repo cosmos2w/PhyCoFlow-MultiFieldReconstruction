@@ -1,8 +1,7 @@
 """Bounded, TRAIN-only fitting of reusable scalable coherence artifacts.
 
 Callers select approximately 10% of TRAIN in a reproducible order and provide
-matched SOURCE outputs. The default limit is 32 samples; override explicitly
-when a different bounded fit budget is justified. No training RNG is consumed.
+matched SOURCE outputs. No training RNG is consumed.
 """
 
 from __future__ import annotations
@@ -102,9 +101,33 @@ def _digest(value):
     return h.hexdigest()
 
 
+def _adaptive_input_binding(*, source, reference, coordinates, source_weights, reference_weights, identity, core):
+    """Bind frozen discovery to actual fit tensors and the reusable C8 body."""
+    from copy import deepcopy
+
+    core_body = {k: deepcopy(core[k]) for k in ("state_bank", "shape_artifact", "priorities", "units", "active")}
+    core_body["shape_artifact"]["provenance"].pop("config_sha256", None)
+    def tensor_digest(value):
+        tensor = value.detach().cpu().contiguous()
+        digest = hashlib.sha256()
+        digest.update((str(tensor.dtype) + repr(tuple(tensor.shape))).encode())
+        data = memoryview(tensor.numpy()).cast("B")
+        for start in range(0, len(data), 8 * 1024 * 1024):
+            digest.update(data[start:start + 8 * 1024 * 1024])
+        return digest.hexdigest()
+    return _digest({
+        "schema": "adaptive_source_input_v1", "members": tensor_digest(source),
+        "reference": tensor_digest(reference), "coordinates": tensor_digest(coordinates),
+        "source_weights": tensor_digest(source_weights),
+        "reference_weights": tensor_digest(reference_weights),
+        "identity": {k: v for k, v in identity.items() if k != "config_sha256"},
+        "core_body": core_body,
+    })
+
+
 def validate_scalable_artifacts(artifacts, expected_provenance):
     expected = _identity(expected_provenance)
-    if not isinstance(artifacts, Mapping) or set(artifacts) != {
+    if not isinstance(artifacts, Mapping) or set(artifacts) - {"adaptive_bank"} != {
         "version",
         "state_bank",
         "shape_artifact",
@@ -127,6 +150,59 @@ def validate_scalable_artifacts(artifacts, expected_provenance):
     return artifacts
 
 
+def _discovery_anchor(
+    members,
+    reference,
+    masses,
+    *,
+    state_family,
+    bank,
+    component,
+    adapter,
+    fields,
+    coordinates,
+    batch,
+):
+    """C8 anchor on exactly the same conditional members as discovery leaves.
+
+    Its projected endpoint-gradient complement is a ranking heuristic; it is
+    not a proof that the complete C8 anchor is insufficient for a physical task.
+    """
+    if members.ndim != 4 or len(members) < 2:
+        raise ValueError("discovery anchor requires at least two members")
+    converted = [state_family._in_declared_units(item, reference)[0] for item in members]
+    target = state_family._in_declared_units(members[0], reference)[1]
+    state_result, _ = score_family(
+        torch.stack(converted),
+        target,
+        masses,
+        masses,
+        bank,
+        channel_weights=component.channel_weights,
+        marginal_weight=state_family.component_weights["self_marginal_w2"],
+        mixed_weight=state_family.component_weights.get("cross_joint_topk_swd", 0.0),
+    )
+    context = {
+        "scoring_mode": "conditional",
+        "field_order": fields,
+        "conditional_draws": tuple(members[1:]),
+        "score_all_conditional_draws": True,
+    }
+    total = state_result.scalar_loss
+    for name in ("multiscale_spectrum", "topology"):
+        result, _, _ = adapter.score(
+            name,
+            members[0],
+            reference,
+            coordinates=coordinates[:1].expand(len(reference), -1, -1),
+            context=context,
+            batch=batch,
+            coefficients={},
+        )
+        total = total + result.scalar_loss
+    return total
+
+
 def fit_scalable_artifacts(
     *,
     families,
@@ -140,10 +216,12 @@ def fit_scalable_artifacts(
     priorities=None,
     units=None,
     shape_batches=8,
-    max_samples=32,
+    max_samples=None,
     candidate_count=None,
     candidate_matrix=None,
     field_floor=1e-6,
+    adaptive_settings=None,
+    reuse_core=None,
 ):
     """Fit C8 from matched SOURCE [B,J,N,C] and TRAIN [B,N,C] tensors.
 
@@ -165,7 +243,7 @@ def fit_scalable_artifacts(
     if (
         b < 1
         or j < 1
-        or b > max_samples
+        or (max_samples is not None and b > max_samples)
         or len(identity["sample_ids"]) != b
         or len(identity["field_order"]) != c
     ):
@@ -234,146 +312,259 @@ def fit_scalable_artifacts(
     state_family = families["global_distribution"]
     if tuple(state_family.field_names) != tuple(fields):
         raise ValueError("State family field order mismatch")
-    converted = [state_family._in_declared_units(source[:, i], reference)[0] for i in range(j)]
-    target_state = state_family._in_declared_units(source[:, 0], reference)[1]
-    state_source = torch.stack(converted, dim=1)
-    cross = None
-    if "cross_joint_topk_swd" in state_family.components_by_key:
-        # torch.nn.ModuleDict supports indexing and membership, but not .get().
-        cross = state_family.components_by_key["cross_joint_topk_swd"]
+    if reuse_core is None:
+        converted = [state_family._in_declared_units(source[:, i], reference)[0] for i in range(j)]
+        target_state = state_family._in_declared_units(source[:, 0], reference)[1]
+        state_source = torch.stack(converted, dim=1)
+        cross = None
+        if "cross_joint_topk_swd" in state_family.components_by_key:
+            # torch.nn.ModuleDict supports indexing and membership, but not .get().
+            cross = state_family.components_by_key["cross_joint_topk_swd"]
 
-    cross_settings = state_family.config.get("components", {}).get("cross", {})
-    direction_seed = int(cross_settings.get("seed", 1234))
-    if candidate_matrix is not None and candidate_count is not None:
-        raise ValueError("provide a candidate matrix or a candidate count override, not both")
-    if c == 1:
-        if candidate_matrix is not None:
-            raise ValueError("one field has no mixed State directions")
-        candidates = torch.empty((0, 1), dtype=torch.float64)
-        hardness = torch.empty(0, dtype=torch.float64)
-    else:
-        if cross is None:
-            raise ValueError("State family must provide its configured mixed direction bank")
-        configured = cross.directions.detach().cpu()
-        if candidate_matrix is not None:
-            candidates = torch.as_tensor(candidate_matrix).detach().cpu()
-        elif candidate_count is None or candidate_count == len(configured):
-            candidates = configured.clone()
+        cross_settings = state_family.config.get("components", {}).get("cross", {})
+        direction_seed = int(cross_settings.get("seed", 1234))
+        if candidate_matrix is not None and candidate_count is not None:
+            raise ValueError("provide a candidate matrix or a candidate count override, not both")
+        if c == 1:
+            if candidate_matrix is not None:
+                raise ValueError("one field has no mixed State directions")
+            candidates = torch.empty((0, 1), dtype=torch.float64)
+            hardness = torch.empty(0, dtype=torch.float64)
         else:
-            candidates = projection_bank(c, candidate_count, seed=direction_seed, qmc=True)
-        if (
-            candidates.ndim != 2
-            or candidates.shape[1] != c
-            or len(candidates) == 0
-            or not torch.isfinite(candidates).all()
-            or (candidates.norm(dim=1) <= 0).any()
-        ):
-            raise ValueError("invalid mixed State candidate matrix")
-        if not torch.allclose(
-            candidates.norm(dim=1),
-            torch.ones(len(candidates), dtype=candidates.dtype),
-            rtol=1e-5,
-            atol=1e-6,
-        ):
-            raise ValueError("mixed State candidates must be unit directions")
-        hardness = fit_source_hardness(
-            [(state_source.detach(), target_state.detach(), sw, rw)],
-            candidates,
-            preserve_input=True,
-        )
-    bank = select_directions(candidates, hardness, fields, direction_seed, preserve_input=True)
-    family = families["topology"]
-    if tuple(family.field_names) != tuple(fields):
-        raise ValueError("Shape family field order mismatch")
-    family._raster_map(coordinates)
-    with torch.no_grad():
-        _, target = family._units_and_fields(reference, reference)
-        grid = gaussian_blur(
-            rasterize_fields(
-                target,
-                family.neighbor_indices,
-                family.neighbor_weights.to(target),
-                family.grid_shape,
-            ),
-            family.smoothing_sigma,
-            family.periodic,
-            radius=family.smoothing_radius,
-        ).double()
-        if family.native_masked:
-            mask = family.domain_mask.to(grid.device)
-            values = grid[..., mask]
-        else:
-            values = grid.flatten(-2)
-        mean = values.mean((0, 2))
-        scale = values.var((0, 2), unbiased=False).sqrt().clamp_min(field_floor)
-    sampler = SharedQuerySampler(fields, seed=seed, epsilon=1.0)
-    batches = []
-    for _ in range(shape_batches):
-        batches.append(sampler.draw())
-        sampler.finish()
-    shape = fit_pooled_shape(
-        family,
-        source[:, 0].detach(),
-        reference.detach(),
-        coordinates,
-        batches,
-        field_mean=mean,
-        field_scale=scale,
-        provenance=identity,
-        dimensions=getattr(family, "dimensions", (0, 1)),
-        projections=getattr(getattr(family, "spatial_objective", None), "projections", 32),
-    )
-    if units is None:
-        # Estimate semantic task units from paired SOURCE/reference blocks on the
-        # same bounded fixed panel, with no extra model calls or random draws.
-        component = state_family.components_by_key["self_marginal_w2"]
-        with torch.no_grad():
-            _, state_blocks = score_family(
-                state_source[:, 0].unsqueeze(0),
-                target_state,
-                sw,
-                rw,
-                bank,
-                channel_weights=component.channel_weights,
-                marginal_weight=state_family.component_weights["self_marginal_w2"],
-                mixed_weight=state_family.component_weights.get("cross_joint_topk_swd", 0.0),
-                mode="paired",
+            if cross is None:
+                raise ValueError("State family must provide its configured mixed direction bank")
+            configured = cross.directions.detach().cpu()
+            if candidate_matrix is not None:
+                candidates = torch.as_tensor(candidate_matrix).detach().cpu()
+            elif candidate_count is None or candidate_count == len(configured):
+                candidates = configured.clone()
+            else:
+                candidates = projection_bank(c, candidate_count, seed=direction_seed, qmc=True)
+            if (
+                candidates.ndim != 2
+                or candidates.shape[1] != c
+                or len(candidates) == 0
+                or not torch.isfinite(candidates).all()
+                or (candidates.norm(dim=1) <= 0).any()
+            ):
+                raise ValueError("invalid mixed State candidate matrix")
+            if not torch.allclose(
+                candidates.norm(dim=1),
+                torch.ones(len(candidates), dtype=candidates.dtype),
+                rtol=1e-5,
+                atol=1e-6,
+            ):
+                raise ValueError("mixed State candidates must be unit directions")
+            hardness = fit_source_hardness(
+                [(state_source.detach(), target_state.detach(), sw, rw)],
+                candidates,
+                preserve_input=True,
             )
-            adapter = ScalableQueryAdapter(families, shape)
-            collected = {key: [] for key in keys}
-            for key, value in state_blocks.items():
-                if value is not None:
-                    collected[key].append(float(value.abs()))
-            for batch in batches:
-                for family_name in ("multiscale_spectrum", "topology"):
-                    _, blocks, _ = adapter.score(
-                        family_name,
-                        source[:, 0],
-                        reference,
-                        coordinates=coordinates,
-                        context={"scoring_mode": "deterministic", "field_order": fields},
-                        batch=batch,
-                        coefficients={},
-                    )
-                    for key, value in blocks.items():
-                        if value is not None:
-                            collected[key].append(float(value.abs()))
-        units = {
-            key: max(field_floor, sum(values) / len(values)) if values else 1.0
-            for key, values in collected.items()
+        bank = select_directions(candidates, hardness, fields, direction_seed, preserve_input=True)
+        family = families["topology"]
+        if tuple(family.field_names) != tuple(fields):
+            raise ValueError("Shape family field order mismatch")
+        family._raster_map(coordinates)
+        with torch.no_grad():
+            _, target = family._units_and_fields(reference, reference)
+            grid = gaussian_blur(
+                rasterize_fields(
+                    target,
+                    family.neighbor_indices,
+                    family.neighbor_weights.to(target),
+                    family.grid_shape,
+                ),
+                family.smoothing_sigma,
+                family.periodic,
+                radius=family.smoothing_radius,
+            ).double()
+            if family.native_masked:
+                mask = family.domain_mask.to(grid.device)
+                values = grid[..., mask]
+            else:
+                values = grid.flatten(-2)
+            mean = values.mean((0, 2))
+            scale = values.var((0, 2), unbiased=False).sqrt().clamp_min(field_floor)
+        sampler = SharedQuerySampler(fields, seed=seed, epsilon=1.0)
+        batches = []
+        for _ in range(shape_batches):
+            batches.append(sampler.draw())
+            sampler.finish()
+        shape = fit_pooled_shape(
+            family,
+            source[:, 0].detach(),
+            reference.detach(),
+            coordinates,
+            batches,
+            field_mean=mean,
+            field_scale=scale,
+            provenance=identity,
+            dimensions=getattr(family, "dimensions", (0, 1)),
+            projections=getattr(getattr(family, "spatial_objective", None), "projections", 32),
+        )
+        if units is None:
+            # Estimate semantic task units from paired SOURCE/reference blocks on the
+            # same bounded fixed panel, with no extra model calls or random draws.
+            component = state_family.components_by_key["self_marginal_w2"]
+            with torch.no_grad():
+                _, state_blocks = score_family(
+                    state_source[:, 0].unsqueeze(0),
+                    target_state,
+                    sw,
+                    rw,
+                    bank,
+                    channel_weights=component.channel_weights,
+                    marginal_weight=state_family.component_weights["self_marginal_w2"],
+                    mixed_weight=state_family.component_weights.get("cross_joint_topk_swd", 0.0),
+                    mode="paired",
+                )
+                adapter = ScalableQueryAdapter(families, shape)
+                collected = {key: [] for key in keys}
+                for key, value in state_blocks.items():
+                    if value is not None:
+                        collected[key].append(float(value.abs()))
+                for batch in batches:
+                    for family_name in ("multiscale_spectrum", "topology"):
+                        _, blocks, _ = adapter.score(
+                            family_name,
+                            source[:, 0],
+                            reference,
+                            coordinates=coordinates,
+                            context={"scoring_mode": "deterministic", "field_order": fields},
+                            batch=batch,
+                            coefficients={},
+                        )
+                        for key, value in blocks.items():
+                            if value is not None:
+                                collected[key].append(float(value.abs()))
+            units = {
+                key: max(field_floor, sum(values) / len(values)) if values else 1.0
+                for key, values in collected.items()
+            }
+            if any(active[key] and not collected[key] for key in keys):
+                raise ValueError("SOURCE semantic task unit missing for an active block")
+            if any(not math.isfinite(value) or value <= 0 for value in units.values()):
+                raise ValueError("SOURCE semantic task units must be finite and positive")
+        result = {
+            "version": VERSION,
+            "state_bank": bank,
+            "shape_artifact": shape,
+            "priorities": priorities,
+            "units": units,
+            "active": active,
+            "provenance": identity,
         }
-        if any(active[key] and not collected[key] for key in keys):
-            raise ValueError("SOURCE semantic task unit missing for an active block")
-        if any(not math.isfinite(value) or value <= 0 for value in units.values()):
-            raise ValueError("SOURCE semantic task units must be finite and positive")
-    result = {
-        "version": VERSION,
-        "state_bank": bank,
-        "shape_artifact": shape,
-        "priorities": priorities,
-        "units": units,
-        "active": active,
-        "provenance": identity,
-    }
+    else:
+        from copy import deepcopy
+
+        validate_scalable_artifacts(reuse_core, reuse_core["provenance"])
+        if "adaptive_bank" in reuse_core:
+            raise ValueError("common core must come from the control artifact")
+        old = reuse_core["provenance"]
+        if any(old[k] != identity[k] for k in IDENTITY_KEYS if k != "config_sha256"):
+            raise ValueError("common core source, population or support differs")
+        result = deepcopy(reuse_core)
+        result.pop("sha256")
+        result["provenance"] = identity
+        result["shape_artifact"]["provenance"] = identity
+        bank, shape = result["state_bank"], result["shape_artifact"]
+        families["topology"]._raster_map(coordinates)
+    if adaptive_settings is not None and adaptive_settings.get("bank_artifact") is not None:
+        from pathlib import Path
+
+        from ..coherence.adaptive_fitting import validate_bank
+        from .run_store import file_sha256
+
+        if reuse_core is None or j < 2:
+            raise ValueError("frozen adaptive bank requires the common core and independent SOURCE members")
+        declaration = adaptive_settings["bank_artifact"]
+        path = Path(declaration["path"])
+        if file_sha256(path) != declaration["sha256"]:
+            raise ValueError("frozen adaptive bank file hash mismatch")
+        frozen = json.loads(path.read_text(encoding="utf-8"))
+        validate_bank(frozen, field_order=fields, support_identity=identity["support_sha256"],
+                      source_identity=identity["source_checkpoint_sha256"])
+        binding = _adaptive_input_binding(source=source, reference=reference, coordinates=coordinates,
+                                          source_weights=sw, reference_weights=rw, identity=identity, core=result)
+        if (frozen.get("source_fit_binding_sha256") != binding
+            or frozen.get("population_ids") != identity["sample_ids"]
+            or frozen.get("units") != str(adaptive_settings.get("units", "model"))):
+            raise ValueError("frozen adaptive bank SOURCE tensors, core, normalizer or support differ")
+        result["adaptive_bank"] = frozen
+    elif adaptive_settings is not None:
+        from ..coherence.adaptive_fitting import _digest as bank_digest
+        from ..coherence.adaptive_fitting import fit_train_bank, spectral_filter
+
+        if j < 2:
+            raise ValueError("adaptive discovery requires independent SOURCE members")
+        if not torch.allclose(
+            sw / sw.sum(-1, keepdim=True), rw / rw.sum(-1, keepdim=True)
+        ) or not torch.allclose(
+            rw / rw.sum(-1, keepdim=True), (rw[:1] / rw[:1].sum(-1, keepdim=True)).expand_as(rw)
+        ):
+            raise ValueError("adaptive discovery requires a fixed shared physical measure")
+        spectral = families["multiscale_spectrum"]
+        geometry = spectral._geometry_tensors(spectral.compute_dtype)
+        physical = rw[0] / rw[0].sum()
+        if physical.shape != geometry["mass"].shape:
+            raise ValueError("adaptive and Scale physical supports differ")
+        piece_indices = geometry["pieces"].long()
+        region_masses = torch.stack(
+            [physical * (piece_indices == i) for i in range(int(piece_indices.max()) + 1)]
+        )
+        query_sampler = SharedQuerySampler(fields, seed=seed, epsilon=1.0)
+        fixed_batch = query_sampler.draw()
+        query_sampler.finish()
+        adapter = ScalableQueryAdapter(families, shape)
+        component = state_family.components_by_key["self_marginal_w2"]
+        panel_batch = int(adaptive_settings.get("panel_batch_size", 8))
+        if panel_batch < 1:
+            raise ValueError("adaptive panel_batch_size must be positive")
+
+        def panel():
+            for start in range(0, b, panel_batch):
+                stop = min(b, start + panel_batch)
+                yield {
+                    "ids": identity["sample_ids"][start:stop],
+                    "members": source[start:stop].transpose(0, 1),
+                    "reference": reference[start:stop],
+                }
+
+        def anchor(x, y, mass):
+            return _discovery_anchor(
+                x,
+                y,
+                mass,
+                state_family=state_family,
+                bank=bank,
+                component=component,
+                adapter=adapter,
+                fields=fields,
+                coordinates=coordinates,
+                batch=fixed_batch,
+            )
+
+        result["adaptive_bank"] = fit_train_bank(
+            panel,
+            field_order=fields,
+            masses=physical,
+            region_masses=region_masses,
+            filter_fn=lambda x: spectral_filter(spectral, x),
+            anchor_fn=anchor,
+            source_identity=identity["source_checkpoint_sha256"],
+            support_identity=identity["support_sha256"],
+            units=str(adaptive_settings.get("units", "model")),
+            seed=seed,
+            floor=float(adaptive_settings.get("floor", 0.01)),
+            sketch_size=int(adaptive_settings.get("sketch_size", 128)),
+            redundancy_limit=float(adaptive_settings.get("redundancy_limit", 0.95)),
+        )
+        frozen = result["adaptive_bank"]
+        frozen["source_fit_binding_sha256"] = _adaptive_input_binding(
+            source=source, reference=reference, coordinates=coordinates,
+            source_weights=sw, reference_weights=rw, identity=identity, core=result,
+        )
+        frozen.pop("sha256")
+        frozen["sha256"] = bank_digest(frozen)
     result["sha256"] = _digest(result)
     return result

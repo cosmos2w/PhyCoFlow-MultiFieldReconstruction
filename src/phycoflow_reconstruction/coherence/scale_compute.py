@@ -159,3 +159,64 @@ def sampled_scale(
         "log_power_self": self_anchor,
         "leaves": {"self": self_leaves, "pair_signed": pair_leaves, "pair_rho": rho_leaves},
     }
+
+
+def third_order_scores(members, reference, queries, region_masses, scales):
+    """Regional centered triple fair leaves on already filtered physical fields.
+
+    Inputs members [J,B,S,N,C], reference [B,S,N,C], queries iterable of
+    (region, ((band,field),(band,field),(band,field))), masses [R,N] and
+    strictly positive scales [R,S,C]. Distinct fields are required. Returns
+    [B,Q], including every member; J=1 is paired scoring.
+    """
+    if members.ndim != 5 or members.shape[1:] != reference.shape or len(members) < 1:
+        raise ValueError("invalid filtered endpoints")
+    mass = torch.as_tensor(region_masses, device=members.device, dtype=members.dtype).detach()
+    scale = torch.as_tensor(scales, device=members.device, dtype=members.dtype).detach()
+    if (
+        mass.ndim != 2
+        or mass.shape[1] != reference.shape[-2]
+        or scale.shape != (mass.shape[0], reference.shape[1], reference.shape[-1])
+        or not torch.isfinite(mass).all()
+        or (mass < 0).any()
+        or (mass.sum(-1) <= 0).any()
+        or not torch.isfinite(scale).all()
+        or (scale <= 0).any()
+    ):
+        raise ValueError("invalid region masses or scales")
+    mass = mass / mass.sum(-1, keepdim=True)
+    leaves = []
+    for region, terms in queries:
+        if (
+            not 0 <= region < len(mass)
+            or len(terms) != 3
+            or len({field for _, field in terms}) != 3
+            or any(
+                not (0 <= band < reference.shape[1] and 0 <= field < reference.shape[-1])
+                for band, field in terms
+            )
+        ):
+            raise ValueError("invalid regional triple query")
+        w = mass[region]
+
+        def descriptor(x, terms=terms, w=w, region=region):
+            factors = []
+            for band, field in terms:
+                value = x[..., band, :, field]
+                center = (value * w).sum(-1, keepdim=True)
+                factors.append((value - center) / scale[region, band, field])
+            return torch.asinh((factors[0] * factors[1] * factors[2] * w).sum(-1))
+
+        x, y = descriptor(members), descriptor(reference)
+        leaf = (x - y).abs().mean(0)
+        if len(members) > 1:
+            leaf = leaf - sum(
+                (
+                    (x[i] - x[k]).abs()
+                    for i in range(len(members))
+                    for k in range(i + 1, len(members))
+                ),
+                torch.zeros_like(leaf),
+            ) / (len(members) * (len(members) - 1))
+        leaves.append(leaf)
+    return torch.stack(leaves, -1) if leaves else members.new_empty((members.shape[1], 0))

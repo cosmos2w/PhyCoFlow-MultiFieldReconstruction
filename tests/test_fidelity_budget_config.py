@@ -42,6 +42,16 @@ def test_external_policy_methods_use_common_defaults(method):
     validate_config(config)
 
 
+def test_shared_reference_requires_absolute_path_and_digest():
+    config = _config()
+    budget = config["optimization"]["multitask"].setdefault("fidelity_budget", {})
+    budget["reference_artifact"] = {"path": "/tmp/reference.json", "sha256": "a" * 64}
+    validate_config(config)
+    budget["reference_artifact"]["path"] = "relative.json"
+    with pytest.raises(ValueError, match="absolute path"):
+        validate_config(config)
+
+
 def test_external_policy_none_family_scalarization_requires_explicit_sum_and_clears_outer():
     config = _config()
     multitask = config["optimization"]["multitask"]

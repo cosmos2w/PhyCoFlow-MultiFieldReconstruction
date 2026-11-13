@@ -176,7 +176,39 @@ def fit_source_hardness(batches, candidates, *, preserve_input=False):
     return total / count
 
 
-def exact_common_embeddings(endpoints, masses, directions, channel_weights=None):
+def prepare_endpoint(x, masses, directions, channel_weights=None):
+    """Prepare endpoint sorts and CDFs; live inputs retain their gradients.
+
+    For an observer cache, the caller must detach and privately own the result,
+    and validate identity including directions, masses and reference mutation.
+    Breakpoints are not cached.
+    """
+    if x.ndim != 3 or not torch.isfinite(x).all():
+        raise ValueError("invalid endpoint")
+    bsz, _, fields = x.shape
+    d = torch.as_tensor(directions, device=x.device, dtype=x.dtype).detach()
+    if d.ndim != 2 or d.shape[1] != fields:
+        raise ValueError("invalid directions")
+    mass = torch.as_tensor(masses, device=x.device, dtype=x.dtype).detach()
+    if mass.ndim == 1:
+        mass = mass.expand(bsz, -1)
+    if (
+        mass.shape != x.shape[:2]
+        or not torch.isfinite(mass).all()
+        or (mass < 0).any()
+        or (mass.sum(-1) <= 0).any()
+    ):
+        raise ValueError("invalid endpoint masses")
+    mass = mass / mass.sum(-1, keepdim=True)
+    p = torch.cat((x, x @ d.T), -1)
+    val, idx = p.sort(dim=1)
+    cdf = mass.unsqueeze(-1).expand_as(p).gather(1, idx).cumsum(1).clamp(max=1)
+    return val.transpose(1, 2).contiguous(), cdf.transpose(1, 2).contiguous()
+
+
+def exact_common_embeddings(
+    endpoints, masses, directions, channel_weights=None, *, compiled_reference=None
+):
     """Sort each endpoint once; embed on all endpoints' merged CDF intervals.
 
     Endpoints are [B,N,C]; masses may differ by endpoint. Every pair then has
@@ -204,25 +236,24 @@ def exact_common_embeddings(endpoints, masses, directions, channel_weights=None)
         raise ValueError("invalid marginal channel weights")
     channel_weights = channel_weights / channel_weights.sum()
     projected, cdfs = [], []
-    for x, raw_mass in zip(endpoints, masses):
-        if x.ndim != 3 or x.shape[0] != bsz or x.shape[2] != fields or not torch.isfinite(x).all():
+    for i, (x, raw_mass) in enumerate(zip(endpoints, masses)):
+        if x.ndim != 3 or x.shape[0] != bsz or x.shape[2] != fields:
             raise ValueError("invalid endpoint")
-        mass = torch.as_tensor(raw_mass, device=x.device, dtype=x.dtype).detach()
-        if mass.ndim == 1:
-            mass = mass.expand(bsz, -1)
-        if (
-            mass.shape != x.shape[:2]
-            or not torch.isfinite(mass).all()
-            or (mass < 0).any()
-            or (mass.sum(-1) <= 0).any()
-        ):
-            raise ValueError("invalid endpoint masses")
-        mass = mass / mass.sum(-1, keepdim=True)
-        p = torch.cat((x, x @ d.T), -1)
-        val, idx = p.sort(dim=1)
-        cdf = mass.unsqueeze(-1).expand_as(p).gather(1, idx).cumsum(1).clamp(max=1)
-        projected.append(val.transpose(1, 2).contiguous())
-        cdfs.append(cdf.transpose(1, 2).contiguous())
+        if compiled_reference is not None and i == len(endpoints) - 1:
+            value, cdf = compiled_reference
+            if (
+                value.shape != (bsz, fields + len(d), x.shape[1])
+                or cdf.shape != value.shape
+                or value.device != x.device
+                or value.dtype != x.dtype
+                or cdf.device != x.device
+                or cdf.dtype != x.dtype
+            ):
+                raise ValueError("incompatible compiled reference")
+        else:
+            value, cdf = prepare_endpoint(x, raw_mass, d, channel_weights)
+        projected.append(value)
+        cdfs.append(cdf)
     all_breaks = torch.cat([torch.zeros_like(cdfs[0][..., :1]), *cdfs], dim=-1).sort(dim=-1).values
     lengths = (all_breaks[..., 1:] - all_breaks[..., :-1]).clamp_min(0)
     mid = ((all_breaks[..., 1:] + all_breaks[..., :-1]) / 2).contiguous()
@@ -250,6 +281,7 @@ def score_family(
     mixed_coefficient=1.0,
     channel_weights=None,
     mode="conditional",
+    compiled_reference=None,
 ):
     """FamilyResult and exact autograd semantic channel probe tensors.
 
@@ -282,6 +314,7 @@ def score_family(
         [member_weights] * len(members) + [reference_weights],
         bank["directions"],
         channel_weights,
+        compiled_reference=compiled_reference,
     )
     ref = embeddings.pop()
     j = len(embeddings)
@@ -341,3 +374,45 @@ def state_channel_contribution(channel_squared, common_squared, weight):
     denom = torch.sqrt(torch.where(positive, common_squared, torch.ones_like(common_squared)))
     factor = torch.where(positive, weight / (2 * denom), torch.zeros_like(denom)).detach()
     return factor * channel_squared
+
+
+def group_projection_scores(members, reference, member_weights, reference_weights, directions):
+    """Complete per-projection W2 energy leaves [B,P], outside the C8 norm.
+
+    Members are [J,B,N,C], reference is [B,N,C]; masses are [N] or [B,N].
+    J=1 gives paired distance; J>=2 uses every member and both gradients.
+    """
+    if members.ndim != 4 or reference.ndim != 3 or members.shape[1:] != reference.shape:
+        raise ValueError("invalid group projection endpoints")
+    d = torch.as_tensor(directions, device=members.device, dtype=members.dtype).detach()
+    if d.ndim != 2 or d.shape[1] != members.shape[-1] or not torch.isfinite(d).all():
+        raise ValueError("invalid projection directions")
+    if len(d) == 0:
+        return members.new_empty((members.shape[1], 0))
+    if (d.norm(dim=1) == 0).any():
+        raise ValueError("projection direction must be nonzero")
+    # A separate embedding retains each complete W2 metric before weighting.
+    scores = []
+    for direction in d:
+        embeds = exact_common_embeddings(
+            [*members, reference],
+            [member_weights] * len(members) + [reference_weights],
+            direction[None, :],
+        )
+        vectors = [e[1] for e in embeds]
+
+        def distance(a, b):
+            return torch.linalg.vector_norm(a - b, dim=-1)
+
+        attraction = torch.stack([distance(v, vectors[-1]) for v in vectors[:-1]]).mean(0)
+        if len(members) > 1:
+            attraction = attraction - sum(
+                (
+                    distance(vectors[i], vectors[k])
+                    for i in range(len(members))
+                    for k in range(i + 1, len(members))
+                ),
+                torch.zeros_like(attraction),
+            ) / (len(members) * (len(members) - 1))
+        scores.append(attraction)
+    return torch.stack(scores, dim=-1)

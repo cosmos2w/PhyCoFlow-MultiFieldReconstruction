@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 from .schema import STAGE_SCHEMAS
@@ -201,6 +202,10 @@ def _validate_common_sections(config: Mapping[str, Any]) -> None:
             "seed",
             "preview",
             "sample_selection",
+            "sample_indices",
+            "sensor_counts",
+            "sensor_seed",
+            "members",
             "native_topology",
             "group_size",
             "batch_size",
@@ -289,16 +294,22 @@ def _validate_common_sections(config: Mapping[str, Any]) -> None:
             "every_steps",
             "epochs",
             "save_epoch_one",
+            "save_epoch_zero",
+            "panel_milestones_only",
             "selection_metric",
             "validation_every_epochs",
         },
         "checkpointing",
     )
-    for key in ("enabled", "save_epoch_one"):
+    for key in ("enabled", "save_epoch_one", "save_epoch_zero", "panel_milestones_only"):
         if key in checkpointing and not isinstance(checkpointing[key], bool):
             raise TypeError(f"checkpointing.{key} must be boolean")
     if int(checkpointing.get("every_epochs", 10)) < 1:
         raise ValueError("checkpointing.every_epochs must be positive")
+    if checkpointing.get("panel_milestones_only") and (
+        not checkpointing.get("epochs") or "validation_every_epochs" in checkpointing
+    ):
+        raise ValueError("panel_milestones_only requires epochs and excludes validation_every_epochs")
     if "every_steps" in checkpointing:
         interval = checkpointing["every_steps"]
         if isinstance(interval, bool) or not isinstance(interval, int) or interval < 1:
@@ -601,14 +612,30 @@ def _validate_fidelity_budget(multitask: Mapping[str, Any]) -> None:
             "calibration_batches",
             "calibration_draws",
             "calibration_seed",
+            "mean_risk_scales",
+            "reference_artifact",
         },
         "optimization.multitask.fidelity_budget",
     )
     if budget.get("metric", "endpoint_mse_model_units") not in {
         "endpoint_mse_model_units",
         "physical_member_mse_model_units",
+        "physical_mean_risk_model_units",
     }:
         raise ValueError("unsupported fidelity budget metric")
+    if budget.get("metric") == "physical_mean_risk_model_units":
+        scales = budget.get("mean_risk_scales")
+        if "absolute_allowance" not in budget or "relative_increase" in budget:
+            raise ValueError("mean risk requires explicit absolute_allowance and no relative_increase")
+        if not isinstance(scales, (list, tuple)) or not scales or any(not math.isfinite(float(x)) or float(x) <= 0 for x in scales):
+            raise ValueError("mean risk requires positive independent per-field mean_risk_scales")
+    artifact = budget.get("reference_artifact")
+    if artifact is not None:
+        if not isinstance(artifact, Mapping) or set(artifact) != {"path", "sha256"}:
+            raise ValueError("fidelity reference_artifact requires path and sha256")
+        path, digest = artifact["path"], artifact["sha256"]
+        if not isinstance(path, str) or not Path(path).is_absolute() or not isinstance(digest, str) or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+            raise ValueError("fidelity reference_artifact requires an absolute path and lowercase SHA-256")
     _method_parameter(
         budget.get("relative_increase", 0.05),
         "optimization.multitask.fidelity_budget.relative_increase",
@@ -736,12 +763,21 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
             "kind",
             "channel_mapping",
             "allow_integration_source",
+            "admission",
+            "snapshot_receipt",
+            "weight_view",
             "inherited_base_keys",
             "config_origins",
         },
         "source",
     )
     source_kind = source.get("kind", "native_run")
+    if source.get("admission", "completed") not in {"completed", "frozen_snapshot"}:
+        raise ValueError("invalid source admission")
+    if source.get("admission") == "frozen_snapshot" and not source.get("snapshot_receipt"):
+        raise ValueError("frozen snapshot requires a receipt")
+    if source.get("weight_view", "live") not in {"live", "ema_materialized"}:
+        raise ValueError("invalid source weight view")
     if source_kind not in {"native_run", "legacy_demo50"}:
         raise ValueError("source.kind must be native_run or legacy_demo50")
     if source_kind == "legacy_demo50" and config["model"].get("name") != "legacy_demo50":
@@ -784,6 +820,7 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
             "hard",
             "endpoint",
             "endpoint_smooth",
+            "native",
         }:
             raise ValueError("invalid observation_consistency.mode")
         _reject_unknown(config["trainable"], {"scope", "modules"}, "trainable")
@@ -882,11 +919,47 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
         raise TypeError("coherence.scalable_anchored_coherence must be a mapping")
     _reject_unknown(
         scalable,
-        {"enabled", "max_samples", "candidate_count", "shape_batches", "field_floor"},
+        {"enabled", "max_samples", "candidate_count", "shape_batches", "field_floor", "adaptive", "source_members", "source_sensor_count", "save_source_panel", "common_core"},
         "coherence.scalable_anchored_coherence",
     )
     if not isinstance(scalable.get("enabled", False), bool):
         raise TypeError("coherence.scalable_anchored_coherence.enabled must be boolean")
+    common = scalable.get("common_core")
+    if common is not None:
+        if not isinstance(common, Mapping) or set(common) != {"path", "sha256", "source_panel_path", "source_panel_sha256"}:
+            raise ValueError("common_core requires artifact and SOURCE panel paths and SHA-256 hashes")
+        for key in ("path", "source_panel_path"):
+            if not isinstance(common[key], str) or not Path(common[key]).is_absolute():
+                raise ValueError("common_core paths must be absolute")
+        for key in ("sha256", "source_panel_sha256"):
+            digest = common[key]
+            if not isinstance(digest, str) or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+                raise ValueError("common_core hashes must be lowercase SHA-256")
+    adaptive = scalable.get("adaptive", {})
+    if not isinstance(adaptive, Mapping):
+        raise TypeError("scalable adaptive settings must be a mapping")
+    _reject_unknown(adaptive, {"enabled", "panel_batch_size", "sketch_size", "floor", "redundancy_limit", "units", "bank_artifact"}, "coherence.scalable_anchored_coherence.adaptive")
+    if not isinstance(adaptive.get("enabled", False), bool):
+        raise TypeError("adaptive.enabled must be boolean")
+    for key, default in (("panel_batch_size", 8), ("sketch_size", 128)):
+        value = adaptive.get(key, default)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError(f"adaptive.{key} must be a positive integer")
+    floor = float(adaptive.get("floor", 0.01))
+    redundancy = float(adaptive.get("redundancy_limit", 0.95))
+    if not math.isfinite(floor) or floor <= 0 or not math.isfinite(redundancy) or not 0 <= redundancy <= 1:
+        raise ValueError("adaptive floor and redundancy_limit are invalid")
+    if not isinstance(adaptive.get("units", "model"), str) or not adaptive.get("units", "model"):
+        raise ValueError("adaptive.units must be a nonempty string")
+    if adaptive.get("enabled", False) and not scalable.get("enabled", False):
+        raise ValueError("adaptive bank requires scalable coherence")
+    frozen_bank = adaptive.get("bank_artifact")
+    if frozen_bank is not None:
+        if not adaptive.get("enabled", False) or common is None or not isinstance(frozen_bank, Mapping) or set(frozen_bank) != {"path", "sha256"}:
+            raise ValueError("frozen adaptive bank requires enabled adaptive, common_core, path and sha256")
+        path, digest = frozen_bank["path"], frozen_bank["sha256"]
+        if not isinstance(path, str) or not Path(path).is_absolute() or not isinstance(digest, str) or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+            raise ValueError("adaptive bank artifact requires an absolute path and lowercase SHA-256")
     for key, default in (("max_samples", 32), ("candidate_count", 32), ("shape_batches", 8)):
         value = scalable.get(key, default)
         if isinstance(value, bool) or not isinstance(value, int) or value < 1:
@@ -914,12 +987,12 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
         .get("fidelity_budget", {})
         .get("metric", "endpoint_mse_model_units")
     )
-    if metric == "physical_member_mse_model_units" and not scalable.get("enabled", False):
+    if metric in {"physical_member_mse_model_units", "physical_mean_risk_model_units"} and not scalable.get("enabled", False):
         raise ValueError("physical member fidelity metric requires scalable coherence")
     if (
         scalable.get("enabled", False)
         and config["optimization"].get("multitask", {}).get("external_policy") is not None
-        and metric != "physical_member_mse_model_units"
+        and metric not in {"physical_member_mse_model_units", "physical_mean_risk_model_units"}
     ):
         raise ValueError(
             "scalable external fidelity policy requires physical_member_mse_model_units"
@@ -1317,7 +1390,7 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
         {"mode", "strength", "sigma", "schedule_power", "final_clamp", "chunk_size"},
         "observation_consistency",
     )
-    if observation.get("mode") not in {"none", "hard", "endpoint", "endpoint_smooth"}:
+    if observation.get("mode") not in {"none", "hard", "endpoint", "endpoint_smooth", "native"}:
         raise ValueError("invalid observation_consistency.mode")
     if config["observations"].get("protocol") == "structured_block_mean" and (
         observation.get("mode") != "none" or observation.get("final_clamp", False)
@@ -1439,10 +1512,14 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
         inherited_model_pending = config.get("inherit_base_config", True) and model == {
             "name": "gl_rbf_cq"
         }
-        if model.get("name") != "gl_rbf_cq" or (
-            not model.get("physical_field_transform") and not inherited_model_pending
+        if execution.get("context_cache", "none") != "none" and (
+            model.get("name") != "gl_rbf_cq" or (
+                not model.get("physical_field_transform") and not inherited_model_pending
+            )
         ):
-            raise ValueError("rollout_execution requires a physical CQ model")
+            raise ValueError("rollout context caching requires a physical CQ model")
+        if model.get("name") not in {"gl_rbf_cq", "diffusion_pde"}:
+            raise ValueError("rollout checkpointing requires a qualified generative source")
         if execution.get("context_cache", "none") not in {
             "none",
             "condition",
@@ -1606,6 +1683,10 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
             "seed",
             "preview",
             "sample_selection",
+            "sample_indices",
+            "sensor_counts",
+            "sensor_seed",
+            "members",
             "native_topology",
             "group_size",
             "batch_size",

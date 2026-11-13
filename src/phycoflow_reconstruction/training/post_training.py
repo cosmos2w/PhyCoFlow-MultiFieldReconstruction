@@ -17,7 +17,7 @@ import statistics
 import warnings
 from collections.abc import Mapping
 from copy import deepcopy
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
@@ -49,6 +49,7 @@ from .coherence_calibration import (
     resolve_family_scales,
 )
 from .coherence_sampling import (
+    _coherence_query_seed,
     _conditional_draw_count,
     _conditional_draw_seed,
     _family_context,
@@ -65,7 +66,14 @@ from .fast_lagrangian import (
     implementation_binding,
     training_execution,
 )
-from .fidelity_budget import ExternalPolicy, FidelityBudget, field_error_sums, field_mse
+from .fidelity_budget import (
+    ExternalPolicy,
+    FidelityBudget,
+    MeanRiskDifferenceBudget,
+    _budget_from_state,
+    field_error_sums,
+    field_mse,
+)
 from .gradient_balance import data_only_update
 from .gradient_balance import two_objective_update as legacy_two_objective_update
 from .model_lifecycle import (
@@ -322,6 +330,9 @@ def _coherence_objective(
             mask=selected.query_valid_mask,
             measure=batch_measure_context(selected),
             members=(prediction, *conditional_draws),
+            query_indices=selected.metadata.get("query_indices"),
+            coupling_selected_batch=selected,
+            rollout_generator_state_sha256=hashlib.sha256(initial_generator_state.cpu().numpy().tobytes()).hexdigest(),
         )
     if step_context is not None:
 
@@ -1007,8 +1018,26 @@ def _calibrate_family_balance(
     }
 
 
-def _physical_endpoint_risk(endpoint, dataset):
-    from ..coherence.physical_risk import physical_field_mse
+def _bound_family_artifact(family, dataset, config):
+    """Keep TRAIN geometry identity on every saved family artifact."""
+    query = fixed_query_indices(
+        math.prod(dataset.data_spec.logical_shape),
+        int(config["coherence"]["compute_budget"]["point_count"]),
+        seed=_coherence_query_seed(config),
+    )
+    artifact = family.state_artifact()
+    artifact["frozen_training_context"] = {
+        "dataset_fingerprint": dataset_fingerprint(dataset.path),
+        "query_indices_sha256": hashlib.sha256(query.numpy().tobytes()).hexdigest(),
+        "normalizer_digest": dataset.normalizer.digest(),
+        "field_names": list(dataset.data_spec.field_names),
+        "split": "train",
+    }
+    return artifact
+
+
+def _physical_endpoint_risk(endpoint, dataset, *, mean_risk=False):
+    from ..coherence.physical_risk import physical_ensemble_risks, physical_field_mse
 
     measure = endpoint.get("measure", {})
     masses = measure.get("generated_weights")
@@ -1021,6 +1050,13 @@ def _physical_endpoint_risk(endpoint, dataset):
         raise ValueError("selected support exceeds native support")
     full = query_count == population
     members = torch.stack(endpoint.get("members", (endpoint["prediction"],)))
+    if mean_risk:
+        _, corrected = physical_ensemble_risks(
+            members.movedim(0, 1), endpoint["target"], masses,
+            total_mass=native.sum(), sampling="full" if full else "without_replacement",
+            probabilities=None if full else query_count / population,
+        )
+        return corrected
     return physical_field_mse(
         members,
         endpoint["target"],
@@ -1029,6 +1065,91 @@ def _physical_endpoint_risk(endpoint, dataset):
         sampling="full" if full else "without_replacement",
         probabilities=None if full else query_count / population,
     ).mean(dim=0)
+
+
+def _fit_source_physical_risk(model, dataset, config, device, *, seed):
+    """Independently fit member fidelity on a reproducible ten-percent TRAIN panel."""
+    limit = max(1, math.ceil(0.1 * len(dataset)))
+    chosen = torch.randperm(len(dataset), generator=torch.Generator().manual_seed(seed))[:limit].tolist()
+    batch_size = int(config["coherence"]["compute_budget"]["batch_size"])
+    indices = [chosen[i:i + batch_size] for i in range(0, limit, batch_size)]
+    points = None if model.capabilities.structured_grid_required else int(config["coherence"]["compute_budget"]["point_count"])
+    source = build_training_batch_source(dataset, indices, config, query_points=points, device=device, start_step=0)
+    total = None
+    count = 0
+    sample_ids = []
+    draw_manifest = []
+    try:
+        with torch.no_grad():
+            for index, batch in enumerate(source):
+                generator = torch.Generator(device=device).manual_seed(seed + 1_000_003 + index)
+                complete = _slice_batch(batch, batch_size)
+                selected = subset_query_batch(complete, int(config["coherence"]["compute_budget"]["point_count"]), generator=generator)
+                model_batch = _without_target(complete if model.capabilities.structured_grid_required else selected)
+                members = []
+                for j in range(2 if model.capabilities.generative else 1):
+                    member_generator = generator if j == 0 else torch.Generator(device=device).manual_seed(_conditional_draw_seed(generator.initial_seed(), j))
+                    value = differentiable_reconstruction(model, model_batch, steps=int(config["rollout"]["steps"]), solver=config["rollout"]["solver"], generator=member_generator, observation_config=dict(config["observation_consistency"]))
+                    if model.capabilities.structured_grid_required:
+                        value = _gather_prediction(value, complete, selected)
+                    members.append(value)
+                endpoint = {"prediction": members[0], "members": tuple(members), "target": selected.target_fields, "mask": selected.query_valid_mask, "measure": batch_measure_context(selected)}
+                risk = _physical_endpoint_risk(endpoint, dataset, mean_risk=config["optimization"]["multitask"].get("fidelity_budget", {}).get("metric") == "physical_mean_risk_model_units")
+                total = risk.double().sum(0) if total is None else total + risk.double().sum(0)
+                count += risk.shape[0]
+                sample_ids.extend(selected.sample_ids)
+                draw_manifest.append({"sample_ids": list(selected.sample_ids), "query_sha256": _query_digest(selected.metadata["query_indices"]), "observation_indices_sha256": _query_digest(selected.obs_indices) if selected.obs_indices is not None else None, "rollout_seeds": [seed + 1_000_003 + index] + ([_conditional_draw_seed(seed + 1_000_003 + index, 1)] if model.capabilities.generative else [])})
+    finally:
+        source.close()
+    if count != limit:
+        raise ValueError("SOURCE risk panel did not cover its declared population")
+    return total / count, {"sample_ids": sample_ids, "seed": seed, "sample_count": count, "support": "native" if points is None and int(config["coherence"]["compute_budget"]["point_count"]) == math.prod(dataset.data_spec.logical_shape) else "selected", "units": "model_field_units_squared", "members": 2 if model.capabilities.generative else 1, "draw_manifest": draw_manifest}
+
+
+def _fidelity_reference_binding(config, dataset, source_hashes_before, source_metadata, scalable_runtime, family_scales):
+    """Bind a shared risk/C8 C0 reference to its full scientific source contract."""
+    from .scalable_fitting import _digest
+
+    if scalable_runtime is None:
+        raise ValueError("shared fidelity references require scalable coherence")
+    artifacts = scalable_runtime.artifacts
+    provenance = artifacts["provenance"]
+    core_artifacts = {k: deepcopy(artifacts[k]) for k in ("state_bank", "shape_artifact", "priorities", "units", "active")}
+    # Adaptive-bank settings change the outer config identity but not the C8
+    # Shape object; bind its actual fitted values and shared source/support.
+    core_artifacts["shape_artifact"]["provenance"].pop("config_sha256", None)
+    settings = dict(config["optimization"]["multitask"].get("fidelity_budget", {}))
+    settings.pop("reference_artifact", None)
+    value = {
+        "version": 1,
+        "source_checkpoint_sha256": source_hashes_before["checkpoint"],
+        "weight_view": source_metadata.get("weight_view", "live"),
+        "materialized_view_sha256": source_metadata.get("materialized_view_sha256"),
+        "dataset_fingerprint": dataset_fingerprint(dataset.path),
+        "normalizer_sha256": dataset.normalizer.digest(),
+        "field_order": list(dataset.field_names),
+        "support_sha256": provenance["support_sha256"],
+        "train_sample_ids": provenance["sample_ids"],
+        "rollout": config["rollout"],
+        "observations": config["observations"],
+        "observation_consistency": config["observation_consistency"],
+        "compute_budget": config["coherence"]["compute_budget"],
+        "core_family_config": config["coherence"]["families"],
+        "core_artifact_sha256": _digest(core_artifacts),
+        "family_scales": dict(family_scales),
+        "fidelity_settings": settings,
+    }
+    return {**value, "sha256": _digest(value)}
+
+
+def _load_shared_fidelity_reference(declaration, expected_binding):
+    path = Path(declaration["path"])
+    if file_sha256(path) != declaration["sha256"]:
+        raise ValueError("shared fidelity reference artifact hash mismatch")
+    report = json.loads(path.read_text(encoding="utf-8"))
+    if report.get("binding") != expected_binding:
+        raise ValueError("shared fidelity reference scientific binding mismatch")
+    return _budget_from_state(report["reference"]), report
 
 
 def _calibrate_fidelity_budget(
@@ -1055,11 +1176,11 @@ def _calibrate_fidelity_budget(
     scalable = scalable_runtime is not None
     if scalable:
         draws = 1  # each shared scalable objective already includes every member
-        limit = min(32, max(1, math.ceil(0.1 * len(dataset))))
+        limit = max(1, math.ceil(0.1 * len(dataset)))
         chosen = torch.randperm(len(dataset), generator=torch.Generator().manual_seed(seed))[
             :limit
         ].tolist()
-        batch_size = int(config["optimization"]["batch_size"])
+        batch_size = int(config["coherence"]["compute_budget"]["batch_size"])
         indices = [chosen[i : i + batch_size] for i in range(0, len(chosen), batch_size)]
         count = len(indices)
     else:
@@ -1076,15 +1197,21 @@ def _calibrate_fidelity_budget(
     )
     cpu_rng, python_rng, numpy_rng = torch.get_rng_state(), random.getstate(), np.random.get_state()
     cuda_rng = torch.cuda.get_rng_state_all() if device.type == "cuda" else []
-    source = build_training_batch_source(
-        dataset, indices, config, query_points=query_points, device=device, start_step=0
-    )
+    source = None
     sums = counts = None
     scientific_sum, samples = 0.0, 0
+    coherence_sample_ids = []
+    coherence_query_digests = []
     family_sums = {name: 0.0 for name in families} if family_means is not None else None
     started = perf_counter()
     try:
         post_training_mode(model, config)
+        risk_reference, risk_receipt = (None, None)
+        if scalable:
+            risk_reference, risk_receipt = _fit_source_physical_risk(model, dataset, config, device, seed=seed + 271828)
+        source = build_training_batch_source(
+            dataset, indices, config, query_points=query_points, device=device, start_step=0
+        )
         with torch.no_grad():
             for index, batch in enumerate(source):
                 for draw in range(draws):
@@ -1100,6 +1227,7 @@ def _calibrate_fidelity_budget(
                             expected_provenance=scalable_runtime.artifacts["provenance"],
                             seed=seed + index * draws + draw,
                             scoring_mode=scalable_runtime.scoring_mode,
+                            core_only=True,
                         )
                         observer.begin_step(0)
                     result, _ = _coherence_objective(
@@ -1137,9 +1265,13 @@ def _calibrate_fidelity_budget(
                                 * size
                             )
                     samples += size
+                    if scalable:
+                        coherence_sample_ids.extend(batch.sample_ids[:size])
+                        coherence_query_digests.append(_query_digest(endpoint["query_indices"]))
                     del endpoint, result
     finally:
-        source.close()
+        if source is not None:
+            source.close()
         torch.set_rng_state(cpu_rng)
         if device.type == "cuda":
             torch.cuda.set_rng_state_all(cuda_rng)
@@ -1147,25 +1279,32 @@ def _calibrate_fidelity_budget(
         np.random.set_state(numpy_rng)
     if sums is None or samples == 0:
         raise ValueError("SOURCE fidelity calibration requires nonempty TRAIN batches")
+    if scalable and samples != limit:
+        raise ValueError("SOURCE coherence panel did not cover its declared population")
     if family_means is not None:
         family_means.update({name: total / samples for name, total in family_sums.items()})
-    reference = FidelityBudget.from_reference(
-        dataset.field_names,
-        sums / counts,
-        scientific_sum / samples,
-        relative_increase=float(settings.get("relative_increase", 0.05)),
-        absolute_allowance=float(settings.get("absolute_allowance", 0.0)),
-        denominator_floor=float(settings.get("denominator_floor", 1e-8)),
-    )
+    if settings.get("metric") == "physical_mean_risk_model_units":
+        if not scalable or not model.capabilities.generative:
+            raise ValueError("mean risk requires a scalable generative source with independent members")
+        reference = MeanRiskDifferenceBudget.from_reference(dataset.field_names, risk_reference, [float(settings.get("absolute_allowance", 0.0))] * len(dataset.field_names), settings["mean_risk_scales"], objective_scale=max(scientific_sum / samples, 1e-8))
+    else:
+        reference = FidelityBudget.from_reference(
+            dataset.field_names, risk_reference if scalable else sums / counts, scientific_sum / samples,
+            relative_increase=float(settings.get("relative_increase", 0.05)),
+            absolute_allowance=float(settings.get("absolute_allowance", 0.0)),
+            denominator_floor=float(settings.get("denominator_floor", 1e-8)),
+        )
     return reference, {
         "settings": settings,
         "effective_draws": (2 if model.capabilities.generative else 1) if scalable else draws,
         "calibration_repeats": draws,
         "batches": count,
-        "risk_definition": "physical_member_mse_model_units"
+        "risk_definition": settings.get("metric", "physical_member_mse_model_units")
         if scalable
         else "endpoint_mse_model_units",
         "calibration_seconds": perf_counter() - started,
+        "risk_reference_panel": risk_receipt,
+        "coherence_reference_panel": {"sample_ids": coherence_sample_ids, "sample_indices": chosen, "query_sha256_by_batch": coherence_query_digests, "seed": seed, "sample_count": samples, "support": "coherence_scoring_support", "units": "configured_core_objective"} if scalable else None,
         "reference": reference.state_dict(),
     }
 
@@ -1260,13 +1399,36 @@ def _build_evaluation_batch(
     if count < 1:
         raise ValueError(f"evaluation split {dataset.split_name!r} contains no samples")
     selection = config.get("evaluation", {}).get("sample_selection", "first")
+    explicit = config.get("evaluation", {}).get("sample_indices")
     indices = (
-        np.linspace(0, len(dataset) - 1, count).round().astype(int).tolist()
+        [int(index) for index in explicit]
+        if explicit is not None
+        else np.linspace(0, len(dataset) - 1, count).round().astype(int).tolist()
         if selection == "uniform"
         else list(range(count))
     )
+    if len(indices) != count or len(set(indices)) != count or any(
+        index < 0 or index >= len(dataset) for index in indices
+    ):
+        raise ValueError("evaluation sample_indices must contain the declared count of unique in-range indices")
     samples = [dataset[index] for index in indices]
-    return build_observation_batch(samples, protocol, query_points=None).to(device)
+    sensor_counts = config.get("evaluation", {}).get("sensor_counts")
+    manifest = None
+    if sensor_counts is not None:
+        protocol = replace(protocol, field_counts=sensor_counts, field_count_ranges=None)
+        manifest = {}
+        sensor_seed = int(config.get("evaluation", {}).get("sensor_seed", 2047))
+        for index, sample in zip(indices, samples):
+            generator = torch.Generator().manual_seed(sensor_seed + index)
+            sample_id = f"{sample.trajectory_id}:{sample.time_index if sample.time_index is not None else 'all'}"
+            manifest[sample_id] = [
+                (int(point), sample.field_names.index(field))
+                for field, sensors in sensor_counts.items()
+                for point in torch.randperm(sample.values.shape[0], generator=generator)[:int(sensors)]
+            ]
+    return build_observation_batch(
+        samples, protocol, query_points=None, manifest_indices=manifest
+    ).to(device)
 
 
 def _build_comparison_batch(
@@ -1425,8 +1587,10 @@ def _evaluate(
         draw_count = (
             1
             if scalable_runtime is not None and not model.capabilities.generative
-            else _conditional_draw_count(families)
+            else int(evaluation.get("members", _conditional_draw_count(families)))
         )
+        if draw_count < 1:
+            raise ValueError("evaluation.members must be positive")
         for draw in range(1, draw_count):
             draw_generator = torch.Generator(device=prediction.device).manual_seed(
                 _conditional_draw_seed(draw_seed, draw)
@@ -1781,6 +1945,7 @@ def run_post_training(
     resume: str | Path | None = None,
     scalable_artifacts=None,
     scalable_expected_provenance=None,
+    budget_stop_requested=None,
 ) -> Path:
     """Create or resume one immutable child post-training run."""
     if (
@@ -1814,7 +1979,7 @@ def run_post_training(
         ("checkpointing", "rollout_checkpointing"),
     ):
         if key in execution:
-            if not hasattr(model, attribute):
+            if not hasattr(model, attribute) and key != "checkpointing":
                 raise ValueError("rollout_execution requires a compatible physical CQ model")
             setattr(model, attribute, execution[key])
     subset_manifest = None
@@ -1983,7 +2148,7 @@ def run_post_training(
             source_checkpoint_sha256=source_hashes_before["checkpoint"],
         )
         family_paths = {
-            name: store.save_artifact(f"{name}_family.pt", family.state_artifact())
+            name: store.save_artifact(f"{name}_family.pt", _bound_family_artifact(family, train_dataset, config))
             for name, family in families.items()
         }
     scalable_settings = config["coherence"].get("scalable_anchored_coherence", {})
@@ -2009,6 +2174,15 @@ def run_post_training(
         if fit_cost is not None:
             store.save_artifact("scalable_coherence.pt", scalable_artifacts)
             store.write_json("artifacts/scalable_fit_cost.json", fit_cost)
+        if scalable_settings.get("common_core") is not None:
+            common_receipt = store.run_dir / "artifacts" / "common_core_receipt.json"
+            receipt_hash = file_sha256(common_receipt)
+            if resume is None:
+                store.update_manifest(common_core_receipt_sha256=receipt_hash)
+            else:
+                manifest = json.loads((store.run_dir / "run_manifest.json").read_text())
+                if manifest.get("common_core_receipt_sha256") != receipt_hash:
+                    raise ValueError("common-core receipt changed since initial training")
     scalable_runtime = None
     if scalable_artifacts is not None:
         if any(
@@ -2069,6 +2243,14 @@ def run_post_training(
                 ]
                 if cursors != list(range(1, start_step + 1)):
                     raise ValueError("scalable update history is incomplete at checkpoint cursor")
+            coupling_path = store.run_dir / "metrics" / "training_coupling.jsonl"
+            if start_step and not coupling_path.is_file():
+                raise FileNotFoundError("scalable checkpoint is missing training coupling history")
+            recover_journal(coupling_path, start_step)
+            if coupling_path.is_file():
+                cursors = [json.loads(line)["step"] for line in coupling_path.read_text().splitlines() if line.strip()]
+                if cursors != list(range(1, start_step + 1)):
+                    raise ValueError("training coupling history is incomplete at checkpoint cursor")
         train_dataset.scalable_runtime = scalable_runtime
     elif checkpoint is not None and "scalable_runtime" in checkpoint:
         raise ValueError("scalable checkpoint requires its original TRAIN artifacts")
@@ -2118,24 +2300,37 @@ def run_post_training(
             raise ValueError("resume checkpoint family scales differ from calibration artifact")
     family_scales = {name: float(calibration["resolved_scales"][name]) for name in families}
     if external_settings is not None:
+        declaration = config["optimization"]["multitask"].get("fidelity_budget", {}).get("reference_artifact")
+        reference_binding = _fidelity_reference_binding(
+            config, train_dataset, source_hashes_before, source_metadata, scalable_runtime, family_scales
+        ) if scalable_runtime is not None else None
         if checkpoint is None:
             ordered_means = {} if ordered_settings is not None else None
-            reference, reference_report = _calibrate_fidelity_budget(
-                model,
-                train_dataset,
-                families,
-                banks,
-                config,
-                family_scales,
-                device,
-                family_means=ordered_means,
-                scalable_runtime=scalable_runtime,
-            )
+            if declaration is not None:
+                if ordered_means is not None or reference_binding is None:
+                    raise ValueError("shared fidelity reference requires scalable unordered policy")
+                reference, reference_report = _load_shared_fidelity_reference(declaration, reference_binding)
+                reference_report = {**reference_report, "loaded_from": dict(declaration)}
+            else:
+                reference, reference_report = _calibrate_fidelity_budget(
+                    model, train_dataset, families, banks, config, family_scales, device,
+                    family_means=ordered_means, scalable_runtime=scalable_runtime,
+                )
+                if reference_binding is not None:
+                    reference_report["binding"] = reference_binding
             store.write_json("artifacts/fidelity_budget_reference.json", reference_report)
             policy = ExternalPolicy(external_settings, reference, device)
         else:
             saved_policy = checkpoint["external_policy"]
-            reference = FidelityBudget.from_state_dict(saved_policy["reference"])
+            reference = _budget_from_state(saved_policy["reference"])
+            if reference_binding is not None:
+                stored_report = json.loads((store.run_dir / "artifacts/fidelity_budget_reference.json").read_text())
+                if stored_report.get("binding") != reference_binding or stored_report.get("reference") != saved_policy["reference"]:
+                    raise ValueError("resumed fidelity reference scientific binding differs")
+                if declaration is not None:
+                    shared, _ = _load_shared_fidelity_reference(declaration, reference_binding)
+                    if shared.state_dict() != reference.state_dict():
+                        raise ValueError("resumed shared fidelity reference differs")
             policy = ExternalPolicy(external_settings, reference, device)
         if int(fast_settings.get("coefficient_interval", 1)) > 1:
             from .periodic_config import PeriodicConfigState
@@ -2340,7 +2535,7 @@ def run_post_training(
     # Evaluation initializes geometry-dependent fixed artifacts. Persist those
     # exact tensors rather than the empty lazy-construction placeholders.
     family_paths = {
-        name: store.save_artifact(f"{name}_family.pt", family.state_artifact())
+        name: store.save_artifact(f"{name}_family.pt", _bound_family_artifact(family, train_dataset, config))
         for name, family in families.items()
     }
     store.update_manifest(
@@ -2483,6 +2678,11 @@ def run_post_training(
                 scalable_runtime=scalable_runtime,
             )
             metrics["sensor_manifest_sha256"] = evaluation_manifest.digest()
+            if evaluation_split == "train" and step % steps_per_epoch == 0:
+                store.write_json(
+                    f"evaluation/train_core_epoch_{step // steps_per_epoch:03d}.json",
+                    {"global_step": step, "epoch": step // steps_per_epoch, "metrics": metrics},
+                )
             panel_metrics_cache.clear()
             panel_metrics_cache[step] = metrics
             return {"metrics": metrics}
@@ -2540,6 +2740,52 @@ def run_post_training(
                 fallback_metric=0.0,
                 force=True,
             )
+    if resume is None and config.get("checkpointing", {}).get("save_epoch_zero", False):
+        # Capture the fully materialized child, references and random streams
+        # after setup and before the first optimizer or query-policy update.
+        initial_path = store.save_checkpoint(
+            "epoch_000",
+            _post_checkpoint_payload(
+                model, optimizer, global_step=0, config=config,
+                train_dataset=train_dataset, families=families,
+                source_hashes_before=source_hashes_before, index_generator=index_generator,
+                device=device, config_sha256=store.config_hash,
+                coherence_calibration_sha256=calibration_hash, family_scales=family_scales,
+                controller=controller, scalarizer=scalarizer, policy=policy,
+            ),
+        )
+        store.update_manifest(epoch_zero_checkpoint_sha256=file_sha256(initial_path))
+        if evaluation_split == "train":
+            store.write_json(
+                "evaluation/train_core_epoch_000.json",
+                {"global_step": 0, "epoch": 0, "metrics": source_metrics},
+            )
+    # A budget pause can coincide with a milestone. Its weights are saved at
+    # once, while the expensive panel waits until the resumed budget permits it.
+    manifest = json.loads((store.run_dir / "run_manifest.json").read_text())
+    if resume is not None and manifest.get("pending_panel_step") == start_step:
+        if budget_stop_requested is not None and budget_stop_requested(start_step, store.run_dir):
+            batch_source.close()
+            monitor.close(checkpoint_checked=False, best_checkpoint_saved=False)
+            preview.close()
+            store.set_status("budget_paused", global_step=start_step,
+                             configured_steps=configured_steps, steps_per_epoch=steps_per_epoch,
+                             reporting_epoch=start_step / steps_per_epoch,
+                             source_immutable_verified=True)
+            train_dataset.close()
+            evaluation_dataset.close()
+            return store.run_dir
+        checkpoint_manager.save(
+            _post_checkpoint_payload(
+                model, optimizer, global_step=start_step, config=config,
+                train_dataset=train_dataset, families=families,
+                source_hashes_before=source_hashes_before, index_generator=index_generator,
+                device=device, config_sha256=store.config_hash,
+                coherence_calibration_sha256=calibration_hash, family_scales=family_scales,
+                controller=controller, scalarizer=scalarizer, policy=policy,
+            ), model=model, preview=preview, global_step=start_step, fallback_metric=0.0,
+        )
+        store.update_manifest(pending_panel_step=None)
     last_coherence_loss = None
     for offset, batch in enumerate(batch_source):
         global_step = start_step + offset
@@ -2584,7 +2830,7 @@ def run_post_training(
         }
         if coherence_active or retention_active:
             step_context = {} if constrained else None
-            endpoint_context = {} if policy is not None else None
+            endpoint_context = {} if policy is not None or scalable_runtime is not None else None
             retention_losses: dict[str, torch.Tensor] = {}
             raw_family_losses = {} if scalarizer is not None else None
             rollout_generator = torch.Generator(device=device).manual_seed(
@@ -2612,6 +2858,19 @@ def run_post_training(
                 execution=execution,
                 scalable_runtime=scalable_runtime,
             )
+            if scalable_runtime is not None:
+                from .scalable_fitting import _digest
+
+                selected = endpoint_context["coupling_selected_batch"]
+                actual_coupling = {
+                    "schema": "training_endpoint_coupling_v1",
+                    "step": global_step + 1,
+                    "sample_ids": list(selected.sample_ids),
+                    "observation_sha256": _digest([selected.obs_indices, selected.obs_field_ids, selected.obs_values, selected.obs_valid_mask]),
+                    "query_sha256": _digest([selected.metadata.get("query_indices"), selected.query_coords, selected.query_valid_mask]),
+                    "member_seeds": [_conditional_draw_seed(seed + 1_000_003 + global_step, member) for member in range(len(endpoint_context["members"]))],
+                    "first_member_generator_state_sha256": endpoint_context["rollout_generator_state_sha256"],
+                }
             for name, loss in retention_losses.items():
                 # Retention has the same sparse cadence as the shared rollout.
                 factor = (
@@ -2699,7 +2958,7 @@ def run_post_training(
                     )
                     row["ordered_primary_surrogate"] = float(coherence_loss.detach().cpu())
                 risks = (
-                    _physical_endpoint_risk(endpoint_context, train_dataset).mean(dim=0)
+                    _physical_endpoint_risk(endpoint_context, train_dataset, mean_risk=config["optimization"]["multitask"].get("fidelity_budget", {}).get("metric") == "physical_mean_risk_model_units").mean(dim=0)
                     if scalable_runtime is not None
                     else field_mse(
                         endpoint_context["prediction"],
@@ -2943,6 +3202,7 @@ def run_post_training(
             )
         if scalable_runtime is not None:
             accepted = row.get("update_accepted", True)
+            scalable_runtime.record_occupied_time(perf_counter() - step_started)
             scalable_row = scalable_runtime.finish_step(accepted)
             if not accepted:
                 raise FloatingPointError(
@@ -2953,6 +3213,11 @@ def run_post_training(
                 "a", encoding="utf-8"
             ) as stream:
                 stream.write(json.dumps(scalable_row, allow_nan=False) + "\n")
+            coupling = {**actual_coupling, "accepted": bool(accepted)}
+            with (store.run_dir / "metrics" / "training_coupling.jsonl").open(
+                "a", encoding="utf-8"
+            ) as stream:
+                stream.write(json.dumps(coupling, allow_nan=False) + "\n")
         if row.get("update_accepted", True):
             after_optimizer_step(model)
         if scalarizer is not None and (global_step + 1) % steps_per_epoch == 0:
@@ -3040,14 +3305,64 @@ def run_post_training(
             with (store.run_dir / "metrics/lr_warmup_updates.jsonl").open("a") as handle:
                 handle.write(json.dumps(detail, allow_nan=False) + "\n")
         monitor.record(row, lr=row["optimizer_lr"])
+        # Campaign accounting is checked only at a durable accepted-update
+        # boundary, before potentially expensive inference callbacks. A budget
+        # pause preserves optimizer/policy/streams and performs no final scoring.
+        if budget_stop_requested is not None and budget_stop_requested(
+            global_step + 1, store.run_dir
+        ):
+            batch_source.close()
+            family_paths = {
+                name: store.save_artifact(f"{name}_family.pt", _bound_family_artifact(family, train_dataset, config))
+                for name, family in families.items()
+            }
+            store.update_manifest(coherence_family_state_sha256s={name: file_sha256(path) for name, path in family_paths.items()})
+            payload = _post_checkpoint_payload(
+                model, optimizer, global_step=global_step + 1, config=config,
+                train_dataset=train_dataset, families=families,
+                source_hashes_before=source_hashes_before, index_generator=index_generator,
+                device=device, config_sha256=store.config_hash,
+                coherence_calibration_sha256=calibration_hash, family_scales=family_scales,
+                controller=controller, scalarizer=scalarizer, policy=policy,
+            )
+            last_path = store.save_checkpoint("last", payload)
+            if checkpoint_manager.milestone_due(global_step + 1):
+                milestone = store.save_checkpoint(
+                    f"epoch_{(global_step + 1) // steps_per_epoch:03d}", payload
+                )
+                current_manifest = json.loads((store.run_dir / "run_manifest.json").read_text())
+                hashes = dict(current_manifest.get("checkpoint_hashes", {}))
+                hashes[f"epoch_{(global_step + 1) // steps_per_epoch:03d}"] = file_sha256(milestone)
+                store.update_manifest(
+                    checkpoint_hashes=hashes,
+                    pending_panel_step=(global_step + 1 if checkpoint_manager.panel_evaluator is not None else None),
+                )
+            monitor.close(checkpoint_checked=False, best_checkpoint_saved=False)
+            preview.close()
+            if source_hashes(config) != source_hashes_before:
+                raise RuntimeError("source run changed before budget recovery save")
+            store.update_manifest(
+                source_immutable_verified=True,
+                budget_recovery_checkpoint_sha256=file_sha256(last_path),
+            )
+            store.set_status(
+                "budget_paused", global_step=global_step + 1,
+                configured_steps=configured_steps, steps_per_epoch=steps_per_epoch,
+                reporting_epoch=(global_step + 1) / steps_per_epoch,
+                source_immutable_verified=True,
+            )
+            train_dataset.close()
+            evaluation_dataset.close()
+            return store.run_dir
         checkpoint_result = None
         if checkpoint_manager.due_for_preview_or_checkpoint(global_step + 1, preview):
             # Keep the case artifacts and checkpoint family state at the same
             # recovery boundary.
             family_paths = {
-                name: store.save_artifact(f"{name}_family.pt", family.state_artifact())
+                name: store.save_artifact(f"{name}_family.pt", _bound_family_artifact(family, train_dataset, config))
                 for name, family in families.items()
             }
+            store.update_manifest(coherence_family_state_sha256s={name: file_sha256(path) for name, path in family_paths.items()})
             checkpoint_result = checkpoint_manager.save(
                 _post_checkpoint_payload(
                     model,
@@ -3144,7 +3459,7 @@ def run_post_training(
         )
     guard_failed = fidelity_guard["exceeded"] and fidelity_guard["behavior"] == "error"
     family_paths = {
-        name: store.save_artifact(f"{name}_family.pt", family.state_artifact())
+        name: store.save_artifact(f"{name}_family.pt", _bound_family_artifact(family, train_dataset, config))
         for name, family in families.items()
     }
     checkpoint_payload = _post_checkpoint_payload(

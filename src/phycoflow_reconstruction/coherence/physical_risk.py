@@ -39,6 +39,24 @@ def physical_field_mse(
     )
 
 
+def physical_ensemble_risks(members: Tensor, reference: Tensor, masses: Tensor, **sampling) -> tuple[Tensor, Tensor]:
+    """Return member MSE and unbiased signed mean risk for [..., J, Q, C].
+
+    The mean-risk estimator requires at least two independent members. Its
+    finite-sample value can be negative, and neither member is detached.
+    """
+    if members.ndim < 3 or members.shape[-3] < 2:
+        raise ValueError("corrected mean risk requires at least two members")
+    mean = members.mean(dim=-3)
+    member_squared = (members - reference.unsqueeze(-3)).square().mean(dim=-3)
+    member_mse = _integral(member_squared, masses, total_mass=sampling.get("total_mass"), sampling=sampling.get("sampling", "full"), probabilities=sampling.get("probabilities"))
+    # Integrating the variance after member reduction keeps sampling metadata
+    # on the original batch/site axes.
+    variance = (members - mean.unsqueeze(-3)).square().sum(dim=-3) / (members.shape[-3] * (members.shape[-3] - 1))
+    correction = _integral(variance, masses, total_mass=sampling.get("total_mass"), sampling=sampling.get("sampling", "full"), probabilities=sampling.get("probabilities"))
+    return member_mse, physical_field_mse(mean, reference, masses, **sampling) - correction
+
+
 def _integral(values, masses, *, total_mass, sampling, probabilities):
     if sampling not in {"full", "without_replacement", "with_replacement"}:
         raise ValueError("unknown spatial sampling design")

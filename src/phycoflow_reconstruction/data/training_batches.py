@@ -521,14 +521,17 @@ class AsyncCompactH5BatchSource:
         isolate_model_rng: bool = False,
     ) -> None:
         self.device = device
-        workers = max(1, int(num_workers))
+        workers = max(0, int(num_workers))
         self.loader = DataLoader(
             _CompactH5Dataset(dataset, protocol, query_points, fixed_query_indices),
             batch_sampler=_StepTaggedBatchSampler(batches, start_step),
             num_workers=workers,
             collate_fn=_unwrap_compact_batch,
-            persistent_workers=True,
-            prefetch_factor=2,
+            persistent_workers=workers > 0,
+            prefetch_factor=2 if workers else None,
+            # Calibration may already have initialized Torch/HDF5 thread pools.
+            # Forking that live state can deadlock the first training fetch.
+            multiprocessing_context="spawn" if workers else None,
             pin_memory=device.type == "cuda",
             pin_memory_device=str(device) if device.type == "cuda" else "",
             # Worker creation must not consume the model's RF/noise RNG stream
@@ -690,7 +693,7 @@ def build_training_batch_source(
         workers = int(runtime.get("num_workers", 4))
         print(
             f"data pipeline: compact asynchronous HDF5 loading with "
-            f"{max(1, workers)} workers (complete fields={size / 1e9:.2f} GB)"
+            f"{max(0, workers)} workers (complete fields={size / 1e9:.2f} GB)"
         )
         return AsyncCompactH5BatchSource(
             dataset,

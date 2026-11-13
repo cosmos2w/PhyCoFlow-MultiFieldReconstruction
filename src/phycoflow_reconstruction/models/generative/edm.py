@@ -142,6 +142,8 @@ class EDMDiffusionPDEModel(nn.Module):
         self.high_noise_fraction = high_noise_fraction
         self.train_microbatch_size, self.precision = train_microbatch_size, precision
         self.model_ema_enabled = model_ema_enabled
+        self.rollout_checkpointing = False
+        self.native_solver = "heun"
         self.model_ema_decay, self._ema_eval = model_ema_decay, model_ema_eval
         # Created lazily after .to(device); EMA is auxiliary state, not a submodule.
         self._ema: ModelEMA | None = None
@@ -260,13 +262,20 @@ class EDMDiffusionPDEModel(nn.Module):
         noise = torch.randn(values.shape, device=values.device, generator=generator)
         # Observed entries follow q(x_sigma | known clean observation).
         state = sigmas[0] * noise + mask * values
+        def denoise(state, sigma):
+            if getattr(self, "rollout_checkpointing", False) and torch.is_grad_enabled():
+                from torch.utils.checkpoint import checkpoint
+
+                return checkpoint(self.denoise, state, sigma, values, mask, use_reentrant=False, preserve_rng_state=True)
+            return self.denoise(state, sigma, values, mask)
+
         for index in range(steps):
             sigma, next_sigma = sigmas[index], sigmas[index + 1]
-            clean = self.denoise(state, sigma, values, mask)
+            clean = denoise(state, sigma)
             direction = (state - clean) / sigma
             proposed = state + (next_sigma - sigma) * direction
             if index < steps - 1:
-                next_clean = self.denoise(proposed, next_sigma, values, mask)
+                next_clean = denoise(proposed, next_sigma)
                 next_direction = (proposed - next_clean) / next_sigma
                 proposed = state + (next_sigma - sigma) * (direction + next_direction) / 2
             state = proposed

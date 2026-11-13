@@ -258,6 +258,62 @@ class LazyPooledShape:
         if x.ndim != 4 or x.shape != y.shape or x.shape[1] != self.mean.numel():
             raise ValueError("Shape fields must align as [B,C,H,W]")
 
+    def compile_queries(self, batches, *, exhaustive=False):
+        """Merge a fixed pack, preserving its average and every multiplicity."""
+        batches = tuple(batches)
+        if not batches:
+            raise ValueError("a nonempty fixed Shape query pack is required")
+        merged = {}
+        for batch in batches:
+            queries = self._queries(batch) if exhaustive else self._sampled_queries(batch)
+            for key, ids, signs, line, weight in queries:
+                identity = (key, ids, signs, line)
+                merged[identity] = merged.get(identity, 0.0) + weight / len(batches)
+        return tuple((*identity, weight) for identity, weight in merged.items())
+
+    def compile_reference(self, reference, queries, *, valid_mask=None):
+        """Own detached immutable diagrams; the caller binds and checks identity."""
+        if self.scales is None:
+            raise ValueError("pooled TRAIN calibration must be frozen")
+        self._validate(reference, reference)
+        norm = self._domain(reference, valid_mask)
+        with torch.no_grad():
+            diagrams = self._diagram_bank(reference.detach(), queries, valid_mask)
+        return diagrams, norm, tuple(reference.shape)
+
+    def score_compiled(self, members, queries, compiled_reference, *, valid_mask=None):
+        """All-member fair score with one diagram construction per endpoint.
+
+        No live feature is retained after this call. Only reference diagrams are
+        reusable across optimizer updates. This kernel is differentiable in every
+        supplied member and supports deterministic J1 and conditional J>=2.
+        """
+        target, norm, reference_shape = compiled_reference
+        if members.ndim != 5 or tuple(members.shape[1:]) != reference_shape or not len(members):
+            raise ValueError("Shape members must match compiled reference [J,B,C,H,W]")
+        if self._domain(members[0], valid_mask) != norm:
+            raise ValueError("compiled Shape domain changed")
+        banks = [self._diagram_bank(x, queries, valid_mask) for x in members]
+        j = len(banks)
+        raw = sum(self._distance(x, target, norm) for x in banks) / j
+        if j > 1:
+            raw = raw - sum(
+                self._distance(banks[a], banks[b], norm)
+                for a in range(j) for b in range(a + 1, j)
+            ) / (j * (j - 1))
+        raw = raw.reshape(len(queries), len(members[0]), len(self.dimensions), 2)
+        scales = torch.stack([self.scales[q[0]] for q in queries]).to(raw)
+        leaf = raw / scales[:, None]
+        values = (0.9 * leaf[..., 0] + 0.1 * leaf[..., 1]).mean(-1)
+        weights = values.new_tensor([q[4] for q in queries])
+        return {
+            kind: sum(
+                (values[i] * weights[i] for i, q in enumerate(queries) if q[0][0] == kind),
+                start=values.new_zeros(len(members[0])),
+            )
+            for kind in ("self", "mutual")
+        }
+
     def score(
         self,
         first,
