@@ -15,7 +15,6 @@ def test_disk_backed_parameter_gram_matches_full_gradients_and_cleans_up(tmp_pat
     from phycoflow_reconstruction.coherence.adaptive_profile import _parameter_gradient_gram
 
     matrix = torch.randn(4, 29, generator=torch.Generator().manual_seed(42), dtype=torch.float64)
-    matrix[0].zero_()
     target = torch.tensor([0.1, 0.2, 0.3, 0.4], dtype=torch.float64)
     gram, count = _parameter_gradient_gram(
         lambda coeff: coeff @ matrix, target, spill_directory=tmp_path, chunk_size=7
@@ -171,9 +170,10 @@ def test_fixed_panel_outer_profile_enumerates_inner_and_charges_cost(monkeypatch
         def score(self, name, prediction, reference, *, coordinates, context, batch, coefficients):
             q = batch.pair_queries[0]
             calls.append((name, q.index, q.inner_sign, q.inner_line))
-            val = (
-                prediction[..., 0] * (q.index + 1) + context["conditional_draws"][0][..., 1]
-            ).mean()
+            unary = batch.self_queries[0]
+            val = (prediction[..., 0] * (q.index + 1) * q.weight
+                   + context["conditional_draws"][0][..., 1] * unary.weight
+                   + prediction[..., 2] * 10).mean()
             return SimpleNamespace(scalar_loss=val), {}, {}
 
     monkeypatch.setattr(module, "ScalableQueryAdapter", Adapter)
@@ -215,32 +215,10 @@ def test_fixed_panel_outer_profile_enumerates_inner_and_charges_cost(monkeypatch
         replicates=10,
         seed=3,
     )
-    assert len(calls) == (3 * 12 + 2 * 3) * 2
+    assert len(calls) == (3 * 12 + 2 * 3) * 2 * 2
     assert result["outer_population"] == 3 and result["inner_shape_enumerated"]
     assert set(result["proposals"]) == {"uniform", "c8_difficulty", "hierarchy", "gradient_cost"}
     assert all(row["total_charged_seconds"] > 2 for row in result["proposals"].values())
-    with pytest.raises(ValueError, match="relative to cell"):
-        module.profile_source_panel(
-            panel,
-            families={},
-            artifacts=artifact,
-            filter_fn=lambda x: x,
-            source_family="ffm",
-            family_weights={"multiscale_spectrum": 1.0, "topology": 1.0},
-            parameter_gradient_fn=lambda w: (torch.arange(1, 43, dtype=w.dtype) * w).sum(),
-            research_costs={
-                "screening_seconds": 1.0,
-                "fitting_seconds": 1.0,
-                "audit_seconds": 1.0,
-                "refresh_seconds": 1.0,
-                "refresh_count": 2,
-            },
-            policy_overhead_fraction=0.01,
-            bundle_cost_fn=lambda i: (0.1, 2.0),
-            draws=2,
-            replicates=2,
-            seed=3,
-        )
 
 
 def test_policy_qualification_requires_both_sources_twenty_percent_and_overhead():
@@ -396,3 +374,38 @@ def test_policy_overhead_charges_profile_and_prior_research_against_complete_upd
     assert not _valid_overhead_accounting(profile)
     with pytest.raises(ValueError, match="unfinalized"):
         finalize_policy_overhead(profile, measured_profile_seconds=1, complete_update_seconds=10)
+
+
+def test_uncentered_ht_leaf_gradients_match_runtime_with_fixed_anchor():
+    from phycoflow_reconstruction.coherence.adaptive_profile import isolate_query_stratum
+    from phycoflow_reconstruction.coherence.query_sampling import Draw, QueryBatch
+
+    theta = torch.tensor(1.0, dtype=torch.float64, requires_grad=True)
+    probabilities = (0.25, 0.75)
+    pair_gradients = (2.0, 6.0)
+    extracted = []
+    for index in range(2):
+        query = QueryBatch((Draw(0, 1, 1.0, 1, 1),),
+                           (Draw(index, 1, 0.5, 2, 1),), 1)
+        def runtime(batch, index=index):
+            return theta * (37.0 + 5.0 * batch.self_queries[0].weight
+                            + pair_gradients[index] * batch.pair_queries[0].weight)
+        leaf = isolate_query_stratum(runtime, query, "pair")
+        extracted.append(torch.autograd.grad(leaf, theta, retain_graph=True)[0])
+        unary = isolate_query_stratum(runtime, query, "self")
+        assert torch.autograd.grad(unary, theta, retain_graph=True)[0].item() == pytest.approx(5.0)
+    torch.testing.assert_close(torch.stack(extracted), torch.tensor(pair_gradients, dtype=torch.float64))
+    target = sum(pair_gradients) / 2
+    estimates = [extracted[i].item() / (2 * probabilities[i]) for i in range(2)]
+    mse = sum(p * (estimate - target) ** 2 for p, estimate in zip(probabilities, estimates))
+    assert mse == pytest.approx(0.0)
+    centered = [(extracted[i] - extracted[0]).item() / (2 * probabilities[i]) for i in range(2)]
+    centered_target = (extracted[1] - extracted[0]).item() / 2
+    assert sum(p * (v - centered_target) ** 2 for p, v in zip(probabilities, centered)) > 0
+    # The actual runtime estimator, with its complete anchor added once, has
+    # the same zero error even though its HT weight sums differ by proposal.
+    for i in range(2):
+        batch = QueryBatch((Draw(0, 1, 1.0, 1, 1),),
+                           (Draw(i, 1, probabilities[i], 2, 1),), 1)
+        objective = theta * (37 + 5 * batch.self_queries[0].weight + pair_gradients[i] * batch.pair_queries[0].weight)
+        assert torch.autograd.grad(objective, theta, retain_graph=True)[0].item() == pytest.approx(37 + 5 + target)

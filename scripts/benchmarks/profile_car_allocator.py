@@ -153,6 +153,7 @@ def main():
         from phycoflow_reconstruction.coherence.adaptive_fitting import spectral_filter
         from phycoflow_reconstruction.coherence.adaptive_profile import (
             finalize_policy_overhead,
+            isolate_query_stratum,
             profile_source_panel,
         )
         from phycoflow_reconstruction.coherence.query_runtime import ScalableQueryAdapter
@@ -292,9 +293,7 @@ def main():
         def parameter_gradient(coefficients):
             budget_check()
             members = rollout()
-            baseline = sum(scores(members, query_batch(0)))
-            base_grad = flatten(torch.autograd.grad(baseline, parameters, retain_graph=True, allow_unused=True))
-            result = -float(coefficients.sum()) * base_grad
+            result = None
             for cell in (coefficients != 0).nonzero().flatten().tolist():
                 budget_check()
                 if cell < count * len(inner):
@@ -303,8 +302,12 @@ def main():
                 else:
                     field, sign_index = divmod(cell - count * len(inner), 2)
                     query = query_batch(0, unary_field=field, unary_sign=(1, -1)[sign_index])
-                loss = sum(scores(members, query))
-                result += float(coefficients[cell]) * flatten(torch.autograd.grad(loss, parameters, retain_graph=True, allow_unused=True))
+                stratum = "pair" if cell < count * len(inner) else "self"
+                loss = isolate_query_stratum(lambda q: sum(scores(members, q)), query, stratum)
+                contribution = float(coefficients[cell]) * flatten(torch.autograd.grad(loss, parameters, retain_graph=True, allow_unused=True))
+                result = contribution if result is None else result + contribution
+            if result is None:
+                return torch.zeros(sum(p.numel() for p in parameters), dtype=torch.float64)
             return result
 
         timing = []

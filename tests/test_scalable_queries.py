@@ -333,6 +333,51 @@ def test_real_sampled_scale_and_shape_importance_value_gradient_and_variance():
     )
 
 
+def test_actual_scale_shape_ht_gradient_mse_cancels_only_complete_anchors():
+    from phycoflow_reconstruction.coherence.adaptive_profile import isolate_query_stratum
+
+    torch.manual_seed(19)
+    c, count = 3, pair_count(3)
+    fields = torch.randn(2, 1, c, 4, 4, dtype=torch.double, requires_grad=True)
+    truth = torch.randn(1, c, 4, 4, dtype=torch.double)
+    spectral = torch.randn(2, 1, 4, c, dtype=torch.double, requires_grad=True)
+    target = torch.randn(1, 4, c, dtype=torch.double)
+    shape = LazyPooledShape([0] * c, [1] * c, dimensions=(0,), projections=4)
+    shape.accumulate(fields[0].detach(), truth, full_batch(c))
+    shape.freeze(provenance={"split": "train", "sample_ids": ["case"], "source_checkpoint_sha256": "a" * 64})
+    desc = torch.randn(2, 1, 2 * c, dtype=torch.double, requires_grad=True)
+    td = torch.randn(1, 2 * c, dtype=torch.double)
+    kw = {"draw_piece_means": torch.zeros(2, 1, 1, c, dtype=torch.double),
+          "target_piece_means": torch.zeros(1, 1, c, dtype=torch.double),
+          "piece_weights": torch.ones(1, dtype=torch.double),
+          "mean_scales": torch.ones(1, c, dtype=torch.double)}
+    def runtime(q):
+        scale = sampled_scale(spectral, target, q, filters=torch.ones(2, 4, dtype=torch.double),
+            scales=torch.ones(2, c, dtype=torch.double), mass=torch.ones(4, dtype=torch.double),
+            power_floor=torch.ones(2, c, dtype=torch.double), band_weights=torch.tensor([.5,.5], dtype=torch.double),
+            self_descriptors=desc, target_self_descriptor=td, mean_kwargs=kw)
+        topology = shape.score(fields[0], fields[1], truth, q, exhaustive=True)
+        return (1.7 * scale["signed"] + .4 * scale["rho"] + .9 * scale["joint"]
+                + .8 * scale["log_power_self"] + .6 * topology["self"] + 1.2 * topology["mutual"]).sum()
+    unary = (Draw(0, 1, 1/c, c, 1),)
+    exact = QueryBatch(unary, tuple(Draw(i, 1, 1/count, count, count) for i in range(count)), 0)
+    tensors = (spectral, fields, desc)
+    exact_gradient = torch.autograd.grad(runtime(exact), tensors, retain_graph=True)
+    leaf_gradients = []
+    for i in range(count):
+        query = QueryBatch(unary, (Draw(i, 1, 1/count, count, 1),), 0)
+        leaf = isolate_query_stratum(runtime, query, "pair")
+        leaf_gradients.append(torch.autograd.grad(leaf, tensors, retain_graph=True, allow_unused=True))
+    probs = (.2, .3, .5)
+    for i, probability in enumerate(probs):
+        actual = QueryBatch(unary, (Draw(i, 1, probability, count, 1),), 0)
+        observed = torch.autograd.grad(runtime(actual), tensors, retain_graph=True)
+        for j, (sample, target_grad) in enumerate(zip(observed, exact_gradient)):
+            leaves = [torch.zeros_like(sample) if leaf[j] is None else leaf[j] for leaf in leaf_gradients]
+            expected_error = leaves[i] / (count * probability) - sum(leaves) / count
+            torch.testing.assert_close(sample - target_grad, expected_error, atol=1e-9, rtol=1e-8)
+
+
 def test_batched_shape_matches_original_loop_values_gradients_and_duplicate_weights(monkeypatch):
     from phycoflow_reconstruction.coherence import shape_compute as module
 

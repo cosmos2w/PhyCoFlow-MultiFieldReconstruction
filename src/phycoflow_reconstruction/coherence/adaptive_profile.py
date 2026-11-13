@@ -60,8 +60,6 @@ def _parameter_gradient_gram(callback, target, *, budget_check=None, spill_direc
                 gram += block @ block.T
                 if not torch.allclose(direct[start:stop], target @ block, rtol=1e-5, atol=1e-8):
                     raise ValueError("parameter callback must produce linear full-parameter gradients")
-            if float(gram[0, 0].clamp_min(0).sqrt()) > 1e-8 * max(1.0, float(gram.diag().clamp_min(0).sqrt().max())):
-                raise ValueError("parameter callback must return gradients relative to cell (0,0)")
         finally:
             del mapped
     return gram, width
@@ -75,6 +73,25 @@ from .query_sampling import (
     QueryBatch,
     pair_count,
 )
+
+
+def isolate_query_stratum(score_fn, batch, stratum):
+    """Extract the actual sampled-stratum objective with fixed anchors canceled.
+
+    Doubling every multiplicity in one stratum doubles only its additive
+    importance-weighted leaves. All complete anchors and the other stratum
+    are identical, so their difference is the uncentered stratum itself.
+    """
+    from dataclasses import replace
+
+    if stratum not in ("pair", "self"):
+        raise ValueError("pair or self query stratum required")
+    attr = "pair_queries" if stratum == "pair" else "self_queries"
+    queries = getattr(batch, attr)
+    if not queries:
+        raise ValueError("nonempty query stratum required")
+    doubled = replace(batch, **{attr: tuple(replace(query, count=2 * query.count) for query in queries)})
+    return score_fn(doubled) - score_fn(batch)
 
 
 def profile_source_panel(
@@ -102,7 +119,7 @@ def profile_source_panel(
 
     J2 is the first two stored independent members. parameter_gradient_fn takes
     flat [K*12+2*C] coefficients for pair and unary cells, and returns true
-    parameter gradients relative to the fixed pair/unary reference cell. It
+    parameter gradients of the uncentered pair and unary leaf sum. It
     may use a declared representative subpanel; endpoint gradients use all panel
     conditions. bundle_cost_fn(pair) returns synchronized incremental and fixed
     bundle seconds including model, anchors, unary, added leaves and SOURCE
@@ -196,18 +213,17 @@ def profile_source_panel(
                     "generated_weights": mb,
                     "reference_weights": mb,
                 }
-                total = a.new_zeros(())
-                for name in ("multiscale_spectrum", "topology"):
-                    result, _, _ = adapter.score(
-                        name,
-                        a,
-                        yb,
-                        coordinates=cb,
-                        context=context,
-                        batch=query_batch,
-                        coefficients=coefficients,
-                    )
-                    total = total + float(family_weights[name]) * result.scalar_loss
+                def score_query(query, a=a, yb=yb, cb=cb, context=context):
+                    total = a.new_zeros(())
+                    for name in ("multiscale_spectrum", "topology"):
+                        result, _, _ = adapter.score(
+                            name, a, yb, coordinates=cb, context=context,
+                            batch=query, coefficients=coefficients,
+                        )
+                        total = total + float(family_weights[name]) * result.scalar_loss
+                    return total
+
+                total = isolate_query_stratum(score_query, query_batch, "pair")
                 grads = torch.autograd.grad(total, (a, b), allow_unused=True)
                 cell_gradients.append(
                     torch.cat(
@@ -239,18 +255,17 @@ def profile_source_panel(
                     "generated_weights": mb,
                     "reference_weights": mb,
                 }
-                total = a.new_zeros(())
-                for name in ("multiscale_spectrum", "topology"):
-                    result, _, _ = adapter.score(
-                        name,
-                        a,
-                        yb,
-                        coordinates=cb,
-                        context=context,
-                        batch=query_batch,
-                        coefficients=coefficients,
-                    )
-                    total = total + float(family_weights[name]) * result.scalar_loss
+                def score_query(query, a=a, yb=yb, cb=cb, context=context):
+                    total = a.new_zeros(())
+                    for name in ("multiscale_spectrum", "topology"):
+                        result, _, _ = adapter.score(
+                            name, a, yb, coordinates=cb, context=context,
+                            batch=query, coefficients=coefficients,
+                        )
+                        total = total + float(family_weights[name]) * result.scalar_loss
+                    return total
+
+                total = isolate_query_stratum(score_query, query_batch, "self")
                 grads = torch.autograd.grad(total, (a, b), allow_unused=True)
                 cell_gradients.append(
                     torch.cat(
@@ -264,7 +279,6 @@ def profile_source_panel(
                     * fraction
                 )
         local = torch.stack(cell_gradients)
-        local = local - local[:1]
         endpoint_gram += local @ local.T
     incremental, fixed = [], []
     for index in range(population):
@@ -377,7 +391,7 @@ def profile_source_panel(
         "panel_conditions": len(y),
         "panel_sample_ids": sample_ids,
         "variance_scope": "joint pair and unary outer and inner draws; duplicate pair IDs share one inner draw",
-        "estimator_scope": "pre-optimizer gradient, no ConFIG or optimizer unbiasedness claim",
+        "estimator_scope": "absolute sampled leaf pre-optimizer gradient; fixed anchors cancel, no ConFIG or optimizer unbiasedness claim",
         "total_audit_wall_seconds": time.perf_counter() - started,
     }
     return output
