@@ -153,7 +153,16 @@ def main():
                 "state_bank_sha256": artifact["state_bank"]["sha256"],
                 "family_artifact_sha256s": manifest["coherence_family_state_sha256s"],
                 "panel_ids_sha256": _digest(ids),
-                "pilot_provenance": "preformal pilot; predates latest source-view binding",
+                "pilot_provenance": (
+                    "preformal SOURCE panel; recorded parameter/buffer and weight-view binding present"
+                    if panel.get("parameter_buffer_sha256") and panel.get("source_weight_view_sha256")
+                    else "preformal pilot; predates parameter/buffer and weight-view binding"
+                ),
+                "source_view_binding": {
+                    key: panel.get(key) for key in (
+                        "parameter_buffer_sha256", "source_weight_view_sha256", "source_weight_view"
+                    )
+                },
             }
         )
         setup_total = compile_total = compiled_total = direct_total = pairing_total = 0.0
