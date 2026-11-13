@@ -306,7 +306,7 @@ def test_profile_bundle_cost_attributes_added_pair_and_removes_anchor():
     costs = [1., 4., 9.]
     def timed(anchor, extra):
         return 100. + costs[anchor] + (costs[extra] if extra is not None else 0.)
-    rows = driver.measure_bundle_costs(timed, 3, 2)
+    rows = driver.measure_bundle_costs(timed, 3, 3)
     assert [row['incremental_seconds'] for row in rows] == costs
     assert all(row['fixed_seconds'] == 100. for row in rows)
 

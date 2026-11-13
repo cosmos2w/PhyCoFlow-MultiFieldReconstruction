@@ -9,7 +9,9 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import math
 import os
+import statistics
 import sys
 import time
 from dataclasses import replace
@@ -20,27 +22,81 @@ CODE_ROOT = Path(os.environ.get("CAR_CODE_ROOT", Path(__file__).resolve().parent
 sys.path.insert(0, str(CODE_ROOT / "src"))
 
 
-def measure_bundle_costs(timed_bundle, count, repeats):
-    """Attribute each added pair to its own ID and subtract the anchor cost."""
-    if count < 2 or repeats < 1:
-        raise ValueError("at least two pairs and one repeat required")
-    rows = []
-    for index in range(count):
-        anchor = (index + 1) % count
-        samples = [(timed_bundle(anchor, None), timed_bundle(anchor, index))
-                   for _ in range(repeats)]
-        delta = sum(b - a for a, b in samples) / repeats
-        if delta <= 0:
-            raise ValueError("incremental timing unresolved; increase repeats or use uniform fallback")
-        rows.append({"pair": index, "anchor": anchor,
-                     "one_and_two_query_seconds": samples, "incremental_seconds": delta})
-    fixed = sum(sum(a for a, _ in row["one_and_two_query_seconds"]) / repeats
-                - rows[row["anchor"]]["incremental_seconds"] for row in rows) / count
-    if fixed < 0:
-        raise ValueError("fixed bundle timing unresolved; increase repeats or use uniform fallback")
-    for row in rows:
-        row["fixed_seconds"] = fixed
-    return rows
+def measure_bundle_costs(timed_bundle, count, repeats, *, evidence=None, budget_check=lambda: None):
+    """Measure warm paired AB/BA blocks; preserve evidence even on failure.
+
+    The 4.303 multiplier is a descriptive small-sample spread indicator, not
+    a coverage guarantee. The half-width must be at most half the mean. Each
+    repeat is one balanced block of four complete bundles.
+    """
+    if count < 2 or repeats < 3:
+        raise ValueError("at least two pairs and three balanced blocks required")
+    record = evidence if evidence is not None else {}
+    record.update(status="running", warmup=[], rows=[], repeats=repeats,
+                  resolution="positive mean and descriptive half-width <= 50% of mean",
+                  interval="4.303 * sample standard deviation / sqrt(blocks); descriptive only")
+    started = time.perf_counter()
+
+    def take(anchor, extra):
+        record["active_attempt"] = {"anchor": anchor, "extra": extra}
+        budget_check()
+        value = float(timed_bundle(anchor, extra))
+        if not math.isfinite(value) or value <= 0:
+            record["active_attempt"]["invalid_seconds"] = repr(value)
+            raise ValueError("bundle time must be positive and finite")
+        record["active_attempt"]["seconds"] = value
+        record.pop("active_attempt", None)
+        return value
+
+    def summarize(values):
+        mean = statistics.mean(values)
+        half = 4.303 * statistics.stdev(values) / math.sqrt(len(values))
+        return mean, half
+
+    try:
+        for extra in (None, 0):
+            record["warmup"].append({"anchor": 1, "extra": extra,
+                                     "seconds": take(1, extra)})
+        for index in range(count):
+            anchor = (index + 1) % count
+            row = {"pair": index, "anchor": anchor, "blocks": []}
+            record["rows"].append(row)
+            for _ in range(repeats):
+                block = {"samples": []}
+                row["blocks"].append(block)
+                for order in (("one", "two"), ("two", "one")):
+                    sample = {"order": list(order)}
+                    block["samples"].append(sample)
+                    for mode in order:
+                        sample[mode] = take(anchor, None if mode == "one" else index)
+                block["incremental_seconds"] = statistics.mean(
+                    sample["two"] - sample["one"] for sample in block["samples"])
+                block["one_query_seconds"] = statistics.mean(
+                    sample["one"] for sample in block["samples"])
+            mean, half = summarize([block["incremental_seconds"] for block in row["blocks"]])
+            row.update(incremental_seconds=mean, descriptive_half_width=half)
+        fixed_blocks = [statistics.mean(
+            row["blocks"][j]["one_query_seconds"] -
+            record["rows"][row["anchor"]]["blocks"][j]["incremental_seconds"]
+            for row in record["rows"]) for j in range(repeats)]
+        fixed, fixed_half = summarize(fixed_blocks)
+        record.update(fixed_seconds=fixed, fixed_descriptive_half_width=fixed_half,
+                      fixed_block_seconds=fixed_blocks)
+        if any(row["incremental_seconds"] <= 0 or
+               row["descriptive_half_width"] > 0.5 * row["incremental_seconds"]
+               for row in record["rows"]):
+            raise ValueError("incremental timing unresolved; use uniform fallback")
+        if fixed <= 0 or fixed_half > 0.5 * fixed:
+            raise ValueError("fixed bundle timing unresolved; use uniform fallback")
+        for row in record["rows"]:
+            row["fixed_seconds"] = fixed
+        record["status"] = "resolved"
+        return record["rows"]
+    except BaseException as exc:
+        record.update(status="failed", error_type=type(exc).__name__, error=str(exc))
+        raise
+    finally:
+        record["elapsed_seconds"] = time.perf_counter() - started
 
 
 def main():
@@ -62,11 +118,16 @@ def main():
     p.add_argument("--timing-repeats", type=int, default=3)
     p.add_argument("--replicates", type=int, default=128)
     args = p.parse_args()
-    from phycoflow_reconstruction.evaluation.adaptive_campaign import enforce_execution_constraints
+    from phycoflow_reconstruction.evaluation.adaptive_campaign import (
+        atomic_json,
+        enforce_execution_constraints,
+    )
     enforce_execution_constraints(args.campaign.resolve(), args.gpu_uuid, args.source_family)
     if os.environ.get("CUDA_VISIBLE_DEVICES") != args.gpu_uuid or not os.environ.get("KEOPS_CACHE_FOLDER"):
         raise ValueError("bind the physical GPU UUID and a device-specific KeOps cache before import")
-    if args.max_seconds <= args.save_margin_seconds or min(args.panel_batch_size, args.audit_conditions, args.timing_repeats) < 1:
+    if (not math.isfinite(args.max_seconds) or not math.isfinite(args.save_margin_seconds)
+            or args.save_margin_seconds <= 0 or args.max_seconds <= args.save_margin_seconds
+            or min(args.panel_batch_size, args.audit_conditions) < 1 or args.timing_repeats < 3):
         raise ValueError("positive profiling budget, margin and batch sizes required")
     if not args.spill_dir.is_dir():
         raise ValueError("spill-dir must be an existing scratch directory")
@@ -77,44 +138,6 @@ def main():
         if time.perf_counter() >= deadline:
             raise TimeoutError("profiling reached its save margin")
 
-    import torch
-    import yaml
-
-    from phycoflow_reconstruction.coherence import build_enabled_families
-    from phycoflow_reconstruction.coherence.adaptive_fitting import spectral_filter
-    from phycoflow_reconstruction.coherence.adaptive_profile import (
-        finalize_policy_overhead,
-        profile_source_panel,
-    )
-    from phycoflow_reconstruction.coherence.query_runtime import ScalableQueryAdapter
-    from phycoflow_reconstruction.coherence.query_sampling import (
-        LINE_WEIGHTS,
-        PAIR_SIGNS,
-        Draw,
-        QueryBatch,
-        pair_count,
-    )
-    from phycoflow_reconstruction.data.physical_measure import (
-        attach_batch_measure,
-        batch_measure_context,
-    )
-    from phycoflow_reconstruction.data.sensor_protocols import build_observation_batch
-    from phycoflow_reconstruction.evaluation.adaptive_campaign import atomic_json
-    from phycoflow_reconstruction.training.common import sensor_protocol_from_config
-    from phycoflow_reconstruction.training.post_training import _physical_endpoint_risk
-    from phycoflow_reconstruction.training.rollout import differentiable_reconstruction
-    from phycoflow_reconstruction.training.run_store import file_sha256
-    from phycoflow_reconstruction.training.scalable_fitting import (
-        _digest,
-        validate_scalable_artifacts,
-    )
-    from phycoflow_reconstruction.training.scalable_runtime import ScalableRuntime
-    from phycoflow_reconstruction.training.source import (
-        load_source_model,
-        set_trainable_scope,
-        source_checkpoint_path,
-    )
-
     run = args.run_dir.resolve()
     args.output.parent.mkdir(parents=True, exist_ok=True)
     if args.output.exists():
@@ -123,6 +146,43 @@ def main():
     atomic_json(args.output, receipt)
     dataset = None
     try:
+        import torch
+        import yaml
+
+        from phycoflow_reconstruction.coherence import build_enabled_families
+        from phycoflow_reconstruction.coherence.adaptive_fitting import spectral_filter
+        from phycoflow_reconstruction.coherence.adaptive_profile import (
+            finalize_policy_overhead,
+            profile_source_panel,
+        )
+        from phycoflow_reconstruction.coherence.query_runtime import ScalableQueryAdapter
+        from phycoflow_reconstruction.coherence.query_sampling import (
+            LINE_WEIGHTS,
+            PAIR_SIGNS,
+            Draw,
+            QueryBatch,
+            pair_count,
+        )
+        from phycoflow_reconstruction.data.physical_measure import (
+            attach_batch_measure,
+            batch_measure_context,
+        )
+        from phycoflow_reconstruction.data.sensor_protocols import build_observation_batch
+        from phycoflow_reconstruction.training.common import sensor_protocol_from_config
+        from phycoflow_reconstruction.training.post_training import _physical_endpoint_risk
+        from phycoflow_reconstruction.training.rollout import differentiable_reconstruction
+        from phycoflow_reconstruction.training.run_store import file_sha256
+        from phycoflow_reconstruction.training.scalable_fitting import (
+            _digest,
+            validate_scalable_artifacts,
+        )
+        from phycoflow_reconstruction.training.scalable_runtime import ScalableRuntime
+        from phycoflow_reconstruction.training.source import (
+            load_source_model,
+            set_trainable_scope,
+            source_checkpoint_path,
+        )
+
         config = yaml.safe_load((run / "resolved_config.yaml").read_text())
         model, dataset, identity = load_source_model(config, torch.device("cuda:0"))
         if bool(model.capabilities.structured_grid_required) != (args.source_family == "edm"):
@@ -265,25 +325,44 @@ def main():
             torch.cuda.synchronize()
             return time.perf_counter() - started
 
-        timing = measure_bundle_costs(timed_bundle, count, args.timing_repeats)
+        receipt["timing_evidence"] = {}
+        timing = measure_bundle_costs(timed_bundle, count, args.timing_repeats,
+                                      evidence=receipt["timing_evidence"], budget_check=budget_check)
         def bundle_cost(index):
             return timing[index]["incremental_seconds"], timing[index]["fixed_seconds"]
 
         costs = json.loads(args.research_costs.read_text())
         profile = profile_source_panel(panel, families=cpu_families, artifacts=artifacts, filter_fn=lambda x: spectral_filter(cpu_families["multiscale_spectrum"], x), source_family=args.source_family, parameter_gradient_fn=parameter_gradient, bundle_cost_fn=bundle_cost, research_costs=costs, policy_overhead_fraction=args.policy_overhead_fraction, coefficients=calibrated, replicates=args.replicates, panel_batch_size=args.panel_batch_size, budget_check=budget_check, spill_directory=str(args.spill_dir), family_weights={k: weights[k] for k in ("multiscale_spectrum", "topology")})
-        # Research inputs must exclude the operational sampler portion already
-        # included in the measured complete-update baseline.
+        # Hashing and dataset shutdown are part of this occupied profiling
+        # attempt. Reserve the declared save margin as a conservative charge
+        # for final receipt serialization/teardown after this measurement.
+        budget_check()
+        panel_hash = file_sha256(panel_path)
+        budget_check()
+        artifact_hash = file_sha256(artifact_path)
+        budget_check()
+        checkpoint_hash = file_sha256(args.calibration_checkpoint) if args.calibration_checkpoint else None
+        budget_check()
+        dataset.close()
+        dataset = None
         measured = time.perf_counter() - began
-        finalize_policy_overhead(profile, measured_profile_seconds=measured,
+        charged = measured + args.save_margin_seconds
+        finalize_policy_overhead(profile, measured_profile_seconds=charged,
                                  complete_update_seconds=args.complete_update_seconds)
-        receipt.update(status="passed", profile=profile, measured_profile_wall_seconds=measured, source_identity=identity, source_view_evidence="panel_parameter_buffer_digest" if panel_view is not None else "legacy_panel_label_and_strict_checkpoint_plus_endpoint_parity", panel_sha256=file_sha256(panel_path), scalable_artifact_sha256=file_sha256(artifact_path), coefficient_identity=coefficient_identity, calibration_checkpoint_sha256=file_sha256(args.calibration_checkpoint) if args.calibration_checkpoint else None, interpretation="SOURCE endpoint allocation audit; does not establish benefits after internal calibration or ConFIG", audit_sample_ids=chunk["sample_ids"][:args.audit_conditions], timing_sample_ids=list(timing_batch.sample_ids), timing_observation_seed=timing_seed, timing_observation_protocol="native_training", timing=timing, family_weights=weights, endpoint_parity_tolerance={"rtol": 3e-4, "atol": 3e-4})
+        receipt.update(status="passed", profile=profile, measured_profile_wall_seconds=measured,
+                       final_save_allowance_seconds=args.save_margin_seconds,
+                       research_profile_charge_seconds=charged,
+                       research_charge_scope="elapsed through artifact hashing and dataset close plus conservative final-save allowance",
+                       source_identity=identity, source_view_evidence="panel_parameter_buffer_digest" if panel_view is not None else "legacy_panel_label_and_strict_checkpoint_plus_endpoint_parity", panel_sha256=panel_hash, scalable_artifact_sha256=artifact_hash, coefficient_identity=coefficient_identity, calibration_checkpoint_sha256=checkpoint_hash, interpretation="SOURCE endpoint allocation audit; does not establish benefits after internal calibration or ConFIG", audit_sample_ids=chunk["sample_ids"][:args.audit_conditions], timing_sample_ids=list(timing_batch.sample_ids), timing_observation_seed=timing_seed, timing_observation_protocol="native_training", timing=timing, family_weights=weights, endpoint_parity_tolerance={"rtol": 3e-4, "atol": 3e-4})
     except BaseException as exc:
         receipt.update(status="failed", error_type=type(exc).__name__, error=str(exc), elapsed_seconds=time.perf_counter() - began)
         raise
     finally:
-        if dataset is not None:
-            dataset.close()
-        atomic_json(args.output, receipt)
+        try:
+            if dataset is not None:
+                dataset.close()
+        finally:
+            atomic_json(args.output, receipt)
 
 
 if __name__ == "__main__":
