@@ -8,6 +8,8 @@ not certify scientific qualification.
 from __future__ import annotations
 
 import argparse
+import copy
+import hashlib
 import json
 import math
 import os
@@ -40,6 +42,96 @@ from phycoflow_reconstruction.evaluation.adaptive_campaign import (
     snapshot_source,
     spent,
 )
+
+
+def validate_code_capsule(code_root):
+    """Rehash the frozen execution inventory before admitting an arm."""
+    root = Path(code_root).resolve()
+    receipt = json.loads((root / 'execution_receipt.json').read_text())
+    files = receipt.get('files')
+    if receipt.get('schema') != 'car_execution_code_v1' or not isinstance(files, dict) or not files:
+        raise ValueError('invalid frozen code inventory')
+    identity = hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest()
+    if receipt.get('sha256') != identity or root.name != identity:
+        raise ValueError('frozen code inventory identity differs')
+    for name, expected in files.items():
+        path = (root / name).resolve()
+        if root not in path.parents or not path.is_file() or digest(path) != expected:
+            raise ValueError(f'frozen execution file changed: {name}')
+    return identity
+
+
+def validate_train_panel(config, campaign):
+    """Bind TRAIN callbacks to the exact frozen T256/J4 condition panel."""
+    from phycoflow_reconstruction.data.factory import open_field_dataset
+
+    panel_path = campaign / 'panels' / 'train.json'
+    manifest = json.loads(panel_path.read_text())
+    evaluation = config['evaluation']
+    if (manifest.get('split') != 'train' or manifest.get('members') != 4
+            or manifest.get('sensor_count') != 256 or evaluation.get('split') != 'train'
+            or evaluation.get('members') != 4 or evaluation.get('sensor_counts') != {'T': 256}
+            or evaluation.get('sensor_seed') != 2047):
+        raise ValueError('formal TRAIN panel requires frozen T256/J4 and sensor seed 2047')
+    ids = manifest['sample_ids']
+    indices = evaluation.get('sample_indices')
+    if (not isinstance(indices, list) or len(indices) != len(ids)
+            or len(ids) != math.ceil(manifest['population'] * .1)
+            or evaluation.get('max_samples') != len(ids) or len(set(indices)) != len(indices)):
+        raise ValueError('formal TRAIN callback indices must cover the frozen 10% panel')
+    dataset = open_field_dataset(config['dataset'], split='train')
+    try:
+        if len(dataset) != manifest['population'] or any(isinstance(i, bool) or not isinstance(i, int) or not 0 <= i < len(dataset) for i in indices):
+            raise ValueError('formal TRAIN split population or indices differ')
+        actual = [f'{dataset.trajectory_ids[dataset._items[i][0]]}:{dataset._items[i][1]}' for i in indices]
+        if actual != ids:
+            raise ValueError('formal TRAIN callback IDs differ from the frozen panel')
+    finally:
+        dataset.close()
+    return digest(panel_path)
+
+
+def validate_formal_pair(configs):
+    """Require identical comparison settings except expanded target and arm path."""
+    if set(configs) != {'FFM_B1', 'FFM_A1'}:
+        raise ValueError('both formal arm configurations are required')
+    normalized = {}
+    for arm, supplied in configs.items():
+        config = copy.deepcopy(supplied)
+        adaptive = config['coherence']['scalable_anchored_coherence'].pop('adaptive', None)
+        if arm == 'FFM_B1' and adaptive and adaptive.get('enabled', False):
+            raise ValueError('B1 must retain the core-only target')
+        if arm == 'FFM_A1':
+            if not isinstance(adaptive, dict) or adaptive.get('enabled') is not True or not adaptive.get('bank_artifact'):
+                raise ValueError('A1 requires the frozen discovered bank')
+            bank = adaptive['bank_artifact']
+            path = Path(bank['path'])
+            if digest(path) != bank['sha256']:
+                raise ValueError('A1 frozen bank file hash differs')
+            data = json.loads(path.read_text())
+            payload = {k: v for k, v in data.items() if k != 'sha256'}
+            internal_hash = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest()
+            if data.get('sha256') != internal_hash or not data.get('source_fit_binding_sha256') or data.get('policy_qualified') or not (data.get('directions') or data.get('triples')):
+                raise ValueError('A1 requires a bound nonempty uniform-fallback bank')
+        config['output'].pop('experiment_name', None)
+        normalized[arm] = config
+    if normalized['FFM_B1'] != normalized['FFM_A1']:
+        raise ValueError('formal arms differ outside the declared adaptive target and output path')
+
+
+def validate_frozen_pair(manifest, campaign):
+    import yaml
+
+    if set(manifest.get('arms', {})) != {'FFM_B1', 'FFM_A1'}:
+        raise ValueError('formal freeze must declare both arms')
+    configs = {}
+    for arm, declaration in manifest['arms'].items():
+        path = Path(declaration['config_path'])
+        if digest(path) != declaration['config_sha256']:
+            raise ValueError(f'{arm} frozen configuration hash differs')
+        configs[arm] = yaml.safe_load(path.read_text())
+    validate_formal_pair(configs)
+    return validate_train_panel(configs['FFM_B1'], campaign)
 
 
 def modernize_c8(config, train_count=800):
@@ -290,10 +382,14 @@ def main():
             freeze_path = campaign / 'formal_freeze.json'
             frozen = json.loads(freeze_path.read_text())['manifest']
             declared = frozen['arms'][args.arm]
+            validate_frozen_pair(frozen, campaign)
             if frozen.get('status') != 'frozen' or declared['config_sha256'] != digest(args.config):
                 raise ValueError('arm config does not match formal freeze')
-            if frozen.get('code_root') != str(CODE_ROOT) or not frozen.get('forecast', {}).get('fits'):
-                raise ValueError('qualified frozen execution code and feasible forecast required')
+            if frozen.get('code_root') != str(CODE_ROOT) or not frozen.get('forecast', {}).get('fits') or frozen.get('driver_sha256') != digest(Path(__file__)):
+                raise ValueError('qualified code capsule, frozen driver and feasible forecast required')
+            validate_code_capsule(CODE_ROOT)
+            if frozen.get('assessment_driver_sha256') != digest(ROOT / 'scripts/posttraining/assess_car_checkpoints.py'):
+                raise ValueError('frozen assessment driver changed')
             if model_name != 'gl_rbf_cq' or config['optimization']['epochs'] != 1000 or config['optimization']['steps_per_epoch'] != 13 or config['optimization']['batch_size'] != 32:
                 raise ValueError('formal arm requires native FFM, 1000 reporting epochs and 13 B32 updates per epoch')
             if config['coherence']['compute_budget']['point_count'] != 4096:
@@ -324,7 +420,7 @@ def main():
         try:
             signal.signal(signal.SIGALRM, initial_stage_expired)
             signal.alarm(max(1, math.ceil(args.initial_stage_bound_seconds - (time.time() - occupied_start))))
-            atomic_json(campaign / 'launches' / f'{token}.json', {'schema': 'car_formal_launch_v1' if is_formal else 'car_preflight_launch_v1', 'token': token, 'arm': args.arm if is_formal else None, 'gpu_uuid': args.gpu_uuid, 'config_sha256': digest(args.config), 'max_steps': None if is_formal else args.max_steps, 'started_unix': time.time(), 'pid': os.getpid(), 'code_root': str(CODE_ROOT), 'initial_stage_bound_seconds': args.initial_stage_bound_seconds, 'save_margin_seconds': args.save_margin_seconds})
+            atomic_json(campaign / 'launches' / f'{token}.json', {'schema': 'car_formal_launch_v1' if is_formal else 'car_preflight_launch_v1', 'token': token, 'arm': args.arm if is_formal else None, 'gpu_uuid': args.gpu_uuid, 'config_sha256': digest(args.config), 'max_steps': None if is_formal else args.max_steps, 'started_unix': time.time(), 'pid': os.getpid(), 'code_root': str(CODE_ROOT), 'driver_sha256': digest(Path(__file__)), 'initial_stage_bound_seconds': args.initial_stage_bound_seconds, 'save_margin_seconds': args.save_margin_seconds})
             from phycoflow_reconstruction.training.post_training import run_post_training
             result = run_post_training(config, case_dir=case_dir, max_steps=None if is_formal else args.max_steps,
                                        resume=args.resume,
@@ -344,6 +440,12 @@ def main():
         doc = json.loads(args.manifest.read_text())
         if doc.get('status') != 'frozen' or not doc.get('train_qualification_sha256'):
             raise ValueError('manifest must declare frozen status and TRAIN qualification digest')
+        if doc.get('code_root') != str(CODE_ROOT) or not doc.get('forecast', {}).get('fits') or doc.get('driver_sha256') != digest(Path(__file__)):
+            raise ValueError('formal freeze requires the executed code capsule, driver hash and feasible forecast')
+        validate_code_capsule(CODE_ROOT)
+        if doc.get('assessment_driver_sha256') != digest(ROOT / 'scripts/posttraining/assess_car_checkpoints.py'):
+            raise ValueError('formal freeze requires the frozen assessment driver hash')
+        validate_frozen_pair(doc, campaign)
         immutable_json(campaign / 'formal_freeze.json', {'schema': 'car_freeze_receipt_v1',
                        'manifest_sha256': digest(args.manifest), 'manifest': doc})
     elif args.command == 'checkpoint-receipt':

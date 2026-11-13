@@ -105,7 +105,7 @@ class FrozenCoherenceObserver:
             "generated_weights": self.member_weights,
             "reference_weights": self.reference_weights,
         }
-        self.families["global_distribution"]._endpoint_measures(
+        _, normalized_reference_weights = self.families["global_distribution"]._endpoint_measures(
             self.reference, self.reference, self.context, required=True
         )
         self.mode, self.fields = mode, fields
@@ -143,7 +143,7 @@ class FrozenCoherenceObserver:
             state_family = self.families["global_distribution"]
             state_target = state_family._in_declared_units(self.reference, self.reference)[1]
             self.state_reference = prepare_endpoint(
-                state_target, self.reference_weights, self.artifacts["state_bank"]["directions"],
+                state_target, normalized_reference_weights, self.artifacts["state_bank"]["directions"],
                 state_family.components_by_key["self_marginal_w2"].channel_weights,
             )
             self.scale_reference = _scale_statistics(scale_family, self.reference)
@@ -271,7 +271,9 @@ class FrozenCoherenceObserver:
             coordinates=self.coordinates, context=context, batch=batch,
             coefficients=self.coefficients,
         )[0] for batch in self.scale_batches]
-        if compiled:
+        # Merged Shape batching can change finite-precision diagram subgradients.
+        # Preserve the independent query-pack gradient when differentiating.
+        if compiled and not (torch.is_grad_enabled() and members.requires_grad):
             f = self.families["topology"]
             grids = torch.stack([_shape_grid(f, x, self.reference) for x in members])
             mask = f.domain_mask if f.native_masked else None

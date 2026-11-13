@@ -25,8 +25,12 @@ def _freeze_fixture(tmp_path):
     event['sha256'] = mod.content_hash(event)
     (campaign / 'assessment/native_event_redesigned.json').write_text(json.dumps(event))
     formal = {'schema':'car_freeze_receipt_v1','manifest_sha256':'manifest',
-              'manifest': {'status':'frozen','train_qualification_sha256':'q','event_task_sha256':event['sha256']}}
+              'manifest': {'status':'frozen','train_qualification_sha256':'q','event_task_sha256':event['sha256'],
+                           'driver_sha256':'driver','assessment_driver_sha256':mod.file_hash(Path(mod.__file__)), 'code_root':'code',
+                           'arms':{'FFM_B1':{'config_sha256':'b1'},'FFM_A1':{'config_sha256':'a1'}}}}
     (campaign / 'formal_freeze.json').write_text(json.dumps(formal))
+    (campaign/'launches').mkdir()
+    (campaign/'completions').mkdir()
     arms = {}
     for arm in ('FFM_B1','FFM_A1'):
         run, alphas = tmp_path/arm, tmp_path/(arm+'_alpha')
@@ -37,10 +41,17 @@ def _freeze_fixture(tmp_path):
             checkpoint = run/'checkpoints'/f'epoch_{epoch:03d}.pt'
             checkpoint.write_bytes(f'{arm}-{epoch}'.encode())
             alpha = {'schema':'car_streamed_alpha_v1','split':'train','epoch':epoch,
-                     'child_checkpoint_sha256':mod.file_hash(checkpoint), 'selected_alpha':.5,
+                     'child_checkpoint_sha256':mod.file_hash(checkpoint), 'selected_alpha':.5, 'assessment_driver_sha256':mod.file_hash(Path(mod.__file__)),
                      'panel_sha256':'panel', 'source_checkpoint_sha256':'source', 'coupling_sha256':'stream',
                      'core_identity':{'hash':'core'}, 'sample_ids':['sample']}
             (alphas/f'epoch_{epoch:03d}.json').write_text(json.dumps({**alpha,'sha256':mod.content_hash(alpha)}))
+        token = arm
+        launch = {'schema':'car_formal_launch_v1','token':token,'arm':arm,
+                  'config_sha256':'b1' if arm == 'FFM_B1' else 'a1',
+                  'driver_sha256':'driver','code_root':'code'}
+        completion = {'token':token,'status':'completed','global_step':13000,'run_dir':str(run)}
+        (campaign/'launches'/f'{token}.json').write_text(json.dumps(launch))
+        (campaign/'completions'/f'{token}.json').write_text(json.dumps(completion))
         arms[arm] = (run,alphas)
     return campaign, arms
 
@@ -125,6 +136,7 @@ def test_train_score_streams_and_writes_bound_blend(tmp_path, monkeypatch, mode)
         torch.save({**row, 'members_model':values}, bank / '0000.pt')
         payload = {'split':'train', 'model':'ffm' if mode == 'mature' else 'edm', 'arm':'FFM_B1' if mode == 'mature' else 'EDM_qualification', 'source_sha256':'source', 'source_weight_view':'view',
                    'panel_sha256':digest(panel_path), 'dataset_fingerprint':'data', 'normalizer_sha256':'norm',
+                   'assessment_driver_sha256':mod.file_hash(Path(mod.__file__)),
                    'field_order':['T'], 'sample_ids':['sample'],
                    'coupling_sha256':'coupling', 'support':40300, 'members':4,
                    'epoch':None if label=='source' else (100 if mode == 'mature' else 9), 'checkpoint_sha256':label,
@@ -177,3 +189,13 @@ def test_frozen_code_and_case_roots_can_differ(tmp_path):
     lines = subprocess.check_output([sys.executable, '-c', program], env=env, text=True).splitlines()
     assert lines == [str(tmp_path/'repo'), str(tmp_path/'capsule'),
                      str(tmp_path/'repo/cases/turbulent_combustion/runs/coherence_adaptive_repair/round_1')]
+
+
+def test_assessment_freeze_rejects_unrelated_completed_run(tmp_path):
+    campaign, arms = _freeze_fixture(tmp_path)
+    completion = campaign/'completions/FFM_A1.json'
+    value = json.loads(completion.read_text())
+    value['run_dir'] = str(tmp_path/'unrelated_completed_run')
+    completion.write_text(json.dumps(value))
+    with pytest.raises(ValueError, match='matching frozen formal launch'):
+        mod.build_assessment_freeze(campaign, arms)

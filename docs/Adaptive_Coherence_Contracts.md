@@ -28,6 +28,8 @@ Formal children declare `adaptive.bank_artifact: {path, sha256}` to consume the 
 
 `FrozenCoherenceObserver.score_tensors` shares differentiable scoring with detached assessment. It compiles immutable reference sorts, spectral statistics and persistence diagrams, while constructing endpoint-dependent merged CDF breakpoints from actual endpoints. It supports J1 paired scoring and every supplied conditional member for J>=2. `compiled=False` provides the same-target reference path. Neither path retains live graphs between calls.
 
+State reference compilation follows the same physical-mass normalization arithmetic as the independent path. Compiled Shape reuse is restricted to assessment without gradients: batched persistence projections can select different finite-precision subgradients when the merged query pack changes shape. Differentiable observation uses the qualified per-pack Shape route while retaining State and Scale reuse. This preserves the training-gradient contract and does not claim a compiled Shape training speedup.
+
 Artifacts bind source, fields, units, physical support, reference values, geometry, normalizer, bank and scientific source files. Pooled Shape rejects changed source-file hashes even when an unrelated definition changed in the same file. Run fitting, training, profiling and assessment from the matching immutable execution capsule; refit after a source identity changes. Do not relabel stale artifacts.
 
 Sampler/calibration cursors commit only with accepted updates. Recovery restores scientific random streams and trims coupling journals to the checkpoint cursor. A budget pause saves full recovery state and curves. If it lands at a milestone, it saves that checkpoint and defers the panel until resume, before another update.

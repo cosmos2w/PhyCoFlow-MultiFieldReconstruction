@@ -54,6 +54,33 @@ def _completed_status(path):
     return status
 
 
+def find_formal_completion(campaign, arm, run, manifest):
+    """Identify the unique successful formal launch matching the frozen arm."""
+    declaration = manifest.get('arms', {}).get(arm, {})
+    matches = []
+    for launch_path in sorted((campaign / 'launches').glob('*.json')):
+        launch = json.loads(launch_path.read_text())
+        if (launch.get('schema') != 'car_formal_launch_v1' or launch.get('arm') != arm
+                or launch.get('config_sha256') != declaration.get('config_sha256')
+                or launch.get('driver_sha256') != manifest.get('driver_sha256')
+                or launch.get('code_root') != manifest.get('code_root')):
+            continue
+        token = launch.get('token')
+        if not token or launch_path.stem != token:
+            continue
+        completion_path = campaign / 'completions' / f'{token}.json'
+        if not completion_path.is_file():
+            continue
+        completion = json.loads(completion_path.read_text())
+        if (completion.get('token') == token and completion.get('status') == 'completed'
+                and completion.get('global_step') == 13000
+                and Path(completion.get('run_dir', '')).resolve() == Path(run).resolve()):
+            matches.append((launch_path.resolve(), completion_path.resolve()))
+    if len(matches) != 1:
+        raise ValueError(f'{arm} requires one matching frozen formal launch and completion')
+    return matches[0]
+
+
 def build_assessment_freeze(campaign, arms):
     """Bind every completed arm checkpoint and TRAIN alpha before held-out access."""
     formal_path = campaign / 'formal_freeze.json'
@@ -61,6 +88,8 @@ def build_assessment_freeze(campaign, arms):
     manifest = formal.get('manifest', {})
     if formal.get('schema') != 'car_freeze_receipt_v1' or manifest.get('status') != 'frozen' or not formal.get('manifest_sha256') or not manifest.get('train_qualification_sha256'):
         raise ValueError('valid formal freeze required')
+    if manifest.get('assessment_driver_sha256') != file_hash(Path(__file__)):
+        raise ValueError('assessment driver differs from formal freeze')
     event = checked_json(campaign / 'assessment/native_event_redesigned.json')
     if manifest.get('event_task_sha256') != event['sha256']:
         raise ValueError('formal freeze must bind the redesigned event')
@@ -72,13 +101,14 @@ def build_assessment_freeze(campaign, arms):
         run, alpha_dir = Path(run).resolve(), Path(alpha_dir).resolve()
         status_path = run / 'status.json'
         _completed_status(status_path)
+        launch_path, completion_path = find_formal_completion(campaign, arm, run, manifest)
         checkpoints = {}
         for epoch in EPOCHS:
             checkpoint = run / 'checkpoints' / f'epoch_{epoch:03d}.pt'
             alpha_path = alpha_dir / f'epoch_{epoch:03d}.json'
             alpha = checked_json(alpha_path)
             checkpoint_sha = file_hash(checkpoint)
-            if alpha.get('schema') != 'car_streamed_alpha_v1' or alpha.get('split') != 'train' or alpha.get('epoch') != epoch or alpha.get('child_checkpoint_sha256') != checkpoint_sha:
+            if alpha.get('schema') != 'car_streamed_alpha_v1' or alpha.get('split') != 'train' or alpha.get('epoch') != epoch or alpha.get('child_checkpoint_sha256') != checkpoint_sha or alpha.get('assessment_driver_sha256') != manifest.get('assessment_driver_sha256'):
                 raise ValueError(f'{arm} epoch {epoch} TRAIN alpha/checkpoint mismatch')
             signature = {k: alpha.get(k) for k in ('panel_sha256', 'source_checkpoint_sha256', 'coupling_sha256', 'core_identity', 'sample_ids')}
             if any(not signature[k] for k in signature):
@@ -91,6 +121,8 @@ def build_assessment_freeze(campaign, arms):
                                        'alpha_path':str(alpha_path), 'alpha_file_sha256':file_hash(alpha_path),
                                        'alpha_receipt_sha256':alpha['sha256']}
         records[arm] = {'run':str(run), 'status_path':str(status_path), 'status_sha256':file_hash(status_path),
+                        'launch_path':str(launch_path), 'launch_sha256':file_hash(launch_path),
+                        'completion_path':str(completion_path), 'completion_sha256':file_hash(completion_path),
                         'checkpoints':checkpoints}
     if records['FFM_B1']['run'] == records['FFM_A1']['run']:
         raise ValueError('formal arms must be distinct runs')
@@ -106,6 +138,9 @@ def validation_gate(campaign, alpha_path):
     freeze = checked_json(freeze_path)
     if freeze.get('schema') != 'car_assessment_freeze_v1' or freeze.get('formal_freeze_sha256') != file_hash(formal_path):
         raise ValueError('formal freeze changed after assessment freeze')
+    formal = json.loads(formal_path.read_text())
+    if formal.get('manifest', {}).get('assessment_driver_sha256') != file_hash(Path(__file__)):
+        raise ValueError('assessment driver differs from formal freeze')
     arms = freeze.get('arms', {})
     if set(arms) != {'FFM_B1', 'FFM_A1'}:
         raise ValueError('assessment freeze requires both completed arms')
@@ -114,6 +149,10 @@ def validation_gate(campaign, alpha_path):
         raise ValueError('frozen event changed')
     allowed = set()
     for arm, record in arms.items():
+        launch_path, completion_path = find_formal_completion(campaign, arm, record['run'], formal['manifest'])
+        if (str(launch_path) != record['launch_path'] or file_hash(launch_path) != record['launch_sha256']
+                or str(completion_path) != record['completion_path'] or file_hash(completion_path) != record['completion_sha256']):
+            raise ValueError(f'{arm} frozen launch or completion changed')
         status_path = Path(record['status_path'])
         if file_hash(status_path) != record['status_sha256']:
             raise ValueError(f'{arm} completion receipt changed')
@@ -332,7 +371,7 @@ def generate(args):
                     obs_digests.append(content_hash({'sample_id': sample_id, 'points': points.tolist(), 'seeds': row['member_seeds']}))
             payload = {'schema':'car_native_bank_v1', 'split':args.split, 'model':args.model, 'arm':args.arm,
                        'epoch':args.epoch, 'source_sha256':source_hash, 'checkpoint_sha256':checkpoint_hash,
-                       'source_weight_view':source_meta['materialized_view_sha256'], 'panel_sha256':digest(panel_path),
+                       'source_weight_view':source_meta['materialized_view_sha256'], 'assessment_driver_sha256':file_hash(Path(__file__)), 'panel_sha256':digest(panel_path),
                        'dataset_fingerprint':dataset_fingerprint(dataset.path), 'normalizer_sha256':dataset.normalizer.digest(),
                        'field_order':list(dataset.field_names), 'sample_ids':ids,
                        'sensor_count':256, 'sensor_seed_rule':'2047+split_sample_index',
@@ -370,10 +409,12 @@ def score(args):
     valid_child = (child['model'] == 'edm' and child['arm'] == 'EDM_qualification' and isinstance(child['epoch'], int) and 0 <= child['epoch'] <= 12) if qualification else (child['model'] == 'ffm' and child['arm'] in {'FFM_B1', 'FFM_A1'} and child['epoch'] in EPOCHS)
     if source['epoch'] is not None or not valid_child or (qualification and args.split != 'train'):
         raise ValueError('SOURCE and mode-specific saved child bank required')
-    for key in ('split', 'model', 'source_sha256', 'source_weight_view', 'panel_sha256',
+    for key in ('split', 'model', 'source_sha256', 'source_weight_view', 'assessment_driver_sha256', 'panel_sha256',
                 'dataset_fingerprint', 'normalizer_sha256', 'field_order', 'sample_ids', 'coupling_sha256', 'support', 'members'):
         if source[key] != child[key]:
             raise ValueError(f'unmatched endpoint bank {key}')
+    if source.get('assessment_driver_sha256') != file_hash(Path(__file__)):
+        raise ValueError('endpoint bank was generated by a different assessment driver')
     if source['split'] != args.split or source['support'] != 40300 or source['members'] != 4:
         raise ValueError('native J4 panel required')
     panel_path = args.campaign / 'panels' / ('train.json' if args.split == 'train' else 'validation_sealed.json')
@@ -503,6 +544,7 @@ def score(args):
                        'source_bank_receipt_sha256':source['sha256'],'child_bank_receipt_sha256':child['sha256'],
                        'panel_sha256':source['panel_sha256'],'coupling_sha256':source['coupling_sha256'],
                        'core_artifact_sha256':core_identity['scalable_sha256'], 'core_identity':core_identity,
+                       'assessment_driver_sha256':file_hash(Path(__file__)),
                        'core_support':'fixed Q4096', 'risk_support':'native decoded 40300',
                        'sample_ids':source['sample_ids'], 'source_core_denominators':denominators.tolist(),
                        'sensor_tolerance_model_units':args.sensor_tolerance, 'frontier':list(FRONTIER),
