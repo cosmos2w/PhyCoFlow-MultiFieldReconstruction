@@ -6,7 +6,7 @@
 
 > **Have a dataset and a trained SOURCE?** Follow [the recommended profile](#611-start-with-the-recommended-profile), then [validate and launch](#63-validate-launch-and-resume-on-your-data). `post-train` automatically fits the coherence representations on TRAIN before its first optimizer update; no separate fit script is needed. You supply the physical measure, geometry, task floors and fidelity allowance.
 
-> **Development and reference status:** The model choices in [§5.2](#52-select-a-model) describe available interfaces and reference configurations; they do not establish an accuracy ranking or efficacy on your dataset. The new `fast_lagrangian`, `lpc_ordered`, and `execution_strategy` methods remain [experimental development/testing routes](docs/posttraining/FAST_LAGRANGIAN_LPC_USER_GUIDE.md). The EDM DiffusionPDE workflow also needs fresh training and case-specific evaluation.
+> **Development and reference status:** The model choices in [§5.2](#52-select-a-model) describe available interfaces and reference configurations; they do not establish an accuracy ranking or efficacy on your dataset. The new `fast_lagrangian`, `lpc_ordered`, and `execution_strategy` methods remain [experimental development/testing routes](docs/posttraining/FAST_LAGRANGIAN_LPC_USER_GUIDE.md). DiffusionPDE source training uses conditional EDM by default.
 
 > **Existing checkpoints:** Base and post-trained models retain their loading contract with their original resolved model configuration, normalization and dataset contract, including saved EMA state where required. Legacy DiffusionPDE weights cannot be upgraded into EDM weights; retrain for the EDM profile. Loading a model for evaluation does not guarantee exact training continuation: resume also verifies optimizer/controller state and, for the new opt-in methods, implementation bindings.
 
@@ -329,18 +329,16 @@ The tracked Senseiver example below shows the total training objective and fixed
 
 <img src="docs/assets/reconstruction_examples/senseiver_base_5000ep_loss_history.png" alt="Senseiver 5000-epoch base-run training and validation loss history" width="78%">
 
-DiffusionPDE supports two interchangeable denoising backbones. The maintained `configs/models/diffusion_pde.yaml` profile selects a time-conditioned, multiscale U-Net with configurable channel multipliers, residual depth, timestep embedding, coarse-level attention, attention heads, and dropout. The original three-convolution implementation remains available as the lightweight, checkpoint-compatible `plain_cnn` option:
+DiffusionPDE uses conditional EDM for new SOURCE training. The shared `configs/models/diffusion_pde.yaml` profile selects the conditioned U-Net, weighted clean-field denoising and EMA evaluation. The case profiles set 32-step Heun reconstruction for both evaluation and training previews:
 
 ```bash
-# Maintained conditional U-Net profile.
 python cases/<case>/run.py train-base --config configs/base/diffusion_pde.yaml
 
-# Select the legacy plain CNN without editing the shared model fragment.
-python cases/<case>/run.py train-base --config configs/base/diffusion_pde.yaml \
-  --override model.backbone=plain_cnn
+# Complete turbulent-combustion source profile.
+python cases/turbulent_combustion/run.py train-base --config configs/base/diffusion_pde.yaml
 ```
 
-Both backbones use the same cosine noise schedule, noise-prediction loss, and deterministic DDIM-style reconstruction with observed values clamped after each sampling update. They require complete two-dimensional target grids. The U-Net uses considerably more accelerator memory, especially when attention is enabled; set the case-level training batch size accordingly.
+For your own case, import the shared model profile, use TRAIN mean/std normalization and complete two-dimensional target grids, and set both `evaluation.generation_steps` and `evaluation.preview.generation_steps` to `32`. Keep both query-point budgets `null`. Set batch and `model.train_microbatch_size` to fit your accelerator. See the [DiffusionPDE guide](docs/diffusion_pde_edm.md) for the equations, a complete case template and evaluation commands. Training loss measures denoising; reconstruction quality is measured separately by the preview and fixed validation panel.
 
 Latent flow has an explicit two-stage lifecycle:
 

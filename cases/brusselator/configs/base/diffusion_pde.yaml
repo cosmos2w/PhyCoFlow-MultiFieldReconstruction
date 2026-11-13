@@ -16,5 +16,18 @@ optimization: {batch_size: 4}
 # Reproducibility and execution. data_strategy choices: auto | vram | async_cpu.
 runtime: {num_workers: 4, data_strategy: auto}
 
+evaluation:
+  query_points: null
+  generation_steps: 32
+  preview: {query_points: null, generation_steps: 32}
+  reconstruction_panel:
+    sample_indices: [0]
+    seeds: [2027, 2028]
+    generation_steps: 32
+
+checkpointing:
+  selection_metric: reconstruction_mse
+  validation_every_epochs: 50
+
 # Stable experiment identifier used for the run directory.
-output: {experiment_name: diffusion_pde_plain}
+output: {experiment_name: diffusion_pde}
