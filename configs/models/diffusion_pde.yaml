@@ -1,24 +1,27 @@
-# Reusable model defaults; case files should override only case-specific values.
-
-# Model family and architecture settings.
+# Default DiffusionPDE model for new source training: conditional EDM.
 model:
   name: diffusion_pde
-
-  # choices: plain_cnn | conditional_unet. The plain CNN preserves legacy
-  # checkpoint structure; the conditional U-Net is the maintained baseline.
+  formulation: edm
   backbone: conditional_unet
-
-  # Used only by backbone=plain_cnn.
-  hidden_channels: 64
-
-  # Used only by backbone=conditional_unet.
   base_channels: 64
   channel_multipliers: [1, 2, 4, 8]
   num_res_blocks: 2
   time_embed_dim: 256
-  attention_levels: [2, 3]  # zero-based U-Net resolution levels
+  attention_levels: [2, 3]
   attention_heads: 4
   dropout: 0.0
-
-  # Shared diffusion schedule.
-  training_timesteps: 1000
+  # Data are standardized per field. Shift the EDM log-noise distribution
+  # with sigma_data rather than copying defaults calibrated to std=0.5.
+  sigma_data: 1.0
+  sigma_min: 0.002
+  sigma_max: 80.0
+  rho: 7.0
+  p_mean: -0.5
+  p_std: 1.2
+  # Explicit conditional-task adaptation: include near-prior training inputs.
+  high_noise_fraction: 0.2
+  train_microbatch_size: 32
+  precision: fp32
+  model_ema_enabled: true
+  model_ema_decay: 0.999
+  model_ema_eval: true

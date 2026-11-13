@@ -12,7 +12,7 @@ This document describes the mathematical contract implemented by `phycoflow_reco
 | `mimonet` | deterministic operator | masked field MSE | two sparse sensor branches, multiplicative fusion, coordinate trunk |
 | `senseiver` | deterministic point | masked field MSE | latent sparse attention |
 | `geofno` | grid operator | masked field MSE | optional `neuraloperator` dependency |
-| `diffusion_pde` | grid generative | legacy noise MSE or conditional EDM weighted denoising | DDIM or EDM Heun sampling |
+| `diffusion_pde` | grid generative | conditional EDM weighted denoising | EDM Heun sampling |
 | `latent_fm` | latent generative | autoencoder / latent flow | Stage 1 prerequisite, Stage 2 source |
 | `pointcloud_ffm` | point rectified flow | velocity MSE | `gl_rbf_enh` or optional FNO backbone |
 | `gl_rbf_cq` | point rectified flow | velocity MSE | cached-K/V, EMA, coherence-ready |
@@ -328,76 +328,25 @@ Current drawbacks:
 
 ### 4.1 Conditional DiffusionPDE model
 
-Let $\mathbf X_0$ denote the complete normalized target grid. A cosine schedule defines cumulative signal levels $\overline\alpha_t$. Training samples a timestep and Gaussian noise $\boldsymbol\epsilon\sim\mathcal N(0,\mathbf I)$:
+New source training uses conditional EDM through `configs/models/diffusion_pde.yaml`. The U-Net receives the noisy normalized grid, sparse value raster and observation mask. For target $y$, noise $\epsilon\sim\mathcal N(0,I)$ and scale $\sigma$, its input is $x=y+\sigma\epsilon$ and its clean-field estimate is
 
 $$
-\mathbf X_t
-=\sqrt{\overline\alpha_t}\,\mathbf X_0
-+\sqrt{1-\overline\alpha_t}\,\boldsymbol\epsilon.
+D_\theta(x,\sigma,V,M)=c_{skip}x+c_{out}F_\theta(c_{in}x,\log(\sigma)/4,V/s_d,M),
 $$
 
-The selected denoiser is conditioned on noisy state, sparse value raster, mask raster, and normalized time:
-
 $$
-\widehat{\boldsymbol\epsilon}_\theta
-=\epsilon_\theta(\mathbf X_t,\mathbf V,\mathbf M,t),
-\qquad
-\mathcal L_{\mathrm{diff}}
-=\mathbb E_{t,\boldsymbol\epsilon}
-\left[
-\lVert\widehat{\boldsymbol\epsilon}_\theta-\boldsymbol\epsilon\rVert_2^2
-\right].
+c_{skip}=\frac{s_d^2}{\sigma^2+s_d^2},\qquad
+c_{out}=\frac{\sigma s_d}{\sqrt{\sigma^2+s_d^2}},\qquad
+c_{in}=\frac{1}{\sqrt{\sigma^2+s_d^2}}.
 $$
 
-`backbone: plain_cnn` retains the original three-convolution checkpoint layout
-and scalar time map. `backbone: conditional_unet` selects the maintained
-multiscale encoder-decoder: sinusoidal time features pass through an MLP and
-enter each residual block, encoder features feed skip concatenations, and
-optional multi-head spatial attention runs at configured zero-based resolution
-levels. Its tunable architecture fields are `base_channels`,
-`channel_multipliers`, `num_res_blocks`, `time_embed_dim`, `attention_levels`,
-`attention_heads`, and `dropout`; `hidden_channels` applies only to the plain
-CNN. Both use `training_timesteps` for the shared cosine schedule.
+Observed clean entries are replaced by $V$. Training minimizes the sigma-weighted squared error on unobserved entries, normalized separately for each sample. The shared profile uses per-field standardized data with $s_d=1$, log-normal noise and a 20% high-noise mixture. Sparse value/mask context enters every encoder scale. Complete-sample microbatching controls training memory, and EMA weights are saved and restored with the checkpoint.
 
-Reconstruction starts from Gaussian noise and uses a deterministic DDIM-style subsequence. At step $t$,
+Reconstruction starts from Gaussian noise and integrates a rho-spaced sigma schedule using Heun correction. The case profiles use 32 steps, or 63 denoiser calls, with exact final point-observation consistency. Reconstruction does not read hidden targets. Denoising loss and reconstruction error are measured separately.
 
-$$
-\widehat{\mathbf X}_0
-=\frac{
-\mathbf X_t-\sqrt{1-\overline\alpha_t}
-\widehat{\boldsymbol\epsilon}_\theta
-}{\sqrt{\overline\alpha_t}},
-$$
+The model supports arbitrary field subsets and complete two-dimensional logical grids, including odd grid sizes through padding/cropping. Attention remains on coarse resolutions. It returns one reconstruction per call; compare matched conditions and seeds when assessing quality. This conditional implementation does not inject case-specific PDE residuals into the generic model.
 
-and for the next selected timestep $s<t$,
-
-$$
-\mathbf X_s
-=\sqrt{\overline\alpha_s}\,\widehat{\mathbf X}_0
-+\sqrt{1-\overline\alpha_s}
-\widehat{\boldsymbol\epsilon}_\theta.
-$$
-
-After each update, observed grid entries are replaced exactly:
-
-$$
-\mathbf X_s\leftarrow
-(\mathbf 1-\mathbf M)\odot\mathbf X_s
-+\mathbf M\odot\mathbf V.
-$$
-
-Current drawbacks:
-
-- The optional plain CNN remains a shallow, local baseline with limited receptive-field and conditioning capacity.
-- The U-Net requires complete two-dimensional grids and substantially more memory; spatial attention is quadratic in the cell count at each selected level and should remain confined to coarse resolutions.
-- The training loss conditions on value/mask channels but does not explicitly clamp the noisy training state at sensors, whereas inference clamps after each DDIM update.
-- `reconstruct` returns one draw and no stacked ensemble, so the advertised stochastic capability does not currently produce uncertainty samples for the common evaluator.
-
-#### Conditional EDM for fresh training
-
-`formulation: edm` selects a separate conditional EDM implementation through the same `ObservationBatch`, `training_loss`, `differentiable_reconstruct`, and `reconstruct` interfaces. Missing `formulation` continues to mean `ddpm`, preserving strict loading and evaluation of historical checkpoints. See [the EDM training recipe](diffusion_pde_edm.md) for the numerical objective, explicit departures from upstream, memory measurements, validation selection and fresh-training commands.
-
-The EDM path uses input/skip/output preconditioning, log-normal noise, a sigma-weighted clean-field objective, multiscale sparse value/mask conditioning, padded/cropped odd grids, and a rho-spaced Heun sampler. Known point observations constrain the clean estimate; intermediate noisy states remain noisy. The common training lifecycle supplies whole-sample microbatch accumulation and resumable EMA, and a fixed multi-frame/multi-seed reconstruction panel selects checkpoints independently of the denoising loss. This is a conditional adaptation of the original method and does not inject case-specific PDE residuals into the generic model.
+See the [DiffusionPDE guide](diffusion_pde_edm.md) for a case template, the complete loss and sampler equations, and evaluation commands. Historical DDPM configuration/state layouts remain available internally for checkpoint loading and resume; they are excluded from new source training.
 
 ### 4.2 Two-stage latent flow matching
 
@@ -891,7 +840,7 @@ Post-training dispatches by capability rather than model name:
 
 - PointCloudFFM and the legacy combustion adapter expose source sampling and velocity hooks for differentiable Euler/Heun integration.
 - Direct regressors and GeoFNO use their direct prediction.
-- DiffusionPDE uses differentiable DDIM.
+- DiffusionPDE uses differentiable EDM Heun sampling.
 - Latent flow Stage 2 uses differentiable latent integration and decoding.
 - Latent flow Stage 1 cannot be a sparse-reconstruction source.
 - PINN belongs to direct physics training and has no plain base source.
