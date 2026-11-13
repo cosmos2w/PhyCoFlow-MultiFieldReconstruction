@@ -24,6 +24,8 @@ Formal children declare `adaptive.bank_artifact: {path, sha256}` to consume the 
 
 `profile_car_allocator.py` measures synchronized incremental bundles and audits true parameter gradients using a disk-backed exact Gram matrix. The currently qualifiable policy is the fixed SOURCE probability vector actually audited on both source families. Its profile identity, uniform floor and probabilities are checkpointed. The changing online policy remains unqualified and disabled. Failed efficiency or overhead gates retain uniform sampling of the same expanded target.
 
+The overhead gate includes disjoint operational sampler time and all policy research/profiling time amortized over 13000 updates. The driver requires a measured complete-update baseline and finalizes cumulative accounting after its own wall time is known; operational-only or inconsistent older profiles cannot qualify.
+
 ## Exact observer and lifecycle
 
 `FrozenCoherenceObserver.score_tensors` shares differentiable scoring with detached assessment. It compiles immutable reference sorts, spectral statistics and persistence diagrams, while constructing endpoint-dependent merged CDF breakpoints from actual endpoints. It supports J1 paired scoring and every supplied conditional member for J>=2. `compiled=False` provides the same-target reference path. Neither path retains live graphs between calls.

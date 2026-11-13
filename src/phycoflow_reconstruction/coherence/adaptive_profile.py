@@ -366,7 +366,8 @@ def profile_source_panel(
         "research_amortization_updates": amortization_updates,
         "total_policy_research_seconds": float(research_seconds),
         "endpoint_panel_batch_size": panel_batch_size,
-        "policy_overhead_fraction": policy_overhead_fraction,
+        "operational_sampler_overhead_fraction": policy_overhead_fraction,
+        "policy_overhead_fraction": None,
         "parameter_gradient_audits": cell_count + 1,
         "parameter_count": parameter_count,
         "parameter_gradient_storage": "temporary disk-backed float64 cell matrix; exact chunked Gram",
@@ -380,6 +381,52 @@ def profile_source_panel(
         "total_audit_wall_seconds": time.perf_counter() - started,
     }
     return output
+
+
+def finalize_policy_overhead(profile, *, measured_profile_seconds, complete_update_seconds):
+    """Charge profiling and combine disjoint operational and research costs.
+
+    The complete-update baseline includes operational sampler overhead, but
+    excludes all research costs, including refreshes charged in research_costs.
+    """
+    operational = profile["operational_sampler_overhead_fraction"]
+    values = (operational, measured_profile_seconds, complete_update_seconds)
+    if not all(isinstance(x, (int, float)) and math.isfinite(x) for x in values):
+        raise ValueError("finite operational fraction, profile time and complete-update time required")
+    if not 0 <= operational <= 1 or measured_profile_seconds < 0 or complete_update_seconds <= 0:
+        raise ValueError("invalid operational fraction, profile time or complete-update time")
+    updates = profile["research_amortization_updates"]
+    if updates != 13000 or profile.get("complete_update_seconds") is not None:
+        raise ValueError("expected an unfinalized 13000-update profile")
+    profile["research_costs"]["audit_seconds"] += measured_profile_seconds
+    profile["total_policy_research_seconds"] += measured_profile_seconds
+    amortized = profile["total_policy_research_seconds"] / updates
+    for label, row in profile["proposals"].items():
+        if label != "uniform":
+            row["research_amortized_seconds"] += measured_profile_seconds / updates
+            row["total_charged_seconds"] += measured_profile_seconds / updates
+            row["parameter_mse_times_total_cost"] = row["parameter_gradient_mse"] * row["total_charged_seconds"]
+    profile["complete_update_seconds"] = complete_update_seconds
+    profile["policy_research_amortized_seconds_per_update"] = amortized
+    profile["policy_overhead_fraction"] = (operational * complete_update_seconds + amortized) / (complete_update_seconds + amortized)
+    profile["overhead_accounting_scope"] = "complete update includes operational sampler; research costs exclude operational sampler and are additive"
+    return profile
+
+
+def _valid_overhead_accounting(profile):
+    try:
+        op = profile["operational_sampler_overhead_fraction"]
+        baseline = profile["complete_update_seconds"]
+        research = profile["total_policy_research_seconds"]
+        amortized = profile["policy_research_amortized_seconds_per_update"]
+        overhead = profile["policy_overhead_fraction"]
+        values = (op, baseline, research, amortized, overhead)
+        return (all(isinstance(x, (int, float)) and math.isfinite(x) for x in values)
+                and 0 <= op <= 1 and baseline > 0 and research >= 0
+                and math.isclose(amortized, research / 13000, rel_tol=1e-10, abs_tol=1e-12)
+                and math.isclose(overhead, (op * baseline + amortized) / (baseline + amortized), rel_tol=1e-10, abs_tol=1e-12))
+    except (KeyError, TypeError, ZeroDivisionError):
+        return False
 
 
 def qualify_policy(bank, profiles, *, minimum_improvement=0.20):
@@ -428,7 +475,7 @@ def qualify_policy(bank, profiles, *, minimum_improvement=0.20):
             or candidate < 0
             or correlation is None
             or not math.isfinite(correlation)
-            or overhead is None
+            or not _valid_overhead_accounting(profile)
             or not 0 <= overhead <= 0.05
             or not isinstance(tail, (int, float)) or not 0 < tail <= 4
             or not costs

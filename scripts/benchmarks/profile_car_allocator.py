@@ -53,7 +53,8 @@ def main():
     p.add_argument("--research-costs", type=Path, required=True)
     p.add_argument("--spill-dir", type=Path, required=True, help="existing writable scratch filesystem for temporary exact parameter gradients")
     p.add_argument("--calibration-checkpoint", type=Path)
-    p.add_argument("--policy-overhead-fraction", type=float, required=True)
+    p.add_argument("--policy-overhead-fraction", type=float, required=True, help="measured operational sampler fraction of the complete update; exclude all research costs")
+    p.add_argument("--complete-update-seconds", type=float, required=True, help="measured complete-update wall time including operational sampler, excluding research costs")
     p.add_argument("--max-seconds", type=float, required=True)
     p.add_argument("--save-margin-seconds", type=float, default=60.0)
     p.add_argument("--panel-batch-size", type=int, default=1)
@@ -81,7 +82,10 @@ def main():
 
     from phycoflow_reconstruction.coherence import build_enabled_families
     from phycoflow_reconstruction.coherence.adaptive_fitting import spectral_filter
-    from phycoflow_reconstruction.coherence.adaptive_profile import profile_source_panel
+    from phycoflow_reconstruction.coherence.adaptive_profile import (
+        finalize_policy_overhead,
+        profile_source_panel,
+    )
     from phycoflow_reconstruction.coherence.query_runtime import ScalableQueryAdapter
     from phycoflow_reconstruction.coherence.query_sampling import (
         LINE_WEIGHTS,
@@ -267,16 +271,11 @@ def main():
 
         costs = json.loads(args.research_costs.read_text())
         profile = profile_source_panel(panel, families=cpu_families, artifacts=artifacts, filter_fn=lambda x: spectral_filter(cpu_families["multiscale_spectrum"], x), source_family=args.source_family, parameter_gradient_fn=parameter_gradient, bundle_cost_fn=bundle_cost, research_costs=costs, policy_overhead_fraction=args.policy_overhead_fraction, coefficients=calibrated, replicates=args.replicates, panel_batch_size=args.panel_batch_size, budget_check=budget_check, spill_directory=str(args.spill_dir), family_weights={k: weights[k] for k in ("multiscale_spectrum", "topology")})
-        # Charge the actual complete profiling wall time, in addition to the
-        # supplied prior research costs, to each nonuniform proposal.
+        # Research inputs must exclude the operational sampler portion already
+        # included in the measured complete-update baseline.
         measured = time.perf_counter() - began
-        profile["research_costs"]["audit_seconds"] += measured
-        profile["total_policy_research_seconds"] += measured
-        for label, row in profile["proposals"].items():
-            if label != "uniform":
-                row["research_amortized_seconds"] += measured / profile["research_amortization_updates"]
-                row["total_charged_seconds"] += measured / profile["research_amortization_updates"]
-                row["parameter_mse_times_total_cost"] = row["parameter_gradient_mse"] * row["total_charged_seconds"]
+        finalize_policy_overhead(profile, measured_profile_seconds=measured,
+                                 complete_update_seconds=args.complete_update_seconds)
         receipt.update(status="passed", profile=profile, measured_profile_wall_seconds=measured, source_identity=identity, source_view_evidence="panel_parameter_buffer_digest" if panel_view is not None else "legacy_panel_label_and_strict_checkpoint_plus_endpoint_parity", panel_sha256=file_sha256(panel_path), scalable_artifact_sha256=file_sha256(artifact_path), coefficient_identity=coefficient_identity, calibration_checkpoint_sha256=file_sha256(args.calibration_checkpoint) if args.calibration_checkpoint else None, interpretation="SOURCE endpoint allocation audit; does not establish benefits after internal calibration or ConFIG", audit_sample_ids=chunk["sample_ids"][:args.audit_conditions], timing_sample_ids=list(timing_batch.sample_ids), timing_observation_seed=timing_seed, timing_observation_protocol="native_training", timing=timing, family_weights=weights, endpoint_parity_tolerance={"rtol": 3e-4, "atol": 3e-4})
     except BaseException as exc:
         receipt.update(status="failed", error_type=type(exc).__name__, error=str(exc), elapsed_seconds=time.perf_counter() - began)

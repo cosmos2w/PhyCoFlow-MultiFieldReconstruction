@@ -253,6 +253,10 @@ def test_policy_qualification_requires_both_sources_twenty_percent_and_overhead(
             "variance_scope": "joint pair and unary outer and inner draws; duplicate pair IDs share one inner draw",
             "research_amortization_updates": 13000,
             "policy_overhead_fraction": overhead,
+            "operational_sampler_overhead_fraction": overhead,
+            "complete_update_seconds": 10.0,
+            "total_policy_research_seconds": 0.0,
+            "policy_research_amortized_seconds_per_update": 0.0,
             "incremental_leaf_seconds": [1.0, 2.0, 3.0],
             "outer_population": 3,
             "proposal_probabilities": {"gradient_cost": [1/3, 1/3, 1/3]},
@@ -273,6 +277,13 @@ def test_policy_qualification_requires_both_sources_twenty_percent_and_overhead(
     assert qualified["policy_mode"] == "fixed_source_profile"
     assert qualified["policy_pair_probabilities"] == [1/3, 1/3, 1/3]
     assert len(qualified["policy_profile_sha256"]) == 64
+    undercounted = copy.deepcopy(good)
+    undercounted[0].update(total_policy_research_seconds=3900.0,
+                           policy_research_amortized_seconds_per_update=0.3,
+                           policy_overhead_fraction=0.03)
+    assert not qualify_policy(bank, undercounted)["policy_qualified"]
+    undercounted[0]["policy_overhead_fraction"] = 0.6 / 10.3
+    assert not qualify_policy(bank, undercounted)["policy_qualified"]
     missing_vector = copy.deepcopy(good)
     del missing_vector[0]["proposal_probabilities"]
     assert not qualify_policy(bank, missing_vector)["policy_qualified"]
@@ -360,3 +371,28 @@ def test_discovery_anchor_all_four_members_change_complementary_gradient(monkeyp
         return probe - (probe.flatten() @ g.flatten()) / g.square().sum() * g
 
     assert not torch.allclose(complement(gradient), complement(changed_gradient))
+
+
+def test_policy_overhead_charges_profile_and_prior_research_against_complete_updates():
+    from phycoflow_reconstruction.coherence.adaptive_profile import (
+        _valid_overhead_accounting,
+        finalize_policy_overhead,
+    )
+
+    profile = {"operational_sampler_overhead_fraction": 0.03,
+               "research_amortization_updates": 13000,
+               "research_costs": {"audit_seconds": 1300.0},
+               "total_policy_research_seconds": 1300.0,
+               "proposals": {"uniform": {"total_charged_seconds": 2.0},
+                             "gradient_cost": {"research_amortized_seconds": 0.1,
+                                               "total_charged_seconds": 2.1,
+                                               "parameter_gradient_mse": 2.0}}}
+    finalize_policy_overhead(profile, measured_profile_seconds=2600.0, complete_update_seconds=10.0)
+    assert profile["policy_overhead_fraction"] == pytest.approx((0.3 + 0.3) / 10.3)
+    assert profile["policy_overhead_fraction"] > 0.05
+    assert profile["proposals"]["gradient_cost"]["parameter_mse_times_total_cost"] == pytest.approx(4.6)
+    assert _valid_overhead_accounting(profile)
+    profile["policy_overhead_fraction"] = 0.03  # old, operational-only accounting
+    assert not _valid_overhead_accounting(profile)
+    with pytest.raises(ValueError, match="unfinalized"):
+        finalize_policy_overhead(profile, measured_profile_seconds=1, complete_update_seconds=10)
