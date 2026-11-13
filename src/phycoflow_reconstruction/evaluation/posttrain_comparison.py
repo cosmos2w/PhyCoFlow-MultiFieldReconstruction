@@ -14,6 +14,7 @@ import torch
 import yaml
 
 from ..data.manifest import SensorManifest
+from ..run_logs import history_paths
 
 SUPPORTED_RUN_STATUSES = {"completed", "integration_truncated"}
 UNSUPPORTED_REASON_CODES = {
@@ -90,7 +91,8 @@ def _pair_record(entry: Mapping[str, Any], matrix_root: Path) -> dict[str, Any]:
     environment = _read_json(post_run / "environment.json")
     before = _read_json(post_run / "evaluation" / "before.json")
     after = _read_json(post_run / "evaluation" / "after.json")
-    history = _last_history(post_run / "metrics" / "history.jsonl")
+    paths = history_paths(post_run, "history.jsonl")
+    history = _last_history(paths[-1]) if paths else {}
 
     if Path(manifest["parent_run"]).resolve() != source_run:
         raise ValueError(f"{entry['id']}: child parent_run does not match source_run")

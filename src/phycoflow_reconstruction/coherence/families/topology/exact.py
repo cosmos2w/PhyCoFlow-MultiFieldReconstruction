@@ -12,9 +12,25 @@ import torch
 from scipy.ndimage import label
 
 
-def reference_levels(reference: torch.Tensor, quantiles: tuple[float, ...]) -> torch.Tensor:
+def reference_levels(
+    reference: torch.Tensor, quantiles: tuple[float, ...], *, valid_mask: torch.Tensor | None = None
+) -> torch.Tensor:
     """Return CPU float64 [B,T] thresholds without rounding them to field dtype."""
-    values = reference.detach().cpu().numpy().reshape(reference.shape[0], -1)
+    if reference.ndim != 3:
+        raise ValueError("reference fields must have shape [B,H,W]")
+    values = reference.detach().cpu().numpy()
+    if valid_mask is not None:
+        if (
+            valid_mask.dtype != torch.bool
+            or tuple(valid_mask.shape) != tuple(reference.shape[-2:])
+            or not valid_mask.any()
+        ):
+            raise ValueError("valid_mask must be a nonempty boolean [H,W] domain")
+        values = values[:, valid_mask.detach().cpu().numpy()]
+    else:
+        values = values.reshape(reference.shape[0], -1)
+    if not np.isfinite(values).all():
+        raise ValueError("reference values must be finite on the valid domain")
     return torch.from_numpy(np.quantile(values, quantiles, axis=1).T.copy())
 
 
@@ -55,9 +71,18 @@ def _counts(mask: np.ndarray, periodic: bool) -> tuple[int, int]:
 
 @torch.no_grad()
 def exact_betti_curves(
-    fields: torch.Tensor, levels: torch.Tensor, *, periodic: bool
+    fields: torch.Tensor,
+    levels: torch.Tensor,
+    *,
+    periodic: bool,
+    valid_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Return CPU integer [B,2,T] superlevel counts, with inclusive birth ties."""
+    """Return superlevel Betti counts on the fixed valid vertex complex.
+
+    Edges and faces are present only when all their vertices are valid and
+    exceed the threshold. Birth ties are inclusive. A periodic mask is not
+    supported, matching the persistence backend's domain contract.
+    """
     if fields.ndim != 3 or min(fields.shape) < 1:
         raise ValueError("exact topology fields must have nonempty [B,H,W] shape")
     values = fields.detach().double().cpu().numpy()
@@ -66,12 +91,24 @@ def exact_betti_curves(
         thresholds = np.broadcast_to(thresholds, (len(values), len(thresholds)))
     if thresholds.ndim != 2 or thresholds.shape[0] != len(values) or not thresholds.shape[1]:
         raise ValueError("exact topology levels must have shape [T] or [B,T]")
-    if not np.isfinite(values).all() or not np.isfinite(thresholds).all():
+    if valid_mask is None:
+        mask = np.ones(values.shape[-2:], dtype=bool)
+    else:
+        if periodic:
+            raise ValueError("masked periodic Betti curves are not supported")
+        if (
+            valid_mask.dtype != torch.bool
+            or tuple(valid_mask.shape) != tuple(values.shape[-2:])
+            or not valid_mask.any()
+        ):
+            raise ValueError("valid_mask must be a nonempty boolean [H,W] domain")
+        mask = valid_mask.detach().cpu().numpy()
+    if not np.isfinite(values[:, mask]).all() or not np.isfinite(thresholds).all():
         raise ValueError("exact topology fields and levels must be finite")
     counts = np.empty((len(values), 2, thresholds.shape[1]), dtype=np.int64)
     for batch, (field, row) in enumerate(zip(values, thresholds)):
         for index, threshold in enumerate(row):
-            counts[batch, :, index] = _counts(field >= threshold, periodic)
+            counts[batch, :, index] = _counts(mask & (field >= threshold), periodic)
     return torch.from_numpy(counts)
 
 

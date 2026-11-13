@@ -9,7 +9,7 @@ import torch
 from torch import nn
 
 from .....contracts import CoherenceComponentSpec, TermResult
-from ....base import empirical_w2_columns, projection_bank
+from ....base import empirical_w2_columns, projection_bank, weighted_w2_columns
 
 
 class CrossJointTopKSWD(nn.Module):
@@ -23,6 +23,7 @@ class CrossJointTopKSWD(nn.Module):
         qmc: bool,
         target_use: str = "training_reference",
         units: str = "model_units",
+        mean_reduction: bool = False,
     ) -> None:
         super().__init__()
         self.spec = CoherenceComponentSpec("cross.joint_topk_swd", target_use, units, True)
@@ -40,8 +41,16 @@ class CrossJointTopKSWD(nn.Module):
         if not 0.0 < float(top_fraction) <= 1.0:
             raise ValueError("cross top_fraction must lie in (0,1]")
         self.top_fraction = float(top_fraction)
+        self.mean_reduction = bool(mean_reduction)
 
-    def forward(self, generated: torch.Tensor, reference: torch.Tensor) -> TermResult:
+    def forward(
+        self,
+        generated: torch.Tensor,
+        reference: torch.Tensor,
+        *,
+        generated_weights: torch.Tensor | None = None,
+        reference_weights: torch.Tensor | None = None,
+    ) -> TermResult:
         if len(self.field_ids) < 2:
             zero = generated.sum(dim=(1, 2)) * 0.0
             return TermResult(zero, zero.mean(), reason="fewer than two configured fields")
@@ -49,12 +58,25 @@ class CrossJointTopKSWD(nn.Module):
         per_batch = []
         per_direction = []
         top_indices = []
-        for generated_item, reference_item in zip(generated, reference):
+        for index, (generated_item, reference_item) in enumerate(zip(generated, reference)):
             generated_projection = generated_item[:, self.field_ids] @ directions.T
             reference_projection = reference_item[:, self.field_ids] @ directions.T
-            costs = empirical_w2_columns(generated_projection, reference_projection)
+            if generated_weights is None and reference_weights is None:
+                costs = empirical_w2_columns(generated_projection, reference_projection)
+            elif generated_weights is not None and reference_weights is not None:
+                costs = weighted_w2_columns(
+                    generated_projection,
+                    reference_projection,
+                    generated_weights[index],
+                    reference_weights[index],
+                )
+            else:
+                raise ValueError("both endpoint measures are required")
             count = max(1, min(costs.numel(), math.ceil(self.top_fraction * costs.numel())))
-            values, indices = costs.topk(count, largest=True, sorted=True)
+            if self.mean_reduction:
+                values, indices = costs, torch.arange(costs.numel(), device=costs.device)
+            else:
+                values, indices = costs.topk(count, largest=True, sorted=True)
             per_batch.append(values.mean())
             per_direction.append(costs)
             top_indices.append(indices)

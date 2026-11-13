@@ -8,7 +8,7 @@ import torch
 from torch import nn
 
 from .....contracts import CoherenceComponentSpec, TermResult
-from ....base import empirical_w2_columns
+from ....base import empirical_w2_columns, weighted_w2_columns
 
 
 class SelfMarginalW2(nn.Module):
@@ -41,14 +41,31 @@ class SelfMarginalW2(nn.Module):
             )
         self.register_buffer("channel_weights", weights.float() / weights.float().sum())
 
-    def forward(self, generated: torch.Tensor, reference: torch.Tensor) -> TermResult:
+    def forward(
+        self,
+        generated: torch.Tensor,
+        reference: torch.Tensor,
+        *,
+        generated_weights: torch.Tensor | None = None,
+        reference_weights: torch.Tensor | None = None,
+    ) -> TermResult:
         per_batch = []
         per_field = []
         weights = self.channel_weights.to(device=generated.device, dtype=generated.dtype)
-        for generated_item, reference_item in zip(generated, reference):
-            costs = empirical_w2_columns(
-                generated_item[:, self.field_ids], reference_item[:, self.field_ids]
-            )
+        for index, (generated_item, reference_item) in enumerate(zip(generated, reference)):
+            if generated_weights is None and reference_weights is None:
+                costs = empirical_w2_columns(
+                    generated_item[:, self.field_ids], reference_item[:, self.field_ids]
+                )
+            elif generated_weights is not None and reference_weights is not None:
+                costs = weighted_w2_columns(
+                    generated_item[:, self.field_ids],
+                    reference_item[:, self.field_ids],
+                    generated_weights[index],
+                    reference_weights[index],
+                )
+            else:
+                raise ValueError("both endpoint measures are required")
             per_field.append(costs)
             per_batch.append((costs * weights).sum())
         per_sample = torch.stack(per_batch)

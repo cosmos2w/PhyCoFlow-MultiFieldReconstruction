@@ -1,0 +1,20 @@
+# Override grid shape, raster geometry, smoothing and projection count for the dataset.
+coherence:
+  families:
+    topology:
+      enabled: true
+      weight: 1.0
+      strategy: cubical_persistence
+      target_use: paired_supervised
+      units: model_units
+      geometry: {grid_shape: [32, 32]}
+      filtration:
+        smoothing_sigma: 0.0
+        dimensions: [0, 1]
+        directions: [sublevel, superlevel]
+      persistence:
+        definition: scalable_pooled_v1
+        projections: 32
+      components:
+        self: {enabled: true, weight: 1.0}
+        mutual: {enabled: true, weight: 1.0}

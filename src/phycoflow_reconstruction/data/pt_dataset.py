@@ -118,9 +118,9 @@ class PTFieldDataset(Dataset[FieldSample]):
             coordinate_dim = 2
             spatial = self.coordinates_raw[:, 0]
             time_grid, space_grid = torch.meshgrid(self.times, spatial, indexing="ij")
-            self.space_time_coordinates_raw = torch.stack(
-                (time_grid, space_grid), dim=-1
-            ).reshape(-1, 2)
+            self.space_time_coordinates_raw = torch.stack((time_grid, space_grid), dim=-1).reshape(
+                -1, 2
+            )
             self.space_time_coordinates = _minmax(self.space_time_coordinates_raw)
         else:
             raise ValueError(f"unsupported reconstruction_unit={reconstruction_unit!r}")
@@ -216,6 +216,9 @@ class PTFieldDataset(Dataset[FieldSample]):
             logical_shape=self.grid_shape,
             metadata={"trajectory_index": trajectory},
         )
+        from .physical_measure import attach_sample_measure
+
+        attach_sample_measure(self, sample)
         sample.validate()
         return sample
 
@@ -234,6 +237,9 @@ class PTFieldDataset(Dataset[FieldSample]):
             reconstruction_unit="space_time_trajectory",
             metadata={"trajectory_index": trajectory},
         )
+        from .physical_measure import attach_sample_measure
+
+        attach_sample_measure(self, sample)
         sample.validate()
         return sample
 

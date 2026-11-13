@@ -10,7 +10,14 @@ from pathlib import Path
 from typing import Any
 
 from ..config import load_config
-from .history_plotting import HISTORY_MUTED_TEXT_COLOR, HISTORY_TEXT_COLOR, style_history_axis
+from ..run_logs import history_paths
+from .history_plotting import (
+    HISTORY_MUTED_TEXT_COLOR,
+    HISTORY_TEXT_COLOR,
+    find_calibration_freeze,
+    mark_calibration_freeze,
+    style_history_axis,
+)
 
 _FIELD_COLORS = {
     "total": "#202733",
@@ -104,14 +111,19 @@ def build_fidelity_history_figure(
         field_names = ["total", *(name for name in field_names if name != "total")]
     epoch_max = max(record["x"] for record in records)
     score_values = [record["metric"] for record in records]
-    figure = pyplot.figure(figsize=(12.4, 10.2), constrained_layout=True, facecolor="white")
-    grid = figure.add_gridspec(4, 1, height_ratios=(0.78, 1.0, 1.05, 0.13))
+    figure = pyplot.figure(figsize=(12.4, 7.4), constrained_layout=True, facecolor="white")
+    grid = figure.add_gridspec(3, 2, height_ratios=(1.0, 1.0, 0.13))
     score_axis = figure.add_subplot(grid[0, 0])
-    full_range_axis = figure.add_subplot(grid[1, 0], sharex=score_axis)
-    gate_axis = figure.add_subplot(grid[2, 0], sharex=score_axis)
-    legend_axis = figure.add_subplot(grid[3, 0])
+    full_range_axis = figure.add_subplot(grid[0, 1], sharex=score_axis)
+    gate_axis = figure.add_subplot(grid[1, :], sharex=score_axis)
+    legend_axis = figure.add_subplot(grid[2, :])
     legend_axis.set_axis_off()
-    figure.suptitle("Checkpoint fidelity and topology score", color=HISTORY_TEXT_COLOR, fontsize=14, fontweight="medium")
+    figure.suptitle(
+        "Checkpoint fidelity and topology score",
+        color=HISTORY_TEXT_COLOR,
+        fontsize=14,
+        fontweight="medium",
+    )
 
     x = [record["x"] for record in records]
     metric = [record["metric"] for record in records]
@@ -152,11 +164,26 @@ def build_fidelity_history_figure(
             label="Selected checkpoint",
         )
         for axis in (score_axis, full_range_axis, gate_axis):
-            axis.axvline(selected["x"], color="#B58900", linewidth=0.9, linestyle=":", alpha=0.85, zorder=0)
-    score_axis.set_title("Fixed-panel topology score · lower is better", loc="left", color=HISTORY_TEXT_COLOR, fontsize=11.2)
+            axis.axvline(
+                selected["x"], color="#B58900", linewidth=0.9, linestyle=":", alpha=0.85, zorder=0
+            )
+    score_axis.set_title(
+        "Fixed-panel topology score · lower is better",
+        loc="left",
+        color=HISTORY_TEXT_COLOR,
+        fontsize=11.2,
+    )
     score_axis.set_ylabel("Selection score")
     style_history_axis(score_axis, score_values, x_max=epoch_max)
-    score_axis.legend(loc="upper right", frameon=True, facecolor="white", edgecolor="#D4D9E2", framealpha=0.96, fontsize=8.2, ncol=3)
+    score_axis.legend(
+        loc="upper right",
+        frameon=True,
+        facecolor="white",
+        edgecolor="#D4D9E2",
+        framealpha=0.96,
+        fontsize=8.2,
+        ncol=3,
+    )
     all_relative_values: list[float] = []
     field_series = []
     for field_index, field in enumerate(field_names):
@@ -184,9 +211,13 @@ def build_fidelity_history_figure(
     padding = max((high - low) * 0.06, 0.01)
     full_limits = (low - padding, high + padding)
     gate_low = min(0.0, -abs(field_budget))
-    gate_high = max(total_budget, field_budget) + max(0.5 * max(abs(total_budget), abs(field_budget)), 0.01)
+    gate_high = max(total_budget, field_budget) + max(
+        0.5 * max(abs(total_budget), abs(field_budget)), 0.01
+    )
 
-    def draw_relative_panel(axis, *, limits: tuple[float, float], show_zoom_edges: bool) -> list[Any]:
+    def draw_relative_panel(
+        axis, *, limits: tuple[float, float], show_zoom_edges: bool
+    ) -> list[Any]:
         handles = []
         for field, color, points, failed_points in field_series:
             if show_zoom_edges:
@@ -247,20 +278,33 @@ def build_fidelity_history_figure(
                             zorder=5,
                         )
         axis.axhline(0.0, color="#667085", linewidth=0.85, linestyle="-", alpha=0.8, zorder=0)
-        axis.axhline(total_budget, color="#202733", linewidth=0.95, linestyle="--", alpha=0.72, zorder=0)
+        axis.axhline(
+            total_budget, color="#202733", linewidth=0.95, linestyle="--", alpha=0.72, zorder=0
+        )
         if not math.isclose(total_budget, field_budget, rel_tol=1e-9, abs_tol=1e-12):
-            axis.axhline(field_budget, color="#667085", linewidth=0.95, linestyle=":", alpha=0.8, zorder=0)
-        style_history_axis(axis, [*all_relative_values, 0.0, total_budget, field_budget], x_max=epoch_max)
+            axis.axhline(
+                field_budget, color="#667085", linewidth=0.95, linestyle=":", alpha=0.8, zorder=0
+            )
+        style_history_axis(
+            axis, [*all_relative_values, 0.0, total_budget, field_budget], x_max=epoch_max
+        )
         axis.set_yscale("linear")
         axis.set_ylim(*limits)
         axis.yaxis.set_major_formatter(PercentFormatter(xmax=1.0))
         return handles
 
     field_handles = draw_relative_panel(full_range_axis, limits=full_limits, show_zoom_edges=False)
-    full_range_axis.set_title("Source-relative normalized MSE · full range", loc="left", color=HISTORY_TEXT_COLOR, fontsize=11.2)
+    full_range_axis.set_title(
+        "Source-relative normalized MSE · full range",
+        loc="left",
+        color=HISTORY_TEXT_COLOR,
+        fontsize=11.2,
+    )
     full_range_axis.set_ylabel("Relative MSE change")
     draw_relative_panel(gate_axis, limits=(gate_low, gate_high), show_zoom_edges=True)
-    gate_axis.set_title("Fidelity gates · focused range", loc="left", color=HISTORY_TEXT_COLOR, fontsize=11.2)
+    gate_axis.set_title(
+        "Fidelity gates · focused range", loc="left", color=HISTORY_TEXT_COLOR, fontsize=11.2
+    )
     gate_axis.set_ylabel("Relative MSE change")
     gate_axis.set_xlabel(x_label)
     gate_note = (
@@ -268,8 +312,26 @@ def build_fidelity_history_figure(
         if math.isclose(total_budget, field_budget, rel_tol=1e-9, abs_tol=1e-12)
         else f"Dashed: total +{total_budget:.0%} · dotted: field +{field_budget:.0%}"
     )
-    full_range_axis.text(0.99, 1.015, gate_note + " · crosses mark field-limit violations", transform=full_range_axis.transAxes, ha="right", va="bottom", color=HISTORY_MUTED_TEXT_COLOR, fontsize=7.8)
-    gate_axis.text(0.99, 1.015, "Dots are in-view observations; triangles mark values outside this view", transform=gate_axis.transAxes, ha="right", va="bottom", color=HISTORY_MUTED_TEXT_COLOR, fontsize=7.8)
+    full_range_axis.text(
+        0.99,
+        1.015,
+        gate_note + " · crosses mark field-limit violations",
+        transform=full_range_axis.transAxes,
+        ha="right",
+        va="bottom",
+        color=HISTORY_MUTED_TEXT_COLOR,
+        fontsize=7.8,
+    )
+    gate_axis.text(
+        0.99,
+        1.015,
+        "Dots are in-view observations; triangles mark values outside this view",
+        transform=gate_axis.transAxes,
+        ha="right",
+        va="bottom",
+        color=HISTORY_MUTED_TEXT_COLOR,
+        fontsize=7.8,
+    )
     legend_axis.legend(
         field_handles,
         [handle.get_label() for handle in field_handles],
@@ -280,6 +342,12 @@ def build_fidelity_history_figure(
         handlelength=2.0,
         columnspacing=1.5,
     )
+    freeze = find_calibration_freeze(training_rows)
+    if "epoch" in x_label.lower() and freeze is not None:
+        for axis in (score_axis, full_range_axis, gate_axis):
+            mark_calibration_freeze(axis, freeze, x_max=epoch_max)
+        if epoch_max >= freeze:
+            gate_axis.set_xlabel(f"{x_label} · dotted: calibration frozen at epoch {freeze:g}")
     return figure
 
 
@@ -291,10 +359,16 @@ def render_fidelity_history(
 ) -> Path | None:
     """Render ``checkpoint_fidelity.png`` without loading a model or dataset."""
     run_dir = Path(run_dir)
-    validation_rows = _read_jsonl(run_dir / "metrics" / "topology_validation.jsonl")
+    validation_rows = [
+        row
+        for path in history_paths(run_dir, "topology_validation.jsonl")
+        for row in _read_jsonl(path)
+    ]
     if not validation_rows:
         return None
-    training_rows = _read_jsonl(run_dir / "metrics" / "history.jsonl")
+    training_rows = [
+        row for path in history_paths(run_dir, "history.jsonl") for row in _read_jsonl(path)
+    ]
     config_path = run_dir / "resolved_config.yaml"
     config = load_config(config_path) if config_path.is_file() else {}
     fidelity = config.get("posttrain_fidelity", {})
@@ -315,7 +389,10 @@ def render_fidelity_history(
             matplotlib.use("Agg")
             from matplotlib import pyplot
         except ImportError:
-            warnings.warn("matplotlib is unavailable; checkpoint_fidelity.png cannot be generated", stacklevel=2)
+            warnings.warn(
+                "matplotlib is unavailable; checkpoint_fidelity.png cannot be generated",
+                stacklevel=2,
+            )
             return None
     pyplot.rcParams["svg.fonttype"] = "none"
     figure = build_fidelity_history_figure(
@@ -328,7 +405,9 @@ def render_fidelity_history(
     )
     if figure is None:
         return None
-    destination = Path(output_path) if output_path is not None else run_dir / "checkpoint_fidelity.png"
+    destination = (
+        Path(output_path) if output_path is not None else run_dir / "checkpoint_fidelity.png"
+    )
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_name(f".{destination.name}.tmp")
     figure.savefig(temporary, dpi=180, format="png")

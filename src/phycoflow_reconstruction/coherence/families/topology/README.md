@@ -1,54 +1,13 @@
-# Topology coherence: efficient sliced persistence
+# Shape: signed cubical persistence
 
-The current post-training method is `strategy: cubical_persistence` with
-`persistence.distance: sliced_wasserstein`. The [shared defaults](../../../../../configs/defaults/topology_post_training.yaml)
-and [active-emulsion case](../../../../../cases/active_emulsion/README.md)
-provide the post-training recipe and launch commands.
+`cubical_persistence` compares descriptors on a fixed two-dimensional raster using exact lower-star cubical pairings. Pairing indices are detached and critical values are gathered from live tensors, giving piecewise gradients. Finite diagrams use fixed-angle sliced Wasserstein with cross-diagonal augmentation; essential births are compared separately. H0 and H1 are distinct leaves. Pairing ties are nonsmooth.
 
-## Mathematical definition
+`finite_primary_v1` is a deterministic paired score. Unary descriptors use both signs. Every pair uses signs `(+,+)`, `(-,-)`, `(+,-)`, `(-,+)` and three positive lines: `(v,beta) = ((1,1)/sqrt(2),(0,0)), ((2,1)/sqrt(5),(0.5,-0.5)), ((1,2)/sqrt(5),(-0.5,0.5))`. Its scalar joint filtration is `max_i((sign_i*f_i-beta_i)/v_i)` and line weights are normalized `min(v)`. These finite slices summarize, but do not fully characterize, a multiparameter module. The pair reference supplies per-snapshot descriptor mean and standard deviation with a fixed positive floor. Each finite distance is normalized by the valid vertex count; essential distance is not. TRAIN/SOURCE calibration freezes separate positive-floored finite and essential leaf scales. A leaf contributes `0.9*F/scale_F + 0.1*E/scale_E`; structurally absent essential leaves are omitted without reallocating their weight. Zero observed SOURCE differences retain the floor.
 
-GUDHI computes exact lower-star cubical pairings on the configured raster,
-including periodic boundaries. Only pairing indices are detached; critical
-values are gathered from live generated tensors so the loss has piecewise
-parameter gradients. All positive-persistence finite bars are retained, along
-with essential births. Ties and changes in pairing remain nonsmooth.
+`conditional_fixed_transform_fair_v1` is a separate score definition for independent conditional samples, requiring two independently generated members for each condition. Descriptor means and scales are fitted and frozen on the declared TRAIN reference raster, rather than re-estimated per snapshot. The calibrated finite and essential persistence distances enter a fair energy score: half the sum of the two member-to-reference distances minus half the member-to-member distance. Members must actually be independent conditional draws; the score cannot establish that property. The same fixed raster, mask, signs, lines, H0/H1 and calibration apply to each comparison. TRAIN sample IDs, fixed transforms, scales, SOURCE binding and geometry are persisted and validated. These scores have distinct versions and must not be compared as interchangeable quantities.
 
-Finite diagrams use a fixed-angle sliced Wasserstein-1 approximation with
-cross-diagonal augmentation. This is not an exact Wasserstein assignment.
-Essential births are compared separately. Reference-derived scaling and fixed
-normalization keep diagrams comparable without using the generated sample to
-set its own reference.
+`geometry.raster_mapping: physical_cell_overlap_v1` defines nonperiodic rectilinear native cells using coordinate midpoints and outer endpoint boundaries, then computes equal-physical-area raster cell averages. This is a cell-average observable, not native vertex topology. Sparse query panels first use raw-coordinate inverse-distance interpolation; the resulting sparse surrogate and extrapolation coverage are recorded. Axis units and a meaningful common distance metric must be declared by the data provider. This map rejects masks, periodic boundaries and nonrectilinear support. `native_masked` instead represents a fixed native vertex-cell complex, omitting missing vertices and incident cells, with zero smoothing and no downsampling. The valid mask and essential counts remain fixed. Legacy raster and persistence definitions keep their historical meanings.
 
-Mutual persistence restricts joint filtrations to fixed positive lines
-`b + t a`, using `max_i((f_i - b_i) / a_i)` for each signed sublevel field.
-Finite slices summarize a multi-parameter module; they do not fully characterize
-it. The active-emulsion recipe uses both filtration directions, H0/H1, self
-phi/vx/vy and phi × signed vorticity as its only mutual group.
+`fit_training_reference` prepares geometry; `fit_calibration` fits the deterministic leaf scales. For conditional scoring, accumulate and freeze the TRAIN descriptor transform before accumulating and freezing SOURCE calibration. Scoring before the required fit or loading inconsistent artifacts fails. Physical occupation weights for State do not automatically define a Shape raster or its area measure.
 
-## Execution and integration
-
-`persistence.py` batches CPU transfer and pairing work, uploads packed indices
-and batches sliced distances. The bounded in-memory reference cache is keyed by exact content.
-`persistence_objective.py` owns descriptors, reference preparation and aggregation.
-`family.py` supplies raster mapping, unit conversion and the common
-`FamilyResult`/`TermResult` contract.
-
-The canonical training recipe uses `optimization.gradient_balance:
-topology_regularized`. One Adam update combines calibrated batch-average topology
-with source-relative endpoint and anchor penalties. Shared rollout context is
-owned by the physical CQ adapter and remains differentiable. Strict held-out
-checkpoint selection is separate from stochastic training updates.
-
-Scientific-source hashes bind family artifacts to their implementation.
-Saved runs must use their recorded source for exact recovery; changing the
-active recipe does not reinterpret historical metrics or checkpoints.
-
-## Historical compatibility
-
-The old `betti_curves`, `spatial_self_mutual`, spatial Wasserstein matching and
-component-constrained optimizer paths remain explicitly addressable for saved
-configurations, provenance and comparative evaluation. Configurations without
-a strategy retain the historical Betti-curve interpretation; every current
-recipe names sliced persistence explicitly. This preserves old scientific
-meaning while removing the old active-emulsion launch recipes from the current
-workflow.
+`persistence.definition: scalable_pooled_v1` selects a geometry-only family for the scalable observer. It keeps field names, raster mapping, H0/H1, projections and self/mutual weights without constructing a pair or filtration bank. Self and mutual populations cover all available fields and pairs; the single-field case has no mutual term. Fit its separate pooled TRAIN artifact with `fit_pooled_shape` or `fit_scalable_artifacts`, then score selected queries through `ScalableQueryAdapter`. The family itself rejects direct scoring. The pooled conditional and paired scores have separate definitions and do not reinterpret legacy artifacts.

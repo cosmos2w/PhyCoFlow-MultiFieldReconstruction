@@ -223,6 +223,8 @@ class TopologyFiltrationSampler:
     PROVIDER_ID = "topology.complete_filtration.v1"
 
     def __init__(self, objective, strategy: str = "p3", *, seed: int = 0):
+        if getattr(objective, "definition", None) == "finite_primary_v1":
+            raise ValueError("finite_primary_v1 requires direct full-bank execution")
         if strategy not in {"full", "p3", "s2", "polarity"}:
             raise ValueError("strategy must be 'full', 'p3', 's2', or 'polarity'")
         if isinstance(seed, bool) or int(seed) != seed or not 0 <= int(seed) < 2**63:

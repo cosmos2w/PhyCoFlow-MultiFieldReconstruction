@@ -68,6 +68,7 @@ def _validate_common_sections(config: Mapping[str, Any]) -> None:
             "field_units",
             "normalization",
             "normalization_stats_path",
+            "physical_measure",
             "time_stride",
             "benchmark_eligible",
             "allow_nonbenchmark",
@@ -202,13 +203,27 @@ def _validate_common_sections(config: Mapping[str, Any]) -> None:
             "sample_selection",
             "native_topology",
             "group_size",
+            "batch_size",
             "reconstruction_panel",
         },
         "evaluation",
     )
     group_size = config.get("evaluation", {}).get("group_size")
+    evaluation_batch_size = evaluation.get("batch_size")
+    if evaluation_batch_size is not None and (
+        isinstance(evaluation_batch_size, bool)
+        or not isinstance(evaluation_batch_size, int)
+        or evaluation_batch_size < 1
+    ):
+        raise ValueError("evaluation.batch_size must be a positive integer")
+    if evaluation_batch_size is not None and not config.get("coherence", {}).get(
+        "scalable_anchored_coherence", {}
+    ).get("enabled", False):
+        raise ValueError("evaluation.batch_size requires independent scalable coherence scores")
     if group_size is not None and (
-        isinstance(group_size, bool) or not isinstance(group_size, int) or group_size < 1
+        isinstance(group_size, bool)
+        or not isinstance(group_size, int)
+        or group_size < 1
         or int(config["evaluation"].get("max_samples", 1)) % group_size
     ):
         raise ValueError("evaluation.group_size must exactly divide max_samples")
@@ -247,12 +262,8 @@ def _validate_common_sections(config: Mapping[str, Any]) -> None:
         if int(preview.get(key, default)) < 1:
             raise ValueError(f"evaluation.preview.{key} must be positive")
     optimization = config.get("optimization", {})
-    multitask = (
-        optimization.get("multitask", {}) if isinstance(optimization, Mapping) else {}
-    )
-    has_external_policy = isinstance(multitask, Mapping) and (
-        "external_policy" in multitask
-    )
+    multitask = optimization.get("multitask", {}) if isinstance(optimization, Mapping) else {}
+    has_external_policy = isinstance(multitask, Mapping) and ("external_policy" in multitask)
     if (
         {"loss_every_epochs", "reconstruct_every_epochs"} & set(preview)
         and not bool(preview.get("enabled", True))
@@ -296,8 +307,13 @@ def _validate_common_sections(config: Mapping[str, Any]) -> None:
         interval = checkpointing["validation_every_epochs"]
         if isinstance(interval, bool) or int(interval) != interval or int(interval) < 1:
             raise ValueError("checkpointing.validation_every_epochs must be a positive integer")
-        if checkpointing.get("selection_metric") not in {"topology_with_fidelity", "reconstruction_mse"}:
-            raise ValueError("validation_every_epochs requires topology_with_fidelity or reconstruction_mse")
+        if checkpointing.get("selection_metric") not in {
+            "topology_with_fidelity",
+            "reconstruction_mse",
+        }:
+            raise ValueError(
+                "validation_every_epochs requires topology_with_fidelity or reconstruction_mse"
+            )
     if "epochs" in checkpointing:
         epochs = checkpointing["epochs"]
         if (
@@ -333,17 +349,23 @@ def _validate_common_sections(config: Mapping[str, Any]) -> None:
     if panel is not None:
         if not isinstance(panel, Mapping):
             raise TypeError("evaluation.reconstruction_panel must be a mapping")
-        _reject_unknown(panel, {"sample_indices", "seeds", "generation_steps"},
-                        "evaluation.reconstruction_panel")
+        _reject_unknown(
+            panel,
+            {"sample_indices", "seeds", "generation_steps"},
+            "evaluation.reconstruction_panel",
+        )
         if config.get("stage") != "base_training":
             raise ValueError("evaluation.reconstruction_panel currently requires base_training")
         if checkpointing.get("selection_metric") != "reconstruction_mse":
             raise ValueError("reconstruction_panel requires selection_metric=reconstruction_mse")
         for key in ("sample_indices", "seeds"):
             values = panel.get(key)
-            if (not isinstance(values, (list, tuple)) or not values
+            if (
+                not isinstance(values, (list, tuple))
+                or not values
                 or any(isinstance(x, bool) or not isinstance(x, int) or x < 0 for x in values)
-                or len(set(values)) != len(values)):
+                or len(set(values)) != len(values)
+            ):
                 raise ValueError(f"reconstruction_panel.{key} must be unique non-negative integers")
         if int(panel.get("generation_steps", evaluation.get("generation_steps", 32))) < 1:
             raise ValueError("reconstruction_panel.generation_steps must be positive")
@@ -444,9 +466,7 @@ def _validate_multitask_interface(
 
     method = interface.get("method", default_method)
     if not isinstance(method, str) or method not in methods:
-        raise ValueError(
-            f"optimization.multitask.{name}.method must be one of {sorted(methods)}"
-        )
+        raise ValueError(f"optimization.multitask.{name}.method must be one of {sorted(methods)}")
     method_parameters = parameter_defaults.get(method)
     allowed = {"method", method} if method_parameters is not None else {"method"}
     _reject_unknown(interface, allowed, f"optimization.multitask.{name}")
@@ -481,8 +501,7 @@ def _validate_external_policy(multitask: Mapping[str, Any]) -> None:
     methods = {"lagrangian", "rectify", "extended_log_barrier"}
     if not isinstance(method, str) or method not in methods:
         raise ValueError(
-            "optimization.multitask.external_policy.method must be one of "
-            f"{sorted(methods)}"
+            f"optimization.multitask.external_policy.method must be one of {sorted(methods)}"
         )
     allowed = {"method", "vector_reduction", "objective_scale"}
     if method == "lagrangian":
@@ -491,9 +510,7 @@ def _validate_external_policy(multitask: Mapping[str, Any]) -> None:
         allowed.add("extended_log_barrier")
     _reject_unknown(external, allowed, "optimization.multitask.external_policy")
     if external.get("vector_reduction") != "sum":
-        raise ValueError(
-            "optimization.multitask.external_policy.vector_reduction must be sum"
-        )
+        raise ValueError("optimization.multitask.external_policy.vector_reduction must be sum")
     if external.get("objective_scale", "source_mean") != "source_mean":
         raise ValueError(
             "optimization.multitask.external_policy.objective_scale must be source_mean"
@@ -519,9 +536,7 @@ def _validate_external_policy(multitask: Mapping[str, Any]) -> None:
     parameter_key = method
     parameters = external.get(parameter_key, {})
     if not isinstance(parameters, Mapping):
-        raise TypeError(
-            f"optimization.multitask.external_policy.{parameter_key} must be a mapping"
-        )
+        raise TypeError(f"optimization.multitask.external_policy.{parameter_key} must be a mapping")
     defaults, integer_keys = parameter_defaults[method]
     _reject_unknown(
         parameters,
@@ -560,9 +575,7 @@ def _validate_coherence_aggregation(multitask: Mapping[str, Any]) -> None:
     """Validate the explicit family-gradient aggregation used inside external policies."""
     aggregation = multitask["coherence_aggregation"]
     if not isinstance(aggregation, Mapping):
-        raise TypeError(
-            "optimization.multitask.coherence_aggregation must be a mapping"
-        )
+        raise TypeError("optimization.multitask.coherence_aggregation must be a mapping")
     _reject_unknown(
         aggregation,
         {"method"},
@@ -591,11 +604,11 @@ def _validate_fidelity_budget(multitask: Mapping[str, Any]) -> None:
         },
         "optimization.multitask.fidelity_budget",
     )
-    if budget.get("metric", "endpoint_mse_model_units") != "endpoint_mse_model_units":
-        raise ValueError(
-            "optimization.multitask.fidelity_budget.metric must be "
-            "endpoint_mse_model_units"
-        )
+    if budget.get("metric", "endpoint_mse_model_units") not in {
+        "endpoint_mse_model_units",
+        "physical_member_mse_model_units",
+    }:
+        raise ValueError("unsupported fidelity budget metric")
     _method_parameter(
         budget.get("relative_increase", 0.05),
         "optimization.multitask.fidelity_budget.relative_increase",
@@ -619,8 +632,7 @@ def _validate_fidelity_budget(multitask: Mapping[str, Any]) -> None:
     seed = budget.get("calibration_seed", 700103)
     if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
         raise ValueError(
-            "optimization.multitask.fidelity_budget.calibration_seed must be "
-            "a nonnegative integer"
+            "optimization.multitask.fidelity_budget.calibration_seed must be a nonnegative integer"
         )
 
 
@@ -653,13 +665,9 @@ def _validate_multitask(optimization: Mapping[str, Any]) -> None:
     has_fidelity_budget = "fidelity_budget" in multitask
     has_coherence_aggregation = "coherence_aggregation" in multitask
     if has_fidelity_budget and not has_external_policy:
-        raise ValueError(
-            "optimization.multitask.fidelity_budget requires external_policy"
-        )
+        raise ValueError("optimization.multitask.fidelity_budget requires external_policy")
     if has_coherence_aggregation and not has_external_policy:
-        raise ValueError(
-            "optimization.multitask.coherence_aggregation requires external_policy"
-        )
+        raise ValueError("optimization.multitask.coherence_aggregation requires external_policy")
 
     _validate_multitask_interface(
         multitask,
@@ -676,8 +684,7 @@ def _validate_multitask(optimization: Mapping[str, Any]) -> None:
             or family_scalarization.get("method") != "none"
         ):
             raise ValueError(
-                "coherence_aggregation requires explicit "
-                "family_scalarization.method=none"
+                "coherence_aggregation requires explicit family_scalarization.method=none"
             )
     if has_external_policy:
         if multitask.get("outer_aggregation") is not None:
@@ -686,9 +693,7 @@ def _validate_multitask(optimization: Mapping[str, Any]) -> None:
                 "with external_policy"
             )
         if optimization.get("gradient_balance", "weighted_sum") != "weighted_sum":
-            raise ValueError(
-                "external_policy cannot be combined with legacy gradient_balance"
-            )
+            raise ValueError("external_policy cannot be combined with legacy gradient_balance")
         _validate_external_policy(multitask)
         _validate_fidelity_budget(multitask)
     else:
@@ -862,9 +867,63 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
     coherence = config["coherence"]
     _reject_unknown(
         coherence,
-        {"schedule", "compute_budget", "family_balance", "families"},
+        {
+            "schedule",
+            "compute_budget",
+            "family_balance",
+            "families",
+            "frozen_family_artifacts",
+            "scalable_anchored_coherence",
+        },
         "coherence",
     )
+    scalable = coherence.get("scalable_anchored_coherence", {})
+    if not isinstance(scalable, Mapping):
+        raise TypeError("coherence.scalable_anchored_coherence must be a mapping")
+    _reject_unknown(
+        scalable,
+        {"enabled", "max_samples", "candidate_count", "shape_batches", "field_floor"},
+        "coherence.scalable_anchored_coherence",
+    )
+    if not isinstance(scalable.get("enabled", False), bool):
+        raise TypeError("coherence.scalable_anchored_coherence.enabled must be boolean")
+    for key, default in (("max_samples", 32), ("candidate_count", 32), ("shape_batches", 8)):
+        value = scalable.get(key, default)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError(
+                f"coherence.scalable_anchored_coherence.{key} must be a positive integer"
+            )
+    floor = scalable.get("field_floor", 1e-6)
+    if (
+        isinstance(floor, bool)
+        or not isinstance(floor, (int, float))
+        or not math.isfinite(floor)
+        or floor <= 0
+    ):
+        raise ValueError(
+            "coherence.scalable_anchored_coherence.field_floor must be positive and finite"
+        )
+    if scalable.get("enabled", False) and (
+        config.get("evaluation", {}).get("group_size") is not None
+        or config.get("evaluation", {}).get("native_topology", False)
+    ):
+        raise ValueError("scalable coherence requires ungrouped evaluation without native_topology")
+    metric = (
+        config["optimization"]
+        .get("multitask", {})
+        .get("fidelity_budget", {})
+        .get("metric", "endpoint_mse_model_units")
+    )
+    if metric == "physical_member_mse_model_units" and not scalable.get("enabled", False):
+        raise ValueError("physical member fidelity metric requires scalable coherence")
+    if (
+        scalable.get("enabled", False)
+        and config["optimization"].get("multitask", {}).get("external_policy") is not None
+        and metric != "physical_member_mse_model_units"
+    ):
+        raise ValueError(
+            "scalable external fidelity policy requires physical_member_mse_model_units"
+        )
     family_balance = coherence.get("family_balance", {})
     if not isinstance(family_balance, Mapping):
         raise TypeError("coherence.family_balance must be a mapping")
@@ -925,7 +984,12 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
         raise ValueError("coherence.compute_budget.query_policy is invalid")
 
     families = coherence.get("families", {})
-    supported_families = {"global_distribution", "cross_spectrum", "topology"}
+    supported_families = {
+        "global_distribution",
+        "cross_spectrum",
+        "multiscale_spectrum",
+        "topology",
+    }
     if not isinstance(families, Mapping) or not families:
         raise ValueError("post-training coherence must configure at least one family")
     unknown_families = sorted(set(families) - supported_families)
@@ -936,10 +1000,27 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
     ]
     if not enabled_families:
         raise ValueError("post-training coherence must enable at least one family")
-    if any(name in {"cross_spectrum", "topology"} for name in enabled_families) and (
-        query_policy != "fixed_shared"
-    ):
+    if any(
+        name in {"cross_spectrum", "multiscale_spectrum", "topology"} for name in enabled_families
+    ) and (query_policy != "fixed_shared"):
         raise ValueError("cross_spectrum/topology coherence requires query_policy=fixed_shared")
+
+    frozen = coherence.get("frozen_family_artifacts", {})
+    if not isinstance(frozen, Mapping):
+        raise TypeError("coherence.frozen_family_artifacts must be a mapping")
+    for name, artifact in frozen.items():
+        if name not in enabled_families or not isinstance(artifact, Mapping):
+            raise ValueError("frozen artifacts require an enabled family and mapping")
+        _reject_unknown(artifact, {"path", "sha256"}, f"coherence.frozen_family_artifacts.{name}")
+        digest = artifact.get("sha256")
+        if (
+            not isinstance(artifact.get("path"), str)
+            or not artifact["path"].strip()
+            or not isinstance(digest, str)
+            or len(digest) != 64
+            or any(c not in "0123456789abcdef" for c in digest)
+        ):
+            raise ValueError("frozen family requires a path and lowercase SHA256")
 
     common_family_keys = {
         "enabled",
@@ -954,8 +1035,28 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
     for family_name, family in families.items():
         if not isinstance(family, Mapping):
             raise TypeError(f"coherence.families.{family_name} must be a mapping")
+        if family_name == "multiscale_spectrum":
+            field_names = config.get("dataset", {}).get("field_names") or family.get("fields")
+            if not field_names:
+                raise ValueError("multiscale_spectrum requires explicit field names")
+            if "relation_extension" in family:
+                from ..coherence.families.multiscale_relation import parse_relation_extension_config
+
+                parse_relation_extension_config(family, tuple(field_names))
+            else:
+                from ..coherence.families.multiscale_spectrum.config import parse_multiscale_config
+
+                parse_multiscale_config(family, tuple(field_names))
+            evaluation_points = config.get("evaluation", {}).get("query_points")
+            if (
+                family.get("enabled", True)
+                and evaluation_points is not None
+                and int(evaluation_points) != int(compute["point_count"])
+            ):
+                raise ValueError("multiscale_spectrum evaluation requires its fixed query geometry")
+            continue
         extra_keys = {
-            "global_distribution": set(),
+            "global_distribution": {"definition", "base_definition", "conditional_draws"},
             "cross_spectrum": {"pairs", "graph", "eps"},
             "topology": {
                 "geometry",
@@ -1008,6 +1109,40 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
                 raise ValueError("topology anchor/evaluation requires strategy=spatial_self_mutual")
         if not isinstance(components, Mapping) or not components:
             raise ValueError(f"{family_name}.components cannot be empty")
+        if family_name == "global_distribution":
+            definition = family.get("definition", "global_distribution_v1")
+            if definition not in {
+                "global_distribution_v1",
+                "marginal_mixed_mean_v2",
+                "marginal_mixed_weighted_v3",
+                "conditional_quantile_fair_v1",
+            }:
+                raise ValueError("unknown global_distribution.definition")
+            if definition == "conditional_quantile_fair_v1":
+                draws = family.get("conditional_draws")
+                if family.get("base_definition") != "marginal_mixed_weighted_v3":
+                    raise ValueError("conditional State requires weighted base_definition")
+                if isinstance(draws, bool) or not isinstance(draws, int) or draws < 2:
+                    raise ValueError("conditional State requires at least two draws")
+            if (
+                definition in {"marginal_mixed_weighted_v3", "conditional_quantile_fair_v1"}
+                and family.get("target_use") != "paired_supervised"
+            ):
+                raise ValueError("weighted State requires paired_supervised endpoints")
+            if definition in {
+                "marginal_mixed_mean_v2",
+                "marginal_mixed_weighted_v3",
+                "conditional_quantile_fair_v1",
+            }:
+                cross = components.get("cross", {})
+                if (
+                    not components.get("self", {}).get("enabled", True)
+                    or components.get("mutual", {}).get("enabled", True)
+                    or float(cross.get("top_fraction", 0.1)) != 1.0
+                    or cross.get("include_axes", True)
+                    or not cross.get("qmc", True)
+                ):
+                    raise ValueError("mixed State requires marginal and full QMC mixed bank")
         component_keys = {
             "global_distribution": {
                 "self": {"enabled", "weight", "channel_weights"},
@@ -1055,7 +1190,22 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
             )
 
             component_keys = PERSISTENCE_COMPONENT_KEYS
-            validate_persistence_config(family, tuple(config["dataset"]["field_names"]))
+            if family.get("persistence", {}).get("definition") == "scalable_pooled_v1":
+                from ..coherence.families.topology.family import _PooledGeometryObjective
+
+                _PooledGeometryObjective(family, tuple(config["dataset"]["field_names"]))
+            else:
+                validate_persistence_config(family, tuple(config["dataset"]["field_names"]))
+            if family.get("persistence", {}).get("definition") in {
+                "finite_primary_v1",
+                "conditional_fixed_transform_fair_v1",
+            } and (
+                config["optimization"].get("execution_strategy") is not None
+                or config["optimization"].get("lpc_ordered") is not None
+            ):
+                raise ValueError(
+                    "finite and conditional-fair Shape require full direct filtration execution"
+                )
         _reject_unknown(components, set(component_keys), f"{family_name}.components")
         for component_name, settings in components.items():
             _reject_unknown(
@@ -1121,9 +1271,19 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
                     "periods",
                     "allow_projected_collisions",
                     "antialias_downsample",
+                    "raster_mapping",
                 },
                 "topology.geometry",
             )
+            raster_mapping = geometry.get("raster_mapping", "legacy_v1")
+            if raster_mapping not in {"legacy_v1", "physical_cell_overlap_v1"}:
+                raise ValueError("unknown topology geometry.raster_mapping")
+            if raster_mapping == "physical_cell_overlap_v1" and (
+                geometry.get("periodic", False) or geometry.get("antialias_downsample", False)
+            ):
+                raise ValueError(
+                    "physical_cell_overlap_v1 requires a complete nonperiodic grid and excludes legacy antialias"
+                )
             if not isinstance(geometry.get("antialias_downsample", False), bool):
                 raise ValueError("topology geometry.antialias_downsample must be boolean")
             if geometry.get("antialias_downsample", False) and topology_strategy == "betti_curves":
@@ -1448,6 +1608,7 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
             "sample_selection",
             "native_topology",
             "group_size",
+            "batch_size",
         },
         "evaluation",
     )
@@ -1538,13 +1699,13 @@ def _validate_external_policy_contract(config: Mapping[str, Any]) -> None:
 
     if "coherence_aggregation" in multitask:
         families = config.get("coherence", {}).get("families", {})
-        for family_name in ("global_distribution", "cross_spectrum", "topology"):
-            family = families.get(family_name) if isinstance(families, Mapping) else None
-            if not isinstance(family, Mapping) or family.get("enabled", True) is not True:
-                raise ValueError(
-                    "coherence_aggregation requires enabled coherence families "
-                    "global_distribution, cross_spectrum, and topology"
-                )
+        from ..coherence.compose import three_family_order
+
+        three_family_order(
+            name
+            for name, family in families.items()
+            if isinstance(family, Mapping) and family.get("enabled", True) is True
+        )
 
     objectives = config["objectives"]
     for name in ("endpoint", "source_anchor"):
@@ -1562,9 +1723,7 @@ def _validate_external_policy_contract(config: Mapping[str, Any]) -> None:
         or not math.isfinite(coherence_weight)
         or coherence_weight != 1.0
     ):
-        raise ValueError(
-            "external_policy requires objectives.coherence enabled with weight 1"
-        )
+        raise ValueError("external_policy requires objectives.coherence enabled with weight 1")
 
     trainable = config["trainable"]
     if trainable.get("scope", "full_model") != "full_model":
@@ -1693,9 +1852,18 @@ def validate_config(config: Mapping[str, Any]) -> None:
         if formulation not in {"ddpm", "edm"}:
             raise ValueError("diffusion_pde formulation must be ddpm or edm")
         edm_keys = {
-            "sigma_data", "sigma_min", "sigma_max", "rho", "p_mean", "p_std",
-            "high_noise_fraction", "train_microbatch_size", "precision",
-            "model_ema_enabled", "model_ema_decay", "model_ema_eval",
+            "sigma_data",
+            "sigma_min",
+            "sigma_max",
+            "rho",
+            "p_mean",
+            "p_std",
+            "high_noise_fraction",
+            "train_microbatch_size",
+            "precision",
+            "model_ema_enabled",
+            "model_ema_decay",
+            "model_ema_eval",
         }
         if formulation == "ddpm" and edm_keys.intersection(model):
             raise ValueError("EDM model settings require formulation=edm")
@@ -1706,8 +1874,13 @@ def validate_config(config: Mapping[str, Any]) -> None:
                 raise ValueError("EDM requires backbone=conditional_unet")
             if {"hidden_channels", "training_timesteps"}.intersection(model):
                 raise ValueError("EDM does not use hidden_channels or training_timesteps")
-            for key, default in (("sigma_data", 1.0), ("sigma_min", 0.002), ("sigma_max", 80.0),
-                                 ("rho", 7.0), ("p_std", 1.2)):
+            for key, default in (
+                ("sigma_data", 1.0),
+                ("sigma_min", 0.002),
+                ("sigma_max", 80.0),
+                ("rho", 7.0),
+                ("p_std", 1.2),
+            ):
                 value = float(model.get(key, default))
                 if not math.isfinite(value) or value <= 0:
                     raise ValueError(f"model.{key} must be finite and positive")
@@ -1732,11 +1905,19 @@ def validate_config(config: Mapping[str, Any]) -> None:
             if float(config.get("optimization", {}).get("backward_loss_scale", 1.0)) != 1:
                 raise ValueError("EDM microbatch backward requires backward_loss_scale=1")
             evaluation = config.get("evaluation", {})
-            for settings in (evaluation, evaluation.get("preview", {}),
-                             evaluation.get("reconstruction_panel", {})):
-                if int(settings.get("generation_steps", evaluation.get("generation_steps", 32))) < 2:
+            for settings in (
+                evaluation,
+                evaluation.get("preview", {}),
+                evaluation.get("reconstruction_panel", {}),
+            ):
+                if (
+                    int(settings.get("generation_steps", evaluation.get("generation_steps", 32)))
+                    < 2
+                ):
                     raise ValueError("EDM Heun sampling requires generation_steps >= 2")
-        backbone = str(model.get("backbone", "conditional_unet" if formulation == "edm" else "plain_cnn")).lower()
+        backbone = str(
+            model.get("backbone", "conditional_unet" if formulation == "edm" else "plain_cnn")
+        ).lower()
         if backbone not in {"plain_cnn", "conditional_unet"}:
             raise ValueError("diffusion_pde backbone must be plain_cnn or conditional_unet")
         if int(model.get("training_timesteps", 1000)) < 2:

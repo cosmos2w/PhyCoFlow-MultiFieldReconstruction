@@ -14,9 +14,13 @@ from typing import Any
 
 from tqdm.auto import tqdm
 
+from ..run_logs import history_paths, log_path
 from .history_plotting import (
     HISTORY_MUTED_TEXT_COLOR,
     HISTORY_TEXT_COLOR,
+    find_calibration_freeze,
+    mark_calibration_freeze,
+    plot_recorded_trend,
     style_history_axis,
 )
 
@@ -93,10 +97,10 @@ class TrainingMonitor:
         plot_every_steps: int = 10,
     ) -> None:
         self.run_dir = Path(run_dir)
-        self.history_path = self.run_dir / "metrics" / "history.jsonl"
-        self.validation_history_path = self.run_dir / "metrics" / "validation_history.jsonl"
-        self.plot_path = self.run_dir / "loss_history.png"
-        self.optimization_plot_path = self.run_dir / "optimization_diagnostics.png"
+        self.history_path = log_path(self.run_dir, "history.jsonl")
+        self.validation_history_path = log_path(self.run_dir, "validation_history.jsonl")
+        self.plot_path = log_path(self.run_dir, "loss_history.png")
+        self.optimization_plot_path = log_path(self.run_dir, "optimization_diagnostics.png")
         self.final_step = int(final_step)
         self.configured_steps = int(configured_steps)
         self.steps_per_epoch = max(1, int(steps_per_epoch))
@@ -109,6 +113,9 @@ class TrainingMonitor:
         self.enabled = bool(enabled)
         self._steps: dict[str, list[int]] = defaultdict(list)
         self._values: dict[str, list[float]] = defaultdict(list)
+        self._coherence_semantics: set[str] = set()
+        self._data_semantics: set[str] = set()
+        self._validation_plot_label = "Fixed validation · recorded metric"
         self._epoch_sums: dict[str, float] = defaultdict(float)
         self._epoch_counts: dict[str, int] = defaultdict(int)
         self._epoch_latest: dict[str, Any] = {}
@@ -121,6 +128,12 @@ class TrainingMonitor:
         self._pending_epoch_report: dict[str, Any] | None = None
         self.last_epoch_report: dict[str, Any] | None = None
         self._plot_available = True
+        self._calibration_freeze_epoch = None
+        config_path = self.run_dir / "resolved_config.yaml"
+        if config_path.is_file():
+            from ..config import load_config
+
+            self._calibration_freeze_epoch = find_calibration_freeze([], load_config(config_path))
         self._load_existing_history()
         self._load_existing_validation_history()
         self.active_epoch = int(start_step) // self.steps_per_epoch + 1
@@ -151,28 +164,44 @@ class TrainingMonitor:
         )
 
     def _load_existing_history(self) -> None:
-        if not self.history_path.exists():
-            return
-        with self.history_path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                if line.strip():
-                    self._capture(json.loads(line))
+        for path in history_paths(self.run_dir, "history.jsonl"):
+            with path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    if line.strip():
+                        self._capture(json.loads(line))
 
     def _load_existing_validation_history(self) -> None:
-        if not self.validation_history_path.exists():
-            return
-        with self.validation_history_path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                if line.strip():
-                    self._capture(json.loads(line))
+        for path in history_paths(self.run_dir, "validation_history.jsonl"):
+            with path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    if line.strip():
+                        self._capture(json.loads(line))
 
     def _capture(self, row: Mapping[str, Any]) -> None:
+        freeze = find_calibration_freeze([dict(row)])
+        if freeze is not None:
+            self._calibration_freeze_epoch = min(freeze, self._calibration_freeze_epoch or freeze)
+        if row.get("validation_plot_label"):
+            self._validation_plot_label = str(row["validation_plot_label"])
         step = int(row.get("step", 0))
+        coherence = row.get("coherence_loss")
+        if isinstance(coherence, (int, float)) and math.isfinite(float(coherence)):
+            self._coherence_semantics.add(
+                "direction"
+                if row.get("total_semantics") == "parameter_direction_without_scalar_objective"
+                else "scalar"
+            )
+        data = row.get("data_loss")
+        if isinstance(data, (int, float)) and math.isfinite(float(data)):
+            self._data_semantics.add(
+                "paired"
+                if row.get("data_retention_objective") == "paired_endpoint_field_budget"
+                else "other"
+            )
         family_keys = (
             key
             for key in row
-            if key.startswith(_COHERENCE_FAMILY_PREFIX)
-            and key.endswith(_COHERENCE_FAMILY_SUFFIX)
+            if key.startswith(_COHERENCE_FAMILY_PREFIX) and key.endswith(_COHERENCE_FAMILY_SUFFIX)
         )
         for key in (*_LOSS_KEYS, *_OPTIMIZATION_KEYS, *family_keys):
             value = row.get(key)
@@ -210,10 +239,7 @@ class TrainingMonitor:
             "epoch": int(epoch),
             "batches": int(batches),
             "epoch_complete": batches == self._epoch_batch_count(epoch),
-            **{
-                key: value / self._epoch_counts[key]
-                for key, value in self._epoch_sums.items()
-            },
+            **{key: value / self._epoch_counts[key] for key, value in self._epoch_sums.items()},
             **self._epoch_latest,
             **{key: None for key in self._epoch_missing if key not in self._epoch_counts},
             **{key: count > 0 for key, count in self._epoch_booleans.items()},
@@ -222,8 +248,9 @@ class TrainingMonitor:
             "update_mode_counts": dict(self._epoch_modes),
         }
         if self._epoch_modes:
-            row["update_mode"] = (next(iter(self._epoch_modes))
-                                  if len(self._epoch_modes) == 1 else "mixed")
+            row["update_mode"] = (
+                next(iter(self._epoch_modes)) if len(self._epoch_modes) == 1 else "mixed"
+            )
         with self.history_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(row, sort_keys=True) + "\n")
         self._capture(row)
@@ -265,7 +292,9 @@ class TrainingMonitor:
         batches = int(pending["batches"])
         checkpoint_checked = bool(pending["checkpoint_checked"])
         best_saved = bool(pending["best_checkpoint_saved"])
-        best_status = "saved" if best_saved else "unchanged" if checkpoint_checked else "not_checked"
+        best_status = (
+            "saved" if best_saved else "unchanged" if checkpoint_checked else "not_checked"
+        )
         summary = dict(pending["summary"])
         report = {
             "epoch": int(pending["epoch"]),
@@ -281,9 +310,7 @@ class TrainingMonitor:
             },
         }
         postfix: dict[str, str] = {
-            f"{_LOSS_LABELS[key]}_avg": f"{report[key]:.4e}"
-            for key in _LOSS_KEYS
-            if key in report
+            f"{_LOSS_LABELS[key]}_avg": f"{report[key]:.4e}" for key in _LOSS_KEYS if key in report
         }
         postfix.update(
             {
@@ -372,6 +399,9 @@ class TrainingMonitor:
             "epoch": float(report["training_epoch"]),
             "validation_loss": float(report["loss"]),
             "components": dict(report.get("components", {})),
+            "validation_plot_label": str(
+                report.get("validation_plot_label", "Fixed validation · recorded metric")
+            ),
         }
         with self.validation_history_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(row, sort_keys=True) + "\n")
@@ -380,9 +410,7 @@ class TrainingMonitor:
             self._pending_epoch_report is not None
             and int(self._pending_epoch_report["step"]) == step
         ):
-            self._pending_epoch_report["summary"]["validation_loss"] = row[
-                "validation_loss"
-            ]
+            self._pending_epoch_report["summary"]["validation_loss"] = row["validation_loss"]
         self._plot()
 
     def _plot(self) -> None:
@@ -416,6 +444,7 @@ class TrainingMonitor:
                 f".{self.optimization_plot_path.name}.tmp"
             )
             optimization_figure.savefig(temporary, dpi=180, format="png")
+            optimization_figure.savefig(self.optimization_plot_path.with_suffix(".pdf"))
             plt.close(optimization_figure)
             os.replace(temporary, self.optimization_plot_path)
         from .coherence_history import render_coherence_history
@@ -428,8 +457,7 @@ class TrainingMonitor:
     def _shown_loss_series(self, key: str) -> tuple[list[float], list[float]]:
         values = self._values[key]
         steps = self._steps[key]
-        stride = max(1, math.ceil(len(values) / 4000))
-        return self._epoch_coordinates(steps[::stride]), values[::stride]
+        return self._epoch_coordinates(steps), values
 
     def _stage_label(self) -> str:
         stage = self.description.partition(":")[0].replace("_", " ").strip()
@@ -469,12 +497,14 @@ class TrainingMonitor:
             # the first row's left-aligned panel titles.
             height_ratios=(0.34, *([1.0] * individual_rows)),
         )
+        has_direction = "direction" in self._coherence_semantics
+        direction_only = self._coherence_semantics == {"direction"}
         title_axis = figure.add_subplot(grid[0, :])
         title_axis.set_axis_off()
         title_axis.text(
             0.5,
             0.64,
-            f"{self._stage_label()} objectives",
+            f"{self._stage_label()} {'diagnostics' if has_direction else 'objectives'}",
             ha="center",
             va="center",
             color=_TEXT_COLOR,
@@ -491,8 +521,7 @@ class TrainingMonitor:
             fontsize=8.3,
         )
         post_training = (
-            self.description.partition(":")[0].replace("_", " ").strip().lower()
-            == "post training"
+            self.description.partition(":")[0].replace("_", " ").strip().lower() == "post training"
         )
         for index, key in enumerate(available):
             row = 1 + index // 2
@@ -504,20 +533,33 @@ class TrainingMonitor:
             )
             axis = figure.add_subplot(grid_cell)
             shown_epochs, shown_values = self._shown_loss_series(key)
-            axis.plot(
-                shown_epochs,
-                shown_values,
-                color=_LOSS_COLORS[key],
-                linewidth=1.7,
-                marker="o" if key == "validation_loss" else None,
-                markersize=4.3 if key == "validation_loss" else None,
-                markerfacecolor="white" if key == "validation_loss" else None,
-                markeredgewidth=1.1 if key == "validation_loss" else None,
+            plot_recorded_trend(axis, shown_epochs, shown_values, color=_LOSS_COLORS[key])
+            axis.set_xlabel(
+                "Training epoch"
+                + (
+                    f" · dotted: freeze at epoch {self._calibration_freeze_epoch:g}"
+                    if self._calibration_freeze_epoch is not None
+                    and epoch_max >= self._calibration_freeze_epoch
+                    else ""
+                ),
+                labelpad=3,
             )
-            axis.set_xlabel("Training epoch", labelpad=3)
             axis.set_ylabel("Objective value", labelpad=3)
             if key == "validation_loss":
                 title = "Fixed validation objective"
+            elif key == "coherence_loss" and has_direction:
+                title = (
+                    "Coherence reporting sum"
+                    if direction_only
+                    else "Coherence values · includes reporting sums"
+                )
+                axis.set_ylabel("Recorded value", labelpad=3)
+            elif key == "data_loss" and self._data_semantics == {"paired"}:
+                title = "Sampled TRAIN paired-endpoint data diagnostic"
+                axis.set_ylabel("Recorded value", labelpad=3)
+            elif post_training and key == "total" and has_direction:
+                title = "Combined reporting value · not an optimized scalar"
+                axis.set_ylabel("Recorded value", labelpad=3)
             elif post_training and key == "total":
                 title = "Weighted combined objective"
             elif post_training and key == "data_loss":
@@ -535,11 +577,14 @@ class TrainingMonitor:
                 pad=7,
             )
             style_history_axis(axis, shown_values, x_max=epoch_max)
+            mark_calibration_freeze(axis, self._calibration_freeze_epoch, x_max=epoch_max)
+            if len(shown_values) >= 8:
+                axis.legend(loc="best", frameon=False, fontsize=7)
             if key == "validation_loss":
                 axis.text(
                     1.0,
                     1.015,
-                    "Native model objective · one fixed validation sample",
+                    self._validation_plot_label,
                     transform=axis.transAxes,
                     ha="right",
                     va="bottom",
@@ -572,7 +617,9 @@ class TrainingMonitor:
         norm_axis = figure.add_subplot(grid[0, :])
         cosine_axis = figure.add_subplot(grid[1, 0])
         conflict_axis = figure.add_subplot(grid[1, 1])
-        figure.suptitle("Optimization diagnostics", color=_TEXT_COLOR, fontsize=14, fontweight="medium")
+        figure.suptitle(
+            "Optimization diagnostics", color=_TEXT_COLOR, fontsize=14, fontweight="medium"
+        )
         labels = {
             "data_grad_norm": "Data objective",
             "coherence_grad_norm": "Coherence objective",
@@ -589,12 +636,16 @@ class TrainingMonitor:
                 linewidth=1.6,
                 label=labels[key],
             )
-        norm_axis.set_title("Gradient norms · epoch means", loc="left", color=_TEXT_COLOR, fontsize=11.2)
+        norm_axis.set_title(
+            "Gradient norms · epoch means", loc="left", color=_TEXT_COLOR, fontsize=11.2
+        )
         norm_axis.set_ylabel("Gradient norm")
         norm_axis.set_xlabel("Training epoch")
         style_history_axis(norm_axis, norm_values, x_max=epoch_max)
         if norm_axis.lines:
-            norm_axis.legend(loc="upper right", frameon=False, ncol=len(norm_axis.lines), fontsize=8.4)
+            norm_axis.legend(
+                loc="upper right", frameon=False, ncol=len(norm_axis.lines), fontsize=8.4
+            )
 
         if cosine_available:
             epochs, values = self._shown_loss_series("gradient_cosine")
@@ -608,7 +659,9 @@ class TrainingMonitor:
             style_history_axis(cosine_axis, values, x_max=epoch_max)
             cosine_axis.set_yscale("linear")
             cosine_axis.set_ylim(-1.0, 1.0)
-            cosine_axis.set_title("Data / coherence gradient cosine", loc="left", color=_TEXT_COLOR, fontsize=10.6)
+            cosine_axis.set_title(
+                "Data / coherence gradient cosine", loc="left", color=_TEXT_COLOR, fontsize=10.6
+            )
             cosine_axis.set_ylabel("Mean cosine")
             cosine_axis.set_xlabel("Training epoch")
         else:
@@ -628,7 +681,9 @@ class TrainingMonitor:
             conflict_axis.set_yscale("linear")
             conflict_axis.set_ylim(0.0, 1.0)
             conflict_axis.yaxis.set_major_formatter(PercentFormatter(xmax=1.0))
-            conflict_axis.set_title("Gradient conflict frequency", loc="left", color=_TEXT_COLOR, fontsize=10.6)
+            conflict_axis.set_title(
+                "Gradient conflict frequency", loc="left", color=_TEXT_COLOR, fontsize=10.6
+            )
             conflict_axis.set_ylabel("Updates with conflict")
             conflict_axis.set_xlabel("Training epoch")
         else:

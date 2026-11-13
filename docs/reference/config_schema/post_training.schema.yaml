@@ -25,6 +25,7 @@ notes:
   - Optional objectives.endpoint and objectives.source_anchor reuse the coherence-cadence rollout and are weighted inside data_retention.
   - checkpointing.selection_metric=topology_with_fidelity requires a multi-sample validation panel and total/per-field source-relative fidelity budgets.
   - evaluation.native_topology requires all native grid points; max_relative_native_topology_increase optionally guards its component distances.
+  - evaluation.batch_size is a positive inference/scoring batch size for independent scalable coherence scores; it retains the full selected panel and is separate from covariance group_size.
   - Cross-frequency coherence requires a coherence ensemble batch of at least three.
   - Observation consistency is a rollout constraint, not a coherence family.
   - structured_block_mean sensors require observation_consistency.mode=none and final_clamp=false.
