@@ -969,7 +969,9 @@ For new `self_spectrum` or topology methods, use a focused branch and experiment
 6. Run the repository checks below, review `git diff --check`, and inspect the final diff for local paths, payloads, run IDs, and generated artifacts.
 7. Commit logical units and open a pull request to `main`. Describe scientific intent, test evidence, and compatibility impact.
 
-The local acceptance checks are:
+For documentation-only edits, check the rendered text, local links and any changed command/config examples. CI keeps the required `cpu-contracts` check and skips Python setup, dependency installation and the CPU suite for documentation-only diffs. Code, configuration, dependency and workflow changes run the full checks; a manual workflow dispatch also runs them.
+
+The local acceptance checks for implementation changes are:
 
 ```bash
 ruff check src tests scripts cases benchmarks
