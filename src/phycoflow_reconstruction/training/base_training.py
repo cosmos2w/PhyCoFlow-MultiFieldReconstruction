@@ -62,6 +62,15 @@ def run_base_training(
 ) -> Path:
     if config["stage"] != "base_training":
         raise ValueError("run_base_training accepts only stage=base_training")
+    if (
+        resume is None
+        and config["model"]["name"] == "diffusion_pde"
+        and config["model"].get("formulation", "ddpm") != "edm"
+    ):
+        raise ValueError(
+            "New DiffusionPDE training requires the EDM profile in "
+            "configs/models/diffusion_pde.yaml; archived DDPM runs remain loadable and resumable."
+        )
     seed = int(config["runtime"].get("seed", 42))
     seed_everything(seed, bool(config["runtime"].get("deterministic", True)))
     device = torch.device(config["runtime"].get("device", "cpu"))

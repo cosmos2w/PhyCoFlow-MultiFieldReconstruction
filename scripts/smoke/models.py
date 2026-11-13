@@ -72,7 +72,16 @@ MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         "depth": 1,
     },
     "geofno": {"name": "geofno", "hidden_channels": 8, "layers": 1},
-    "diffusion_pde": {"name": "diffusion_pde", "hidden_channels": 8},
+    "diffusion_pde": {
+        "name": "diffusion_pde",
+        "formulation": "edm",
+        "base_channels": 8,
+        "channel_multipliers": [1, 2],
+        "num_res_blocks": 1,
+        "time_embed_dim": 16,
+        "attention_levels": [1],
+        "attention_heads": 2,
+    },
     "latent_fm_stage1": {"name": "latent_fm", "latent_channels": 4, "stage": 1},
     "pointcloud_ffm_gl_rbf": {
         "name": "pointcloud_ffm",
@@ -213,7 +222,7 @@ def _run_one(name: str, config: dict[str, Any], device: torch.device) -> dict[st
     optimizer.step()
     reconstruction = model.reconstruct(
         batch,
-        steps=1,
+        steps=2 if name == "diffusion_pde" else 1,
         generator=torch.Generator(device=device).manual_seed(991),
     ).prediction
     if reconstruction.shape != batch.target_fields.shape or not bool(
