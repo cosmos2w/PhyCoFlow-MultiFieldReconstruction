@@ -971,16 +971,18 @@ For new `self_spectrum` or topology methods, use a focused branch and experiment
 
 For documentation-only edits, check the rendered text, local links and any changed command/config examples. CI keeps the required `cpu-contracts` check and skips Python setup, dependency installation and the CPU suite for documentation-only diffs. Code, configuration, dependency and workflow changes run the full checks; a manual workflow dispatch also runs them.
 
-The local acceptance checks for implementation changes are:
+For implementation changes, run Ruff and focused tests for the affected behavior locally. CI runs the full CPU suite with CPU-only PyTorch and reports the slowest tests. Canonical case configuration validation is included in that suite.
 
 ```bash
 ruff check src tests scripts cases benchmarks
-pytest
 ```
 
 Useful focused checks include:
 
 ```bash
+# Run the relevant test module (configuration example).
+pytest tests/test_config_contracts.py
+
 # Validate a changed launch profile.
 python cases/<case>/run.py validate --config configs/<stage>/<profile>.yaml
 
