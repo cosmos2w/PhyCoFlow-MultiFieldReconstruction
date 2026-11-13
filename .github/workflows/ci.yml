@@ -14,14 +14,56 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Classify changed files
+        id: changes
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          case "$EVENT_NAME" in
+            pull_request)
+              git diff --no-renames --name-only -z "$PR_BASE_SHA...$PR_HEAD_SHA" > "$RUNNER_TEMP/changed-files"
+              ;;
+            push)
+              if [[ -z "$PUSH_BEFORE_SHA" || "$PUSH_BEFORE_SHA" =~ ^0+$ ]]; then
+                echo "run_full=true" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              git diff --no-renames --name-only -z "$PUSH_BEFORE_SHA" "$GITHUB_SHA" > "$RUNNER_TEMP/changed-files"
+              ;;
+            *)
+              echo "run_full=true" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+          esac
+
+          run_full=false
+          while IFS= read -r -d '' path; do
+            case "$path" in
+              *.md|*.rst|*.adoc|LICENSE|LICENSE.*|NOTICE|NOTICE.*|COPYING|COPYING.*) ;;
+              docs/*.png|docs/*.jpg|docs/*.jpeg|docs/*.gif|docs/*.svg|docs/*.webp|docs/*.pdf) ;;
+              *) run_full=true; break ;;
+            esac
+          done < "$RUNNER_TEMP/changed-files"
+          echo "run_full=$run_full" >> "$GITHUB_OUTPUT"
+          if [[ "$run_full" == false ]]; then
+            echo "Documentation-only changes: dependency installation and CPU tests are skipped." >> "$GITHUB_STEP_SUMMARY"
+          fi
       - name: Set up Python
+        if: steps.changes.outputs.run_full == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
       - name: Install project and development dependencies
+        if: steps.changes.outputs.run_full == 'true'
         run: python -m pip install --upgrade pip && python -m pip install -e ".[dev,operator,keops,topology,multitask,posttrain_constraints,posttrain,plot]"
       - name: Verify TorchJD and Cooper are installed
+        if: steps.changes.outputs.run_full == 'true'
         run: |
           python - <<'PY'
           from importlib.metadata import version
@@ -34,14 +76,17 @@ jobs:
           print(f"TorchJD {version('torchjd')} and Cooper {version('cooper-optim')} are available")
           PY
       - name: Lint permanent source
+        if: steps.changes.outputs.run_full == 'true'
         run: ruff check src tests scripts cases benchmarks
       - name: Run CPU contract and unit tests
+        if: steps.changes.outputs.run_full == 'true'
         env:
           CUDA_VISIBLE_DEVICES: ""
           OMP_NUM_THREADS: "2"
           MKL_NUM_THREADS: "2"
         run: pytest
       - name: Validate canonical case configuration composition
+        if: steps.changes.outputs.run_full == 'true'
         env:
           PYTHONPATH: src
         run: |
@@ -57,6 +102,7 @@ jobs:
           print(f"validated {len(paths)} canonical base configurations")
           PY
       - name: Check repository architecture
+        if: steps.changes.outputs.run_full == 'true'
         run: |
           test ! -d src/phycoflow_pointcloud
           ! git ls-files -z -- '*.py' | xargs -0 grep -nH 'phycoflow_pointcloud'
