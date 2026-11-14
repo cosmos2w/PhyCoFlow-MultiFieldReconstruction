@@ -103,7 +103,7 @@ python cases/brusselator/run.py train-base \
   --max-steps 1
 ```
 
-Remove `--max-steps 1` for a real run. Outputs are written under `cases/brusselator/runs/<experiment_name>/<run-id>/`; this directory is intentionally ignored by Git.
+Remove `--max-steps 1` for a real run. Outputs are written under `cases/brusselator/runs/<experiment_name>/<run-id>/`; this directory is intentionally ignored by Git. On this host, new campaigns use the case path as a stable logical alias for generated payloads on DATA2; see [experiment artifact organization](docs/Experiment_Artifacts.md) before creating a campaign.
 
 ### 1.2 Which command should I use?
 

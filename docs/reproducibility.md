@@ -34,7 +34,7 @@ The benchmark aggregation script is `scripts/benchmarks/aggregate_benchmark.py`.
 
 ## Run lineage and external artifacts
 
-A run stores its resolved config, manifest, status, `last`/`best` checkpoints, and optional evaluation payloads under `cases/<case>/runs/`. Post-training stores the source run/checkpoint identity and hashes before and after refinement. The source checkpoint must remain immutable.
+A run records its resolved config, manifest, status, `last`/`best` checkpoints, and optional evaluation payloads at a stable logical path under `cases/<case>/runs/`. On this host, new generated payloads belong in existing DATA2 project storage and are accessed through that case alias; legacy layouts stay in place until authorized relocation; see [experiment artifact organization](Experiment_Artifacts.md) for provenance, timing and terminal-only relocation rules. Post-training stores the source run/checkpoint identity and hashes before and after refinement. The source checkpoint must remain immutable.
 
 If a formal result needs to be shared, publish the complete checkpoint/data bundle in an external artifact store without changing its recorded hash. A traceable result whose payload is unavailable is not independently replayable.
 
