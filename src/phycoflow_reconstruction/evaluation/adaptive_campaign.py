@@ -21,16 +21,95 @@ RESERVE_SECONDS = 6 * 3600
 EPOCHS = (0, 100, 250, 500, 750, 1000)
 
 
+def load_execution_runtime(campaign: Path):
+    """Load current operational device choices, separate from frozen science."""
+    path = os.environ.get('CAR_EXECUTION_RUNTIME')
+    if not path:
+        raise ValueError('CAR_EXECUTION_RUNTIME is required for GPU execution')
+    runtime = json.loads(Path(path).read_text())
+    if runtime.get('schema') != 'car_execution_runtime_v1':
+        raise ValueError('invalid execution runtime schema')
+    selected = runtime.get('gpu_uuid')
+    excluded = runtime.get('excluded_gpu_uuids')
+    paused = runtime.get('paused_source_families')
+    if (not isinstance(selected, str) or not selected.startswith('GPU-')
+            or not isinstance(excluded, list) or not isinstance(paused, list)):
+        raise ValueError('runtime requires selected GPU and exclusion/pause lists')
+    return runtime
+
+
 def enforce_execution_constraints(campaign: Path, gpu_uuid: str, source_family=None):
-    """Honor the owner's current device and paused-backend instructions."""
-    path = campaign / 'execution_constraints.json'
-    if not path.is_file():
-        return
-    rules = json.loads(path.read_text())
-    if gpu_uuid not in rules['allowed_gpu_uuids']:
-        raise ValueError('GPU excluded by current owner execution instructions')
-    if source_family in rules.get('paused_source_families', []):
+    runtime = load_execution_runtime(campaign)
+    if gpu_uuid != runtime['gpu_uuid'] or gpu_uuid in runtime['excluded_gpu_uuids']:
+        raise ValueError('GPU differs from selection or is excluded by current runtime')
+    if source_family in runtime['paused_source_families']:
         raise ValueError('backend paused by owner; explicit continuation required')
+
+
+def _content_hash(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest()
+
+
+def _capsule_inventory(root):
+    root = Path(root).resolve()
+    receipt = json.loads((root / 'execution_receipt.json').read_text())
+    files = receipt.get('files')
+    if not isinstance(files, dict) or not files:
+        raise ValueError('capsule inventory missing')
+    identity = hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest()
+    if receipt.get('schema') != 'car_execution_code_v1' or receipt.get('sha256') != identity or root.name != identity:
+        raise ValueError('capsule identity mismatch')
+    for name, expected in files.items():
+        path = (root / name).resolve()
+        if not path.is_relative_to(root) or not path.is_file() or digest(path) != expected:
+            raise ValueError(f'capsule file changed: {name}')
+    return files
+
+
+def load_assessment_formal(campaign: Path):
+    """Verify an optional device-only amendment and derive effective metadata."""
+    campaign = Path(campaign)
+    freeze_path = campaign / 'formal_freeze.json'
+    formal = json.loads(freeze_path.read_text())
+    if formal.get('schema') != 'car_freeze_receipt_v1' or formal.get('manifest', {}).get('status') != 'frozen':
+        raise ValueError('valid frozen formal metadata required')
+    manifest = formal['manifest']
+    amendment_path = os.environ.get('CAR_ASSESSMENT_AMENDMENT')
+    if not amendment_path:
+        formal['manifest'] = {**manifest, 'assessment_code_root': manifest['code_root']}
+        return formal
+    amendment = json.loads(Path(amendment_path).read_text())
+    body = {k:v for k,v in amendment.items() if k != 'sha256'}
+    if amendment.get('schema') != 'car_device_amendment_v1' or amendment.get('sha256') != _content_hash(body):
+        raise ValueError('invalid assessment amendment identity')
+    if amendment.get('formal_freeze_sha256') != digest(freeze_path):
+        raise ValueError('amendment frozen formal identity differs')
+    old_root = Path(manifest['code_root']).resolve()
+    new_root = Path(amendment['assessment_code_root']).resolve()
+    if (Path(amendment['training_code_root']).resolve() != old_root
+            or amendment.get('original_assessment_driver_sha256') != manifest['assessment_driver_sha256']
+            or amendment.get('artifact_namespace') != 'assessment/device_v1'):
+        raise ValueError('amendment source or namespace differs')
+    old, new = _capsule_inventory(old_root), _capsule_inventory(new_root)
+    allowed = {'src/phycoflow_reconstruction/evaluation/adaptive_campaign.py', 'scripts/posttraining/assess_car_checkpoints.py'}
+    if set(old) != set(new) or {k for k in old if old[k] != new[k]} != allowed:
+        raise ValueError('amendment changes files outside permitted device-only scope')
+    if (amendment.get('training_capsule_sha256') != old_root.name
+            or amendment.get('assessment_capsule_sha256') != new_root.name
+            or old['scripts/posttraining/assess_car_checkpoints.py'] != manifest['assessment_driver_sha256']
+            or new['scripts/posttraining/assess_car_checkpoints.py'] != amendment['assessment_driver_sha256']
+            or amendment.get('changed_files') != {k:{'old':old[k], 'new':new[k]} for k in sorted(allowed)}):
+        raise ValueError('amendment capsule or driver identity differs')
+    formal['manifest'] = {**manifest, 'assessment_code_root': str(new_root),
+                          'assessment_driver_sha256': amendment['assessment_driver_sha256'],
+                          'assessment_amendment_sha256': amendment['sha256']}
+    return formal
+
+
+def assessment_root(campaign: Path):
+    formal = load_assessment_formal(campaign)
+    suffix = 'assessment/device_v1' if formal['manifest'].get('assessment_amendment_sha256') else 'assessment'
+    return Path(campaign) / suffix
 
 
 def digest(path: Path) -> str:

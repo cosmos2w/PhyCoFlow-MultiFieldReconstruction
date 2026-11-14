@@ -84,7 +84,8 @@ def find_formal_completion(campaign, arm, run, manifest):
 def build_assessment_freeze(campaign, arms):
     """Bind every completed arm checkpoint and TRAIN alpha before held-out access."""
     formal_path = campaign / 'formal_freeze.json'
-    formal = json.loads(formal_path.read_text())
+    from phycoflow_reconstruction.evaluation.adaptive_campaign import load_assessment_formal
+    formal = load_assessment_formal(campaign)
     manifest = formal.get('manifest', {})
     if formal.get('schema') != 'car_freeze_receipt_v1' or manifest.get('status') != 'frozen' or not formal.get('manifest_sha256') or not manifest.get('train_qualification_sha256'):
         raise ValueError('valid formal freeze required')
@@ -108,7 +109,7 @@ def build_assessment_freeze(campaign, arms):
             alpha_path = alpha_dir / f'epoch_{epoch:03d}.json'
             alpha = checked_json(alpha_path)
             checkpoint_sha = file_hash(checkpoint)
-            if alpha.get('schema') != 'car_streamed_alpha_v1' or alpha.get('split') != 'train' or alpha.get('epoch') != epoch or alpha.get('child_checkpoint_sha256') != checkpoint_sha or alpha.get('assessment_driver_sha256') != manifest.get('assessment_driver_sha256'):
+            if alpha.get('schema') != 'car_streamed_alpha_v1' or alpha.get('split') != 'train' or alpha.get('epoch') != epoch or alpha.get('child_checkpoint_sha256') != checkpoint_sha or alpha.get('assessment_driver_sha256') != manifest.get('assessment_driver_sha256') or alpha.get('assessment_amendment_sha256') != manifest.get('assessment_amendment_sha256'):
                 raise ValueError(f'{arm} epoch {epoch} TRAIN alpha/checkpoint mismatch')
             signature = {k: alpha.get(k) for k in ('panel_sha256', 'source_checkpoint_sha256', 'coupling_sha256', 'core_identity', 'sample_ids')}
             if any(not signature[k] for k in signature):
@@ -127,18 +128,24 @@ def build_assessment_freeze(campaign, arms):
     if records['FFM_B1']['run'] == records['FFM_A1']['run']:
         raise ValueError('formal arms must be distinct runs')
     return {'schema':'car_assessment_freeze_v1', 'formal_freeze_sha256':file_hash(formal_path),
-            'event_task_sha256':event['sha256'], 'arms':records}
+            'event_task_sha256':event['sha256'], 'assessment_amendment_sha256':manifest.get('assessment_amendment_sha256'), 'arms':records}
 
 
 def validation_gate(campaign, alpha_path):
     formal_path = campaign / 'formal_freeze.json'
-    freeze_path = campaign / 'assessment/assessment_freeze.json'
+    from phycoflow_reconstruction.evaluation.adaptive_campaign import (
+        assessment_root,
+        load_assessment_formal,
+    )
+    freeze_path = assessment_root(campaign) / 'assessment_freeze.json'
     if not formal_path.is_file() or not freeze_path.is_file() or alpha_path is None or not alpha_path.is_file():
         raise ValueError('VALIDATION requires formal and complete two-arm assessment freezes and TRAIN alpha receipt')
     freeze = checked_json(freeze_path)
     if freeze.get('schema') != 'car_assessment_freeze_v1' or freeze.get('formal_freeze_sha256') != file_hash(formal_path):
         raise ValueError('formal freeze changed after assessment freeze')
-    formal = json.loads(formal_path.read_text())
+    formal = load_assessment_formal(campaign)
+    if freeze.get('assessment_amendment_sha256') != formal['manifest'].get('assessment_amendment_sha256'):
+        raise ValueError('assessment amendment differs from freeze')
     if formal.get('manifest', {}).get('assessment_driver_sha256') != file_hash(Path(__file__)):
         raise ValueError('assessment driver differs from formal freeze')
     arms = freeze.get('arms', {})
@@ -166,7 +173,7 @@ def validation_gate(campaign, alpha_path):
             if file_hash(checkpoint) != item['checkpoint_sha256'] or file_hash(nomination) != item['alpha_file_sha256']:
                 raise ValueError(f'{arm} epoch {epoch} evidence changed')
             alpha = checked_json(nomination)
-            if alpha.get('sha256') != item['alpha_receipt_sha256'] or alpha.get('epoch') != epoch or alpha.get('child_checkpoint_sha256') != item['checkpoint_sha256'] or alpha.get('split') != 'train' or alpha.get('schema') != 'car_streamed_alpha_v1':
+            if alpha.get('sha256') != item['alpha_receipt_sha256'] or alpha.get('epoch') != epoch or alpha.get('child_checkpoint_sha256') != item['checkpoint_sha256'] or alpha.get('split') != 'train' or alpha.get('schema') != 'car_streamed_alpha_v1' or alpha.get('assessment_driver_sha256') != formal['manifest']['assessment_driver_sha256'] or alpha.get('assessment_amendment_sha256') != formal['manifest'].get('assessment_amendment_sha256'):
                 raise ValueError(f'{arm} epoch {epoch} TRAIN nomination invalid')
             allowed.add((str(nomination.resolve()), item['alpha_receipt_sha256']))
     alpha = checked_json(alpha_path)
@@ -234,9 +241,6 @@ def generate(args):
     enforce_execution_constraints(args.campaign, args.gpu_uuid, args.model)
     if os.environ.get('CUDA_VISIBLE_DEVICES') != args.gpu_uuid or not os.environ.get('KEOPS_CACHE_FOLDER'):
         raise ValueError('set exact CUDA_VISIBLE_DEVICES UUID and device-specific KEOPS_CACHE_FOLDER before Python starts')
-    allowed = {'GPU-233fcd85-5c6a-6212-3f44-655252afec70', 'GPU-3ceda40c-fd5c-4b88-6c47-b3301711571e'}
-    if args.gpu_uuid not in allowed:
-        raise ValueError('assessment requires authorized physical GPU0 or GPU1 UUID')
     devices = subprocess.check_output(['nvidia-smi', '--query-gpu=uuid', '--format=csv,noheader,nounits'], text=True).splitlines()
     if args.gpu_uuid not in [v.strip() for v in devices]:
         raise ValueError('physical GPU UUID not found')
@@ -248,6 +252,14 @@ def generate(args):
     (cache / name).mkdir(parents=True, exist_ok=True)
     import torch
     import yaml
+
+    from phycoflow_reconstruction.evaluation.adaptive_campaign import (
+        assessment_root,
+        load_assessment_formal,
+    )
+    formal = load_assessment_formal(args.campaign)
+    if formal['manifest']['assessment_driver_sha256'] != file_hash(Path(__file__)):
+        raise ValueError('assessment driver differs from effective formal metadata')
 
     from phycoflow_reconstruction.data.factory import open_field_dataset
     from phycoflow_reconstruction.data.manifest import dataset_fingerprint
@@ -303,7 +315,7 @@ def generate(args):
         bank_name = f'{args.arm}_epoch_{args.epoch:03d}'
         if args.split == 'validation' and alpha.get('child_checkpoint_sha256') != checkpoint_hash:
             raise ValueError('TRAIN alpha is bound to a different child checkpoint')
-    output = args.campaign / 'assessment' / 'banks' / args.model / args.split / bank_name
+    output = assessment_root(args.campaign) / 'banks' / args.model / args.split / bank_name
     output.mkdir(parents=True, exist_ok=False)
     ledger = args.campaign / 'gpu_ledger.json'
     token = str(uuid.uuid4())
@@ -313,6 +325,13 @@ def generate(args):
         begin(state, token, args.gpu_uuid, 'assessment')
     started = time.perf_counter()
     try:
+        if not torch.cuda.is_available() or torch.cuda.device_count() != 1:
+            raise ValueError('one compatible visible CUDA device is required')
+        hardware = {'device_uuid':args.gpu_uuid, 'device_name':torch.cuda.get_device_name(0),
+                    'cuda_version':torch.version.cuda, 'torch_version':torch.__version__,
+                    'compute_capability':list(torch.cuda.get_device_capability(0)),
+                    'cuda_visible_devices':os.environ['CUDA_VISIBLE_DEVICES'],
+                    'keops_cache_folder':str(cache.resolve())}
         model, train, source_meta = load_source_model(cfg, torch.device('cuda:0'))
         if checkpoint is not None:
             state = load_project_checkpoint(checkpoint)
@@ -381,7 +400,8 @@ def generate(args):
                        'inference_seconds_total':sum(timing), 'first_condition_seconds':timing[0],
                        'warm_condition_seconds_mean':sum(timing[1:])/max(1,len(timing)-1),
                        'storage_bytes':sum(p.stat().st_size for p in output.glob('*.pt')),
-                       'wall_seconds':time.perf_counter()-started, 'device_uuid':args.gpu_uuid}
+                       'wall_seconds':time.perf_counter()-started, 'device_uuid':args.gpu_uuid, 'hardware':hardware,
+                       'assessment_amendment_sha256':formal['manifest'].get('assessment_amendment_sha256')}
             publish_json(output / 'receipt.json', payload)
         finally:
             if dataset is not train: dataset.close()
@@ -404,7 +424,13 @@ def score(args):
     from scripts.posttraining.freeze_car_event import FrozenRedesignedEvent
     if args.split == 'validation':
         alpha_receipt = validation_gate(args.campaign, args.alpha_receipt)
+    from phycoflow_reconstruction.evaluation.adaptive_campaign import load_assessment_formal
+    effective = load_assessment_formal(args.campaign)['manifest']
+    if effective['assessment_driver_sha256'] != file_hash(Path(__file__)):
+        raise ValueError('assessment driver differs from effective formal metadata')
     source, child = checked_json(args.source_bank / 'receipt.json'), checked_json(args.child_bank / 'receipt.json')
+    if any(x.get('assessment_amendment_sha256') != effective.get('assessment_amendment_sha256') for x in (source, child)):
+        raise ValueError('endpoint assessment amendment mismatch')
     qualification = args.mode == 'edm-qualification'
     valid_child = (child['model'] == 'edm' and child['arm'] == 'EDM_qualification' and isinstance(child['epoch'], int) and 0 <= child['epoch'] <= 12) if qualification else (child['model'] == 'ffm' and child['arm'] in {'FFM_B1', 'FFM_A1'} and child['epoch'] in EPOCHS)
     if source['epoch'] is not None or not valid_child or (qualification and args.split != 'train'):
@@ -545,6 +571,7 @@ def score(args):
                        'panel_sha256':source['panel_sha256'],'coupling_sha256':source['coupling_sha256'],
                        'core_artifact_sha256':core_identity['scalable_sha256'], 'core_identity':core_identity,
                        'assessment_driver_sha256':file_hash(Path(__file__)),
+                       'assessment_amendment_sha256':effective.get('assessment_amendment_sha256'),
                        'core_support':'fixed Q4096', 'risk_support':'native decoded 40300',
                        'sample_ids':source['sample_ids'], 'source_core_denominators':denominators.tolist(),
                        'sensor_tolerance_model_units':args.sensor_tolerance, 'frontier':list(FRONTIER),
@@ -554,6 +581,7 @@ def score(args):
             a = float(alpha_receipt['selected_alpha'])
             payload = {'schema':'car_checkpoint_assessment_v1','split':'validation','epoch':child['epoch'],
                        'alpha':a,'alpha_receipt_sha256':alpha_receipt['sha256'],
+                       'assessment_amendment_sha256':effective.get('assessment_amendment_sha256'),
                        'source_bank_receipt_sha256':source['sha256'],'child_bank_receipt_sha256':child['sha256'],
                        'sample_ids':source['sample_ids'],'core':core[a],'member_mse':risk[a],
                        'sensor_max_abs_model_units':sensor_max[a], 'core_support':'fixed Q4096',
@@ -639,7 +667,8 @@ def main():
     args.campaign = args.campaign.resolve()
     if args.command == 'freeze-assessment':
         payload = build_assessment_freeze(args.campaign, {'FFM_B1':(args.b1_run, args.b1_alpha_dir), 'FFM_A1':(args.a1_run, args.a1_alpha_dir)})
-        path = args.campaign / 'assessment/assessment_freeze.json'
+        from phycoflow_reconstruction.evaluation.adaptive_campaign import assessment_root
+        path = assessment_root(args.campaign) / 'assessment_freeze.json'
         publish_json(path, payload)
         print(path)
     elif args.command == 'generate':

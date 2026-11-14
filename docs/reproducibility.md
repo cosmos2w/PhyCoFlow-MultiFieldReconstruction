@@ -38,6 +38,12 @@ A run records its resolved config, manifest, status, `last`/`best` checkpoints, 
 
 If a formal result needs to be shared, publish the complete checkpoint/data bundle in an external artifact store without changing its recorded hash. A traceable result whose payload is unavailable is not independently replayable.
 
+## Assessment device runtime
+
+Coherence Adaptive Repair assessments select their GPU through `CAR_EXECUTION_RUNTIME`, a current JSON file with schema `car_execution_runtime_v1`, selected `gpu_uuid`, `excluded_gpu_uuids` and `paused_source_families`. The assessment CLI's `--gpu-uuid` and `CUDA_VISIBLE_DEVICES` must agree with that runtime selection. A writable device-specific `KEOPS_CACHE_FOLDER` is required. Device ownership and CUDA compatibility are checked, and actual device, environment and occupied leases are recorded; device preferences are operational configuration, not frozen scientific constraints. Measure compared methods on the same device or explicitly label hardware differences.
+
+When an older frozen assessor contains device restrictions, preserve it and select a versioned device-only amendment through `CAR_ASSESSMENT_AMENDMENT`. The amendment verifies the original scientific freeze and complete original/amended capsule inventories; it separates original training provenance from effective assessment code and generated outputs. Runtime device choices remain mutable and separate from that amendment. Changing device does not authorize changing samples, seeds, checkpoints, metrics, alpha rules or held-out gates.
+
 ## Statistical rule
 
 Independent trajectories are the statistical unit whenever available. Compute means, standard deviations, and standard errors across trajectory-level values, not adjacent frames. If a release has one trajectory per row, report spread and uncertainty as unavailable and make no significance or method-ranking claim.

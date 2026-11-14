@@ -115,6 +115,8 @@ def test_train_score_streams_and_writes_bound_blend(tmp_path, monkeypatch, mode)
     monkeypatch.setattr(frozen, 'FrozenCoherenceObserver', Observer)
     campaign = tmp_path / 'campaign'
     (campaign / 'panels').mkdir(parents=True)
+    formal = {'schema':'car_freeze_receipt_v1', 'manifest':{'status':'frozen', 'code_root':'code', 'assessment_driver_sha256':mod.file_hash(Path(mod.__file__))}}
+    (campaign / 'formal_freeze.json').write_text(json.dumps(formal))
     panel = {'split':'train', 'population':10, 'sample_ids':['sample'], 'sensor_count':256, 'members':4}
     panel_path = campaign / 'panels/train.json'
     panel_path.write_text(json.dumps(panel))
@@ -199,3 +201,19 @@ def test_assessment_freeze_rejects_unrelated_completed_run(tmp_path):
     completion.write_text(json.dumps(value))
     with pytest.raises(ValueError, match='matching frozen formal launch'):
         mod.build_assessment_freeze(campaign, arms)
+
+
+def test_cuda_compatibility_calls_are_inside_closed_lease_scope():
+    import ast
+
+    tree = ast.parse(Path(mod.__file__).read_text())
+    generate = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'generate')
+    lease_try = next(n for n in generate.body if isinstance(n, ast.Try)
+                     and any(isinstance(c, ast.Call) and isinstance(c.func, ast.Name) and c.func.id == 'end'
+                             for part in n.finalbody for c in ast.walk(part)))
+    calls = {ast.unparse(c.func) for part in lease_try.body for c in ast.walk(part) if isinstance(c, ast.Call)}
+    assert {'torch.cuda.is_available', 'torch.cuda.device_count', 'torch.cuda.get_device_name',
+            'torch.cuda.get_device_capability'} <= calls
+    begins = [i for i, n in enumerate(generate.body) if any(isinstance(c, ast.Call)
+              and isinstance(c.func, ast.Name) and c.func.id == 'begin' for c in ast.walk(n))]
+    assert begins and begins[0] < generate.body.index(lease_try)

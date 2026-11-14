@@ -60,16 +60,17 @@ def test_execution_snapshot_is_content_bound(tmp_path):
     assert (first / 'src/pkg/module.py').read_text() == 'VALUE = 1\n'
 
 
-def test_owner_constraints_exclude_device_and_pause_backend(tmp_path):
+def test_owner_constraints_exclude_device_and_pause_backend(tmp_path, monkeypatch):
     from phycoflow_reconstruction.evaluation.adaptive_campaign import (
         atomic_json,
         enforce_execution_constraints,
     )
-    atomic_json(tmp_path / 'execution_constraints.json', {
-        'allowed_gpu_uuids': ['GPU-one'], 'paused_source_families': ['edm'],
-    })
+    runtime = tmp_path / 'runtime.json'
+    atomic_json(runtime, {'schema':'car_execution_runtime_v1', 'gpu_uuid':'GPU-one',
+                          'excluded_gpu_uuids':['GPU-zero'], 'paused_source_families':['edm']})
+    monkeypatch.setenv('CAR_EXECUTION_RUNTIME', str(runtime))
     enforce_execution_constraints(tmp_path, 'GPU-one', 'ffm')
-    with pytest.raises(ValueError, match='GPU excluded'):
+    with pytest.raises(ValueError, match='excluded'):
         enforce_execution_constraints(tmp_path, 'GPU-zero', 'ffm')
     with pytest.raises(ValueError, match='backend paused'):
         enforce_execution_constraints(tmp_path, 'GPU-one', 'edm')
@@ -192,3 +193,69 @@ def test_budget_pause_resume_matches_uninterrupted(tmp_path):
         path = child / 'artifacts' / f'{name}_family.pt'
         assert file_sha256(path) == expected
         assert torch.load(path, map_location='cpu', weights_only=True)['frozen_training_context']['split'] == 'train'
+
+
+def test_assessment_amendment_checks_inventory_and_preserves_training_identity(tmp_path, monkeypatch):
+    import hashlib
+    import json
+
+    from phycoflow_reconstruction.evaluation import adaptive_campaign as c
+
+    def capsule(files):
+        hashes = {k:hashlib.sha256(v.encode()).hexdigest() for k,v in files.items()}
+        identity = hashlib.sha256(json.dumps(hashes,sort_keys=True).encode()).hexdigest()
+        root = tmp_path / 'execution' / identity
+        for name, body in files.items():
+            p = root/name
+            p.parent.mkdir(parents=True,exist_ok=True)
+            p.write_text(body)
+        (root/'execution_receipt.json').write_text(json.dumps({'schema':'car_execution_code_v1','sha256':identity,'files':hashes}))
+        return root, hashes
+
+    names = ('scripts/posttraining/assess_car_checkpoints.py','src/phycoflow_reconstruction/evaluation/adaptive_campaign.py')
+    original, old = capsule({names[0]:'old driver',names[1]:'old runtime','src/other.py':'same'})
+    revised, new = capsule({names[0]:'new driver',names[1]:'new runtime','src/other.py':'same'})
+    campaign = tmp_path/'campaign'; campaign.mkdir()
+    formal = {'schema':'car_freeze_receipt_v1','manifest':{'status':'frozen','code_root':str(original),
+              'assessment_driver_sha256':old[names[0]],'event_task_sha256':'unchanged'}}
+    frozen = campaign/'formal_freeze.json'; frozen.write_text(json.dumps(formal))
+    body = {'schema':'car_device_amendment_v1','formal_freeze_sha256':c.digest(frozen),
+            'training_code_root':str(original),'training_capsule_sha256':original.name,
+            'original_assessment_driver_sha256':old[names[0]],'assessment_code_root':str(revised),
+            'assessment_capsule_sha256':revised.name,'assessment_driver_sha256':new[names[0]],
+            'changed_files':{k:{'old':old[k],'new':new[k]} for k in sorted(names)},
+            'artifact_namespace':'assessment/device_v1'}
+    amendment = campaign/'amendment.json'
+    def save():
+        amendment.write_text(json.dumps({**body,'sha256':c._content_hash(body)}))
+    save(); monkeypatch.setenv('CAR_ASSESSMENT_AMENDMENT',str(amendment))
+    effective = c.load_assessment_formal(campaign)['manifest']
+    assert effective['code_root'] == str(original)
+    assert effective['assessment_code_root'] == str(revised)
+    assert effective['assessment_driver_sha256'] == new[names[0]]
+    assert effective['event_task_sha256'] == 'unchanged'
+    assert c.assessment_root(campaign) == campaign/'assessment/device_v1'
+    altered = json.loads(amendment.read_text()); altered['artifact_namespace'] = 'assessment/other'
+    amendment.write_text(json.dumps(altered))
+    with pytest.raises(ValueError,match='amendment identity'): c.load_assessment_formal(campaign)
+    save()
+    body['formal_freeze_sha256'] = '0'*64; save()
+    with pytest.raises(ValueError,match='frozen formal identity'): c.load_assessment_formal(campaign)
+    body['formal_freeze_sha256'] = c.digest(frozen); save()
+    (revised/'src/other.py').write_text('tampered')
+    with pytest.raises(ValueError,match='capsule file changed'): c.load_assessment_formal(campaign)
+
+
+def test_runtime_requires_selected_nonexcluded_gpu_and_paused_backend(tmp_path, monkeypatch):
+    import json
+
+    from phycoflow_reconstruction.evaluation import adaptive_campaign as c
+    runtime = tmp_path/'runtime.json'
+    values = {'schema':'car_execution_runtime_v1','gpu_uuid':'GPU-arbitrary',
+              'excluded_gpu_uuids':['GPU-excluded'],'paused_source_families':['edm']}
+    runtime.write_text(json.dumps(values)); monkeypatch.setenv('CAR_EXECUTION_RUNTIME',str(runtime))
+    c.enforce_execution_constraints(tmp_path,'GPU-arbitrary','ffm')
+    values['gpu_uuid'] = 'GPU-excluded'; runtime.write_text(json.dumps(values))
+    with pytest.raises(ValueError,match='excluded'): c.enforce_execution_constraints(tmp_path,'GPU-excluded','ffm')
+    values['gpu_uuid'] = 'GPU-arbitrary'; runtime.write_text(json.dumps(values))
+    with pytest.raises(ValueError,match='paused'): c.enforce_execution_constraints(tmp_path,'GPU-arbitrary','edm')
