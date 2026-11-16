@@ -26,6 +26,11 @@ notes:
   - checkpointing.selection_metric=topology_with_fidelity requires a multi-sample validation panel and total/per-field source-relative fidelity budgets.
   - evaluation.native_topology requires all native grid points; max_relative_native_topology_increase optionally guards its component distances.
   - evaluation.batch_size is a positive inference/scoring batch size for independent scalable coherence scores; it retains the full selected panel and is separate from covariance group_size.
+  - evaluation.sample_indices, sensor_counts, sensor_seed and members bind matched condition, fixed-sensor and all-member assessment without changing the native training protocol.
+  - checkpointing.save_epoch_zero captures the initialized child; panel_milestones_only separates expensive scientific panels from rolling recovery saves and ten-epoch loss curves.
+  - source.admission=frozen_snapshot verifies a pinned receipt; weight_view=ema_materialized restores auxiliary EMA before selecting live child weights.
+  - physical_mean_risk_model_units requires an explicit absolute allowance and positive independent mean_risk_scales; its signed SOURCE reference is not a ratio denominator.
+  - Adaptive coherence contracts and campaign tools are documented in docs/Adaptive_Coherence_Contracts.md; mutable online allocation remains unqualified.
   - Cross-frequency coherence requires a coherence ensemble batch of at least three.
   - Observation consistency is a rollout constraint, not a coherence family.
   - structured_block_mean sensors require observation_consistency.mode=none and final_clamp=false.

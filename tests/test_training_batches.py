@@ -85,6 +85,33 @@ def test_dataset_reuses_static_coordinates_and_drops_full_query_indices(tmp_path
     assert dataset_field_bytes(dataset) == 3 * 5 * 8 * 4 * 2 * 4
 
 
+@pytest.mark.parametrize("workers", [0, 2])
+def test_compact_cpu_workers_preserve_batches_and_rng(tmp_path, workers):
+    if workers:
+        import socket
+
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+                probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        except PermissionError:
+            pytest.skip("sandbox blocks the Unix sockets required by torch worker IPC")
+    path = tmp_path / "compact_cpu.h5"
+    _write_fixture(path)
+    dataset = H5FieldDataset(path, split="train")
+    config = _config("async_cpu", workers=workers)
+    config["stage"] = "post_training"
+    before = torch.random.get_rng_state().clone()
+    source = build_training_batch_source(dataset, [[0, 1], [2, 3]], config, query_points=8, device=torch.device("cpu"), start_step=4)
+    try:
+        batches = list(source)
+        assert len(batches) == 2
+        assert all(batch.target_fields.shape == (2, 8, 2) for batch in batches)
+        assert torch.equal(torch.random.get_rng_state(), before)
+    finally:
+        source.close()
+        dataset.close()
+
+
 def test_resident_source_samples_and_gathers_on_physical_gpu_one(tmp_path):
     device = _require_gpu_one()
     path = tmp_path / "resident.h5"

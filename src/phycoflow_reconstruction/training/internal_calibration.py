@@ -13,6 +13,7 @@ BLOCKS = {
     "state": ("marginal", "mixed"),
     "shape": ("self", "mutual"),
 }
+EXTRA_BLOCKS = {"state": ("group_projection",), "scale": ("third_order",)}
 PROBES = (1, 3, 6, 8, 10)
 
 
@@ -37,8 +38,14 @@ def state_channel_contribution(channel_squared, common_squared, weight):
 class InternalCalibration:
     def __init__(self, priorities, units, active, numerical_floor=1e-12):
         keys = {f"{f}.{b}" for f, blocks in BLOCKS.items() for b in blocks}
-        if set(priorities) != keys or set(units) != keys or set(active) != keys:
-            raise ValueError("all eight semantic blocks must be declared")
+        extra = {f"{f}.{b}" for f, blocks in EXTRA_BLOCKS.items() for b in blocks}
+        if (
+            set(priorities) not in (keys, keys | extra)
+            or set(units) != set(priorities)
+            or set(active) != set(priorities)
+        ):
+            raise ValueError("semantic block declarations must match the C8 or expanded contract")
+        keys = set(priorities)
         if (
             not math.isfinite(float(numerical_floor))
             or numerical_floor <= 0
@@ -77,12 +84,18 @@ class InternalCalibration:
         result = {k: 1.0 for k in self.active}
         for family, blocks in BLOCKS.items():
             names = [f"{family}.{b}" for b in blocks if self.active[f"{family}.{b}"]]
+            extras = [
+                f"{family}.{b}"
+                for b in EXTRA_BLOCKS.get(family, ())
+                if self.active.get(f"{family}.{b}", False)
+            ]
             positive = [self.ema[k] for k in names if self.ema[k] > self.floor]
             if not positive:
                 continue
             median = statistics.median(positive)
             floor = max(self.floor, 0.1 * median)
-            for k in names:
+            for k in names + extras:
+                # Expanded blocks use the core reference, without changing it.
                 # Unresolved near-zero blocks remain unamplified.
                 if self.ema[k] >= floor:
                     result[k] = min(2.0, max(0.5, median / max(self.ema[k], floor)))

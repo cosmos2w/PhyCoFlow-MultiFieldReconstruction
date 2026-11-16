@@ -168,7 +168,7 @@ def _fit_training_references(
 def _fit_source_calibrations(
     families, model, train_dataset, config, *, device, source_checkpoint_sha256
 ) -> None:
-    """Freeze new descriptor scales on 32 spaced TRAIN/SOURCE endpoints.
+    """Freeze descriptor scales on approximately 10% TRAIN/SOURCE endpoints.
 
     This is distinct from family gradient balancing and the endpoint-MSE budget.
     Reference fitting and this source calibration never advance training streams.
@@ -196,7 +196,7 @@ def _fit_source_calibrations(
     count = min(int(config["coherence"]["compute_budget"]["point_count"]), total)
     query = fixed_query_indices(total, count, seed=_coherence_query_seed(config))
     positions = (
-        np.linspace(0, len(train_dataset) - 1, min(32, max(1, math.ceil(0.1 * len(train_dataset)))))
+        np.linspace(0, len(train_dataset) - 1, max(1, math.ceil(0.1 * len(train_dataset))))
         .round()
         .astype(int)
     )
@@ -233,22 +233,26 @@ def _fit_source_calibrations(
                 if coordinates is not None and not torch.equal(coordinates, coordinate):
                     raise ValueError("SOURCE descriptor calibration geometry changed")
                 coordinates = coordinate
-                predictions.append(prediction.detach())
-                references.append(target.detach())
+                predictions.append(prediction.detach().cpu())
+                references.append(target.detach().cpu())
                 sample_ids.extend(batch.sample_ids)
             for family in selected:
-                family.fit_calibration(
-                    torch.cat(predictions),
-                    torch.cat(references),
-                    coordinates=coordinates.expand(len(sample_ids), -1, -1),
-                    provenance={
-                        "split": "train",
-                        "sample_ids": sample_ids,
-                        "source_checkpoint_sha256": source_checkpoint_sha256,
-                        "positions": positions.tolist(),
-                        "weight_identity": "live_training_weights",
-                    },
-                )
+                family.cpu()
+                try:
+                    family.fit_calibration(
+                        torch.cat(predictions),
+                        torch.cat(references),
+                        coordinates=coordinates.cpu().expand(len(sample_ids), -1, -1),
+                        provenance={
+                            "split": "train",
+                            "sample_ids": sample_ids,
+                            "source_checkpoint_sha256": source_checkpoint_sha256,
+                            "positions": positions.tolist(),
+                            "weight_identity": "live_training_weights",
+                        },
+                    )
+                finally:
+                    family.to(device)
     finally:
         model.train(was_training)
 

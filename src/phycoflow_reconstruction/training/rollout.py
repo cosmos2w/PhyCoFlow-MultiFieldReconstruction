@@ -133,10 +133,21 @@ def differentiable_rf_rollout(
         )
 
     times = torch.linspace(0.0, 1.0, steps + 1, device=state.device, dtype=state.dtype)
+
+    def velocity(value, time):
+        if getattr(model, "rollout_checkpointing", False) and torch.is_grad_enabled():
+            from torch.utils.checkpoint import checkpoint
+
+            return checkpoint(
+                lambda x, t: model.velocity(batch, x, t), value, time,
+                use_reentrant=False, preserve_rng_state=True,
+            )
+        return model.velocity(batch, value, time)
+
     for step in range(steps):
         time0 = times[step].expand(state.shape[0])
         delta = times[step + 1] - times[step]
-        velocity0 = model.velocity(batch, state, time0)
+        velocity0 = velocity(state, time0)
         if mode in {"endpoint", "endpoint_smooth"}:
             velocity0 = guide_endpoint_velocity(
                 state,
@@ -150,7 +161,7 @@ def differentiable_rf_rollout(
         if solver == "heun":
             euler_state = state + delta * velocity0
             time1 = times[step + 1].expand(state.shape[0])
-            velocity1 = model.velocity(batch, euler_state, time1)
+            velocity1 = velocity(euler_state, time1)
             if mode in {"endpoint", "endpoint_smooth"} and step + 1 < steps:
                 velocity1 = guide_endpoint_velocity(
                     euler_state,
@@ -213,6 +224,14 @@ def differentiable_reconstruction(
     observation_config: dict,
 ) -> torch.Tensor:
     """Dispatch one common coherence path without inspecting model names."""
+    if observation_config.get("mode") == "native":
+        expected_solver = getattr(model, "native_solver", None)
+        if expected_solver is not None and solver != expected_solver:
+            raise ValueError(f"native rollout requires solver={expected_solver}")
+        native = getattr(model, "differentiable_reconstruct", None)
+        if native is None:
+            raise ValueError("native observation mode requires differentiable_reconstruct")
+        return native(batch, steps=steps, generator=generator)
     if hasattr(model, "sample_source") and hasattr(model, "velocity"):
         return differentiable_rf_rollout(
             model,

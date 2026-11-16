@@ -39,7 +39,7 @@ def test_tiny_scalable_profile_prefit_train_and_resume(tmp_path, deterministic):
     post["coherence"]["families"]["topology"]["persistence"]["projections"] = 4
     post["evaluation"].update(query_points=16, batch_size=1, preview={"enabled": False})
     post["observation_consistency"] = {"mode": "hard", "final_clamp": True}
-    post["checkpointing"] = {"every_epochs": 1, "selection_metric": "reconstruction_mse"}
+    post["checkpointing"] = {"every_epochs": 1, "save_epoch_zero": True, "selection_metric": "reconstruction_mse"}
     post["runtime"]["progress"] = False
     post_path = tmp_path / "posttrain.yaml"
     post_path.write_text(yaml.safe_dump(post))
@@ -47,6 +47,10 @@ def test_tiny_scalable_profile_prefit_train_and_resume(tmp_path, deterministic):
     assert post["dataset"]["physical_measure"] == "native_rectilinear_area"
     assert post["source"]["config_origins"]["dataset.physical_measure"] == "child_config"
     child = run_post_training(post, case_dir=tmp_path / "case", max_steps=9)
+    initial = load_project_checkpoint(child / "checkpoints/epoch_000.pt")
+    assert initial["global_step"] == 0
+    assert initial["optimizer"]["state"] == {}
+    assert initial["scalable_runtime"]["calibration"]["coefficients"] is None
     first = load_project_checkpoint(child / "checkpoints/last.pt")
     assert first["global_step"] == 9
     assert first["scalable_runtime"]["calibration"]["coefficients"] is None
@@ -82,3 +86,6 @@ def test_tiny_scalable_profile_prefit_train_and_resume(tmp_path, deterministic):
 
     for key in ("model", "optimizer", "rng_state", "scalable_runtime", "external_policy"):
         equal(second[key], uninterrupted[key])
+    resumed_coupling = [json.loads(line) for line in (child / "metrics/training_coupling.jsonl").read_text().splitlines()]
+    whole_coupling = [json.loads(line) for line in (other / "metrics/training_coupling.jsonl").read_text().splitlines()]
+    assert resumed_coupling == whole_coupling

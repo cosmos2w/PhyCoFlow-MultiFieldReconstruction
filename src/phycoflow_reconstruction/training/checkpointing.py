@@ -29,6 +29,7 @@ class PeriodicCheckpointManager:
         self.every_epochs = int(settings.get("every_epochs", 10))
         self.every_steps = settings.get("every_steps")
         self.validation_every_epochs = settings.get("validation_every_epochs")
+        self.panel_milestones_only = bool(settings.get("panel_milestones_only", False))
         self.save_epoch_one = bool(settings.get("save_epoch_one", False))
         configured_epochs = settings.get("epochs")
         self.checkpoint_epochs = (
@@ -148,6 +149,8 @@ class PeriodicCheckpointManager:
                 self.selection_metric == "reconstruction_mse" and self.save_epoch_one and epoch == 1
             )
         )
+        if self.panel_milestones_only:
+            panel_due = force or milestone_due
         if self.selection_metric == "topology_with_fidelity" and not panel_due:
             eligible_for_best = False
         elif self.selection_metric == "topology_with_fidelity":

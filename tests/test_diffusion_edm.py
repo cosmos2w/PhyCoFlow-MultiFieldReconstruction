@@ -124,6 +124,44 @@ def test_edm_heun_constant_clean_oracle_reaches_clean_endpoint():
     torch.testing.assert_close(result.prediction, expected.flatten(2).transpose(1, 2))
 
 
+def test_edm_native_hook_and_checkpointed_parameter_gradients():
+    from phycoflow_reconstruction.training.rollout import differentiable_reconstruction
+
+    batch = replace(make_batch(), target_fields=None)
+    plain = make_model().eval()
+    nn.init.normal_(plain.denoiser.output_projection.weight, std=0.01)
+    replay = deepcopy(plain)
+    replay.rollout_checkpointing = True
+    outputs, gradients = [], []
+    for model in (plain, replay):
+        output = differentiable_reconstruction(model, batch, steps=3, solver="heun", generator=torch.Generator().manual_seed(12), observation_config={"mode": "native"})
+        output.square().mean().backward()
+        outputs.append(output.detach())
+        gradients.append([p.grad for p in model.parameters()])
+    torch.testing.assert_close(*outputs)
+    for a, b in zip(*gradients):
+        assert (a is None) == (b is None)
+        if a is not None:
+            torch.testing.assert_close(a, b, rtol=1e-5, atol=1e-7)
+
+
+def test_materialized_ema_has_zero_update_native_parity():
+    from phycoflow_reconstruction.training.source import materialize_ema_view
+
+    model = make_model().eval()
+    model.after_optimizer_step()
+    with torch.no_grad():
+        next(model.parameters()).add_(1)
+    child = deepcopy(model)
+    batch = replace(make_batch(), target_fields=None)
+    with model.evaluation_weight_context():
+        expected = model.differentiable_reconstruct(batch, steps=3, generator=torch.Generator().manual_seed(4))
+    digest = materialize_ema_view(child)
+    actual = child.differentiable_reconstruct(batch, steps=3, generator=torch.Generator().manual_seed(4))
+    assert len(digest) == 64 and child._ema is None
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
 def test_edm_ema_auxiliary_resume_and_live_weight_restore():
     model = make_model()
     model.after_optimizer_step()

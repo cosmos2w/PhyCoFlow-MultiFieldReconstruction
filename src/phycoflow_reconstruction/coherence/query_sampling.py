@@ -312,3 +312,298 @@ class SharedQuerySampler:
                 ):
                     raise ValueError("invalid pending pair inner draw")
         return obj
+
+
+ADAPTIVE_VERSION = "adaptive_hierarchy_v1"
+
+
+class HierarchicalQuerySampler(SharedQuerySampler):
+    """Opt-in balanced-tree pair mixture with transactional accepted updates.
+
+    Tree nodes are contiguous intervals in the declared field order. Each
+    internal node owns precisely the pairs crossing its two children. The
+    hierarchy is uniform over internal nodes and over each node's cross pairs.
+    The sparse cache receives detached gradient-second-moment/cost priorities.
+    """
+
+    def __init__(
+        self,
+        field_ids,
+        *,
+        seed=0,
+        mutual_draws=3,
+        epsilon=0.25,
+        hierarchy_weight=0.5,
+        decay=0.9,
+        capacity=None,
+        refresh_epochs=10,
+        fixed_probabilities=None,
+        profile_sha256=None,
+    ):
+        super().__init__(
+            field_ids,
+            seed=seed,
+            mutual_draws=mutual_draws,
+            epsilon=epsilon,
+            decay=decay,
+            capacity=capacity,
+            refresh_epochs=refresh_epochs,
+        )
+        if not 0 <= hierarchy_weight <= 1 - epsilon:
+            raise ValueError("invalid hierarchy mixture weight")
+        self.hierarchy_weight = float(hierarchy_weight)
+        self.fixed_probabilities = None if fixed_probabilities is None else tuple(float(x) for x in fixed_probabilities)
+        self.profile_sha256 = profile_sha256
+        if self.fixed_probabilities is not None:
+            count = pair_count(len(self.fields))
+            if (len(self.fields) > 5 or len(self.fixed_probabilities) != count or not count
+                or any(not math.isfinite(p) or p < 0.25 / count for p in self.fixed_probabilities)
+                or not math.isclose(sum(self.fixed_probabilities), 1., rel_tol=1e-10, abs_tol=1e-10)
+                or not isinstance(profile_sha256, str) or len(profile_sha256) != 64):
+                raise ValueError("invalid fixed SOURCE profile probabilities or identity")
+        self.nodes = []
+
+        def build(lo, hi):
+            if hi - lo > 1:
+                mid = (lo + hi) // 2
+                self.nodes.append((lo, mid, hi))
+                build(lo, mid)
+                build(mid, hi)
+
+        build(0, len(self.fields))
+        self._transaction = None
+
+    def pair_probability(self, index):
+        if self.fixed_probabilities is not None:
+            return self.fixed_probabilities[index]
+        n = len(self.fields)
+        a, b = index_pair(n, index)
+        lo, hi = 0, n
+        while hi - lo > 1:
+            mid = (lo + hi) // 2
+            if a < mid <= b:
+                group = 1 / (len(self.nodes) * (mid - lo) * (hi - mid))
+                break
+            if b < mid:
+                hi = mid
+            else:
+                lo = mid
+        cache = self.distribution["pair"]
+        cw = 1 - self.epsilon - self.hierarchy_weight if cache else 0.0
+        # Empty cache mass goes to uniform support.
+        return (
+            (1 - self.hierarchy_weight - cw) / pair_count(n)
+            + self.hierarchy_weight * group
+            + cw * cache.get(index, 0.0)
+        )
+
+    def _draw(self, kind, population, count):
+        if kind != "pair" or not population:
+            return super()._draw(kind, population, count)
+        if self.fixed_probabilities is not None:
+            picks = self.rng.choices(range(population), weights=self.fixed_probabilities, k=count)
+            return tuple(Draw(i, k, self.fixed_probabilities[i], population, count)
+                         for i, k in Counter(picks).items())
+        cache = self.distribution["pair"]
+        cw = 1 - self.epsilon - self.hierarchy_weight if cache else 0.0
+        picks = []
+        for _ in range(count):
+            u = self.rng.random()
+            if u < self.hierarchy_weight:
+                lo, mid, hi = self.rng.choice(self.nodes)
+                a, b = self.rng.randrange(lo, mid), self.rng.randrange(mid, hi)
+                picks.append(pair_index(len(self.fields), a, b))
+            elif u < self.hierarchy_weight + cw:
+                picks.append(self.rng.choices(tuple(cache), weights=tuple(cache.values()), k=1)[0])
+            else:
+                picks.append(self.rng.randrange(population))
+        return tuple(
+            Draw(i, k, self.pair_probability(i), population, count)
+            for i, k in Counter(picks).items()
+        )
+
+    def draw(self):
+        if self._transaction is not None:
+            raise RuntimeError("pending transaction")
+        self._transaction = (self.rng.getstate(), self.inner_rng.getstate(), self.counter)
+        try:
+            return super().draw()
+        except Exception:
+            self._transaction = None
+            raise
+
+    def reject(self):
+        """Roll back random streams and cursor for a rejected update."""
+        if self._transaction is None or self.pending is None:
+            raise RuntimeError("no pending transaction")
+        self.rng.setstate(self._transaction[0])
+        self.inner_rng.setstate(self._transaction[1])
+        self.counter = self._transaction[2]
+        self.pending = None
+        self._transaction = None
+
+    def finish(self, **kwargs):
+        super().finish(**kwargs)
+        self._transaction = None
+
+    def finish_measurements(
+        self, *, self_measurements=None, pair_measurements=None, exposure_sink=None
+    ):
+        """Commit measured detached gradient second moment and incremental cost.
+
+        Each value is (gradient_second_moment, incremental_cost). Measurements
+        should be gathered from lagged shared-endpoint gradient sketches, not
+        scalar loss values. The result is a heuristic; full gradients still train.
+        """
+
+        def priorities(rows):
+            output = {}
+            for index, (second_moment, cost) in (rows or {}).items():
+                second_moment, cost = float(second_moment), float(cost)
+                if (
+                    not math.isfinite(second_moment)
+                    or second_moment < 0
+                    or not math.isfinite(cost)
+                    or cost <= 0
+                ):
+                    raise ValueError("invalid gradient/cost measurement")
+                priority = math.sqrt(second_moment / cost)
+                output[index] = (priority, priority)
+            return output
+
+        self.finish(
+            self_difficulties=priorities(self_measurements),
+            pair_difficulties=priorities(pair_measurements),
+            exposure_sink=exposure_sink,
+        )
+
+    def state_dict(self):
+        state = super().state_dict()
+        state["adaptive_version"] = ADAPTIVE_VERSION
+        state["hierarchy_weight"] = self.hierarchy_weight
+        state["transaction"] = self._transaction
+        state["fixed_probabilities"] = self.fixed_probabilities
+        state["profile_sha256"] = self.profile_sha256
+        return state
+
+    @classmethod
+    def from_state_dict(cls, state):
+        if state.get("adaptive_version") != ADAPTIVE_VERSION:
+            raise ValueError("incompatible adaptive sampler")
+        base = SharedQuerySampler.from_state_dict(state)
+        obj = cls(
+            base.fields,
+            mutual_draws=base.mutual_draws,
+            epsilon=base.epsilon,
+            hierarchy_weight=state["hierarchy_weight"],
+            decay=base.decay,
+            capacity=base.capacity,
+            refresh_epochs=base.refresh_epochs,
+            fixed_probabilities=state.get("fixed_probabilities"),
+            profile_sha256=state.get("profile_sha256"),
+        )
+        obj.__dict__.update({k: v for k, v in base.__dict__.items() if k != "_transaction"})
+
+        def tuples(x):
+            return tuple(tuples(y) for y in x) if isinstance(x, (list, tuple)) else x
+
+        obj._transaction = tuples(state.get("transaction"))
+        if (obj.pending is None) != (obj._transaction is None):
+            raise ValueError("inconsistent pending transaction")
+        return obj
+
+
+def allocate_counts(weights, deviations, costs, budget):
+    """Heuristic for a draw-count cap; this is not a fixed-cost optimum."""
+    if not (len(weights) == len(deviations) == len(costs)):
+        raise ValueError("stratum arrays must have matching lengths")
+    if any(not math.isfinite(x) or x < 0 for x in (*weights, *deviations)) or any(
+        not math.isfinite(x) or x <= 0 for x in costs
+    ):
+        raise ValueError("invalid stratum statistics")
+    active = [i for i, w in enumerate(weights) if w > 0]
+    if isinstance(budget, bool) or int(budget) != budget or budget < len(active):
+        raise ValueError("budget must cover every active stratum")
+    counts = [int(i in active) for i in range(len(weights))]
+    if not active:
+        if budget:
+            raise ValueError("no active strata")
+        return counts
+    scores = [weights[i] * deviations[i] / math.sqrt(costs[i]) for i in active]
+    if sum(scores) == 0:
+        scores = [1.0] * len(active)
+    remaining = int(budget) - len(active)
+    quotas = [remaining * s / sum(scores) for s in scores]
+    for i, q in zip(active, quotas):
+        counts[i] += int(q)
+    for j in sorted(range(len(active)), key=lambda j: (-(quotas[j] % 1), active[j]))[
+        : int(budget) - sum(counts)
+    ]:
+        counts[active[j]] += 1
+    return counts
+
+
+def allocate_cost_counts(weights, deviations, costs, cost_budget):
+    """Round the fixed-cost variance allocation with one draw per active stratum.
+
+    The continuous solution is n_h=max(1,lambda*W_h*sigma_h/sqrt(c_h)).
+    Rounding uses affordable marginal variance decrease per unit cost. Integer
+    optimality is not asserted. All counts are chosen before any current draw.
+    """
+    if not (len(weights) == len(deviations) == len(costs)):
+        raise ValueError("stratum arrays must have matching lengths")
+    if any(not math.isfinite(x) or x < 0 for x in (*weights, *deviations)) or any(
+        not math.isfinite(x) or x <= 0 for x in costs
+    ) or not math.isfinite(cost_budget) or cost_budget < 0:
+        raise ValueError("finite nonnegative statistics and positive costs required")
+    active = [i for i, value in enumerate(weights) if value > 0]
+    minimum = sum(costs[i] for i in active)
+    if cost_budget < minimum:
+        raise ValueError("cost budget must cover every active stratum")
+    counts = [int(i in active) for i in range(len(weights))]
+    variable = [i for i in active if deviations[i] > 0]
+    if not variable:
+        return counts
+    scores = {i: weights[i] * deviations[i] / math.sqrt(costs[i]) for i in variable}
+    def charge(multiplier):
+        return sum(costs[i] * max(1.0, multiplier * scores.get(i, 0.0)) for i in active)
+    lower, upper = 0.0, 1.0
+    while charge(upper) < cost_budget:
+        upper *= 2
+    for _ in range(80):
+        middle = (lower + upper) / 2
+        if charge(middle) <= cost_budget:
+            lower = middle
+        else:
+            upper = middle
+    for i in variable:
+        counts[i] = max(1, math.floor(lower * scores[i]))
+    remaining = cost_budget - sum(costs[i] * counts[i] for i in active)
+    while True:
+        affordable = [i for i in variable if costs[i] <= remaining]
+        if not affordable:
+            return counts
+        selected = max(affordable, key=lambda i: (
+            (weights[i] * deviations[i]) ** 2 / (counts[i] * (counts[i] + 1) * costs[i]),
+            -i,
+        ))
+        counts[selected] += 1
+        remaining -= costs[selected]
+
+
+def stable_query_id(kind, field_ids):
+    """Versioned ID for unary and unordered pair query populations."""
+    import hashlib
+    import json
+
+    fields = tuple(field_ids)
+    if kind == "self" and len(fields) == 1:
+        pass
+    elif kind == "pair" and len(fields) == 2 and fields[0] != fields[1]:
+        fields = tuple(sorted(fields))
+    else:
+        raise ValueError("invalid unary or pair query")
+    if any(not isinstance(x, str) or not x for x in fields):
+        raise ValueError("nonempty field IDs required")
+    encoded = json.dumps([ADAPTIVE_VERSION, kind, fields], separators=(",", ":"))
+    return kind + ":" + hashlib.sha256(encoded.encode()).hexdigest()[:24]

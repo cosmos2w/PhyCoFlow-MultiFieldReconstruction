@@ -31,6 +31,18 @@ def _scale_statistics(family, fields):
     return coef, means, logpower / denominator
 
 
+def _shape_grid(family, fields, reference):
+    fields, _ = family._units_and_fields(fields, reference)
+    return gaussian_blur(
+        rasterize_fields(
+            fields, family.neighbor_indices, family.neighbor_weights.to(fields), family.grid_shape
+        ),
+        family.smoothing_sigma,
+        family.periodic,
+        radius=family.smoothing_radius,
+    ).float()
+
+
 def _draws(context, first, count):
     supplied = tuple((context or {}).get("conditional_draws", ()))
     if len(supplied) < count - 1:
@@ -94,7 +106,10 @@ def score(
         f._require_ready(prediction, coordinates)
         with torch.autocast(device_type=prediction.device.type, enabled=False):
             with torch.no_grad():
-                target, target_means, target_desc = _scale_statistics(f, reference)
+                cached = (context or {}).get("compiled_scale_reference")
+                target, target_means, target_desc = (
+                    _scale_statistics(f, reference) if cached is None else cached
+                )
             deterministic = (context or {}).get("scoring_mode") == "deterministic"
             draws = (
                 (prediction,) if deterministic else _draws(context, prediction, f.conditional_draws)
@@ -152,30 +167,32 @@ def score(
         f._raster_map(coordinates)
         deterministic = (context or {}).get("scoring_mode") == "deterministic"
         draws = (prediction,) if deterministic else _draws(context, prediction, 2)
-        if not deterministic and len(draws) != 2:
-            raise ValueError("Shape adapter requires exactly two draws")
 
         def grid(x):
-            x, _ = f._units_and_fields(x, reference)
-            return gaussian_blur(
-                rasterize_fields(x, f.neighbor_indices, f.neighbor_weights.to(x), f.grid_shape),
-                f.smoothing_sigma,
-                f.periodic,
-                radius=f.smoothing_radius,
-            ).float()
+            return _shape_grid(f, x, reference)
 
         with torch.autocast(device_type=prediction.device.type, enabled=False):
             with torch.no_grad():
                 target = grid(reference.detach())
-            blocks, leaves = shape.score(
-                grid(draws[0]),
-                None if deterministic else grid(draws[1]),
-                target,
-                sampler_batch,
-                valid_mask=f.domain_mask if f.native_masked else None,
-                return_leaves=True,
-                mode="paired" if deterministic else "conditional",
-            )
+            mask = f.domain_mask if f.native_masked else None
+            if len(draws) > 2:
+                queries = shape.compile_queries((sampler_batch,))
+                compiled = shape.compile_reference(target, queries, valid_mask=mask)
+                blocks = shape.score_compiled(
+                    torch.stack([grid(x) for x in draws]), queries, compiled, valid_mask=mask
+                )
+                # This branch is assessment-only; no adaptive difficulty update.
+                leaves = {"self": {}, "pair": {}}
+            else:
+                blocks, leaves = shape.score(
+                    grid(draws[0]),
+                    None if deterministic else grid(draws[1]),
+                    target,
+                    sampler_batch,
+                    valid_mask=mask,
+                    return_leaves=True,
+                    mode="paired" if deterministic else "conditional",
+                )
         physical = {
             "self": f.spatial_objective.weights.get("self.persistence", 0.0),
             "mutual": f.spatial_objective.weights.get("mutual.persistence", 0.0),
@@ -241,6 +258,8 @@ class ScalableQueryAdapter:
             key, self.families[key], prediction, reference, coordinates, context, batch, config
         )
         prefix = "scale" if key == "multiscale_spectrum" else "shape"
+        if context.get("_adaptive_capture_leaves", False):
+            return result, {f"{prefix}.{k}": v for k, v in blocks.items()}, leaves
         return (
             result,
             {f"{prefix}.{k}": v for k, v in blocks.items()},

@@ -69,6 +69,28 @@ def test_reconstruction_panel_is_authoritative_between_validation_epochs(tmp_pat
     assert manager.last_best_checked is False
 
 
+def test_milestone_panels_do_not_follow_recovery_cadence(tmp_path):
+    config = {"stage": "post_training", "checkpointing": {
+        "every_epochs": 10, "epochs": [100, 250],
+        "panel_milestones_only": True, "selection_metric": "reconstruction_mse"}}
+    store = RunStore.create(tmp_path, "milestone_panels", config)
+    manager = PeriodicCheckpointManager(config, store=store, steps_per_epoch=1)
+    model = torch.nn.Linear(1, 1)
+    calls = []
+    def panel(step):
+        calls.append(step)
+        return {"metrics": {"mse_normalized": 1.0}}
+    manager.panel_evaluator = panel
+    for step in (10, 20, 100, 110, 250):
+        manager.save({"model": model.state_dict()}, model=model, preview=_Preview(),
+                     global_step=step, fallback_metric=0.)
+        assert store.load_checkpoint("last")["global_step"] == step
+    assert calls == [100, 250]
+    manager.save({"model": model.state_dict()}, model=model, preview=_Preview(),
+                 global_step=251, fallback_metric=0., force=True)
+    assert calls == [100, 250, 251]
+
+
 def test_step_recovery_cadence_does_not_trigger_extra_topology_validation(tmp_path):
     config = {'stage': 'post_training', 'checkpointing': {'every_epochs': 1,
         'every_steps': 3, 'validation_every_epochs': 1, 'selection_metric': 'topology_with_fidelity'}}

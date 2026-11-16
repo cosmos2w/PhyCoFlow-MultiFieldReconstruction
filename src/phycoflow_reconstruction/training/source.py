@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import asdict
@@ -47,6 +48,23 @@ def source_hashes(config: Mapping[str, Any]) -> dict[str, str]:
 
 
 def _validate_native_source_status(config: Mapping[str, Any]) -> None:
+    source = config.get("source", {})
+    if source.get("admission") == "frozen_snapshot":
+        receipt_path = Path(source["snapshot_receipt"])
+        source_run = Path(config["source_run"])
+        if receipt_path.resolve().parent != source_run.resolve():
+            raise ValueError("snapshot receipt must belong to the admitted source directory")
+        if source_checkpoint_path(config).resolve().parent != (source_run / "checkpoints").resolve():
+            raise ValueError("admitted checkpoint must reside in the snapshot checkpoint directory")
+        receipt = json.loads(receipt_path.read_text())
+        if receipt.get("schema") != "frozen_source_snapshot.v1" or receipt.get("checkpoint_sha256") != file_sha256(source_checkpoint_path(config)):
+            raise ValueError("frozen source snapshot receipt or checkpoint hash mismatch")
+        metadata = receipt.get("metadata_sha256")
+        if not isinstance(metadata, Mapping) or set(metadata) != {"resolved_config.yaml", "run_manifest.json", "status.json"}:
+            raise ValueError("frozen source receipt lacks complete metadata hashes")
+        if any(file_sha256(source_run / name) != digest for name, digest in metadata.items()):
+            raise ValueError("frozen source snapshot metadata hash mismatch")
+        return
     status_path = Path(config["source_run"]) / "status.json"
     if not status_path.is_file():
         raise FileNotFoundError(f"native source run has no status.json: {status_path}")
@@ -58,6 +76,25 @@ def _validate_native_source_status(config: Mapping[str, Any]) -> None:
             "source run is not complete; set source.allow_integration_source=true "
             "only for a declared integration check"
         )
+
+
+def materialize_ema_view(model: torch.nn.Module) -> str:
+    """Strictly materialize an already restored EMA, then disable child EMA."""
+    ema = getattr(model, "_ema", None)
+    if ema is None or ema.num_updates < 1:
+        raise ValueError("materialized EMA requires a populated strict-loaded EMA")
+    ema.copy_to(model)
+    model._ema = None
+    model._ema_eval = False
+    if hasattr(model, "model_ema_enabled"):
+        model.model_ema_enabled = False
+    digest = hashlib.sha256()
+    for name, tensor in sorted(model.state_dict().items()):
+        digest.update(name.encode())
+        digest.update(str(tensor.dtype).encode())
+        digest.update(str(tuple(tensor.shape)).encode())
+        digest.update(tensor.detach().cpu().contiguous().reshape(-1).view(torch.uint8).numpy().tobytes())
+    return digest.hexdigest()
 
 
 def load_source_model(
@@ -106,6 +143,13 @@ def load_source_model(
     model = build_model(config["model"], dataset.data_spec)
     load_model_state_strict(model, checkpoint["model"])
     load_training_aux_state(model, checkpoint)
+    weight_view = config.get("source", {}).get("weight_view", "live")
+    view_hash = None
+    if weight_view == "ema_materialized":
+        view_hash = materialize_ema_view(model)
+    elif weight_view != "live":
+        raise ValueError("unknown source weight view")
+    model.source_weight_view_sha256 = view_hash
     checkpoint_normalizer = FieldNormalizer(
         checkpoint["normalization"]["offset"],
         checkpoint["normalization"]["scale"],
@@ -122,6 +166,8 @@ def load_source_model(
             "kind": source_kind,
             "checkpoint_model_name": checkpoint["model_name"],
             "checkpoint_config_sha256": checkpoint["config_sha256"],
+            "weight_view": weight_view,
+            "materialized_view_sha256": view_hash,
         },
     )
 

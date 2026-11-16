@@ -227,6 +227,69 @@ class FidelityBudget:
         return reference
 
 
+@dataclass(frozen=True)
+class MeanRiskDifferenceBudget:
+    """Signed mean-risk constraint with independently declared risk scales."""
+
+    field_names: tuple[str, ...]
+    reference_risks: tuple[float, ...]
+    absolute_allowance: tuple[float, ...]
+    risk_scales: tuple[float, ...]
+    objective_scale: float
+
+    @classmethod
+    def from_reference(cls, field_names, reference_risks, absolute_allowance, risk_scales, objective_scale=1.0):
+        names = tuple(field_names)
+        vectors = [torch.as_tensor(x, dtype=torch.float64).reshape(-1) for x in (reference_risks, absolute_allowance, risk_scales)]
+        if not names or len(set(names)) != len(names) or any(not isinstance(n, str) or not n for n in names):
+            raise ValueError("unique nonempty field names required")
+        if any(v.numel() != len(names) or not bool(torch.isfinite(v).all()) for v in vectors):
+            raise ValueError("finite reference, allowance and scale per field required")
+        if bool((vectors[1] < 0).any()) or bool((vectors[2] <= 0).any()):
+            raise ValueError("allowances must be nonnegative and risk scales positive")
+        if not math.isfinite(float(objective_scale)) or float(objective_scale) <= 0:
+            raise ValueError("objective scale must be positive and finite")
+        return cls(names, *(tuple(float(x) for x in v) for v in vectors), float(objective_scale))
+
+    @property
+    def upper_bounds(self):
+        return tuple(a + b for a, b in zip(self.reference_risks, self.absolute_allowance))
+
+    @property
+    def denominator_floor_activated(self):
+        return (False,) * len(self.field_names)
+
+    @property
+    def objective_floor_activated(self):
+        return False
+
+    def violations(self, risks: Tensor) -> Tensor:
+        if not risks.is_floating_point() or risks.is_complex() or risks.numel() != len(self.field_names):
+            raise ValueError("signed risks must match field names")
+        risks = risks.reshape(-1).to(torch.float64)
+        if not bool(torch.isfinite(risks.detach()).all()):
+            raise FloatingPointError("signed mean risk is non-finite")
+        return (risks - risks.new_tensor(self.reference_risks) - risks.new_tensor(self.absolute_allowance)) / risks.new_tensor(self.risk_scales)
+
+    def state_dict(self) -> dict[str, Any]:
+        return {"version": 1, "kind": "mean_risk_difference", "field_names": list(self.field_names), "reference_risks": list(self.reference_risks), "absolute_allowance": list(self.absolute_allowance), "risk_scales": list(self.risk_scales), "objective_scale": self.objective_scale}
+
+    @classmethod
+    def from_state_dict(cls, state):
+        if state.get("version") != 1 or state.get("kind") != "mean_risk_difference":
+            raise ValueError("invalid mean-risk budget checkpoint")
+        value = cls.from_reference(state["field_names"], state["reference_risks"], state["absolute_allowance"], state["risk_scales"], state["objective_scale"])
+        if value.state_dict() != dict(state):
+            raise ValueError("inconsistent mean-risk budget checkpoint")
+        return value
+
+
+def _budget_from_state(state):
+    if state.get("kind") == "mean_risk_difference":
+        return MeanRiskDifferenceBudget.from_state_dict(state)
+    return FidelityBudget.from_state_dict(state)
+
+
 class ExternalPolicy:
     """Build one external objective and apply one model backward/optimizer step."""
 
@@ -237,7 +300,7 @@ class ExternalPolicy:
         self.method = self.settings["method"]
         if self.method not in {"lagrangian", "rectify", "extended_log_barrier"}:
             raise ValueError("unknown external policy method")
-        self.reference = reference if isinstance(reference, FidelityBudget) else FidelityBudget.from_state_dict(reference)
+        self.reference = reference if isinstance(reference, (FidelityBudget, MeanRiskDifferenceBudget)) else _budget_from_state(reference)
         self.device = torch.device(device)
         self.completed_updates = 0
         if self.settings.get("vector_reduction", "sum") != "sum" or self.settings.get("objective_scale", "source_mean") != "source_mean":
@@ -683,9 +746,9 @@ class ExternalPolicy:
     def load_state_dict(self, state: Mapping[str, Any]) -> None:
         if state.get("version") != 1 or state.get("method") != self.method or state.get("settings") != self.settings:
             raise ValueError("external policy checkpoint does not match active settings")
-        reference = FidelityBudget.from_state_dict(state["reference"])
-        if reference.field_names != self.reference.field_names:
-            raise ValueError("external policy checkpoint field order differs")
+        reference = _budget_from_state(state["reference"])
+        if type(reference) is not type(self.reference) or reference.field_names != self.reference.field_names:
+            raise ValueError("external policy checkpoint risk contract or field order differs")
         self.reference = reference
         updates = state["completed_updates"]
         if isinstance(updates, bool) or not isinstance(updates, int) or updates < 0:
