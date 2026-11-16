@@ -168,8 +168,8 @@ def _discovery_anchor(
     Its projected endpoint-gradient complement is a ranking heuristic; it is
     not a proof that the complete C8 anchor is insufficient for a physical task.
     """
-    if members.ndim != 4 or len(members) < 2:
-        raise ValueError("discovery anchor requires at least two members")
+    if members.ndim != 4 or len(members) < 1:
+        raise ValueError("discovery anchor requires genuine SOURCE predictions")
     converted = [state_family._in_declared_units(item, reference)[0] for item in members]
     target = state_family._in_declared_units(members[0], reference)[1]
     state_result, _ = score_family(
@@ -181,9 +181,10 @@ def _discovery_anchor(
         channel_weights=component.channel_weights,
         marginal_weight=state_family.component_weights["self_marginal_w2"],
         mixed_weight=state_family.component_weights.get("cross_joint_topk_swd", 0.0),
+        mode="paired" if len(members) == 1 else "conditional",
     )
     context = {
-        "scoring_mode": "conditional",
+        "scoring_mode": "deterministic" if len(members) == 1 else "conditional",
         "field_order": fields,
         "conditional_draws": tuple(members[1:]),
         "score_all_conditional_draws": True,
@@ -475,8 +476,8 @@ def fit_scalable_artifacts(
         from ..coherence.adaptive_fitting import validate_bank
         from .run_store import file_sha256
 
-        if reuse_core is None or j < 2:
-            raise ValueError("frozen adaptive bank requires the common core and independent SOURCE members")
+        if reuse_core is None:
+            raise ValueError("frozen adaptive bank requires its common core")
         declaration = adaptive_settings["bank_artifact"]
         path = Path(declaration["path"])
         if file_sha256(path) != declaration["sha256"]:
@@ -484,6 +485,8 @@ def fit_scalable_artifacts(
         frozen = json.loads(path.read_text(encoding="utf-8"))
         validate_bank(frozen, field_order=fields, support_identity=identity["support_sha256"],
                       source_identity=identity["source_checkpoint_sha256"])
+        if frozen.get("scoring_mode", "conditional") != ("deterministic" if j == 1 else "conditional"):
+            raise ValueError("frozen bank point/law scoring contract differs")
         binding = _adaptive_input_binding(source=source, reference=reference, coordinates=coordinates,
                                           source_weights=sw, reference_weights=rw, identity=identity, core=result)
         if (frozen.get("source_fit_binding_sha256") != binding
@@ -495,8 +498,6 @@ def fit_scalable_artifacts(
         from ..coherence.adaptive_fitting import _digest as bank_digest
         from ..coherence.adaptive_fitting import fit_train_bank, spectral_filter
 
-        if j < 2:
-            raise ValueError("adaptive discovery requires independent SOURCE members")
         if not torch.allclose(
             sw / sw.sum(-1, keepdim=True), rw / rw.sum(-1, keepdim=True)
         ) or not torch.allclose(
@@ -558,6 +559,7 @@ def fit_scalable_artifacts(
             floor=float(adaptive_settings.get("floor", 0.01)),
             sketch_size=int(adaptive_settings.get("sketch_size", 128)),
             redundancy_limit=float(adaptive_settings.get("redundancy_limit", 0.95)),
+            scoring_mode="deterministic" if j == 1 else "conditional",
         )
         frozen = result["adaptive_bank"]
         frozen["source_fit_binding_sha256"] = _adaptive_input_binding(

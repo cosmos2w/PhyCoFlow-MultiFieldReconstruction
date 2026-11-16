@@ -84,8 +84,16 @@ def test_tiny_scalable_profile_prefit_train_and_resume(tmp_path, deterministic):
         else:
             assert a == b
 
-    for key in ("model", "optimizer", "rng_state", "scalable_runtime", "external_policy"):
+    for key in ("model", "optimizer", "rng_state", "external_policy"):
         equal(second[key], uninterrupted[key])
+    measured_timers = {"sampler_seconds", "policy_seconds", "occupied_seconds"}
+    for state in (second["scalable_runtime"], uninterrupted["scalable_runtime"]):
+        for timer in measured_timers:
+            assert 0 <= state[timer] < float("inf")
+        assert state["sampler_completed_updates"] == 12
+        assert state["sampler_timer_complete"] is True
+    equal({key: value for key, value in second["scalable_runtime"].items() if key not in measured_timers},
+          {key: value for key, value in uninterrupted["scalable_runtime"].items() if key not in measured_timers})
     resumed_coupling = [json.loads(line) for line in (child / "metrics/training_coupling.jsonl").read_text().splitlines()]
     whole_coupling = [json.loads(line) for line in (other / "metrics/training_coupling.jsonl").read_text().splitlines()]
     assert resumed_coupling == whole_coupling

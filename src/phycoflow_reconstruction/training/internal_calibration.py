@@ -27,6 +27,89 @@ def gradient_norm(loss, parameters):
     )
 
 
+def sample_weighted_parameter_gradients(microbatches, parameters):
+    """Accumulate complete parameter gradients, before any nonlinear update.
+
+    Each iterable item contains ``(sample_ids, scalar_losses)``. The returned
+    named gradients are the gradient of the sample-weighted full-batch mean,
+    with all family and field-risk gradients kept separate for the caller to
+    apply ConFIG and external fidelity policy exactly once.
+    """
+    parameters = tuple(parameters)
+    if not parameters or any(not p.requires_grad for p in parameters):
+        raise ValueError("nonempty trainable parameters are required")
+    sums, totals, names, seen = {}, {}, None, []
+    for sample_ids, losses in microbatches:
+        sample_ids = list(sample_ids)
+        if not sample_ids or not losses or (names is not None and tuple(losses) != names):
+            raise ValueError("every microbatch requires IDs and the same ordered losses")
+        names = tuple(losses)
+        n = len(sample_ids)
+        seen.extend(sample_ids)
+        for name, loss in losses.items():
+            if loss.numel() != 1 or not torch.isfinite(loss):
+                raise ValueError("microbatch losses must be finite scalars")
+            gradients = torch.autograd.grad(loss, parameters, retain_graph=True, allow_unused=True) if loss.requires_grad else (None,) * len(parameters)
+            if name not in sums:
+                sums[name] = [torch.zeros_like(p) for p in parameters]
+                totals[name] = 0.0
+            for target, gradient in zip(sums[name], gradients):
+                if gradient is not None:
+                    target.add_(gradient.detach(), alpha=n)
+            totals[name] += float(loss.detach()) * n
+    if not seen or len(set(seen)) != len(seen):
+        raise ValueError("microbatch IDs must be nonempty and unique")
+    size = len(seen)
+    return {name: tuple(value / size for value in values) for name, values in sums.items()}, {
+        name: value / size for name, value in totals.items()
+    }, seen
+
+
+def fit_common_prefit(calibration, batch_blocks, parameters, *, binding, scale_joint_ratio=1):
+    """Fit common coefficients from full semantic-block SOURCE graphs.
+
+    Each item is ``(sample_ids, blocks)`` for one complete panel batch. The
+    caller owns constructing the full target and SOURCE rollout; sampled query
+    sketches do not meet this interface's scientific contract.
+    """
+    parameters = tuple(parameters)
+    if not parameters or any(not p.requires_grad for p in parameters):
+        raise ValueError("SOURCE calibration requires trainable SOURCE parameters")
+    expected = {k for k, active in calibration.active.items() if active}
+    sums = {k: 0.0 for k in expected}
+    ids, batches, count = [], [], 0
+    for sample_ids, blocks in batch_blocks:
+        sample_ids = list(sample_ids)
+        if not sample_ids or set(blocks) != expected:
+            raise ValueError("full batch must supply every active semantic block")
+        norms = {k: gradient_norm(blocks[k] / calibration.units[k], parameters) for k in sorted(expected)}
+        n = len(sample_ids)
+        count += n
+        ids.extend(sample_ids)
+        batches.append({"sample_ids": sample_ids, "sample_count": n, "gradient_norms": norms})
+        for k in expected:
+            sums[k] += n * norms[k] ** 2
+    if not count or len(set(ids)) != count:
+        raise ValueError("prefit panel IDs must be nonempty and unique")
+    rms = {k: math.sqrt(sums[k] / count) for k in sorted(expected)}
+    artifact = {"version": "common_prefit_calibration_v1", "binding": dict(binding), "priorities": calibration.priorities.copy(), "units": calibration.units.copy(), "active": calibration.active.copy(), "rms_gradient_norms": rms, "scale_joint_ratio": scale_joint_ratio, "panel_sample_ids": ids, "batches": batches}
+    # The same computation is used by the loader, then independently checked.
+    result = {k: 1.0 for k in calibration.active}
+    for family, blocks in BLOCKS.items():
+        core = [f"{family}.{b}" for b in blocks if calibration.active[f"{family}.{b}"]]
+        extras = [f"{family}.{b}" for b in EXTRA_BLOCKS.get(family, ()) if calibration.active.get(f"{family}.{b}", False)]
+        positive = [rms[k] for k in core if rms[k] > 0]
+        if positive:
+            reference = statistics.median(positive)
+            for k in core + extras:
+                if rms[k] >= max(calibration.floor, 0.1 * reference):
+                    result[k] = min(2.0, max(0.5, reference / rms[k]))
+    result["scale.joint"] *= scale_joint_ratio
+    artifact["coefficients"] = result
+    calibration.load_prefit(artifact)
+    return artifact
+
+
 def state_channel_contribution(channel_squared, common_squared, weight):
     """Exact channel chain-rule contribution with zero-distance convention."""
     positive = common_squared > 0
@@ -102,7 +185,38 @@ class InternalCalibration:
         self.coefficients = result
         return dict(result)
 
+    def load_prefit(self, artifact):
+        """Load a TRAIN-fitted common coefficient vector without online probes."""
+        if artifact.get("version") != "common_prefit_calibration_v1":
+            raise ValueError("invalid common prefit calibration version")
+        if any(artifact.get(k) != getattr(self, k) for k in ("priorities", "units", "active")):
+            raise ValueError("common prefit block declarations differ from runtime")
+        norms = artifact.get("rms_gradient_norms", {})
+        expected = {k for k, active in self.active.items() if active}
+        if set(norms) != expected or any(not math.isfinite(float(v)) or float(v) < 0 for v in norms.values()):
+            raise ValueError("common prefit requires finite RMS norms for active blocks")
+        result = {k: 1.0 for k in self.active}
+        for family, blocks in BLOCKS.items():
+            names = [f"{family}.{b}" for b in blocks if self.active[f"{family}.{b}"]]
+            extras = [f"{family}.{b}" for b in EXTRA_BLOCKS.get(family, ()) if self.active.get(f"{family}.{b}", False)]
+            positive = [float(norms[k]) for k in names if float(norms[k]) > 0]
+            if positive:
+                median = statistics.median(positive)
+                for k in names + extras:
+                    if float(norms[k]) >= max(self.floor, 0.1 * median):
+                        result[k] = min(2.0, max(0.5, median / float(norms[k])))
+        ratio = artifact.get("scale_joint_ratio", 1)
+        if ratio not in (1, 2, 4):
+            raise ValueError("scale joint ratio must be 1, 2 or 4")
+        result["scale.joint"] *= ratio
+        if artifact.get("coefficients") != result:
+            raise ValueError("common prefit coefficients do not match RMS fit")
+        self.coefficients = result
+        self.prefit = dict(artifact)
+
     def state_dict(self):
+        if hasattr(self, "prefit"):
+            return {"version": "internal_prefit_state_v1", "artifact": self.prefit}
         return {
             "version": VERSION,
             "priorities": self.priorities.copy(),
@@ -116,6 +230,11 @@ class InternalCalibration:
 
     @classmethod
     def from_state_dict(cls, state):
+        if state.get("version") == "internal_prefit_state_v1":
+            artifact = state["artifact"]
+            obj = cls(artifact["priorities"], artifact["units"], artifact["active"])
+            obj.load_prefit(artifact)
+            return obj
         if state["version"] != VERSION:
             raise ValueError("calibration version mismatch")
         obj = cls(state["priorities"], state["units"], state["active"], state["floor"])

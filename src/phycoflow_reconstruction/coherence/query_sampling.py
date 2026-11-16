@@ -66,6 +66,21 @@ class QueryBatch:
     number: int
 
 
+def full_target_query_batch(field_count):
+    """Enumerate every outer unary and pair leaf with exact uniform weights.
+
+    Pass this batch with the Shape adapter's ``exhaustive_shape_queries``
+    context flag to enumerate its signed/line inner target as well.
+    """
+    if isinstance(field_count, bool) or not isinstance(field_count, int) or field_count < 1:
+        raise ValueError("field_count must be a positive integer")
+    pairs = pair_count(field_count)
+    unary = tuple(Draw(i, 1, 1 / field_count, field_count, field_count)
+                  for i in range(field_count))
+    mutual = tuple(Draw(i, 1, 1 / pairs, pairs, pairs) for i in range(pairs))
+    return QueryBatch(unary, mutual, 0)
+
+
 class SharedQuerySampler:
     """Sparse EMA priority with a frozen pre-draw mixture and exact resume.
 

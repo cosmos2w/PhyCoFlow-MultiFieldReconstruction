@@ -224,6 +224,10 @@ def differentiable_reconstruction(
     observation_config: dict,
 ) -> torch.Tensor:
     """Dispatch one common coherence path without inspecting model names."""
+    wrapper = getattr(model, "reconstruct_with_observation_config", None)
+    if wrapper is not None:
+        return wrapper(batch, steps=steps, solver=solver, generator=generator,
+                       observation_config=observation_config)
     if observation_config.get("mode") == "native":
         expected_solver = getattr(model, "native_solver", None)
         if expected_solver is not None and solver != expected_solver:

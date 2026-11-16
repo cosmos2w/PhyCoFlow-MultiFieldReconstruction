@@ -35,6 +35,34 @@ def test_runtime_deploys_and_restores_fixed_profile(monkeypatch):
     assert runtime.sampler.fixed_probabilities == (.2, .3, .5)
     assert runtime.sampler.draw() == restored.sampler.draw()
 
+    # A shared qualified bank must not change the control's proposal.
+    control = ScalableRuntime(artifact, families, steps_per_epoch=1, expected_provenance=provenance,
+                              allocation_mode="uniform", uniform_epochs=10)
+    assert control.sampler.fixed_probabilities is None
+    assert all(query.probability == pytest.approx(1 / 3) for query in control.sampler.draw().pair_queries)
+
+    from phycoflow_reconstruction.training.internal_calibration import fit_common_prefit
+    delayed = ScalableRuntime(artifact, families, steps_per_epoch=1, expected_provenance=provenance,
+                              allocation_mode="qualified_fixed", uniform_epochs=10)
+    parameter = torch.nn.Parameter(torch.tensor(1.))
+    prefit = fit_common_prefit(delayed.calibration, [(["id"], {k: parameter for k in keys})],
+                              (parameter,), binding={"split": "train"})
+    for step in range(10):
+        delayed.begin_step(step)
+        assert all(query.probability == pytest.approx(1 / 3) for query in delayed.batch.pair_queries)
+        values = {kind: {q.index: 1. for q in getattr(delayed.batch, f"{kind}_queries")}
+                  for kind in ("self", "pair")}
+        delayed.difficulties = {name: values for name in ("multiscale_spectrum", "topology")}
+        delayed.finish_step(True)
+    resumed = ScalableRuntime(artifact, families, steps_per_epoch=1, expected_provenance=provenance,
+                              allocation_mode="qualified_fixed", uniform_epochs=10)
+    resumed.calibration.load_prefit(prefit)
+    resumed.load_state_dict(delayed.state_dict())
+    delayed.begin_step(10)
+    resumed.begin_step(10)
+    assert delayed.batch == resumed.batch
+    assert delayed.sampler.fixed_probabilities == (.2, .3, .5)
+
 
 def test_runtime_acceptance_calibration_and_resume(monkeypatch):
     import phycoflow_reconstruction.training.scalable_runtime as module

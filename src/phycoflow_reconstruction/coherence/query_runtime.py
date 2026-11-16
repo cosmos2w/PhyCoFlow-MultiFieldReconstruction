@@ -191,6 +191,7 @@ def score(
                     sampler_batch,
                     valid_mask=mask,
                     return_leaves=True,
+                    exhaustive=bool((context or {}).get("exhaustive_shape_queries", False)),
                     mode="paired" if deterministic else "conditional",
                 )
         physical = {

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 from collections.abc import Mapping
 from time import perf_counter
 
@@ -32,12 +33,18 @@ class ScalableRuntime:
         seed=0,
         scoring_mode="conditional",
         core_only=False,
+        allocation_mode=None,
+        uniform_epochs=0,
     ):
         validate_scalable_artifacts(artifacts, expected_provenance)
         if scoring_mode not in {"conditional", "deterministic"}:
             raise ValueError("invalid scalable scoring mode")
         self.scoring_mode = scoring_mode
         self.core_only = bool(core_only)
+        if allocation_mode not in {None, "uniform", "qualified_fixed"} or isinstance(uniform_epochs, bool) or not isinstance(uniform_epochs, int) or uniform_epochs < 0:
+            raise ValueError("invalid fixed-target allocation mode or initial uniform horizon")
+        self.allocation_mode = allocation_mode
+        self.uniform_epochs = uniform_epochs
         self.artifacts = artifacts
         provenance = artifacts["provenance"]
         required = (
@@ -102,18 +109,28 @@ class ScalableRuntime:
         sampler_class = HierarchicalQuerySampler if self.bank is not None else SharedQuerySampler
         # Uniform fallback until gradient/cost allocation is qualified.
         sampler_options = {"hierarchy_weight": 0.0} if self.bank is not None else {}
-        if self.bank and self.bank.get("policy_qualified", False):
+        if self.bank and self.bank.get("policy_qualified", False) and allocation_mode != "uniform":
             if self.bank.get("policy_mode") != "fixed_source_profile":
                 raise ValueError("qualified allocator must deploy its fixed SOURCE profile")
             sampler_options.update(fixed_probabilities=self.bank.get("policy_pair_probabilities"),
                                    profile_sha256=self.bank.get("policy_profile_sha256"))
             if sampler_options["fixed_probabilities"] is None:
                 raise ValueError("qualified fixed SOURCE probabilities required")
+        elif allocation_mode == "qualified_fixed":
+            raise ValueError("fixed allocation requires an actually qualified policy")
+        self._fixed_probabilities = sampler_options.get("fixed_probabilities")
+        self._fixed_profile_sha256 = sampler_options.get("profile_sha256")
+        if uniform_epochs:
+            sampler_options.pop("fixed_probabilities", None)
+            sampler_options.pop("profile_sha256", None)
         self.sampler = sampler_class(self.fields, seed=int(seed), **sampler_options)
         self.probe_sampler = sampler_class(self.fields, seed=int(seed) + 104729, **sampler_options)
         self._gradient_cost_measurements = None
         self.policy_seconds = 0.0
         self.occupied_seconds = 0.0
+        self.sampler_seconds = 0.0
+        self.sampler_completed_updates = 0
+        self.sampler_timer_complete = True
         # Online changing priorities are not the fixed policy audited offline.
         self.policy_enabled = False
         self._profile_leaves = {}
@@ -138,8 +155,13 @@ class ScalableRuntime:
     def begin_step(self, step):
         if self.batch is not None or step != self.step:
             raise ValueError("runtime cursor mismatch or pending update")
+        if self._fixed_probabilities is not None and step >= self.uniform_epochs * self.steps_per_epoch:
+            self.sampler.fixed_probabilities = tuple(self._fixed_probabilities)
+            self.sampler.profile_sha256 = self._fixed_profile_sha256
         self._before = (self.sampler.state_dict(), self.probe_sampler.state_dict())
+        sampler_started = perf_counter()
         self.batch = self.sampler.draw()
+        self.sampler_seconds += perf_counter() - sampler_started
         self.blocks, self.difficulties, self.pending_probe = {}, {}, None
         self._gradient_cost_measurements = None
         self._profile_leaves, self._profile_costs = {}, {}
@@ -395,6 +417,7 @@ class ScalableRuntime:
                 raise ValueError("Scale and Shape exposure differs")
             values[kind] = {i: (scale[i], shape[i]) for i in scale}
         exposure = []
+        sampler_started = perf_counter()
         if self.bank is not None:
             if self._gradient_cost_measurements is None:
                 self.sampler.finish(exposure_sink=exposure.append)
@@ -414,8 +437,12 @@ class ScalableRuntime:
         self.step += 1
         if self.step % self.steps_per_epoch == 0:
             self.sampler.refresh(epoch)
-            if epoch == 10:
+            self.sampler_seconds += perf_counter() - sampler_started
+            if epoch == 10 and self.calibration.coefficients is None:
                 self.calibration.freeze(epoch)
+        else:
+            self.sampler_seconds += perf_counter() - sampler_started
+        self.sampler_completed_updates += 1
         self.batch, self.pending_probe, self._before = None, None, None
         return {
             "step": self.step,
@@ -438,9 +465,14 @@ class ScalableRuntime:
             "steps_per_epoch": self.steps_per_epoch,
             "scoring_mode": self.scoring_mode,
             "core_only": self.core_only,
+            "allocation_mode": self.allocation_mode,
+            "uniform_epochs": self.uniform_epochs,
             "adaptive_bank_sha256": self.bank["sha256"] if self.bank is not None else None,
             "policy_seconds": self.policy_seconds,
             "occupied_seconds": self.occupied_seconds,
+            "sampler_seconds": self.sampler_seconds,
+            "sampler_completed_updates": self.sampler_completed_updates,
+            "sampler_timer_complete": self.sampler_timer_complete,
             "policy_enabled": self.policy_enabled,
             "sampler": self.sampler.state_dict(),
             "probe_sampler": self.probe_sampler.state_dict(),
@@ -455,6 +487,8 @@ class ScalableRuntime:
             or state["steps_per_epoch"] != self.steps_per_epoch
             or state.get("scoring_mode") != self.scoring_mode
             or state.get("core_only", False) != self.core_only
+            or state.get("allocation_mode") != self.allocation_mode
+            or state.get("uniform_epochs", 0) != self.uniform_epochs
             or state.get("adaptive_bank_sha256")
             != (self.bank["sha256"] if self.bank is not None else None)
         ):
@@ -482,19 +516,27 @@ class ScalableRuntime:
                     expected_hierarchy = 0.0
                 if actual.hierarchy_weight != expected_hierarchy:
                     raise ValueError("runtime hierarchy settings changed")
-                if (actual.fixed_probabilities != initial.fixed_probabilities
-                    or actual.profile_sha256 != initial.profile_sha256):
+                active_fixed = actual is sampler and step > self.uniform_epochs * self.steps_per_epoch
+                expected_fixed = tuple(self._fixed_probabilities) if self._fixed_probabilities is not None and (active_fixed or not self.uniform_epochs) else None
+                expected_profile = self._fixed_profile_sha256 if expected_fixed is not None else None
+                if (actual.fixed_probabilities != expected_fixed
+                    or actual.profile_sha256 != expected_profile):
                     raise ValueError("runtime fixed SOURCE profile changed")
             if any(getattr(actual, k) != getattr(initial, k) for k in keys):
                 raise ValueError("runtime sampler settings or stream identity changed")
             if actual.pending is not None:
                 raise ValueError("checkpoint contains an unfinished update")
-        expected_probes = [e for e in PROBES if step >= (e - 1) * self.steps_per_epoch + 1]
+        prefit = hasattr(calibration, "prefit")
+        if prefit and (not hasattr(self.calibration, "prefit") or calibration.prefit != self.calibration.prefit):
+            raise ValueError("checkpoint common prefit differs from declared artifact")
+        if not prefit and hasattr(self.calibration, "prefit"):
+            raise ValueError("checkpoint lacks declared common prefit")
+        expected_probes = [] if prefit else [e for e in PROBES if step >= (e - 1) * self.steps_per_epoch + 1]
         if (
             [r["epoch"] for r in calibration.records] != expected_probes
             or sampler.counter != step
             or probe_sampler.counter != len(expected_probes)
-            or (calibration.coefficients is not None) != (step >= 10 * self.steps_per_epoch)
+            or (calibration.coefficients is not None) != (prefit or step >= 10 * self.steps_per_epoch)
         ):
             raise ValueError("runtime sampler or calibration cursor mismatch")
         if (
@@ -506,10 +548,14 @@ class ScalableRuntime:
             raise ValueError("runtime calibration settings differ from TRAIN artifacts")
         self.policy_seconds = float(state.get("policy_seconds", 0.0))
         self.occupied_seconds = float(state.get("occupied_seconds", 0.0))
+        self.sampler_seconds = float(state.get("sampler_seconds", 0.0))
+        self.sampler_completed_updates = int(state.get("sampler_completed_updates", 0))
+        self.sampler_timer_complete = bool(state.get("sampler_timer_complete", False))
         if state.get("policy_enabled", False):
             raise ValueError("online changing policy has no deployment qualification")
         self.policy_enabled = False
-        if min(self.policy_seconds, self.occupied_seconds) < 0:
+        if (not all(math.isfinite(x) and x >= 0 for x in (self.policy_seconds, self.occupied_seconds, self.sampler_seconds))
+                or self.sampler_completed_updates < 0 or self.sampler_completed_updates > step):
             raise ValueError("invalid policy timing state")
         self.sampler, self.probe_sampler, self.calibration, self.step = (
             sampler,

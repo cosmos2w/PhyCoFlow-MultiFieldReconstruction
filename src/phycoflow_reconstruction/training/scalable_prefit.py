@@ -24,8 +24,8 @@ from .scalable_fitting import _digest, fit_scalable_artifacts, validate_scalable
 
 
 def _load_common_core(declaration, *, provenance, model, config, batch, indexes, samples, query, protocol, manifest_indices, seed, members, sensor_count, microbatch):
-    if members != 4:
-        raise ValueError("common SOURCE panel reuse requires the frozen J4 member bank")
+    if members != (4 if model.capabilities.generative else 1):
+        raise ValueError("common SOURCE panel reuse requires native J4 law or J1 point bank")
     core_path, panel_path = Path(declaration["path"]), Path(declaration["source_panel_path"])
     if file_sha256(core_path) != declaration["sha256"] or file_sha256(panel_path) != declaration["source_panel_sha256"]:
         raise ValueError("common core or SOURCE panel hash mismatch")

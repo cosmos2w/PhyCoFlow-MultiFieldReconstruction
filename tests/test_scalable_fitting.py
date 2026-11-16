@@ -29,7 +29,8 @@ def test_common_core_rebase_preserves_fitted_body_and_rejects_stale_support():
         fit_scalable_artifacts(**candidate)
 
 
-def test_frozen_adaptive_bank_reuses_exact_source_and_common_core(tmp_path, monkeypatch):
+@pytest.mark.parametrize("point_model", [False, True])
+def test_frozen_adaptive_bank_reuses_exact_source_and_common_core(tmp_path, monkeypatch, point_model):
     import json
 
     from phycoflow_reconstruction.coherence import adaptive_fitting
@@ -37,6 +38,8 @@ def test_frozen_adaptive_bank_reuses_exact_source_and_common_core(tmp_path, monk
     from phycoflow_reconstruction.training.scalable_fitting import _adaptive_input_binding
 
     args = fixture(3)
+    if point_model:
+        args["source"] = args["source"][:, :1]
     core = fit_scalable_artifacts(**args)
     source, reference, coords = args['source'], args['reference'], args['coordinates']
     weights = torch.ones(reference.shape[:2], dtype=reference.dtype)
@@ -48,6 +51,7 @@ def test_frozen_adaptive_bank_reuses_exact_source_and_common_core(tmp_path, monk
         anchor_fn=lambda x, y, m: ((x-y).square() * m[None, None, :, None]).sum(),
         source_identity=args['provenance']['source_checkpoint_sha256'],
         support_identity=args['provenance']['support_sha256'], units='model',
+        scoring_mode='deterministic' if point_model else 'conditional',
     )
     bank['source_fit_binding_sha256'] = _adaptive_input_binding(
         source=source, reference=reference, coordinates=coords, source_weights=weights,
@@ -96,7 +100,7 @@ def test_common_source_panel_requires_exact_stream_and_frozen_families(tmp_path)
     args["provenance"]["field_order"] = list(names)
     parent = fit_scalable_artifacts(**args)
     model = torch.nn.Linear(1, 1)
-    model.capabilities = SimpleNamespace(structured_grid_required=False)
+    model.capabilities = SimpleNamespace(structured_grid_required=False, generative=True)
     model.source_weight_view_sha256 = "ema-view"
     coupling = [{"sample_ids": list(batch.sample_ids), "observation_sha256": _digest([batch.obs_indices, batch.obs_values, batch.obs_field_ids, batch.obs_valid_mask]), "member_seeds": [_conditional_draw_seed(7, j) for j in range(4)]}]
     panel = {"schema": "car_source_panel_v1", "provenance": parent["provenance"], "members": torch.cat((args["source"], args["source"] + 0.3), dim=1), "reference": batch.target_fields, "coordinates": batch.query_coords, "masses": torch.ones(2, 9), "query_indices": batch.metadata["query_indices"], "sample_indices": [0, 1], "sample_ids": list(batch.sample_ids), "observation_manifest": None, "coupling": coupling, "source_weight_view": "ema_materialized", "source_weight_view_sha256": "ema-view", "parameter_buffer_sha256": _digest(model.state_dict()), "members_count": 4, "sensor_count": None}

@@ -95,6 +95,7 @@ class TrainingMonitor:
         description: str,
         enabled: bool = True,
         plot_every_steps: int = 10,
+        resume_state: Mapping[str, Any] | None = None,
     ) -> None:
         self.run_dir = Path(run_dir)
         self.history_path = log_path(self.run_dir, "history.jsonl")
@@ -129,13 +130,36 @@ class TrainingMonitor:
         self.last_epoch_report: dict[str, Any] | None = None
         self._plot_available = True
         self._calibration_freeze_epoch = None
+        self._recording_definitions = None
+        self._loss_component_order = []
+        self._recording_definitions_path = self.run_dir / "logs" / "recording_definitions.json"
         config_path = self.run_dir / "resolved_config.yaml"
         if config_path.is_file():
             from ..config import load_config
 
             self._calibration_freeze_epoch = find_calibration_freeze([], load_config(config_path))
+            config = load_config(config_path)
+            self._loss_component_order = [name for name, settings in config.get("coherence", {}).get("families", {}).items() if settings.get("enabled", True)]
+            self._ordered_recording = bool(config.get("coherence", {}).get("scalable_anchored_coherence", {}).get("common_prefit"))
+        else:
+            self._ordered_recording = False
+        if self._ordered_recording and int(start_step) % self.steps_per_epoch:
+            if resume_state is None or resume_state.get("version") != "ordered_monitor_state_v1" or resume_state.get("step") != int(start_step):
+                raise ValueError("ordered recording requires checkpointed partial-epoch loss accumulation")
+            self._epoch_sums.update(resume_state["sums"])
+            self._epoch_counts.update(resume_state["counts"])
+            self._epoch_latest.update(resume_state["latest"])
+            self._epoch_booleans.update(resume_state["booleans"])
+            self._epoch_modes.update(resume_state["modes"])
+            self._epoch_missing.update(resume_state["missing"])
+            self._epoch_batch_count_seen = int(resume_state["batch_count"])
+            if self._epoch_batch_count_seen != int(start_step) % self.steps_per_epoch:
+                raise ValueError("checkpointed loss accumulation cursor mismatch")
+        if self._ordered_recording and self._recording_definitions_path.is_file():
+            self._recording_definitions = json.loads(self._recording_definitions_path.read_text())
         self._load_existing_history()
         self._load_existing_validation_history()
+        self._last_step = int(start_step) if start_step else None
         self.active_epoch = int(start_step) // self.steps_per_epoch + 1
         self._epoch_started = perf_counter()
         self._epoch_observed_batches = 0
@@ -150,6 +174,14 @@ class TrainingMonitor:
     def _epoch_batch_count(self, epoch: int) -> int:
         epoch_start = (epoch - 1) * self.steps_per_epoch
         return min(self.steps_per_epoch, self.configured_steps - epoch_start)
+
+    def checkpoint_state(self) -> dict[str, Any]:
+        """Snapshot ordered partial-epoch accumulators at the accepted cursor."""
+        return {"version": "ordered_monitor_state_v1", "step": self._last_step or 0,
+                "sums": dict(self._epoch_sums), "counts": dict(self._epoch_counts),
+                "latest": dict(self._epoch_latest), "booleans": dict(self._epoch_booleans),
+                "modes": dict(self._epoch_modes), "missing": sorted(self._epoch_missing),
+                "batch_count": self._epoch_batch_count_seen}
 
     def _new_epoch_bar(self, epoch: int, *, initial: int):
         self._epoch_started = perf_counter()
@@ -241,7 +273,7 @@ class TrainingMonitor:
             "epoch_complete": batches == self._epoch_batch_count(epoch),
             **{key: value / self._epoch_counts[key] for key, value in self._epoch_sums.items()},
             **self._epoch_latest,
-            **{key: None for key in self._epoch_missing if key not in self._epoch_counts},
+            **{key: None for key in sorted(self._epoch_missing) if key not in self._epoch_counts},
             **{key: count > 0 for key, count in self._epoch_booleans.items()},
             **{f"{key}_fraction": count / batches for key, count in self._epoch_booleans.items()},
             "finite_counts": dict(self._epoch_counts),
@@ -251,8 +283,61 @@ class TrainingMonitor:
             row["update_mode"] = (
                 next(iter(self._epoch_modes)) if len(self._epoch_modes) == 1 else "mixed"
             )
+        if self._ordered_recording:
+            if self._recording_definitions is not None:
+                order = self._recording_definitions["accumulation_order"]
+                current = dict(self._epoch_sums)
+                self._epoch_sums.clear()
+                self._epoch_sums.update({key: current[key] for key in order if key in current})
+                self._epoch_sums.update({key: value for key, value in current.items() if key not in order})
+            def kind(value):
+                if value is None:
+                    return "nullable"
+                if isinstance(value, bool):
+                    return "bool"
+                if isinstance(value, (int, float)):
+                    return "number"
+                if isinstance(value, str):
+                    return "string"
+                return "object"
+            def definition(key, value):
+                units, meaning = "dimensionless", "Accepted-update epoch diagnostic; structured values retain their named axes."
+                if key in {"step", "epoch", "batches", "completed_updates"}:
+                    units, meaning = "updates" if key != "epoch" else "reporting_epochs", "Completed clock or count in the saved B64/12 reporting convention."
+                elif key.endswith("_seconds"):
+                    units, meaning = "seconds", "Measured wall duration averaged over accepted updates in this epoch."
+                elif key == "field_risk" or key == "field_reference_risk" or key == "field_upper_bound":
+                    units, meaning = "model_field_units_squared", "Field-ordered physical risk under the saved point/member/signed-mean contract."
+                elif key.startswith("coherence_family/") or "coherence" in key or key.endswith("_loss"):
+                    units, meaning = "declared_representation_units", "Sampled training coherence or loss diagnostic under frozen family units and coefficients; evaluation is recorded separately."
+                elif key == "total":
+                    units, meaning = "configured_scalar_units_or_null", "Optimized scalar only when defined; ConFIG parameter-direction updates have no scalar objective."
+                elif key.endswith(("_grad_norm", "_direction_norm")):
+                    units, meaning = "parameter_gradient_norm", "Norm in the declared trainable parameter space before the documented clipping/update stage."
+                elif key == "optimizer_lr":
+                    units, meaning = "optimizer_step_scale", "AdamW learning rate actually used for the accepted update."
+                return {"name": key, "type": kind(value), "units": units, "meaning": meaning}
+            if self._recording_definitions is None:
+                self._recording_definitions = {
+                    "version": "ordered_epoch_recording_v1",
+                    "columns": [definition(k, v) for k, v in row.items()],
+                    "accumulation_order": list(self._epoch_sums),
+                    "loss_component_accumulation_order": self._loss_component_order,
+                    "aggregation": "finite values averaged in accepted update order; booleans recorded as any and fraction",
+                }
+                self._recording_definitions_path.write_text(json.dumps(self._recording_definitions, indent=2) + "\n")
+            else:
+                columns = self._recording_definitions["columns"]
+                old, new = [c["name"] for c in columns], list(row)
+                added, missing = [k for k in new if k not in old], [k for k in old if k not in new]
+                # JSON/dictionary order does not redefine the saved columns.
+                reordered = self._recording_definitions.get("loss_component_accumulation_order", self._loss_component_order) != self._loss_component_order
+                semantic = [c["name"] for c in columns if c["name"] in row and c["type"] not in ("nullable", kind(row[c["name"]])) and kind(row[c["name"]]) != "nullable"]
+                if added or missing or reordered or semantic or list(self._epoch_sums) != self._recording_definitions["accumulation_order"]:
+                    raise ValueError(f"recording definitions incompatible: added={added}, missing={missing}, reordered={reordered}, semantic={semantic}, accumulation_order_changed={list(self._epoch_sums) != self._recording_definitions['accumulation_order']}")
+                row = {k: row[k] for k in old}
         with self.history_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(row, sort_keys=True) + "\n")
+            handle.write(json.dumps(row, sort_keys=not self._ordered_recording) + "\n")
         self._capture(row)
         self._epoch_sums.clear()
         self._epoch_counts.clear()
@@ -309,6 +394,19 @@ class TrainingMonitor:
                 if isinstance(summary.get(key), (int, float))
             },
         }
+        # This separate append-only operational journal includes the data
+        # stream wait and leaves the existing scientific history unchanged.
+        timing = {
+            "version": "complete_epoch_timing_v1",
+            "epoch": int(pending["epoch"]),
+            "step": int(pending["step"]),
+            "accepted_updates": int(summary["batches"]),
+            "train_seconds": train_seconds,
+            "wall_seconds": wall_seconds,
+            "callback_and_reporting_seconds": max(0.0, wall_seconds - train_seconds),
+        }
+        with log_path(self.run_dir, "epoch_timing.jsonl").open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(timing, allow_nan=False) + "\n")
         postfix: dict[str, str] = {
             f"{_LOSS_LABELS[key]}_avg": f"{report[key]:.4e}" for key in _LOSS_KEYS if key in report
         }
@@ -359,7 +457,7 @@ class TrainingMonitor:
         self.progress.update(increment)
         self._accumulate_epoch(row)
         epoch_finished = batch_in_epoch == self._epoch_batch_count(epoch)
-        if epoch_finished or step == self.final_step:
+        if epoch_finished or (step == self.final_step and not self._ordered_recording):
             train_seconds = perf_counter() - self._epoch_started
             summary = self._flush_epoch(epoch=epoch, step=step)
             if epoch == 1 or epoch % self.plot_every_epochs == 0 or step == self.final_step:
@@ -697,7 +795,7 @@ class TrainingMonitor:
         best_checkpoint_saved: bool = False,
     ) -> None:
         """Write the latest figure and leave a completed terminal progress line."""
-        if self._epoch_batch_count_seen:
+        if self._epoch_batch_count_seen and not self._ordered_recording:
             assert self._last_epoch is not None and self._last_step is not None
             summary = self._flush_epoch(epoch=self._last_epoch, step=self._last_step)
             self._pending_epoch_report = {

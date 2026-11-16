@@ -105,7 +105,7 @@ def _assert_same_value(left: Any, right: Any) -> None:
 def test_epoch_change_requires_explicit_extension_and_preserves_archived_state(tmp_path):
     store, old_config = _new_run(tmp_path)
     new_config = _config(epochs=3)
-    with pytest.raises(ValueError, match="config hash"):
+    with pytest.raises(ValueError, match="changed optimization.epochs"):
         RunStore.resume(store.run_dir, new_config)
 
     config_path = store.run_dir / "resolved_config.yaml"
@@ -151,7 +151,7 @@ def test_epoch_change_requires_explicit_extension_and_preserves_archived_state(t
 
     resumed = RunStore.resume(store.run_dir, expected_config)
     assert resumed.config == expected_config
-    with pytest.raises(ValueError, match="config hash"):
+    with pytest.raises(ValueError, match="changed optimization.epochs"):
         RunStore.resume(store.run_dir, old_config)
     assert extended.config_hash == config_digest(expected_config)
 

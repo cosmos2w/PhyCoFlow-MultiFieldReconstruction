@@ -161,8 +161,34 @@ class RunStore:
     def resume(cls, run_dir: str | Path, config: Mapping[str, Any]) -> RunStore:
         store = cls(run_dir, config)
         manifest = json.loads((store.run_dir / "run_manifest.json").read_text(encoding="utf-8"))
+        saved = yaml.safe_load((store.run_dir / "resolved_config.yaml").read_text(encoding="utf-8"))
+        if config_digest(saved) != manifest["config_sha256"]:
+            raise ValueError("saved resume config does not match manifest")
         if manifest["config_sha256"] != store.config_hash:
-            raise ValueError("resume config hash does not match the existing run")
+            old, new = deepcopy(saved), deepcopy(dict(config))
+            old.get("runtime", {}).pop("device", None)
+            new.get("runtime", {}).pop("device", None)
+            if old != new:
+                def differences(a, b, path=""):
+                    if isinstance(a, Mapping) and isinstance(b, Mapping):
+                        result = []
+                        for key in sorted(set(a) | set(b)):
+                            name = f"{path}.{key}" if path else str(key)
+                            if key not in a:
+                                result.append(f"added {name}")
+                            elif key not in b:
+                                result.append(f"missing {name}")
+                            else:
+                                result.extend(differences(a[key], b[key], name))
+                        return result
+                    return [] if a == b else [f"changed {path}: saved={a!r}, incoming={b!r}"]
+                raise ValueError("resume scientific configuration differs: " + "; ".join(differences(old, new)))
+        # Saved definitions own component/append order even when a semantically
+        # equal incoming mapping was serialized with a different key order.
+        store.config = deepcopy(saved)
+        if "device" in config.get("runtime", {}):
+            store.config.setdefault("runtime", {})["device"] = config["runtime"]["device"]
+        store.config_hash = manifest["config_sha256"]
         return store
 
     @classmethod

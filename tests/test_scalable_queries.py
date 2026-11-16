@@ -12,6 +12,7 @@ from phycoflow_reconstruction.coherence.query_sampling import (
     Draw,
     QueryBatch,
     SharedQuerySampler,
+    full_target_query_batch,
     index_pair,
     pair_count,
     pair_index,
@@ -27,6 +28,16 @@ def full_batch(n):
         tuple(Draw(i, 1, 1 / p, p, p) for i in range(p)),
         1,
     )
+
+
+def test_full_target_plan_matches_exhaustive_reference_outer_weights():
+    for fields in (2, 5):
+        actual = full_target_query_batch(fields)
+        expected = full_batch(fields)
+        assert actual.self_queries == expected.self_queries
+        assert actual.pair_queries == expected.pair_queries
+        assert sum(draw.weight for draw in actual.self_queries) == pytest.approx(1)
+        assert sum(draw.weight for draw in actual.pair_queries) == pytest.approx(1)
 
 
 def test_bijection_resume_and_positive_probabilities():

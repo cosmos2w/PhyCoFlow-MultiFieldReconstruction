@@ -20,11 +20,27 @@ from .state_compute import group_projection_scores
 
 VERSION = "adaptive_measured_train_bank_v1"
 
+_TARGET_KEYS = ("directions", "triples", "target_weights", "field_scales", "region_masses",
+                "triple_scales", "physical_masses", "field_order", "source_identity",
+                "support_identity", "units", "block_units")
+
 
 def _digest(value):
     return hashlib.sha256(
         json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
     ).hexdigest()
+
+
+def bank_target_digest(bank):
+    """Hash only the scientific expanded target, independent of sampling policy."""
+    if not isinstance(bank, dict) or any(key not in bank for key in _TARGET_KEYS):
+        raise ValueError("complete expanded bank target required")
+    return _digest({key: bank[key] for key in _TARGET_KEYS})
+
+
+def validate_bank_target_binding(binding, bank):
+    if binding.get("bank_target_sha256") != bank_target_digest(bank):
+        raise ValueError("common prefit expanded bank target differs")
 
 
 def _sync(x):
@@ -97,6 +113,7 @@ def fit_train_bank(
     floor=0.01,
     sketch_size=128,
     redundancy_limit=0.95,
+    scoring_mode="conditional",
 ):
     """Measure and freeze a bounded bank on a repeatable TRAIN/SOURCE panel.
 
@@ -115,6 +132,7 @@ def fit_train_bank(
         or floor <= 0
         or sketch_size < 1
         or not 0 <= redundancy_limit <= 1
+        or scoring_mode not in {"conditional", "deterministic"}
     ):
         raise ValueError("TRAIN identities, positive floors and valid sketch settings required")
     m = torch.as_tensor(masses, dtype=torch.float64).detach().cpu()
@@ -183,8 +201,10 @@ def fit_train_bank(
         x = batch["members"].detach().requires_grad_(True)
         y = batch["reference"].detach()
         seen.extend(batch["ids"])
-        if x.ndim != 4 or x.shape[1:] != y.shape or x.shape[0] < 2:
-            raise ValueError("independent J>=2 SOURCE members required")
+        if (x.ndim != 4 or x.shape[1:] != y.shape
+            or (scoring_mode == "conditional" and x.shape[0] < 2)
+            or (scoring_mode == "deterministic" and x.shape[0] != 1)):
+            raise ValueError("independent J>=2 conditional or genuine J1 deterministic SOURCE required")
         anchor = anchor_fn(x, y, m.to(x))
         ga = torch.autograd.grad(anchor.mean(), x)[0].detach().mean(dim=1).flatten()
         rng = torch.Generator(device="cpu").manual_seed(seed)
@@ -273,6 +293,7 @@ def fit_train_bank(
     bank = {
         "version": VERSION,
         "policy_qualified": False,
+        "scoring_mode": scoring_mode,
         "split": split,
         "field_order": list(field_order),
         "population_ids": ids,

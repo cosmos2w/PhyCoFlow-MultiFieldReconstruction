@@ -33,6 +33,7 @@ COMMON_KEYS = {
     "benchmark_telemetry",
     "trainable",
     "posttrain_fidelity",
+    "residual",
 }
 
 
@@ -613,6 +614,7 @@ def _validate_fidelity_budget(multitask: Mapping[str, Any]) -> None:
             "calibration_draws",
             "calibration_seed",
             "mean_risk_scales",
+            "member_allowance_fraction",
             "reference_artifact",
         },
         "optimization.multitask.fidelity_budget",
@@ -625,8 +627,10 @@ def _validate_fidelity_budget(multitask: Mapping[str, Any]) -> None:
         raise ValueError("unsupported fidelity budget metric")
     if budget.get("metric") == "physical_mean_risk_model_units":
         scales = budget.get("mean_risk_scales")
-        if "absolute_allowance" not in budget or "relative_increase" in budget:
-            raise ValueError("mean risk requires explicit absolute_allowance and no relative_increase")
+        if ("absolute_allowance" in budget) == ("member_allowance_fraction" in budget) or "relative_increase" in budget:
+            raise ValueError("mean risk requires exactly one absolute allowance or member allowance fraction and no relative_increase")
+        if "member_allowance_fraction" in budget:
+            _method_parameter(budget["member_allowance_fraction"], "member_allowance_fraction", allow_zero=True)
         if not isinstance(scales, (list, tuple)) or not scales or any(not math.isfinite(float(x)) or float(x) <= 0 for x in scales):
             raise ValueError("mean risk requires positive independent per-field mean_risk_scales")
     artifact = budget.get("reference_artifact")
@@ -919,11 +923,23 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
         raise TypeError("coherence.scalable_anchored_coherence must be a mapping")
     _reject_unknown(
         scalable,
-        {"enabled", "max_samples", "candidate_count", "shape_batches", "field_floor", "adaptive", "source_members", "source_sensor_count", "save_source_panel", "common_core"},
+        {"enabled", "max_samples", "candidate_count", "shape_batches", "field_floor", "adaptive", "source_members", "source_sensor_count", "save_source_panel", "common_core", "common_prefit", "allocation"},
         "coherence.scalable_anchored_coherence",
     )
     if not isinstance(scalable.get("enabled", False), bool):
         raise TypeError("coherence.scalable_anchored_coherence.enabled must be boolean")
+    allocation = scalable.get("allocation")
+    if allocation is not None and (
+            not isinstance(allocation, Mapping) or set(allocation) != {"mode", "uniform_epochs"}
+            or allocation["mode"] not in {"uniform", "qualified_fixed"}
+            or isinstance(allocation["uniform_epochs"], bool) or not isinstance(allocation["uniform_epochs"], int) or allocation["uniform_epochs"] < 0):
+        raise ValueError("allocation requires uniform/qualified_fixed mode and nonnegative uniform_epochs")
+    prefit = scalable.get("common_prefit")
+    if prefit is not None:
+        if not isinstance(prefit, Mapping) or set(prefit) != {"path", "sha256"} or not isinstance(prefit["path"], str) or not Path(prefit["path"]).is_absolute() or not isinstance(prefit["sha256"], str) or len(prefit["sha256"]) != 64 or any(c not in "0123456789abcdef" for c in prefit["sha256"]):
+            raise ValueError("common_prefit requires absolute path and lowercase SHA-256")
+        if int(coherence["compute_budget"]["batch_size"]) != int(config["optimization"]["batch_size"]):
+            raise ValueError("common prefit runs require coherence and optimization batch sizes to match")
     common = scalable.get("common_core")
     if common is not None:
         if not isinstance(common, Mapping) or set(common) != {"path", "sha256", "source_panel_path", "source_panel_sha256"}:
@@ -1888,6 +1904,21 @@ def validate_config(config: Mapping[str, Any]) -> None:
         raise ValueError(f"unknown top-level config keys: {unknown}")
     if schema.requires_one_of and not (schema.requires_one_of & config.keys()):
         raise ValueError(f"{stage} requires one of {sorted(schema.requires_one_of)}")
+
+    residual = config.get("residual")
+    if residual is not None:
+        if stage != "post_training" or not isinstance(residual, Mapping):
+            raise ValueError("residual requires a post-training configuration")
+        _reject_unknown(residual, {"enabled", "coordinate_dim", "field_scales", "width", "max_fraction"}, "residual")
+        if not isinstance(residual.get("enabled", False), bool):
+            raise ValueError("residual.enabled must be boolean")
+        if residual.get("enabled"):
+            if any(isinstance(residual.get(k), bool) or not isinstance(residual.get(k), int) or residual[k] <= 0 for k in ("coordinate_dim", "width")):
+                raise ValueError("residual dimensions must be positive integers")
+            scales = residual.get("field_scales")
+            if not isinstance(scales, (list, tuple)) or not scales or any(not math.isfinite(float(v)) or float(v) <= 0 for v in scales):
+                raise ValueError("residual.field_scales must be positive finite")
+            _method_parameter(residual.get("max_fraction"), "residual.max_fraction")
 
     _validate_common_sections(config)
 

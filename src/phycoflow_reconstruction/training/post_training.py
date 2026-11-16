@@ -20,7 +20,7 @@ from copy import deepcopy
 from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from time import perf_counter
+from time import perf_counter, time
 from typing import Any
 
 import numpy as np
@@ -1075,7 +1075,7 @@ def _fit_source_physical_risk(model, dataset, config, device, *, seed):
     indices = [chosen[i:i + batch_size] for i in range(0, limit, batch_size)]
     points = None if model.capabilities.structured_grid_required else int(config["coherence"]["compute_budget"]["point_count"])
     source = build_training_batch_source(dataset, indices, config, query_points=points, device=device, start_step=0)
-    total = None
+    member_total = mean_total = None
     count = 0
     sample_ids = []
     draw_manifest = []
@@ -1094,16 +1094,23 @@ def _fit_source_physical_risk(model, dataset, config, device, *, seed):
                         value = _gather_prediction(value, complete, selected)
                     members.append(value)
                 endpoint = {"prediction": members[0], "members": tuple(members), "target": selected.target_fields, "mask": selected.query_valid_mask, "measure": batch_measure_context(selected)}
-                risk = _physical_endpoint_risk(endpoint, dataset, mean_risk=config["optimization"]["multitask"].get("fidelity_budget", {}).get("metric") == "physical_mean_risk_model_units")
-                total = risk.double().sum(0) if total is None else total + risk.double().sum(0)
-                count += risk.shape[0]
+                member_risk = _physical_endpoint_risk(endpoint, dataset)
+                member_total = member_risk.double().sum(0) if member_total is None else member_total + member_risk.double().sum(0)
+                if model.capabilities.generative:
+                    mean_risk = _physical_endpoint_risk(endpoint, dataset, mean_risk=True)
+                    mean_total = mean_risk.double().sum(0) if mean_total is None else mean_total + mean_risk.double().sum(0)
+                count += member_risk.shape[0]
                 sample_ids.extend(selected.sample_ids)
                 draw_manifest.append({"sample_ids": list(selected.sample_ids), "query_sha256": _query_digest(selected.metadata["query_indices"]), "observation_indices_sha256": _query_digest(selected.obs_indices) if selected.obs_indices is not None else None, "rollout_seeds": [seed + 1_000_003 + index] + ([_conditional_draw_seed(seed + 1_000_003 + index, 1)] if model.capabilities.generative else [])})
     finally:
         source.close()
     if count != limit:
         raise ValueError("SOURCE risk panel did not cover its declared population")
-    return total / count, {"sample_ids": sample_ids, "seed": seed, "sample_count": count, "support": "native" if points is None and int(config["coherence"]["compute_budget"]["point_count"]) == math.prod(dataset.data_spec.logical_shape) else "selected", "units": "model_field_units_squared", "members": 2 if model.capabilities.generative else 1, "draw_manifest": draw_manifest}
+    member_reference = member_total / count
+    mean_reference = None if mean_total is None else mean_total / count
+    receipt = {"sample_ids": sample_ids, "seed": seed, "sample_count": count, "support": "native" if int(config["coherence"]["compute_budget"]["point_count"]) == math.prod(dataset.data_spec.logical_shape) else "selected", "units": "model_field_units_squared", "members": 2 if model.capabilities.generative else 1, "draw_manifest": draw_manifest, "field_order": list(dataset.field_names), "source_member_mse": member_reference.tolist(), "source_mean_risk": None if mean_reference is None else mean_reference.tolist()}
+    selected_risk = mean_reference if config["optimization"]["multitask"].get("fidelity_budget", {}).get("metric") == "physical_mean_risk_model_units" else member_reference
+    return selected_risk, receipt
 
 
 def _fidelity_reference_binding(config, dataset, source_hashes_before, source_metadata, scalable_runtime, family_scales):
@@ -1149,7 +1156,20 @@ def _load_shared_fidelity_reference(declaration, expected_binding):
     report = json.loads(path.read_text(encoding="utf-8"))
     if report.get("binding") != expected_binding:
         raise ValueError("shared fidelity reference scientific binding mismatch")
-    return _budget_from_state(report["reference"]), report
+    reference = _budget_from_state(report["reference"])
+    if isinstance(reference, MeanRiskDifferenceBudget):
+        panel = report.get("risk_reference_panel", {})
+        settings = report.get("settings", {})
+        if panel.get("field_order") != list(reference.field_names) or panel.get("source_mean_risk") != list(reference.reference_risks):
+            raise ValueError("shared mean-risk reference is inconsistent with its fieldwise panel")
+        fraction = settings.get("member_allowance_fraction")
+        if fraction is not None:
+            member = panel.get("source_member_mse")
+            if not isinstance(member, list) or len(member) != len(reference.field_names) or any(not math.isfinite(float(x)) or float(x) < 0 for x in member):
+                raise ValueError("shared mean-risk reference lacks valid member risks")
+            if list(reference.absolute_allowance) != [float(fraction) * float(x) for x in member]:
+                raise ValueError("shared mean-risk field allowances differ from member risks")
+    return reference, report
 
 
 def _calibrate_fidelity_budget(
@@ -1286,7 +1306,9 @@ def _calibrate_fidelity_budget(
     if settings.get("metric") == "physical_mean_risk_model_units":
         if not scalable or not model.capabilities.generative:
             raise ValueError("mean risk requires a scalable generative source with independent members")
-        reference = MeanRiskDifferenceBudget.from_reference(dataset.field_names, risk_reference, [float(settings.get("absolute_allowance", 0.0))] * len(dataset.field_names), settings["mean_risk_scales"], objective_scale=max(scientific_sum / samples, 1e-8))
+        fraction = settings.get("member_allowance_fraction")
+        allowance = ([float(fraction) * x for x in risk_receipt["source_member_mse"]] if fraction is not None else [float(settings.get("absolute_allowance", 0.0))] * len(dataset.field_names))
+        reference = MeanRiskDifferenceBudget.from_reference(dataset.field_names, risk_reference, allowance, settings["mean_risk_scales"], objective_scale=max(scientific_sum / samples, 1e-8))
     else:
         reference = FidelityBudget.from_reference(
             dataset.field_names, risk_reference if scalable else sums / counts, scientific_sum / samples,
@@ -1937,6 +1959,16 @@ def _fidelity_guard_report(
     }
 
 
+def _record_checkpoint_clock(run_dir, epoch, global_step, checkpoint_path):
+    """Record the wall-clock instant and content identity of a saved milestone."""
+    path = Path(checkpoint_path)
+    row = {"schema": "checkpoint_clock_v1", "epoch": int(epoch), "global_step": int(global_step),
+           "checkpoint_path": str(path.resolve()), "checkpoint_sha256": file_sha256(path),
+           "recorded_unix": time()}
+    with (Path(run_dir) / "logs" / "checkpoint_timing.jsonl").open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(row, allow_nan=False) + "\n")
+
+
 def run_post_training(
     config: Mapping[str, Any],
     *,
@@ -1946,6 +1978,7 @@ def run_post_training(
     scalable_artifacts=None,
     scalable_expected_provenance=None,
     budget_stop_requested=None,
+    prepare_only: bool = False,
 ) -> Path:
     """Create or resume one immutable child post-training run."""
     if (
@@ -1965,6 +1998,8 @@ def run_post_training(
         raise ValueError("run_post_training accepts only stage=post_training")
     if max_steps is not None and max_steps < 0:
         raise ValueError("max_steps must be non-negative")
+    if prepare_only and resume is not None:
+        raise ValueError("prepare_only requires a fresh immutable attempt")
     _configure_persistence_workers(config)
     seed = int(config["runtime"].get("seed", 42))
     seed_everything(seed, bool(config["runtime"].get("deterministic", True)))
@@ -2001,7 +2036,18 @@ def run_post_training(
         raise ValueError(f"training split is empty for {config['dataset']['path']}")
     if not model.capabilities.differentiable_rollout:
         raise ValueError("source model does not support differentiable rollout post-training")
+    residual = config.get("residual", {})
+    if residual.get("enabled", False):
+        from ..models.source_residual import FrozenSourceResidual
+
+        model = FrozenSourceResidual(model, coordinate_dim=int(residual["coordinate_dim"]), field_scales=residual["field_scales"], width=int(residual["width"]), max_fraction=float(residual["max_fraction"])).to(device)
+    source_for_fit = model.source if residual.get("enabled", False) else model
     trainable_names = set_trainable_scope(model, config["trainable"])
+    if residual.get("enabled", False):
+        model.freeze_source()
+        trainable_names = [name for name, parameter in model.named_parameters() if parameter.requires_grad]
+        if not trainable_names:
+            raise ValueError("residual trainable scope selects no head parameters")
     parameter_count = sum(parameter.numel() for parameter in model.parameters())
     trainable_parameter_count = sum(
         parameter.numel() for parameter in model.parameters() if parameter.requires_grad
@@ -2046,6 +2092,7 @@ def run_post_training(
         checkpoint = None
     else:
         store = RunStore.resume(resume, config)
+        config = store.config
         checkpoint = store.load_checkpoint("last")
         if (
             config["optimization"].get("fast_lagrangian") is not None
@@ -2141,7 +2188,7 @@ def run_post_training(
         )
         _fit_source_calibrations(
             families,
-            model,
+            source_for_fit,
             train_dataset,
             config,
             device=device,
@@ -2163,7 +2210,7 @@ def run_post_training(
         if resume is not None and not artifact_path.is_file():
             raise FileNotFoundError("resume is missing scalable TRAIN artifact")
         scalable_artifacts, scalable_expected_provenance, fit_cost = prepare_scalable_artifacts(
-            model,
+            source_for_fit,
             train_dataset,
             families,
             config,
@@ -2222,7 +2269,23 @@ def run_post_training(
             expected_provenance=scalable_expected_provenance,
             seed=seed + 800048,
             scoring_mode="conditional" if model.capabilities.generative else "deterministic",
+            allocation_mode=scalable_settings.get("allocation", {}).get("mode"),
+            uniform_epochs=int(scalable_settings.get("allocation", {}).get("uniform_epochs", 0)),
         )
+        prefit_declaration = scalable_settings.get("common_prefit")
+        if prefit_declaration is not None:
+            prefit_path = Path(prefit_declaration["path"])
+            if file_sha256(prefit_path) != prefit_declaration["sha256"]:
+                raise ValueError("common prefit artifact hash mismatch")
+            prefit = json.loads(prefit_path.read_text(encoding="utf-8"))
+            binding = prefit.get("binding", {})
+            for key in ("source_checkpoint_sha256", "normalizer_sha256", "support_sha256", "field_order", "sample_ids"):
+                if binding.get(key) != scalable_artifacts["provenance"].get(key):
+                    raise ValueError(f"common prefit binding differs: {key}")
+            from ..coherence.adaptive_fitting import validate_bank_target_binding
+
+            validate_bank_target_binding(binding, scalable_runtime.bank)
+            scalable_runtime.calibration.load_prefit(prefit)
         if checkpoint is not None:
             if "scalable_runtime" not in checkpoint:
                 raise ValueError("resume checkpoint lacks scalable runtime state")
@@ -2313,7 +2376,7 @@ def run_post_training(
                 reference_report = {**reference_report, "loaded_from": dict(declaration)}
             else:
                 reference, reference_report = _calibrate_fidelity_budget(
-                    model, train_dataset, families, banks, config, family_scales, device,
+                    source_for_fit, train_dataset, families, banks, config, family_scales, device,
                     family_means=ordered_means, scalable_runtime=scalable_runtime,
                 )
                 if reference_binding is not None:
@@ -2387,6 +2450,19 @@ def run_post_training(
                     raise ValueError(
                         "ordered recovery field dual cursor differs from model updates"
                     )
+    if prepare_only:
+        store.update_manifest(
+            source_kind=source_metadata["kind"], source_hashes=source_hashes_before,
+            source_metadata=source_metadata, dataset_path=str(train_dataset.path),
+            dataset_fingerprint=dataset_fingerprint(train_dataset.path),
+            coherence_family_state_sha256s={name: file_sha256(path) for name, path in family_paths.items()},
+            coherence_families=list(families), coherence_family_scales=family_scales,
+            coherence_calibration_sha256=file_sha256(calibration_path),
+            source_immutable_verified=source_hashes(config) == source_hashes_before,
+        )
+        store.set_status("prepared", training_updates=0)
+        train_dataset.close()
+        return store.run_dir
     execution_runtime = None
     if strategy_settings.get("enabled", False):
         from .execution_strategy.runtime import ExecutionRuntime
@@ -2649,7 +2725,9 @@ def run_post_training(
         description=f"post:{config['model']['name']}",
         enabled=bool(config["runtime"].get("progress", True)),
         plot_every_steps=int(config["runtime"].get("plot_every_steps", 10)),
+        resume_state=None if checkpoint is None else checkpoint.get("training_monitor"),
     )
+    train_dataset.training_monitor = monitor
     preview = TrainingReconstructionPreview(
         config,
         store=store,
@@ -2755,6 +2833,7 @@ def run_post_training(
             ),
         )
         store.update_manifest(epoch_zero_checkpoint_sha256=file_sha256(initial_path))
+        _record_checkpoint_clock(store.run_dir, 0, 0, initial_path)
         if evaluation_split == "train":
             store.write_json(
                 "evaluation/train_core_epoch_000.json",
@@ -2785,6 +2864,9 @@ def run_post_training(
                 controller=controller, scalarizer=scalarizer, policy=policy,
             ), model=model, preview=preview, global_step=start_step, fallback_metric=0.0,
         )
+        if checkpoint_manager.milestone_due(start_step):
+            _record_checkpoint_clock(store.run_dir, start_step // steps_per_epoch, start_step,
+                                     store.run_dir / 'checkpoints' / f'epoch_{start_step // steps_per_epoch:03d}.pt')
         store.update_manifest(pending_panel_step=None)
     last_coherence_loss = None
     for offset, batch in enumerate(batch_source):
@@ -3337,6 +3419,7 @@ def run_post_training(
                     checkpoint_hashes=hashes,
                     pending_panel_step=(global_step + 1 if checkpoint_manager.panel_evaluator is not None else None),
                 )
+                _record_checkpoint_clock(store.run_dir, (global_step+1)//steps_per_epoch, global_step+1, milestone)
             monitor.close(checkpoint_checked=False, best_checkpoint_saved=False)
             preview.close()
             if source_hashes(config) != source_hashes_before:
@@ -3387,6 +3470,9 @@ def run_post_training(
                 fallback_metric=row["data_loss"],
             )
         if checkpoint_result is not None:
+            if checkpoint_manager.milestone_due(global_step + 1):
+                _record_checkpoint_clock(store.run_dir, (global_step+1)//steps_per_epoch, global_step+1,
+                                         store.run_dir / 'checkpoints' / f'epoch_{(global_step+1)//steps_per_epoch:03d}.pt')
             monitor.record_validation(checkpoint_manager.last_validation_report)
             store.write_json(
                 "progress.json",
@@ -3497,6 +3583,9 @@ def run_post_training(
     )
     if saved is None:
         raise RuntimeError("final checkpoint save was unexpectedly skipped")
+    if checkpoint_manager.milestone_due(final_step):
+        _record_checkpoint_clock(store.run_dir, final_step//steps_per_epoch, final_step,
+                                 store.run_dir / 'checkpoints' / f'epoch_{final_step//steps_per_epoch:03d}.pt')
     last_path, saved_best_path = saved
     if last_path is None:
         raise RuntimeError("forced final save did not create last.pt")
@@ -3617,6 +3706,8 @@ def _post_checkpoint_payload(
     }
     if hasattr(train_dataset, "scalable_runtime"):
         payload["scalable_runtime"] = train_dataset.scalable_runtime.state_dict()
+    if hasattr(train_dataset, "training_monitor"):
+        payload["training_monitor"] = train_dataset.training_monitor.checkpoint_state()
     if controller is not None:
         payload["component_controller"] = controller.state_dict()
     if scalarizer is not None and scalarizer.method == "dwa":
