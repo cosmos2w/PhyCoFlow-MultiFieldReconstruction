@@ -197,6 +197,9 @@ def test_synthetic_report_renders_every_indexed_preview_and_master(tmp_path, mon
     report.produce({'source_banks': sources, 'allocator_audits': {'ffm': [], 'senseiver': []}}, tmp_path, output)
     assert (output / 'report.md').is_file()
     assert (output / 'report.html').is_file()
+    rendered_html = (output / 'report.html').read_text()
+    assert '<table>' in rendered_html and '<th>Field</th>' in rendered_html
+    assert '</head><body><h1' in rendered_html and rendered_html.endswith('</body></html>')
     receipt = json.loads((output / 'report_receipt.json').read_text())
     assert receipt['report_inputs_sha256'] == report.sha(output / 'report_inputs.json')
     assert receipt['script_sha256'] == report.sha(ROOT / 'scripts/analysis/report_car_round2.py')

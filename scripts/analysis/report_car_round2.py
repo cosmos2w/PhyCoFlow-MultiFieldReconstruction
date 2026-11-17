@@ -547,8 +547,8 @@ def produce(inputs, campaign, output):
         def heading(self, text, level, **attrs):
             anchor = re.sub(r'[^a-z0-9 -]', '', re.sub(r'<[^>]*>', '', text).lower()).replace(' ', '-')
             return f'<h{level} id="{anchor}">{text}</h{level}>\n'
-    rendered = mistune.create_markdown(renderer=Renderer())(markdown)
-    (output / 'report.html').write_text('<!doctype html><meta charset="utf-8"><title>Round 2 report</title>' + rendered)
+    rendered = mistune.create_markdown(renderer=Renderer(), plugins=['table'])(markdown)
+    (output / 'report.html').write_text('<!doctype html><html><head><meta charset="utf-8"><title>Round 2 report</title></head><body>' + rendered + '</body></html>')
     validate_rendered(output, captions)
     end = time.time()
     (output / 'report_receipt.json').write_text(json.dumps({'schema': 'car_round2_report_job_v1', 'status': 'completed',
