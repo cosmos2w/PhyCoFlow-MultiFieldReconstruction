@@ -105,6 +105,21 @@ def test_family_gradients_cannot_cancel():
     torch.testing.assert_close(gram, torch.tensor([[2., 4.], [4., 8.]], dtype=torch.float64))
 
 
+def test_oracle_diagnostics_split_actual_parameter_width_and_count_mismatches():
+    expected = torch.tensor([1., 0., 2., 0.], dtype=torch.float64)
+    actual = torch.tensor([1. + 2e-5, 0., 2., float('nan')], dtype=torch.float64)
+    report = mod.oracle_family_diagnostics(actual, expected, 2)
+    assert report['scale']['tolerance_mismatch_count'] == 1
+    assert report['scale']['finite_pairs'] == 2
+    assert report['scale']['max_abs'] == pytest.approx(2e-5)
+    assert report['shape']['finite_pairs'] == 1
+    assert report['shape']['finite_weighted'] == 1
+    assert report['shape']['finite_direct'] == 2
+    assert report['shape']['tolerance_mismatch_count'] == 1
+    with pytest.raises(ValueError, match='two complete'):
+        mod.oracle_family_diagnostics(actual, expected, 1)
+
+
 def test_c8_conditional_difficulty_uses_each_leaf_once():
     scale = torch.tensor([[[2., 4.], [0., -8.]], [[6., 2.], [4., 0.]]])
     shape = torch.tensor([[[0., 2.], [2., 2.]], [[2., 0.], [0., 2.]]])

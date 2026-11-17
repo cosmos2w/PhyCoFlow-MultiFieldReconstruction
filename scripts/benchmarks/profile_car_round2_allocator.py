@@ -94,6 +94,29 @@ def family_gradient_gram(losses, parameters):
     return matrix @ matrix.T, sum(p.numel() for p in params)
 
 
+def oracle_family_diagnostics(weighted, direct, parameter_width):
+    """Report the original elementwise tolerance separately for each family."""
+    import torch
+    if parameter_width < 1 or weighted.numel() != 2 * parameter_width or direct.numel() != weighted.numel():
+        raise ValueError('oracle vectors must contain two complete parameter gradients')
+    result = {}
+    for index, name in enumerate(('scale', 'shape')):
+        actual = weighted[index * parameter_width:(index + 1) * parameter_width]
+        expected = direct[index * parameter_width:(index + 1) * parameter_width]
+        finite = torch.isfinite(actual) & torch.isfinite(expected)
+        delta = actual[finite] - expected[finite]
+        ref = expected[finite]
+        diff_norm = float(torch.linalg.vector_norm(delta))
+        ref_norm = float(torch.linalg.vector_norm(ref))
+        result[name] = {'elements': parameter_width, 'finite_pairs': int(finite.sum()),
+            'finite_weighted': int(torch.isfinite(actual).sum()), 'finite_direct': int(torch.isfinite(expected).sum()),
+            'max_abs': float(delta.abs().max()) if delta.numel() else None,
+            'l2_difference': diff_norm, 'l2_reference': ref_norm,
+            'relative_l2': diff_norm / ref_norm if ref_norm else None,
+            'tolerance_mismatch_count': int((~finite).sum()) + int((delta.abs() > 1e-7 + 1e-5 * ref.abs()).sum())}
+    return result
+
+
 def c8_frozen_probabilities(scale_leaves, shape_leaves, inner_weights, batch_weights, *, epsilon=.5):
     """C8's detached nonnegative family mean, conditioned on each outer ID.
 
@@ -331,7 +354,9 @@ def main():
         # by the randomly initialized, zero-output residual wrapper.
         res = config['residual']
         model = FrozenSourceResidual(model, coordinate_dim=res['coordinate_dim'], field_scales=res['field_scales'], width=res['width'], max_fraction=res['max_fraction']).to('cuda:0').eval()
-        parameters = tuple(p for p in model.parameters() if p.requires_grad)
+        named_parameters = tuple((name, p) for name, p in model.named_parameters() if p.requires_grad)
+        parameters = tuple(p for _, p in named_parameters)
+        parameter_width = sum(p.numel() for p in parameters)
         if not parameters or any(p.requires_grad for p in model.source.parameters()):
             raise ValueError('audit must differentiate exactly the trainable residual head')
         manifest = json.loads((run / 'run_manifest.json').read_text())
@@ -457,44 +482,6 @@ def main():
             with torch.no_grad():
                 evaluate(group, verify=True)
 
-        # Balanced paired timings include SOURCE, all families, complete anchors,
-        # fidelity, extra leaves and backward work. Duplicate pairs cost once.
-        from importlib.util import module_from_spec, spec_from_file_location
-        timing_spec = spec_from_file_location('old_car_timing', CODE_ROOT / 'scripts/benchmarks/profile_car_allocator.py')
-        timing_module = module_from_spec(timing_spec); timing_spec.loader.exec_module(timing_module)
-        timing_inner = 0
-        def timed_bundle(index, extra):
-            torch.cuda.synchronize(); began = time.perf_counter()
-            values = evaluate(groups[0])
-            members, target, coord, mask, mass, context = values
-            q = query(index, timing_inner, extra=extra)
-            objectives = [runtime._score(name, family, members[0], target, coord, context, q)[0].scalar_loss * family_weights[name]
-                          for name, family in families.items()]
-            endpoint = {'prediction': members[0], 'members': tuple(members), 'target': target,
-                        'mask': mask, 'measure': {'generated_weights': mass}}
-            objectives.append(_physical_endpoint_risk(endpoint, dataset, mean_risk=family_name == 'ffm').mean())
-            for objective in objectives:
-                torch.autograd.grad(objective, parameters, retain_graph=True, allow_unused=True)
-            torch.cuda.synchronize()
-            return time.perf_counter() - began
-        timing_evidence = []
-        receipt['timing'] = timing_evidence
-        timings = []
-        for timing_inner in range(len(inner)):
-            evidence = {'inner_index': timing_inner}
-            timing_evidence.append(evidence)
-            timings.append(timing_module.measure_bundle_costs(timed_bundle, k, 3, evidence=evidence))
-        costs = sum(weights[j] * torch.tensor([row['incremental_seconds'] for row in timing], dtype=torch.float64)
-                    for j, timing in enumerate(timings))
-        fixed = sum(float(weights[j]) * float(timing[0]['fixed_seconds']) for j, timing in enumerate(timings))
-        uniform_p = torch.full((k,), 1/k, dtype=torch.float64)
-        # Include ConFIG, clipping, AdamW, sampler and input preparation as
-        # measured in a complete actual update, without double-counting pairs.
-        measured_residual = float(update_seconds) - expected_unique_cost(uniform_p, costs, draws)
-        fixed = max(fixed, measured_residual)
-        if fixed <= 0:
-            raise ValueError('complete fixed cost is unresolved')
-
         def concatenate_grads(two_losses):
             pieces = []
             for loss in two_losses:
@@ -533,8 +520,25 @@ def main():
                 ('self', unary_matrix, torch.full((2*len(fields),), 1/(2*len(fields)), dtype=torch.float64)),
             ):
                 exact = concatenate_grads([isolate_query_stratum(lambda draw, j=j, values=exhaustive_values: losses(values, draw)[j], exhaustive, stratum) for j in range(2)])
-                torch.testing.assert_close(target_weights @ matrix, exact, rtol=1e-5, atol=1e-7,
-                                           msg=f'{stratum} estimator leaves differ from the full target')
+                weighted = target_weights @ matrix
+                group_ids = [sample for begin, end, _, _ in group for sample in ids[begin:end]]
+                receipt.setdefault('oracle_diagnostics', []).append({
+                    'stratum': stratum, 'group_ids': group_ids,
+                    'families': oracle_family_diagnostics(weighted, exact, parameter_width),
+                })
+                try:
+                    torch.testing.assert_close(weighted, exact, rtol=1e-5, atol=1e-7)
+                except AssertionError:
+                    failure_path = args.output.parent / 'oracle_failure.pt'
+                    with failure_path.open('xb') as failure_file:
+                        torch.save({'schema': 'car_round2_oracle_failure_v1', 'stratum': stratum,
+                            'matrix': matrix.detach().cpu(), 'weights': target_weights.detach().cpu(),
+                            'weighted_mean': weighted.detach().cpu(), 'direct_target': exact.detach().cpu(),
+                            'parameter_width': parameter_width,
+                            'parameters': [{'name': name, 'shape': list(p.shape), 'numel': p.numel()}
+                                           for name, p in named_parameters], 'group_ids': group_ids}, failure_file)
+                    receipt['oracle_failure'] = {'path': str(failure_path), 'sha256': file_sha256(failure_path)}
+                    raise
             gram = pair_matrix @ pair_matrix.T
             unary_gram = unary_matrix @ unary_matrix.T
             count = sum(end-begin for begin,end,_,_ in group)
@@ -546,6 +550,45 @@ def main():
             del values, pair_vectors, unary_vectors, pair_matrix, unary_matrix
         if [x for row in rows for x in row['ids']] != ids:
             raise ValueError('parameter audit did not cover the exact TRAIN manifest')
+        # Balanced paired timings include SOURCE, all families, complete anchors,
+        # fidelity, extra leaves and backward work. Duplicate pairs cost once.
+        from importlib.util import module_from_spec, spec_from_file_location
+        timing_spec = spec_from_file_location('old_car_timing', CODE_ROOT / 'scripts/benchmarks/profile_car_allocator.py')
+        timing_module = module_from_spec(timing_spec); timing_spec.loader.exec_module(timing_module)
+        timing_inner = 0
+        def timed_bundle(index, extra):
+            torch.cuda.synchronize(); began = time.perf_counter()
+            values = evaluate(groups[0])
+            members, target, coord, mask, mass, context = values
+            q = query(index, timing_inner, extra=extra)
+            objectives = [runtime._score(name, family, members[0], target, coord, context, q)[0].scalar_loss * family_weights[name]
+                          for name, family in families.items()]
+            endpoint = {'prediction': members[0], 'members': tuple(members), 'target': target,
+                        'mask': mask, 'measure': {'generated_weights': mass}}
+            objectives.append(_physical_endpoint_risk(endpoint, dataset, mean_risk=family_name == 'ffm').mean())
+            for objective in objectives:
+                torch.autograd.grad(objective, parameters, retain_graph=True, allow_unused=True)
+            torch.cuda.synchronize()
+            return time.perf_counter() - began
+        timing_evidence = []
+        receipt['timing'] = timing_evidence
+        timings = []
+        for timing_inner in range(len(inner)):
+            evidence = {'inner_index': timing_inner}
+            timing_evidence.append(evidence)
+            timings.append(timing_module.measure_bundle_costs(timed_bundle, k, 3, evidence=evidence))
+        costs = sum(weights[j] * torch.tensor([row['incremental_seconds'] for row in timing], dtype=torch.float64)
+                    for j, timing in enumerate(timings))
+        fixed = sum(float(weights[j]) * float(timing[0]['fixed_seconds']) for j, timing in enumerate(timings))
+        uniform_p = torch.full((k,), 1/k, dtype=torch.float64)
+        # Include ConFIG, clipping, AdamW, sampler and input preparation as
+        # measured in a complete actual update, without double-counting pairs.
+        measured_residual = float(update_seconds) - expected_unique_cost(uniform_p, costs, draws)
+        fixed = max(fixed, measured_residual)
+        if fixed <= 0:
+            raise ValueError('complete fixed cost is unresolved')
+
+
         c8, c8_difficulty = c8_frozen_probabilities(
             torch.stack([row[0] for row in difficulty_rows]), torch.stack([row[1] for row in difficulty_rows]),
             weights, torch.tensor([row[2] for row in difficulty_rows],dtype=torch.float64))

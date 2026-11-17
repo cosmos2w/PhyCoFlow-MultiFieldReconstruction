@@ -692,3 +692,76 @@ def test_paired_scale_matches_conditional_degenerate_point_values_and_gradients(
                 assert y is None
             else:
                 torch.testing.assert_close(x, y, rtol=1e-9, atol=1e-10)
+
+
+@pytest.mark.parametrize('dtype', [torch.float64, torch.float32])
+@pytest.mark.parametrize('tied_grid', [False, True])
+@pytest.mark.parametrize('anchor_coefficient', [.31, 10000.])
+def test_sampled_inner_matches_exhaustive_shared_head_gradients(dtype, tied_grid, anchor_coefficient):
+    """Compare real Scale/Shape cell gradients with the exhaustive fixed target."""
+    import time
+
+    from phycoflow_reconstruction.coherence.adaptive_profile import isolate_query_stratum
+    from phycoflow_reconstruction.coherence.query_sampling import LINE_WEIGHTS, PAIR_SIGNS
+
+    started = time.perf_counter()
+    torch.manual_seed(610)
+    c, k = 3, pair_count(3)
+    head = torch.nn.Parameter(torch.randn(c, 4, 4, dtype=dtype) * .2)
+    base = torch.randn(1, c, 4, 4, dtype=dtype)
+    truth = torch.randn_like(base)
+    prediction = base + head.unsqueeze(0)
+    if tied_grid:
+        # Explicit tie with shared gradient ancestry, present in every query set.
+        index = torch.tensor([0, 0, 2, 3], dtype=torch.long)
+        prediction = prediction.index_select(-1, index)
+    shape = LazyPooledShape([0] * c, [1] * c, dimensions=(0,), projections=3)
+    shape.accumulate(prediction.detach(), truth, full_batch(c))
+    shape.freeze(provenance={'split': 'train', 'sample_ids': ['synthetic'], 'source_checkpoint_sha256': 'a' * 64})
+    spectral = prediction.flatten(2)[..., :4].transpose(1, 2).unsqueeze(0)
+    target = truth.flatten(2)[..., :4].transpose(1, 2)
+    desc = prediction.flatten(2)[..., :2].reshape(1, 1, 2*c)
+    target_desc = truth.flatten(2)[..., :2].reshape(1, 2*c)
+    mean_kw = {'draw_piece_means': prediction.mean((-1, -2)).unsqueeze(0).unsqueeze(2),
+               'target_piece_means': truth.mean((-1, -2)).unsqueeze(1),
+               'piece_weights': torch.ones(1, dtype=dtype), 'mean_scales': torch.ones(1, c, dtype=dtype)}
+    unary = (Draw(0, 1, 1/c, c, 1, (1,), None, .5),)
+    full = full_target_query_batch(c)
+    expanded_fixed_anchor = prediction.square().mean() * anchor_coefficient
+
+    def score(family, query, exhaustive):
+        if family == 'scale':
+            blocks = sampled_scale(spectral, target, query, filters=torch.ones(2, 4, dtype=dtype),
+                scales=torch.ones(2, c, dtype=dtype), mass=torch.ones(4, dtype=dtype),
+                power_floor=torch.ones(2, c, dtype=dtype), band_weights=torch.tensor([.5, .5], dtype=dtype),
+                self_descriptors=desc, target_self_descriptor=target_desc, mean_kwargs=mean_kw, mode='paired')
+            result = 1.7 * blocks['signed'] + .4 * blocks['rho'] + .9 * blocks['joint'] + .8 * blocks['log_power_self']
+        else:
+            blocks = shape.score(prediction, None, truth, query, exhaustive=exhaustive, mode='paired')
+            result = .6 * blocks['self'] + 1.2 * blocks['mutual']
+        return result.mean() + expanded_fixed_anchor
+
+    report, comparisons = {}, []
+    for family in ('scale', 'shape'):
+        exact_loss = isolate_query_stratum(lambda q, family=family: score(family, q, True), full, 'pair')
+        exact = torch.autograd.grad(exact_loss, head, retain_graph=True)[0].detach().double()
+        weighted = torch.zeros_like(exact)
+        weighted_value = 0.
+        for pair in range(k):
+            for signs in PAIR_SIGNS:
+                for line, line_weight in enumerate(LINE_WEIGHTS):
+                    q = QueryBatch(unary, (Draw(pair, 1, 1/k, k, 1, signs, line, line_weight/4),), 1)
+                    loss = isolate_query_stratum(lambda batch, family=family: score(family, batch, False), q, 'pair')
+                    grad = torch.autograd.grad(loss, head, retain_graph=True)[0].detach().double()
+                    weight = line_weight/(4*k)
+                    weighted += weight * grad
+                    weighted_value += weight * float(loss.detach())
+        delta = weighted - exact
+        report[family] = {'gradient_norm': float(exact.norm()), 'difference_norm': float(delta.norm()),
+            'max_abs': float(delta.abs().max()), 'relative_norm': float(delta.norm()/exact.norm().clamp_min(1e-30)),
+            'value_difference': weighted_value - float(exact_loss.detach()),
+            'elements_outside_original_tolerance': int((delta.abs() > 1e-7 + 1e-5 * exact.abs()).sum())}
+        comparisons.append((weighted, exact))
+    print(json.dumps({'dtype': str(dtype), 'tied_grid': tied_grid, 'anchor_coefficient': anchor_coefficient, 'seconds': time.perf_counter()-started, 'families': report}, sort_keys=True))
+    for weighted, exact in comparisons:
+        torch.testing.assert_close(weighted, exact, rtol=1e-5, atol=1e-7)
