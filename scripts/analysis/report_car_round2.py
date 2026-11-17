@@ -291,6 +291,23 @@ def save_figure(fig, directory, name):
     plt.close(fig)
 
 
+def deployment_memory_table(docs):
+    """Render measured final selected/raw allocated memory without inventing missing values."""
+    lines = ['## Deployment allocated memory', '',
+             'Per-amplitude maxima across measured conditions in the profiling harness, with SOURCE and child models resident. These are not isolated standalone serving memory.', '',
+             '| Arm | Output | Amplitude | Baseline (MiB) | Peak (MiB) |',
+             '| --- | --- | ---: | ---: | ---: |']
+    for arm in ARMS:
+        doc = docs[arm]['validation'][1000][1]
+        for label, row in (('Nominated', selected(doc)), ('Raw', selected(doc, 1.))):
+            memory = row.get('deployment_memory')
+            baseline = f"{memory['baseline_allocated_bytes']/2**20:.2f}" if memory else 'unavailable'
+            peak = f"{memory['peak_allocated_bytes']/2**20:.2f}" if memory else 'unavailable'
+            lines.append(f"| {arm} | {label} | {row['alpha']:g} | {baseline} | {peak} |")
+    lines.append('')
+    return lines
+
+
 def produce(inputs, campaign, output):
     import matplotlib
     matplotlib.use('Agg')
@@ -424,6 +441,7 @@ def produce(inputs, campaign, output):
     for name, caption in captions.items():
         lines.extend([f'## Figure {name.replace("_", "-")}', '', f'![{caption}](figures/{name}.png)', '',
                       f'{caption} [PDF master](figures/{name}.pdf)', ''])
+    lines.extend(deployment_memory_table(docs))
     lines.extend(['## Final raw and nominated results', ''])
     for arm in ARMS:
         doc = docs[arm]['validation'][1000][1]

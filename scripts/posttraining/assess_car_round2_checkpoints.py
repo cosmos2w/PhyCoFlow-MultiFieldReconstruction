@@ -771,6 +771,7 @@ def score(args, campaign):
     latency = {float(k):float(v) for k,v in timing['alpha_seconds'].items()}
     if set(latency) != set(AMPLITUDES) or any(not math.isfinite(v) or v <= 0 for v in latency.values()):
         raise ValueError('measured deployment latency for each declared amplitude required')
+    memory = deployment_memory_by_alpha(timing, AMPLITUDES)
     if split == 'validation':
         _freeze, nomination = validation_freeze(campaign, family, arm, epoch)
         validate_reserved_freeze(campaign, family)
@@ -865,6 +866,7 @@ def score(args, campaign):
             row['utility'] = sum(row['scores'][key]/normalizers[key] for key in normalizers)
             row['eligible'] = row['core']['pass'] and row['fidelity']['primary_pass']
             row['latency_seconds'] = latency[alpha]
+            row['deployment_memory'] = memory[alpha]
         if split == 'train':
             feasible = [a for a,row in aggregates.items() if row['eligible']]
             if feasible:
@@ -880,6 +882,7 @@ def score(args, campaign):
                          'sensor_mse_scope':'mean per-condition sensor MSE; null denotes an unobserved field',
                          'core':row['core'], 'fidelity':row['fidelity'],
                          'utility':row['utility'], 'eligible':row['eligible'], 'latency_seconds':row['latency_seconds'],
+                         'deployment_memory':row['deployment_memory'],
                          'per_condition_member_mse':row['per_condition'], 'per_condition_scores':row['per_condition_scores']})
         # Save the actual selected nonlinear blend, retaining native model fields.
         selected_dir = output / 'selected'; selected_dir.mkdir()
@@ -1030,6 +1033,38 @@ def freeze_nominations(args, campaign):
     print(path)
 
 
+DEPLOYMENT_MEMORY_SCOPE = ('CUDA allocated memory with SOURCE and child models resident in the profiling harness; '
+                           'per-amplitude baseline and peak are maxima across measured conditions, not standalone serving memory')
+
+
+def deployment_memory_by_alpha(timing, amplitudes):
+    """Carry recorded amplitude memory forward; older timing receipts have no measurement."""
+    values = timing.get('alpha_memory_bytes')
+    if values is None:
+        return {alpha: None for alpha in amplitudes}
+    mapped = {float(key): value for key, value in values.items()}
+    if set(mapped) != set(amplitudes) or not timing.get('memory_scope'):
+        raise ValueError('deployment memory must cover every declared amplitude with a scope')
+    for value in mapped.values():
+        baseline, peak = value.get('baseline_allocated_bytes'), value.get('peak_allocated_bytes')
+        if (isinstance(baseline, bool) or not isinstance(baseline, int) or baseline < 0
+                or isinstance(peak, bool) or not isinstance(peak, int) or peak < baseline):
+            raise ValueError('deployment memory requires nonnegative baseline and peak bytes')
+    return {alpha: {**mapped[alpha], 'scope': timing['memory_scope']} for alpha in amplitudes}
+
+
+def timed_deployment_call(cuda, invoke, clock=time.perf_counter):
+    """Measure one existing invocation; memory counters are outside its latency span."""
+    cuda.synchronize()
+    baseline = cuda.memory_allocated()
+    cuda.reset_peak_memory_stats()
+    begin = clock()
+    invoke()
+    cuda.synchronize()
+    elapsed = clock() - begin
+    return elapsed, baseline, cuda.max_memory_allocated()
+
+
 def profile_deployment(args, campaign):
     import yaml
 
@@ -1152,23 +1187,33 @@ def profile_deployment(args, campaign):
         first_index, first_id = panel['sample_indices'][0], ids[0]
         first_sample = dataset[first_index]
         with torch.no_grad():
+            torch.cuda.synchronize(); torch.cuda.reset_peak_memory_stats()
             for _ in range(args.warmup):
                 for alpha in AMPLITUDES: invoke(first_sample, first_index, first_id, alpha)
-            torch.cuda.synchronize(); torch.cuda.reset_peak_memory_stats()
+            torch.cuda.synchronize(); harness_peak = torch.cuda.max_memory_allocated()
             samples = {str(alpha):[] for alpha in AMPLITUDES}
+            memory_samples = {str(alpha):[] for alpha in AMPLITUDES}
             for index, sample_id in zip(panel['sample_indices'], ids):
                 sample = dataset[index]
                 if f'{dataset.trajectory_ids[dataset._items[index][0]]}:{dataset._items[index][1]}' != sample_id:
                     raise ValueError('timing panel sample identity changed')
                 for alpha in AMPLITUDES:
-                    torch.cuda.synchronize(); begin = time.perf_counter()
-                    invoke(sample, index, sample_id, alpha)
-                    torch.cuda.synchronize(); samples[str(alpha)].append(time.perf_counter()-begin)
+                    elapsed, baseline, peak = timed_deployment_call(
+                        torch.cuda, lambda sample=sample, index=index, sample_id=sample_id, alpha=alpha:
+                        invoke(sample, index, sample_id, alpha))
+                    samples[str(alpha)].append(elapsed)
+                    memory_samples[str(alpha)].append({'baseline_allocated_bytes':baseline, 'peak_allocated_bytes':peak})
+                    harness_peak = max(harness_peak, peak)
         receipt.update(status='completed', alpha_seconds={key:sum(values)/len(values) for key,values in samples.items()},
                        alpha_per_condition_seconds=samples, sample_ids=ids, members=panel['members'][family],
                        native_points=40300, sensor_count=256, warmup_repeats=args.warmup,
                        device_name=torch.cuda.get_device_name(0), cuda_version=torch.version.cuda,
-                       peak_allocated_bytes=torch.cuda.max_memory_allocated(),
+                       alpha_memory_bytes={key:{'baseline_allocated_bytes':max(row['baseline_allocated_bytes'] for row in values),
+                                                'peak_allocated_bytes':max(row['peak_allocated_bytes'] for row in values)}
+                                           for key,values in memory_samples.items()},
+                       alpha_per_condition_memory_bytes=memory_samples, memory_scope=DEPLOYMENT_MEMORY_SCOPE,
+                       peak_allocated_bytes=harness_peak,
+                       peak_allocated_scope='full profiling harness after models are resident, including warmup and all amplitude calls; both models remain resident',
                        scope='full input/sensor assembly, host-device transfer, native reconstruction, member draws, mixing and device-host output transfer')
     except BaseException as exc:
         receipt.update(status='failed',error_type=type(exc).__name__,error=str(exc))

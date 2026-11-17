@@ -12,6 +12,33 @@ mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 
 
+def test_deployment_memory_counters_are_outside_timed_call():
+    events = []
+    class Cuda:
+        def synchronize(self): events.append('sync')
+        def memory_allocated(self): events.append('baseline'); return 100
+        def reset_peak_memory_stats(self): events.append('reset')
+        def max_memory_allocated(self): events.append('peak'); return 160
+    times = iter((10., 10.25))
+    def clock(): events.append('clock'); return next(times)
+    elapsed, baseline, peak = mod.timed_deployment_call(Cuda(), lambda: events.append('invoke'), clock)
+    assert (elapsed, baseline, peak) == (.25, 100, 160)
+    assert events == ['sync', 'baseline', 'reset', 'clock', 'invoke', 'sync', 'clock', 'peak']
+
+
+def test_deployment_memory_carries_scope_and_handles_legacy_receipt():
+    timing = {'memory_scope': mod.DEPLOYMENT_MEMORY_SCOPE, 'alpha_memory_bytes': {
+        '0.0': {'baseline_allocated_bytes': 100, 'peak_allocated_bytes': 150},
+        '1.0': {'baseline_allocated_bytes': 110, 'peak_allocated_bytes': 220}}}
+    values = mod.deployment_memory_by_alpha(timing, (0., 1.))
+    assert values[1.]['peak_allocated_bytes'] == 220
+    assert values[1.]['scope'] == mod.DEPLOYMENT_MEMORY_SCOPE
+    assert mod.deployment_memory_by_alpha({}, (0., 1.)) == {0.: None, 1.: None}
+    timing['alpha_memory_bytes']['1.0']['peak_allocated_bytes'] = 10
+    with pytest.raises(ValueError, match='baseline and peak'):
+        mod.deployment_memory_by_alpha(timing, (0., 1.))
+
+
 class Event:
     def masks(self, values):
         mask = values[..., 0] > 0

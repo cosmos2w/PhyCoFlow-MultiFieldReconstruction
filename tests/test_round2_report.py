@@ -16,6 +16,23 @@ def load():
     return module
 
 
+def test_deployment_memory_table_uses_selected_and_raw_values():
+    report = load()
+    selected = {'alpha': .5, 'deployment_memory': {'baseline_allocated_bytes': 2**20,
+                                                     'peak_allocated_bytes': 3*2**20}}
+    raw = {'alpha': 1., 'deployment_memory': {'baseline_allocated_bytes': 2*2**20,
+                                               'peak_allocated_bytes': 5*2**20}}
+    doc = {'selected_alpha': .5, 'rows': [selected, raw]}
+    docs = {arm: {'validation': {1000: (None, doc)}} for arm in report.ARMS}
+    table = '\n'.join(report.deployment_memory_table(docs))
+    assert '| Nominated | 0.5 | 1.00 | 3.00 |' in table
+    assert '| Raw | 1 | 2.00 | 5.00 |' in table
+    assert 'SOURCE and child models resident' in table
+    assert 'not isolated standalone' in table
+    raw['deployment_memory'] = None
+    assert '| Raw | 1 | unavailable | unavailable |' in '\n'.join(report.deployment_memory_table(docs))
+
+
 def test_adjacent_blocks_do_not_bridge_missing_frames_or_trajectories():
     report = load()
     ids = [f'first:{i}' for i in range(12)] + ['first:15', 'second:2']
