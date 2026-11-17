@@ -2002,7 +2002,8 @@ def run_post_training(
         raise ValueError("prepare_only requires a fresh immutable attempt")
     _configure_persistence_workers(config)
     seed = int(config["runtime"].get("seed", 42))
-    seed_everything(seed, bool(config["runtime"].get("deterministic", True)))
+    strict_algorithms = bool(config.get("coherence", {}).get("scalable_anchored_coherence", {}).get("common_prefit"))
+    seed_everything(seed, bool(config["runtime"].get("deterministic", True)), strict_algorithms=strict_algorithms)
     device = torch.device(config["runtime"].get("device", "cpu"))
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA was requested but is unavailable")

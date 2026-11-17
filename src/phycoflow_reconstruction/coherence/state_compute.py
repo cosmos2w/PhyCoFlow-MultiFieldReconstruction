@@ -202,7 +202,16 @@ def prepare_endpoint(x, masses, directions, channel_weights=None):
     mass = mass / mass.sum(-1, keepdim=True)
     p = torch.cat((x, x @ d.T), -1)
     val, idx = p.sort(dim=1)
-    cdf = mass.unsqueeze(-1).expand_as(p).gather(1, idx).cumsum(1).clamp(max=1)
+    sorted_mass = mass.unsqueeze(-1).expand_as(p).gather(1, idx)
+    # This CDF is built only from detached physical masses and detached sort
+    # indices. CUDA cumsum has no strict deterministic kernel in PyTorch 2.5;
+    # the CPU operation preserves the same dtype and leaves field gradients on
+    # the original device and graph.
+    if sorted_mass.is_cuda and torch.are_deterministic_algorithms_enabled():
+        cdf = sorted_mass.cpu().cumsum(1).to(sorted_mass.device)
+    else:
+        cdf = sorted_mass.cumsum(1)
+    cdf = cdf.clamp(max=1)
     return val.transpose(1, 2).contiguous(), cdf.transpose(1, 2).contiguous()
 
 
