@@ -115,8 +115,8 @@ def assemble(campaign, registry, ledger):
             job = {'id':identifier, 'scope':scope, 'allocations':weights, **bindings}
             if 'checkpoint_epochs' in entry:
                 epochs = entry['checkpoint_epochs']
-                if scope != 'assessment' or not isinstance(epochs, list) or not epochs or set(epochs) - set(EPOCHS):
-                    raise ValueError('checkpoint epochs require assessment scope and valid epoch numbers')
+                if scope not in {'assessment', 'deployment'} or not isinstance(epochs, list) or not epochs or set(epochs) - set(EPOCHS):
+                    raise ValueError('checkpoint epochs require assessment/deployment scope and valid epoch numbers')
                 job['checkpoint_epochs'] = epochs
             if kind == 'gpu':
                 data = json.loads(Path(first['path']).read_text())
@@ -176,7 +176,7 @@ def assemble(campaign, registry, ledger):
         extras[arm] = {}
         for epoch in EPOCHS:
             matching = [job['id'] for group in jobs.values() for job in group
-                        if job['scope'] == 'assessment' and arm in job['allocations']
+                        if job['scope'] in {'assessment', 'deployment'} and arm in job['allocations']
                         and epoch in job.get('checkpoint_epochs', [])]
             extras[arm][str(epoch)] = matching
             if not matching:

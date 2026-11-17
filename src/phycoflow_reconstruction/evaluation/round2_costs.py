@@ -32,6 +32,32 @@ def validate_excluded_enclosure(doc):
         'car_round2_assessment_sequence_v1': 'group wall encloses child costs; do not add both',
         'car_round2_assessment_sequence_child_v1': 'encloses the GPU lease; do not add both',
     }
+    variants = {
+        ('car_round2_assessment_sequence_v1', 'group encloses GPU leases and independent CPU score; nonadditive'),
+        ('car_round2_validation_successor_v11', 'Encloses GPU lease and independent CPU scores; group wall is nonadditive.'),
+    }
+    identity = (doc.get('schema'), doc.get('wall_accounting'))
+    if identity in variants:
+        children = doc.get('children')
+        if doc.get('status') != 'completed' or not isinstance(children, list) or not children:
+            raise ValueError('terminal enclosure must bind completed children')
+        expected = 3 if identity[0] == 'car_round2_assessment_sequence_v1' else 26
+        if len(children) != expected or len({ref.get('path') for ref in children}) != expected:
+            raise ValueError('terminal enclosure child coverage differs')
+        refs = [{'path': doc.get('launch_receipt'), 'sha256': doc.get('launch_sha256')}, *children]
+        docs = []
+        for ref in refs:
+            path = Path(ref.get('path') or '')
+            if not path.is_file() or digest(path) != ref.get('sha256'):
+                raise ValueError('terminal enclosure child or launch binding changed')
+            docs.append(json.loads(path.read_text()))
+        launch_schema = ('car_round2_assessment_sequence_launch_v1' if expected == 3
+                         else 'car_round2_validation_successor_launch_v1')
+        if docs[0].get('schema') != launch_schema or any(
+                child.get('schema') != 'car_round2_assessment_sequence_child_v1' or child.get('returncode') != 0
+                for child in docs[1:]):
+            raise ValueError('terminal enclosure launch or child failed')
+        return
     if (doc.get('schema') not in allowed or doc.get('wall_accounting') != allowed[doc['schema']]
             or (doc.get('schema') == 'car_round2_assessment_sequence_child_v1' and doc.get('kind') != 'gpu')):
         raise ValueError('excluded enclosure must be a recognized measured sequence GPU/group wrapper')
@@ -258,7 +284,7 @@ def reconcile(*, campaign, ledger, manifest, family, checkpoint_loader=_default_
         if 'receipt' in job:
             receipt = _bound_file(job['receipt'],campaign,references)
             receipt_start,receipt_end = _interval(receipt)
-            if receipt.get('token') != token or receipt.get('gpu_uuid') != lease['gpu_uuid'] or not math.isclose(receipt_start,start,rel_tol=0.,abs_tol=1e-3) or not math.isclose(receipt_end,end,rel_tol=0.,abs_tol=1e-3):
+            if (receipt.get('token') != token or receipt.get('gpu_uuid') != lease['gpu_uuid'] or not math.isclose(receipt_start,start,rel_tol=0.,abs_tol=1e-3) or not math.isclose(receipt_end,end,rel_tol=0.,abs_tol=1e-3)):
                 raise ValueError(f'GPU job {identifier}: receipt does not match closed lease')
             status = receipt.get('status')
         else:
@@ -422,9 +448,9 @@ def reconcile(*, campaign, ledger, manifest, family, checkpoint_loader=_default_
                     continue
                 if len(extras) != len(set(extras)) or any(job_id not in by_id for job_id in extras):
                     raise ValueError('checkpoint extra job IDs must be unique and declared')
-                if any(by_id[j]['scope'] != 'assessment' or by_id[j]['weights'].get(arm,0.) <= 0
+                if any(by_id[j]['scope'] not in {'assessment', 'deployment'} or by_id[j]['weights'].get(arm,0.) <= 0
                        or epoch not in by_id[j]['checkpoint_epochs'] for j in extras):
-                    raise ValueError('checkpoint extras must be attributable assessment jobs')
+                    raise ValueError('checkpoint extras must be attributable assessment/deployment jobs')
                 lower, upper = _checkpoint_cost_bounds(own, extras, arm, cutoff)
                 checkpoint_bounds[str(epoch)] = [lower, upper]
                 checkpoints[str(epoch)] = lower if lower == upper else None
