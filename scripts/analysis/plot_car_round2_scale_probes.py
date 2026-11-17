@@ -19,6 +19,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--prefit', type=Path, required=True)
     parser.add_argument('--family', choices=('ffm', 'senseiver'), required=True)
+    parser.add_argument('--target-label', choices=('provisional target', 'final selected target'),
+                        default='provisional target')
     parser.add_argument('--output-dir', type=Path, required=True)
     args = parser.parse_args()
     started, cpu = time.time(), time.process_time()
@@ -100,7 +102,7 @@ def main():
     axes[0].legend(loc='lower left', frameon=False, fontsize=9)
     label = 'FFM' if args.family == 'ffm' else 'Senseiver'
     figure.suptitle(f'{label}: one accepted-update Scale response', x=.08, ha='left', fontsize=14)
-    figure.text(.08, .89, f'TRAIN800 · three matched RNG manifests · threshold {threshold:.5g} · provisional target', fontsize=10)
+    figure.text(.08, .89, f'TRAIN800 · three matched RNG manifests · threshold {threshold:.5g} · {args.target_label}', fontsize=10)
     figure.text(.08, .075, 'Open marks: RNG manifests; diamonds and labels: sample-weighted pooled decreases.', fontsize=9)
     figure.text(.08, .04, 'Each trial restores initial state. These are local responses, not a learning trajectory or independent trained replicas.', fontsize=9)
     figure.subplots_adjust(left=.1, right=.98, bottom=.2, top=.8, wspace=.12)
@@ -109,12 +111,13 @@ def main():
     figure.savefig(png, dpi=180)
     plt.close(figure)
     source_relative = os.path.relpath(source, args.output_dir)
-    caption = f'{label} provisional-target complete Scale decreases after one production optimizer update, with initial state restored for every trial. Every point pools the same 800 TRAIN conditions; RNG-manifest spread is descriptive. The frozen response threshold applies to each parameterization and matched manifest. The saved decision retains ratio {probe["decision"]["chosen_ratio"]}; no mature efficacy conclusion follows.'
-    (args.output_dir / 'README.md').write_text(f'# {label} provisional Scale response\n\nFigure index: one two-panel figure.\n\n![{label} one-update Scale response for full-model and residual-head paths](scale_response.png)\n\n{caption}\n\n[PDF master](scale_response.pdf) · [Completed probe source]({source_relative})\n')
+    caption = f'{label} complete Scale decreases for the {args.target_label} after one production optimizer update, with initial state restored for every trial. Every point pools the same 800 TRAIN conditions; RNG-manifest spread is descriptive. The frozen response threshold applies to each parameterization and matched manifest. The saved decision retains ratio {probe["decision"]["chosen_ratio"]}; no mature efficacy conclusion follows.'
+    (args.output_dir / 'README.md').write_text(f'# {label} Scale response: {args.target_label}\n\nFigure index: one two-panel figure.\n\n![{label} one-update Scale response for full-model and residual-head paths](scale_response.png)\n\n{caption}\n\n[PDF master](scale_response.pdf) · [Completed probe source]({source_relative})\n')
     (args.output_dir / 'plotted_values.json').write_text(json.dumps({'source_scale': probe['source_scale'],
         'decision': probe['decision'], 'cells': values}, indent=2, allow_nan=False) + '\n')
     shutil.copyfile(Path(__file__), args.output_dir / 'render_scale_probe.py')
     result = {'schema': 'car_round2_scale_probe_figure_v1', 'status': 'completed', 'family': args.family,
+              'target_label': args.target_label,
               'prefit': str(source), 'prefit_sha256': sha(source), 'prefit_receipt_sha256': sha(receipt_path),
               'script_sha256': sha(Path(__file__)), 'trial_count': len(rows), 'condition_count': 800,
               'gpu_lease': None, 'start_unix': started, 'end_unix': time.time(),
