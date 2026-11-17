@@ -4,6 +4,8 @@ Date: 2026-11-16. Participants: the primary agent and the user-requested GPT-6.1
 
 Execution authorization received later on 2026-11-16: the user's Round 2 goal approves execution within the reviewed 130 GPU-hour ceiling and explicitly permits GPUs 0 and 1 in parallel. This supersedes the preparatory GPU1/GPU2 recommendations below. The historical design discussion remains preserved; live execution provenance is in [execution state](EXECUTION_STATE.md).
 
+Scheduling correction authorized on 2026-11-17: source-local qualification, allocation audits and mature admission proceed independently when their actual inputs and the whole-round budget permit. Earlier wording requiring all four execution qualifications before either source can advance is superseded by the amended [workplan](WORKPLAN.md) and [scheduling review](SCHEDULING_REVIEW.md). The two-family nonuniform-allocation gate, immutable scientific identities, four mature horizons and TRAIN-selection-before-VALIDATION barrier remain unchanged.
+
 ## Joint recommendations
 
 - Preserve the Round 1 expanded representation and measured event gain, while keeping its negative allocation/output-promotion disposition intact. New Scale retention, complete costs and actual deployment address the unfinished branch question.
