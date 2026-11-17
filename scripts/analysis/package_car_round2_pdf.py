@@ -113,6 +113,25 @@ def main():
         converted = re.sub(r'<img\b[^>]*>', replace_img, text)
         converted = re.sub(r'href="(figures/[^"]+\.pdf)"',
                            lambda m: 'href="' + inside(report, html.unescape(m.group(1))).as_uri() + '"', converted)
+        # Writer ignores inherited table sizing from the stylesheet. Explicit
+        # cell formatting keeps numeric columns and headers readable in PDF.
+        converted = converted.replace('<table>', '<table width="100%" border="1" cellspacing="0" cellpadding="3">')
+        def format_cell(match):
+            value = re.sub(r'(?<!\w)[+-]?\d+(?:\.\d+)?[eE][+-]\d+',
+                           lambda number: number.group(0).replace('-', '\u2060-\u2060').replace('+', '\u2060+\u2060'),
+                           match.group(2))
+            return match.group(1) + '<font size="1">' + value + '</font>' + match.group(3)
+        converted = re.sub(r'(<t[dh]\b[^>]*>)(.*?)(</t[dh]>)', format_cell, converted, flags=re.DOTALL)
+        # Writer's HTML importer drops the first body element and inserts a
+        # blank page when a later table follows ordinary body content. Make
+        # the existing title the first table's content, preserving its text.
+        title = re.search(r'<h1\b[^>]*>(.*?)</h1>', converted, flags=re.DOTALL | re.IGNORECASE)
+        if title is None:
+            raise ValueError('report title missing')
+        title_text = html.unescape(re.sub(r'<[^>]+>', '', title.group(1))).strip()
+        if not title_text:
+            raise ValueError('report title empty')
+        converted = converted[:title.start()] + '<table><tr><td>' + title.group(0) + '</td></tr></table>' + converted[title.end():]
         style = '<style>@page { size: A4; margin: 0.6in; } body { font-family: sans-serif; font-size: 10pt; } img { max-width: 100%; } h2 { page-break-after: avoid; }</style>'
         converted = converted.replace('<title>Round 2 report</title>', '<title>Round 2 report</title>' + style)
         with tempfile.TemporaryDirectory(prefix='car_round2_pdf_') as temporary:
@@ -133,6 +152,8 @@ def main():
         if pages < 1:
             raise ValueError('empty PDF')
         rendered_text = subprocess.run(['pdftotext', '-layout', str(pdf), '-'], capture_output=True, text=True, check=True).stdout
+        if re.sub(r'\s+', ' ', title_text) not in re.sub(r'\s+', ' ', rendered_text.split('\f', 1)[0]):
+            raise ValueError('report title absent from first PDF page')
         for name in FIGURES:
             if 'Figure ' + name.replace('_', '-') not in rendered_text:
                 raise ValueError(f'figure heading absent from PDF: {name}')
