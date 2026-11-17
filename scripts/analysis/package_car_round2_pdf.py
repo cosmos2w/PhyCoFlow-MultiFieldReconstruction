@@ -103,7 +103,8 @@ def main():
                 raise ValueError(f'broken internal link: {link}')
             parsed = urlsplit(link)
             if link and not link.startswith('#') and not parsed.scheme:
-                inside(report, unquote(parsed.path))
+                asset = inside(report, unquote(parsed.path))
+                hashes[unquote(parsed.path)] = digest(asset)
         def replace_img(match):
             tag = match.group(0)
             src = html.unescape(re.search(r'src="([^"]+)"', tag).group(1))
@@ -111,8 +112,13 @@ def main():
             tag = re.sub(r'src="[^"]+"', 'src="' + inside(report, src).as_uri() + '"', tag)
             return re.sub(r'\s*/?>$', f' width="{width}" height="{height}">', tag)
         converted = re.sub(r'<img\b[^>]*>', replace_img, text)
-        converted = re.sub(r'href="(figures/[^"]+\.pdf)"',
-                           lambda m: 'href="' + inside(report, html.unescape(m.group(1))).as_uri() + '"', converted)
+        def local_link(match):
+            link = html.unescape(match.group(1))
+            parsed = urlsplit(link)
+            if not link or link.startswith('#') or parsed.scheme:
+                return match.group(0)
+            return 'href="' + inside(report, unquote(parsed.path)).as_uri() + '"'
+        converted = re.sub(r'href="([^"]*)"', local_link, converted)
         # Writer ignores inherited table sizing from the stylesheet. Explicit
         # cell formatting keeps numeric columns and headers readable in PDF.
         converted = converted.replace('<table>', '<table width="100%" border="1" cellspacing="0" cellpadding="3">')

@@ -86,6 +86,27 @@ def test_allocator_table_marks_missing_and_invalid_oracle_metrics_unavailable():
     assert 'worst relative L2 error: unavailable' in text
 
 
+def test_qualification_ledger_binds_sources_and_relative_markdown(tmp_path):
+    report = load()
+    directory = tmp_path / 'assessment'; directory.mkdir()
+    source = directory / 'source.json'; source.write_text('{}')
+    markdown = directory / 'ledger.md'; markdown.write_text('# Completed execution qualification\n')
+    ledger = directory / 'ledger.json'
+    ledger.write_text(json.dumps({'schema': 'car_round2_definition_qualification_ledger_v1',
+        'execution_qualification_passed': True, 'markdown_path': 'assessment/ledger.md',
+        'markdown_sha256': report.sha(markdown),
+        'source_receipts': [{'path': 'assessment/source.json', 'sha256': report.sha(source)}]}))
+    inputs = {'definition_qualification_ledger': 'assessment/ledger.json'}
+    lines, bound_ledger, bound_markdown = report.qualification_ledger_lines(inputs, tmp_path, tmp_path / 'reports/final')
+    assert 'qualification/ledger.md' in '\n'.join(lines) and 'pre-learning qualification' in '\n'.join(lines)
+    assert bound_ledger == ledger and bound_markdown == markdown
+    source.write_text('{"changed":true}')
+    with pytest.raises(ValueError, match='source changed'):
+        report.qualification_ledger_lines(inputs, tmp_path, tmp_path / 'reports/final')
+    with pytest.raises(ValueError, match='ledger required'):
+        report.qualification_ledger_lines({}, tmp_path, tmp_path / 'reports/final')
+
+
 def test_adjacent_blocks_do_not_bridge_missing_frames_or_trajectories():
     report = load()
     ids = [f'first:{i}' for i in range(12)] + ['first:15', 'second:2']
@@ -256,7 +277,14 @@ def test_synthetic_report_renders_every_indexed_preview_and_master(tmp_path, mon
     (operations / 'synthetic_head_launch.json').write_text(json.dumps({
         'output': str(audit.relative_to(tmp_path)), 'code_capsule_sha256': 'synthetic-capsule',
         'command': ['--replicates', '128']}))
-    report_inputs = {'source_banks': sources, 'allocator_audits': {'ffm': [], 'senseiver': [str(audit)]}}
+    ledger = tmp_path / 'qualification_ledger.json'
+    markdown = tmp_path / 'qualification_ledger.md'; markdown.write_text('# Synthetic qualification ledger\n')
+    ledger.write_text(json.dumps({'schema': 'car_round2_definition_qualification_ledger_v1',
+        'execution_qualification_passed': True, 'markdown_path': str(markdown),
+        'markdown_sha256': report.sha(markdown),
+        'source_receipts': [{'path': str(audit), 'sha256': report.sha(audit)}]}))
+    report_inputs = {'source_banks': sources, 'allocator_audits': {'ffm': [], 'senseiver': [str(audit)]},
+                     'definition_qualification_ledger': str(ledger)}
     output = tmp_path / 'report'
     report.produce(report_inputs, tmp_path, output)
     assert (output / 'report.md').is_file()
@@ -265,9 +293,14 @@ def test_synthetic_report_renders_every_indexed_preview_and_master(tmp_path, mon
     assert '<table>' in rendered_html and '<th>Field</th>' in rendered_html
     assert 'Analytic gradient MSE</th>' in rendered_html
     assert '128 saved-dispatch draws' in rendered_html and 'lagged_gradient_cost' in rendered_html
+    assert 'qualification/ledger.md' in rendered_html and 'pre-learning qualification' in rendered_html
+    assert (output / 'qualification/ledger.json').read_bytes() == ledger.read_bytes()
+    assert (output / 'qualification/ledger.md').read_bytes() == markdown.read_bytes()
     assert '</head><body><h1' in rendered_html and rendered_html.endswith('</body></html>')
     receipt = json.loads((output / 'report_receipt.json').read_text())
     assert receipt['report_inputs_sha256'] == report.sha(output / 'report_inputs.json')
+    assert receipt['definition_qualification_ledger_sha256'] == report.sha(ledger)
+    assert receipt['definition_qualification_markdown_sha256'] == report.sha(markdown)
     assert receipt['script_sha256'] == report.sha(ROOT / 'scripts/analysis/report_car_round2.py')
     assert json.loads((output / 'report_inputs.json').read_text()) == report_inputs
     assert len(list((output / 'figures').glob('*.png'))) == 8

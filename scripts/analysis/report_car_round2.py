@@ -8,6 +8,8 @@ and split (train, validation) to six epoch-keyed assessment JSON paths;
 to paths; `allocation_disposition` names its JSON and `allocator_audits` maps
 families to lists of audit receipt paths (empty when none were run). Each
 source bank directory contains its native receipt and matched saved rows.
+`definition_qualification_ledger` names the source-bound definition/code/task
+and completed execution-qualification ledger, distinct from mature results.
 """
 from __future__ import annotations
 
@@ -112,6 +114,31 @@ def route_label(value, reason='incomplete costs'):
 
 def cost_hours(value):
     return 'unavailable' if value is None else f'{value / 3600:.4g} h'
+
+
+def qualification_ledger_lines(inputs, campaign, output):
+    path = inputs.get('definition_qualification_ledger')
+    if not path:
+        raise ValueError('source-bound definition and qualification ledger required')
+    ledger = read(campaign / path, campaign, 'car_round2_definition_qualification_ledger_v1')
+    if ledger.get('execution_qualification_passed') is not True:
+        raise ValueError('ledger must identify passed execution qualification')
+    markdown = inside(campaign / ledger['markdown_path'], campaign)
+    if sha(markdown) != ledger['markdown_sha256']:
+        raise ValueError('definition and qualification ledger Markdown changed')
+    sources = ledger.get('source_receipts')
+    if not isinstance(sources, list) or not sources:
+        raise ValueError('qualification ledger source evidence required')
+    seen = set()
+    for ref in sources:
+        source = inside(campaign / ref['path'], campaign)
+        if source in seen or sha(source) != ref['sha256']:
+            raise ValueError('qualification ledger source changed or duplicated')
+        seen.add(source)
+    lines = ['## Definition and execution qualification', '',
+             '[Definition/code/task and point-versus-law qualification ledger](qualification/ledger.md), with [structured evidence](qualification/ledger.json), records the frozen source identities, fieldwise fidelity references, mathematical definitions, code correspondence and completed execution checks.',
+             'The ledger records pre-learning qualification. Native mature fidelity and adoption are decided from the matched final results below.', '']
+    return lines, inside(campaign / path, campaign), markdown
 
 
 def allocation_audit_table(audit, launch=None):
@@ -466,10 +493,14 @@ def produce(inputs, campaign, output):
     import matplotlib.pyplot as plt
     import numpy as np
 
+    ledger_lines, ledger_path, ledger_markdown = qualification_ledger_lines(inputs, campaign, output)
     docs, histories, decisions, costs, banks, allocation = validate_inputs(inputs, campaign)
     if output.exists() or campaign not in output.parents:
         raise ValueError('report output must be a new campaign-owned directory')
     output.mkdir(parents=True)
+    qualification = output / 'qualification'; qualification.mkdir()
+    (qualification / 'ledger.json').write_bytes(ledger_path.read_bytes())
+    (qualification / 'ledger.md').write_bytes(ledger_markdown.read_bytes())
     inputs_path = output / 'report_inputs.json'
     inputs_path.write_text(json.dumps(inputs, indent=2, allow_nan=False) + '\n')
     figures = output / 'figures'; figures.mkdir()
@@ -596,6 +627,7 @@ def produce(inputs, campaign, output):
     allocation_verdict = ('adopt' if all(value is True for value in allocation_states) else
                           'reject' if any(value is False for value in allocation_states) else 'unavailable')
     lines.extend([f'Two-family nonuniform allocation decision: **{allocation_verdict}**. Family-specific rechecks above retain their own evidence and do not change the recorded training recipe.', ''])
+    lines.extend(ledger_lines)
     lines.extend(['The selected amplitude and operational method order were frozen on TRAIN. Raw amplitude 1 remains a separate diagnostic; neither VALIDATION nor the reserved task chooses a new amplitude or checkpoint.',
                   'Both learner comparisons use the same source-specific selected bank, observer and fidelity target. These integrated comparisons do not isolate the effects of bank selection, learner parameterization and sampling policy.', '',
                   '## Fidelity and numerical contract', '',
@@ -638,6 +670,8 @@ def produce(inputs, campaign, output):
         'start_unix': start, 'end_unix': end, 'wall_seconds': end - start, 'cpu_seconds': time.process_time() - cpu,
         'scope': 'independent CPU-only report rendering; not included in the preceding cost reconciliation',
         'report_sha256': sha(output / 'report.md'), 'html_sha256': sha(output / 'report.html'),
+        'definition_qualification_ledger_sha256': sha(qualification / 'ledger.json'),
+        'definition_qualification_markdown_sha256': sha(qualification / 'ledger.md'),
         'report_inputs_sha256': sha(inputs_path), 'script_sha256': sha(Path(__file__).resolve())}, indent=2) + '\n')
 
 
