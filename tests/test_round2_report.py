@@ -55,6 +55,37 @@ def test_training_and_deployment_device_provenance_labels_cross_device_and_unkno
     assert 'FFM deployment device comparison: unavailable' in '\n'.join(report.device_provenance_lines(docs, costs))
 
 
+def test_allocator_table_reports_saved_policy_costs_ranges_and_partial_groups():
+    report = load()
+    policies = {name: {'gradient_mse': mse, 'full_estimator_seconds': seconds,
+                       'mse_cost': mse * seconds, 'descriptive_mse_cost_p05_p95': [1., 3.],
+                       'pair_probabilities': [.25, .75], 'maximum_importance_weight': 2.}
+                for name, mse, seconds in [('uniform', 1., 2.), ('c8_priorities', 2., 2.),
+                                           ('lagged_gradient_cost', 1.5, 2.)]}
+    group = {'group_ids': ['first', 'second'], 'families': {'scale': {'max_abs': .01, 'relative_l2': .02,
+             'tolerance_mismatch_count': 0, 'elements': 5, 'finite_direct': 5, 'finite_weighted': 5, 'finite_pairs': 5}}}
+    audit = {'policies': policies, 'oracle_diagnostics': [group, {**group, 'stratum': 'self'}],
+             'actual_head_parameters': 5, 'prior_research_seconds': 100.,
+             'audit_through_measurement_seconds': 50., 'save_margin_seconds': 10., 'amortization_updates': 12000}
+    text = '\n'.join(report.allocation_audit_table(audit, {'command': ['--replicates', '128']}))
+    assert '| lagged_gradient_cost | 1.5 | 2 | 3 | 1.5 | 1–3 | 0.25–0.75 | 2 |' in text
+    assert '128 saved-dispatch draws' in text and 'not confidence intervals' in text
+    assert 'Oracle group sizes: [2]' in text and 'residual-head parameters: 5' in text
+    assert '(prior research 100 s + audit through measurement 50 s + safe-save allowance 10 s) / 12000' in text
+    assert 'unavailable saved-dispatch draws' in '\n'.join(report.allocation_audit_table({}))
+
+
+def test_allocator_table_marks_missing_and_invalid_oracle_metrics_unavailable():
+    report = load()
+    audit = {'oracle_diagnostics': [{'group_ids': ['sample'], 'families': {'scale': {
+        'max_abs': True, 'relative_l2': float('nan'), 'elements': 4, 'finite_direct': 4}}}]}
+    text = '\n'.join(report.allocation_audit_table(audit))
+    assert 'coverage: unavailable' in text
+    assert 'maximum tolerance mismatch count: unavailable' in text
+    assert 'worst absolute error: unavailable' in text
+    assert 'worst relative L2 error: unavailable' in text
+
+
 def test_adjacent_blocks_do_not_bridge_missing_frames_or_trajectories():
     report = load()
     ids = [f'first:{i}' for i in range(12)] + ['first:15', 'second:2']
@@ -215,18 +246,30 @@ def test_synthetic_report_renders_every_indexed_preview_and_master(tmp_path, mon
         path = tmp_path / family; path.mkdir()
         (path / 'receipt.json').write_text(json.dumps({'field_order': ['T', 'CO']}))
         sources[family] = str(path)
+    audit = tmp_path / 'artifacts/allocation/synthetic_head/audit.json'
+    audit.parent.mkdir(parents=True)
+    audit.write_text(json.dumps({'schema': 'car_round2_allocator_job_v1', 'status': 'completed',
+        'code_capsule_sha256': 'synthetic-capsule', 'gradient_cost_uniform_ratio': 1.5,
+        'policies': {'uniform': {'gradient_mse': 1., 'full_estimator_seconds': 2., 'mse_cost': 2.},
+                     'lagged_gradient_cost': {'gradient_mse': 1.5, 'full_estimator_seconds': 2., 'mse_cost': 3.}}}))
+    operations = tmp_path / 'operations'; operations.mkdir()
+    (operations / 'synthetic_head_launch.json').write_text(json.dumps({
+        'output': str(audit.relative_to(tmp_path)), 'code_capsule_sha256': 'synthetic-capsule',
+        'command': ['--replicates', '128']}))
+    report_inputs = {'source_banks': sources, 'allocator_audits': {'ffm': [], 'senseiver': [str(audit)]}}
     output = tmp_path / 'report'
-    report.produce({'source_banks': sources, 'allocator_audits': {'ffm': [], 'senseiver': []}}, tmp_path, output)
+    report.produce(report_inputs, tmp_path, output)
     assert (output / 'report.md').is_file()
     assert (output / 'report.html').is_file()
     rendered_html = (output / 'report.html').read_text()
     assert '<table>' in rendered_html and '<th>Field</th>' in rendered_html
+    assert 'Analytic gradient MSE</th>' in rendered_html
+    assert '128 saved-dispatch draws' in rendered_html and 'lagged_gradient_cost' in rendered_html
     assert '</head><body><h1' in rendered_html and rendered_html.endswith('</body></html>')
     receipt = json.loads((output / 'report_receipt.json').read_text())
     assert receipt['report_inputs_sha256'] == report.sha(output / 'report_inputs.json')
     assert receipt['script_sha256'] == report.sha(ROOT / 'scripts/analysis/report_car_round2.py')
-    assert json.loads((output / 'report_inputs.json').read_text()) == {
-        'source_banks': sources, 'allocator_audits': {'ffm': [], 'senseiver': []}}
+    assert json.loads((output / 'report_inputs.json').read_text()) == report_inputs
     assert len(list((output / 'figures').glob('*.png'))) == 8
     assert len(list((output / 'figures').glob('*.pdf'))) == 8
     assert json.loads((output / 'paired_condition_blocks.json').read_text())['ffm']['blocks'][0]['count'] == 1

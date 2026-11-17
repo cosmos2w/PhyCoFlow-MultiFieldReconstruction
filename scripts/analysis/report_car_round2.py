@@ -114,6 +114,49 @@ def cost_hours(value):
     return 'unavailable' if value is None else f'{value / 3600:.4g} h'
 
 
+def allocation_audit_table(audit, launch=None):
+    """Summarize the saved head-gradient audit without adding model evaluations."""
+    def number(value):
+        return f'{value:.6g}' if isinstance(value, (float, int)) and not isinstance(value, bool) and math.isfinite(value) else 'unavailable'
+    policies = audit.get('policies') or {}
+    baseline = policies.get('uniform', {}).get('mse_cost')
+    lines = ['| Policy | Analytic gradient MSE | Full estimator seconds | MSE × cost | Relative to uniform | Descriptive p05–p95 | Pair probability min–max | Max importance weight |',
+             '| --- | ---: | ---: | ---: | ---: | --- | --- | ---: |']
+    for label in ('uniform', 'c8_priorities', 'lagged_gradient_cost'):
+        row = policies.get(label, {})
+        interval = row.get('descriptive_mse_cost_p05_p95') or []
+        probs = row.get('pair_probabilities') or []
+        value = row.get('mse_cost')
+        ratio = value / baseline if isinstance(value, (int, float)) and isinstance(baseline, (int, float)) and baseline > 0 else None
+        spread = f'{number(interval[0])}–{number(interval[1])}' if len(interval) == 2 else 'unavailable'
+        tails = f'{number(min(probs))}–{number(max(probs))}' if probs else 'unavailable'
+        lines.append(f'| {label} | {number(row.get("gradient_mse"))} | {number(row.get("full_estimator_seconds"))} | {number(value)} | {number(ratio)} | {spread} | {tails} | {number(row.get("maximum_importance_weight"))} |')
+    command = (launch or {}).get('command', [])
+    count = command[command.index('--replicates') + 1] if '--replicates' in command and command.index('--replicates') + 1 < len(command) else 'unavailable'
+    lines.extend(['', f'Analytic MSE is the expected query-estimator squared error from fixed Gram matrices, averaged over TRAIN condition-group sample fractions for concatenated Scale/Shape residual-head gradients. It is not minibatch-condition or final ConFIG-direction variance. The {count} saved-dispatch draws provide descriptive p05–p95 ranges, not confidence intervals or independent training runs. Full estimator time charges State, fidelity, all represented families and enumerated expanded leaves.',
+                  f'Provisional research amortization is (prior research {number(audit.get("prior_research_seconds"))} s + audit through measurement {number(audit.get("audit_through_measurement_seconds"))} s + safe-save allowance {number(audit.get("save_margin_seconds"))} s) / {audit.get("amortization_updates", "unavailable")} updates. This is not deployment latency; final actual-overhead reconciliation is a separate check.'])
+    oracle = audit.get('oracle_diagnostics') or []
+    if oracle:
+        groups = {tuple(item.get('group_ids', [])) for item in oracle}
+        sizes = sorted(len(group) for group in groups)
+        families = [entry for item in oracle for entry in item.get('families', {}).values()]
+        def complete_values(key):
+            values = [entry.get(key) for entry in families]
+            return values if values and all(item.get('families') for item in oracle) and all(isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) for x in values) else None
+        abs_values, rel_values = complete_values('max_abs'), complete_values('relative_l2')
+        mismatch_values = complete_values('tolerance_mismatch_count')
+        worst_abs = max(abs_values) if abs_values else None
+        worst_rel = max(rel_values) if rel_values else None
+        mismatches = max(mismatch_values) if mismatch_values else None
+        keys = ('elements', 'finite_direct', 'finite_weighted', 'finite_pairs')
+        coverage = (sorted({tuple(entry[key] for key in keys) for entry in families}, key=str)
+                    if all(complete_values(key) for key in keys) else 'unavailable')
+        lines.append(f'Oracle group sizes: {sizes}; residual-head parameters: {audit.get("actual_head_parameters", "unavailable")}; (elements, finite direct, finite weighted, finite pair) coverage: {coverage}; maximum tolerance mismatch count: {number(mismatches)}; worst absolute error: {number(worst_abs)}; worst relative L2 error: {number(worst_rel)}.')
+    else:
+        lines.append('Oracle group sizes, parameter coverage and errors: unavailable.')
+    return lines
+
+
 def device_provenance_lines(docs, costs):
     lines = ['## Device provenance', '']
     for family in ('ffm', 'senseiver'):
@@ -542,6 +585,12 @@ def produce(inputs, campaign, output):
         for path in inputs['allocator_audits'][family]:
             audit = read(path, campaign, 'car_round2_allocator_job_v1')
             lines.append(f"{family.upper()} allocator audit: gradient MSE-times-cost ratio {audit.get('gradient_cost_uniform_ratio')}, provisional overhead fraction {audit.get('overhead_fraction')}, one-path qualification {audit.get('qualified_one_path')}; final status follows the complete cost reconciliation.")
+            launch_path = campaign / 'operations' / (Path(path).parent.name + '_launch.json')
+            launch = read(launch_path, campaign) if launch_path.is_file() else None
+            if launch and (inside(campaign / launch.get('output', ''), campaign) != inside(path, campaign)
+                           or launch.get('code_capsule_sha256') != audit.get('code_capsule_sha256')):
+                raise ValueError('allocator dispatch does not bind this audit and capsule')
+            lines.extend(['', *allocation_audit_table(audit, launch), ''])
         lines.append('')
     allocation_states = [decisions[family]['allocation_decision']['adopt'] for family in ('ffm', 'senseiver')]
     allocation_verdict = ('adopt' if all(value is True for value in allocation_states) else
