@@ -28,6 +28,8 @@ The most recent source-backed gap is 3903.385 seconds (65.056 minutes) from Sens
 
 ## Ready-task and blocking rules
 
+After GPU0 finishes the remaining eligible FFM generation stages, it can have a genuine idle tail while GPU1 completes FFM deployment profiling. All independent TRAIN banks are then already generated, compared deployment functions retain their common profiling device, and VALIDATION is still prohibited until all 24 TRAIN groups and global nominations/priorities are frozen. The exact recovery condition is successful publication and validation of that global TRAIN-choice barrier, which immediately enables the two-device VALIDATION pipelines. Do not create extra calls merely to occupy the device or claim that this required selection barrier can be removed.
+
 | Obligation | Genuine inputs or blocker | Resume or dispatch condition |
 | --- | --- | --- |
 | Source qualification | Correct source-specific final bank, common fit and production code | Those immutable bindings validate and a permitted device is free; no other-model wait |

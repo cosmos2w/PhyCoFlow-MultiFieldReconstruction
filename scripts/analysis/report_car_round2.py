@@ -344,6 +344,39 @@ def adjacent_blocks(ids, values):
     return blocks
 
 
+def reserved_task_block_summary(ids, first, second, normalizer):
+    """Summarize saved paired task scores without treating frames as independent."""
+    if (not isinstance(normalizer, (int, float)) or isinstance(normalizer, bool)
+            or not math.isfinite(normalizer) or normalizer <= 0
+            or not isinstance(first, list) or not isinstance(second, list)
+            or len(first) != len(ids) or len(second) != len(ids) or not ids):
+        return None
+    if any(not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value)
+           for value in first + second):
+        return None
+    differences = [(float(b) - float(a)) / normalizer for a, b in zip(first, second, strict=True)]
+    blocks = adjacent_blocks(ids, differences)
+    block_means = [block['mean'] for block in blocks]
+    return {'per_condition_difference': differences, 'mean_difference': sum(differences) / len(differences),
+            'block_mean_min': min(block_means), 'block_mean_max': max(block_means), 'blocks': blocks}
+
+
+def reserved_task_value_summary(ids, values, *, members):
+    if not isinstance(values, list) or len(values) != len(ids) or not ids:
+        return None
+    if members:
+        if any(not isinstance(row, list) or len(row) != members for row in values):
+            return None
+        flattened = [value for row in values for value in row]
+    else:
+        flattened = values
+    if any(not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value) for value in flattened):
+        return None
+    per_condition = [sum(row) / members for row in values] if members else [float(value) for value in values]
+    return {'per_condition': per_condition, 'min': min(per_condition), 'max': max(per_condition),
+            'mean': sum(per_condition) / len(per_condition)}
+
+
 def training_series(history):
     result = {}
     for family, _label in TRAINING_FAMILIES:
@@ -564,6 +597,33 @@ def produce(inputs, campaign, output):
         ax.axhline(0, color='black', lw=.5); ax.plot(range(len(blocks)), [row['mean'] for row in blocks], '.', ms=3)
         ax.set_title(f'{family.upper()}: residual minus full model'); ax.set_xlabel('Consecutive-frame block'); ax.set_ylabel('State score difference')
         paired_notes.append(f'{family.upper()}: {len(differences)} matched conditions, mean difference {np.mean(differences):.6g}, {len(blocks)} consecutive-frame blocks (up to 10 frames).')
+        task_full, task_residual = a['reserved_task'], b['reserved_task']
+        matched_task = (a['sample_ids'] == b['sample_ids'] and task_full.get('task_sha256') is not None
+                        and task_full.get('task_sha256') == task_residual.get('task_sha256')
+                        and task_full.get('train_source_normalizer') == task_residual.get('train_source_normalizer'))
+        normalizer = task_full.get('train_source_normalizer') if matched_task else None
+        task_series = {'source_minus_full': (task_full.get('selected_per_condition'), task_full.get('source_per_condition')),
+                       'source_minus_residual': (task_residual.get('selected_per_condition'), task_residual.get('source_per_condition')),
+                       'residual_minus_full': (task_full.get('selected_per_condition'), task_residual.get('selected_per_condition'))}
+        block_records[family]['reserved_task'] = {}
+        for label, (first, second) in task_series.items():
+            summary = reserved_task_block_summary(a['sample_ids'], first, second, normalizer)
+            block_records[family]['reserved_task'][label] = summary
+            if summary is None:
+                paired_notes.append(f'{family.upper()} reserved-task {label}: paired distribution unavailable.')
+            else:
+                paired_notes.append(f'{family.upper()} reserved-task {label}: mean paired score difference {summary["mean_difference"]:.6g}; descriptive range of {len(summary["blocks"])} consecutive-frame block means {summary["block_mean_min"]:.6g} to {summary["block_mean_max"]:.6g} in TRAIN SOURCE-normalized score units (not a confidence interval).')
+        value_series = {'truth': (task_full.get('truth'), 0), 'source_member_mean': (task_full.get('source_member_values'), 4 if family == 'ffm' else 1),
+                        'full_member_mean': (task_full.get('selected_member_values'), 4 if family == 'ffm' else 1),
+                        'residual_member_mean': (task_residual.get('selected_member_values'), 4 if family == 'ffm' else 1)}
+        block_records[family]['reserved_task_values'] = {}
+        for label, (values, members) in value_series.items():
+            summary = reserved_task_value_summary(a['sample_ids'], values, members=members) if matched_task else None
+            block_records[family]['reserved_task_values'][label] = summary
+            if summary is None:
+                paired_notes.append(f'{family.upper()} reserved-task {label} values: unavailable.')
+            else:
+                paired_notes.append(f'{family.upper()} reserved-task {label}: per-condition mean {summary["mean"]:.6g}, range {summary["min"]:.6g} to {summary["max"]:.6g} in normalized covariance units; member means are formed within each condition.')
     save_figure(fig, figures, 'paired_blocks')
     (output / 'paired_condition_blocks.json').write_text(json.dumps(block_records, indent=2, allow_nan=False) + '\n')
     fig, axes = plt.subplots(2, 3, figsize=(13, 7), constrained_layout=True)

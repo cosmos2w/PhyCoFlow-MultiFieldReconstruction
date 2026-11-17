@@ -116,6 +116,19 @@ def test_adjacent_blocks_do_not_bridge_missing_frames_or_trajectories():
     assert blocks[0]['mean'] == 4.5
 
 
+def test_reserved_task_summaries_pair_conditions_and_do_not_pool_members():
+    report = load()
+    ids = ['traj:2', 'traj:3', 'traj:8']
+    scores = report.reserved_task_block_summary(ids, [1., 2., 4.], [2., 4., 2.], 2.)
+    assert scores['per_condition_difference'] == [.5, 1., -1.]
+    assert scores['block_mean_min'] == -1. and scores['block_mean_max'] == .75
+    assert report.reserved_task_block_summary(ids, [1.], [2.], 2.) is None
+    assert report.reserved_task_block_summary(ids, [1., 2., 3.], [2., 3., 4.], None) is None
+    values = report.reserved_task_value_summary(ids, [[1., 3.], [4., 6.], [7., 9.]], members=2)
+    assert values['per_condition'] == [2., 5., 8.] and values['mean'] == 5.
+    assert report.reserved_task_value_summary(ids, [[1.], [2.], [3.]], members=2) is None
+
+
 def test_report_rejects_missing_four_mature_runs(tmp_path):
     report = load()
     with pytest.raises(ValueError, match='four named mature runs'):
@@ -217,6 +230,7 @@ def test_native_plot_has_per_field_physical_error_annotations(tmp_path):
 
 @pytest.mark.parametrize('complete_costs', [True, False])
 def test_synthetic_report_renders_every_indexed_preview_and_master(tmp_path, monkeypatch, complete_costs):
+    import copy
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
@@ -242,6 +256,13 @@ def test_synthetic_report_renders_every_indexed_preview_and_master(tmp_path, mon
                for label in ('raw', 'selected')}}
     docs = {arm: {split: {epoch: (tmp_path / 'unused.json', doc) for epoch in report.EPOCHS}
                   for split in ('train', 'validation')} for arm in report.ARMS}
+    for arm in report.ARMS:
+        final = copy.deepcopy(doc)
+        members = 4 if arm.startswith('FFM_') else 1
+        final['reserved_task'].update(task_sha256='same-task', train_source_normalizer=2.,
+            source_per_condition=[2.], selected_per_condition=[1.], truth=[.5],
+            source_member_values=[[1.] * members], selected_member_values=[[.5] * members])
+        docs[arm]['validation'][1000] = (tmp_path / 'unused.json', final)
     decisions = {family: {'deployment_disposition': {'operational_recommendation': 'retain SOURCE/C8',
                                                      'opt_in_function': None},
                           'quality_route': False if complete_costs else None,
@@ -293,6 +314,8 @@ def test_synthetic_report_renders_every_indexed_preview_and_master(tmp_path, mon
     assert '<table>' in rendered_html and '<th>Field</th>' in rendered_html
     assert 'Analytic gradient MSE</th>' in rendered_html
     assert '128 saved-dispatch draws' in rendered_html and 'lagged_gradient_cost' in rendered_html
+    assert 'reserved-task source_minus_full' in rendered_html and 'not a confidence interval' in rendered_html
+    assert 'reserved-task full_member_mean' in rendered_html
     assert 'qualification/ledger.md' in rendered_html and 'pre-learning qualification' in rendered_html
     assert (output / 'qualification/ledger.json').read_bytes() == ledger.read_bytes()
     assert (output / 'qualification/ledger.md').read_bytes() == markdown.read_bytes()
