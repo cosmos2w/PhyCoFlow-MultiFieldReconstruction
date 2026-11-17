@@ -43,8 +43,8 @@ def test_source_panel_guard_uses_producer_tensor_digest():
     digest_imports = [node for node in ast.walk(main) if isinstance(node, ast.ImportFrom)
                       and any(alias.name == '_digest' for alias in node.names)]
     assert len(digest_imports) == 1
-    scope = {}
-    exec(compile(ast.Module(body=digest_imports, type_ignores=[]), str(path), 'exec'), scope)
+    scope = {alias.asname or alias.name: getattr(importlib.import_module(node.module), alias.name)
+             for node in digest_imports for alias in node.names}
     assert scope['_digest'] is producer_digest
     guard = next(node.test for node in ast.walk(main) if isinstance(node, ast.If)
                  and "panel['parameter_buffer_sha256']" in ast.unparse(node.test))
