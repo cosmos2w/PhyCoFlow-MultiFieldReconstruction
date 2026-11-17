@@ -309,12 +309,12 @@ def deployment_memory_table(docs):
 
 
 def produce(inputs, campaign, output):
+    start, cpu = time.time(), time.process_time()
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
     import numpy as np
 
-    start, cpu = time.time(), time.process_time()
     docs, histories, decisions, costs, banks, allocation = validate_inputs(inputs, campaign)
     if output.exists() or campaign not in output.parents:
         raise ValueError('report output must be a new campaign-owned directory')
@@ -421,6 +421,9 @@ def produce(inputs, campaign, output):
         lines.append(f"{family.upper()}: operational choice is **{disposition['operational_recommendation']}**; opt-in function is {disposition['opt_in_function']}. Quality route: {route_label(decision['quality_route'])}; learning-efficiency route: {route_label(decision['learning_efficiency_route'])}; comparative deployment route: {route_label(decision['deployment_comparison_route'])}.")
         final_allocation = decision['allocation_decision']
         lines.append(f"{family.upper()} bank selected {bank['selected_count']} of {bank['candidate_count']} candidates; historical training allocation mode is {allocation['mode']}; final allocation decision is {final_allocation['status']} (adopt: {final_allocation['adopt']}). Actual final accounting is {cost['allocator_final']['status']} (qualified: {cost['allocator_final'].get('qualified')}).")
+        lines.append(f"{family.upper()} selected-bank decision: retain the documented source-specific target for task-conditioned use. This comparison does not qualify an isolated learned-selection advantage or complete-law sufficiency.")
+        for arm, verdict in disposition.get('decisions', {}).items():
+            lines.append(f"{arm} learned-output eligibility: {verdict['task_useful']}; SOURCE-reference deployment route: {route_label(verdict['source_deployment_route'])}; default operational eligibility: {route_label(verdict['operational_eligible'])}.")
         if cost.get('complete') is not True:
             lines.append(f"{family.upper()} cost evidence is incomplete: {'; '.join(cost.get('missing', [])) or 'required cost evidence missing'}. Measured scientific and latency results remain reportable; cost-dependent adoption is unavailable.")
         for path in inputs['allocator_audits'][family]:
@@ -435,6 +438,7 @@ def produce(inputs, campaign, output):
                   'Both learner comparisons use the same source-specific selected bank, observer and fidelity target. These integrated comparisons do not isolate the effects of bank selection, learner parameterization and sampling policy.', '',
                   '## Fidelity and numerical contract', '',
                   'FFM learning constrains the signed ensemble-mean risk increase with a fieldwise absolute allowance equal to 10% of TRAIN SOURCE member MSE; it does not constrain a mean-risk ratio. The legacy member-MSE gate remains a separate default-deployment requirement. Senseiver is evaluated as a genuine J1 point predictor and retains its native sensor predictions; its residual correction is zero at observed field/site IDs.',
+                  'FFM qualification concerns the stated mean-risk contract and measured finite conditional-member observables on this cohort; passing those gates does not establish calibrated complete conditional laws. Native fidelity is reported separately for raw amplitude 1 and the TRAIN-nominated function, including a possible SOURCE fallback.',
                   'Before formal admission, the Shape implementation was corrected so tied projection gradients do not depend on unrelated diagrams in a padded batch. Stable sorting and pointwise two-component projection arithmetic preserve the mathematical distance while choosing a consistent tie subgradient; floating values can differ by roundoff. Earlier allocation failures and pre-correction execution qualifications are preserved as historical attempts. Affected coefficient fitting, optimizer probes, bank selection, final-target execution qualifications and complete allocation audits were revisited on the corrected path. Exact saved-panel comparisons verified unchanged SOURCE outputs. These correctness checks do not establish a learned repair benefit.', '',
                   '## Figure index', ''])
     for name, caption in captions.items():
@@ -449,7 +453,7 @@ def produce(inputs, campaign, output):
     for arm in ARMS:
         doc = docs[arm]['validation'][1000][1]
         raw, nominee = selected(doc, 1.), selected(doc)
-        lines.append(f"{arm}: TRAIN-nominated amplitude {doc['selected_alpha']}; raw State/Scale/Shape/event {raw['scores']}; nominated State/Scale/Shape/event {nominee['scores']}; primary field/sensor gate {nominee['fidelity']['primary_pass']}, legacy member gate {nominee['fidelity'].get('legacy_member_pass', 'not applicable')}; reserved-task normalized gain {doc['reserved_task']['normalized_improvement']:.6g}.")
+        lines.append(f"{arm}: TRAIN-nominated amplitude {doc['selected_alpha']}; raw State/Scale/Shape/event {raw['scores']}; nominated State/Scale/Shape/event {nominee['scores']}; raw primary field/sensor gate {raw['fidelity']['primary_pass']}, nominated primary field/sensor gate {nominee['fidelity']['primary_pass']}; raw legacy member gate {raw['fidelity'].get('legacy_member_pass', 'not applicable')}, nominated legacy member gate {nominee['fidelity'].get('legacy_member_pass', 'not applicable')}; reserved-task normalized gain {doc['reserved_task']['normalized_improvement']:.6g}.")
         family = 'ffm' if arm.startswith('FFM') else 'senseiver'
         item = costs[family]['arms'][arm]
         lines.append(f"{arm} new research cost: complete serial {cost_hours(item.get('serial_cost_seconds'))}; recorded occupied GPU {cost_hours(item.get('gpu_seconds'))}, independent CPU {cost_hours(item.get('independent_cpu_seconds'))}, failed attempts {cost_hours(item.get('failed_attempt_seconds'))}, planned pause segments {cost_hours(item.get('paused_attempt_seconds'))}.")
