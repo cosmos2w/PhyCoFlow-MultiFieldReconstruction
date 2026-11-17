@@ -279,7 +279,10 @@ def reconcile(*, campaign, ledger, manifest, family, checkpoint_loader=_default_
     for token in sorted(set(by_token)-seen_tokens):
         missing.append(f'closed GPU lease {token}: no allocation and receipt')
     cpu_pending = []
-    for job in manifest.get('cpu_jobs',[]):
+    cpu_jobs = manifest.get('cpu_jobs', [])
+    registered_receipts = [str(Path(job['receipt']['path']).resolve()) for job in cpu_jobs if 'receipt' in job]
+    unplaced_sources = set()
+    for job in cpu_jobs:
         identifier = job.get('id')
         if not identifier or identifier in by_id or any(x['id']==identifier for x in cpu_pending):
             raise ValueError('job IDs must be unique')
@@ -288,7 +291,29 @@ def reconcile(*, campaign, ledger, manifest, family, checkpoint_loader=_default_
         except (KeyError, FileNotFoundError) as exc:
             missing.append(f'CPU job {identifier}: receipt missing: {exc}')
             continue
-        start,end = _interval(receipt)
+        unplaced = receipt.get('schema') == 'car_round2_unplaced_cpu_duration_v1'
+        if unplaced:
+            if job.get('independent') is not True or job.get('parent_gpu_token') or job.get('parent_cpu_job') or 'active_wall_field' in job:
+                raise ValueError('unplaced duration requires independent CPU without parent or active timer')
+            source_binding = receipt['source_receipt']
+            source_path = str(Path(source_binding['path']).resolve())
+            if source_path in registered_receipts or source_path in unplaced_sources:
+                raise ValueError('unplaced source registered more than once')
+            source = _bound_file(source_binding, campaign, references)
+            unplaced_sources.add(source_path)
+            start, end = _interval(source)
+            if (receipt.get('envelope_start_unix') != start or receipt.get('envelope_end_unix') != end
+                    or source.get('independent_cpu') is not True or receipt.get('independent_cpu') is not True
+                    or source.get('status') != 'completed' or receipt.get('status') != 'completed'):
+                raise ValueError('unplaced duration source or envelope mismatch')
+            tests = source.get('tests')
+            if not isinstance(tests, list) or not tests or any(t.get('returncode') != 0 or not _number(t.get('wall_seconds')) for t in tests):
+                raise ValueError('unplaced duration requires measured successful test walls')
+            duration = receipt.get('measured_duration_seconds')
+            if not _number(duration) or duration > end-start or not math.isclose(duration, sum(t['wall_seconds'] for t in tests), rel_tol=0., abs_tol=1e-9):
+                raise ValueError('unplaced duration disagrees with source or envelope')
+        else:
+            start,end = _interval(receipt)
         if receipt.get('status') in {'running','created'}:
             raise ValueError('CPU job receipt must be terminal')
         cpu_status = receipt.get('status', 'completed' if receipt.get('returncode', 0) == 0 else 'failed')
@@ -296,6 +321,9 @@ def reconcile(*, campaign, ledger, manifest, family, checkpoint_loader=_default_
                'interval':(start,end),'weights':_weights(job),'parent_gpu_token':job.get('parent_gpu_token'),
                'parent_cpu_job':job.get('parent_cpu_job'),'independent':job.get('independent'),
                'checkpoint_epochs':job.get('checkpoint_epochs',[])}
+        if unplaced:
+            row['active_wall_seconds'] = float(duration)
+            row['active_wall_field'] = 'measured_duration_seconds'
         if (job.get('independent') is True and 'active_wall_field' not in job
                 and ('active_wall_seconds' in receipt or 'controller_active_wall_seconds' in receipt)):
             raise ValueError('independent controller receipt must explicitly select its active wall field')

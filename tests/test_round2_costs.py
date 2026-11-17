@@ -176,3 +176,36 @@ def test_checkpoint_bounds_count_assessment_extra_once():
                   'seconds':7., 'weights':{arm:1.}}
     assert _checkpoint_cost_bounds([controller, assessment], ['assessment'], arm, 60.) == (7.,22.)
     assert _checkpoint_cost_bounds([controller, assessment], ['assessment'], arm, 150.) == (22.,22.)
+
+
+def test_unplaced_measured_test_duration_preserves_bounds_and_rejects_duplicates(tmp_path):
+    from phycoflow_reconstruction.evaluation.round2_costs import _prefix_bounds
+
+    source = _receipt(tmp_path, 'source.json', {'status':'completed', 'independent_cpu':True,
+        'start_unix':10., 'end_unix':110., 'wall_seconds':100.,
+        'tests':[{'returncode':0, 'wall_seconds':2.}, {'returncode':0, 'wall_seconds':3.}]})
+    derived = {'schema':'car_round2_unplaced_cpu_duration_v1', 'status':'completed', 'independent_cpu':True,
+               'source_receipt':source, 'envelope_start_unix':10., 'envelope_end_unix':110.,
+               'measured_duration_seconds':5.}
+    receipt = _receipt(tmp_path, 'derived.json', derived)
+    job = {'id':'unplaced', 'scope':'qualification', 'allocations':{ARMS[0]:1.},
+           'receipt':receipt, 'independent':True}
+    ledger = {'schema':'car_gpu_ledger_v1', 'closed':[], 'active':{}}
+    manifest = {'schema':'car_round2_cost_allocation_v1', 'cpu_jobs':[job]}
+    result = reconcile(campaign=tmp_path, ledger=ledger, manifest=manifest, family='ffm')
+    row = next(row for row in result['allocated_jobs'] if row['id']=='unplaced')
+    assert row['seconds'] == 5.
+    assert _prefix_bounds(row, 60.) == (0., 5.)
+    assert _prefix_bounds(row, 110.) == (5., 5.)
+    duplicate = {**job, 'id':'duplicate', 'receipt':_receipt(tmp_path, 'derived2.json', derived)}
+    with pytest.raises(ValueError, match='source registered more than once'):
+        reconcile(campaign=tmp_path, ledger=ledger, manifest={**manifest, 'cpu_jobs':[job,duplicate]}, family='ffm')
+    parent = {**job, 'id':'parent', 'receipt':source}
+    with pytest.raises(ValueError, match='source registered more than once'):
+        reconcile(campaign=tmp_path, ledger=ledger, manifest={**manifest, 'cpu_jobs':[job,parent]}, family='ffm')
+    for key, value in [('measured_duration_seconds', 101.), ('envelope_start_unix', 11.)]:
+        bad = {**job, 'receipt':_receipt(tmp_path, f'bad-{key}.json', {**derived,key:value})}
+        with pytest.raises(ValueError, match='unplaced duration'):
+            reconcile(campaign=tmp_path, ledger=ledger, manifest={**manifest,'cpu_jobs':[bad]}, family='ffm')
+    with pytest.raises(ValueError, match='independent CPU'):
+        reconcile(campaign=tmp_path, ledger=ledger, manifest={**manifest,'cpu_jobs':[{**job,'independent':False}]}, family='ffm')
