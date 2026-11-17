@@ -41,6 +41,39 @@ def test_ragged_batched_value_and_gradient_matches_scalar(monkeypatch, limit):
         torch.testing.assert_close(a, b, rtol=1e-12, atol=1e-12)
 
 
+@pytest.mark.parametrize("dtype", [torch.float64, torch.float32])
+@pytest.mark.parametrize("seed", [3, 5, 17])
+def test_tied_positive_diagram_gradient_does_not_depend_on_padding(monkeypatch, dtype, seed):
+    monkeypatch.setenv("PHYCOFLOW_TOPOLOGY_BATCHED", "1")
+    monkeypatch.setenv("PHYCOFLOW_TOPOLOGY_DISTANCE_ELEMENTS", "2000000")
+    rng = torch.Generator().manual_seed(seed)
+    parameter = torch.zeros(7, dtype=dtype, requires_grad=True)
+
+    def points(count):
+        birth = torch.randint(-3, 4, (count,), generator=rng).to(dtype)
+        death = birth + torch.randint(1, 4, (count,), generator=rng).to(dtype)
+        return torch.stack((birth, death), dim=-1)
+
+    count = 2 + seed % 9
+    base = points(count)
+    derivative = torch.randn(count, 2, 7, generator=rng, dtype=dtype)
+    left = Diagram(base + derivative @ parameter, torch.zeros(1, dtype=dtype))
+    right = Diagram(points(3 + seed % 7), torch.ones(1, dtype=dtype))
+    other_left = Diagram(points(43), torch.zeros(1, dtype=dtype))
+    other_right = Diagram(points(41), torch.ones(1, dtype=dtype))
+    alone = sliced_diagram_distances([left], [right], normalization=27.0)[0]
+    padded = sliced_diagram_distances(
+        [left, other_left], [right, other_right], normalization=27.0
+    )[0]
+    scalar = sliced_diagram_distance(left, right, normalization=27.0)
+    gradients = [torch.autograd.grad(value, parameter, retain_graph=True)[0]
+                 for value in (alone, padded, scalar)]
+    torch.testing.assert_close(alone, padded, rtol=0, atol=0)
+    torch.testing.assert_close(padded, scalar, rtol=0, atol=0)
+    torch.testing.assert_close(gradients[0], gradients[1], rtol=0, atol=0)
+    torch.testing.assert_close(gradients[1], gradients[2], rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("periodic", [True, False])
 def test_packed_pairing_threads_and_cache_preserve_rows_and_gradients(monkeypatch, periodic):
     x = torch.randn(

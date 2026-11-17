@@ -189,6 +189,16 @@ def cubical_diagrams(
     return result
 
 
+def _project_diagram_points(points, directions):
+    """Use the same arithmetic for every point, independent of padded batch size.
+
+    A matrix product may round a tied projection differently when its enclosing
+    matrix changes shape. At an absolute-value kink that changes the selected
+    subgradient even when the displayed distance is unchanged.
+    """
+    return points[..., :1] * directions[0] + points[..., 1:] * directions[1]
+
+
 def sliced_diagram_distance(
     left: Diagram,
     right: Diagram,
@@ -215,8 +225,12 @@ def sliced_diagram_distance(
     directions = torch.stack((theta.cos(), theta.sin()))
     x_diag = x.mean(-1, keepdim=True).expand(-1, 2)
     y_diag = y.mean(-1, keepdim=True).expand(-1, 2)
-    a = (torch.cat((x, y_diag)) @ directions).sort(dim=0).values
-    b = (torch.cat((y, x_diag)) @ directions).sort(dim=0).values
+    a = _project_diagram_points(torch.cat((x, y_diag)), directions).sort(
+        dim=0, stable=True
+    ).values
+    b = _project_diagram_points(torch.cat((y, x_diag)), directions).sort(
+        dim=0, stable=True
+    ).values
     finite = (a - b).abs().sum(dim=0).mean() / normalization
     essential = (left.essential.sort().values - right.essential.sort().values).abs().sum()
     return finite + essential_weight * essential
@@ -270,14 +284,18 @@ def sliced_diagram_distances(
             arows.append(torch.cat((a.finite, b.finite.mean(-1, keepdim=True).expand(-1, 2))))
             brows.append(torch.cat((b.finite, a.finite.mean(-1, keepdim=True).expand(-1, 2))))
             essentials.append((a.essential.sort().values - b.essential.sort().values).abs().sum())
-        a = torch.nn.utils.rnn.pad_sequence(arows, batch_first=True) @ directions
-        b = torch.nn.utils.rnn.pad_sequence(brows, batch_first=True) @ directions
+        a = _project_diagram_points(
+            torch.nn.utils.rnn.pad_sequence(arows, batch_first=True), directions
+        )
+        b = _project_diagram_points(
+            torch.nn.utils.rnn.pad_sequence(brows, batch_first=True), directions
+        )
         valid = (
             torch.arange(a.shape[1], device=device)[None, :, None]
             < torch.tensor([lengths[i] for i in ids], device=device)[:, None, None]
         )
-        a = a.masked_fill(~valid, float("inf")).sort(dim=1).values
-        b = b.masked_fill(~valid, float("inf")).sort(dim=1).values
+        a = a.masked_fill(~valid, float("inf")).sort(dim=1, stable=True).values
+        b = b.masked_fill(~valid, float("inf")).sort(dim=1, stable=True).values
         delta = a.masked_fill(~valid, 0.0) - b.masked_fill(~valid, 0.0)
         costs = delta.abs().sum(1).mean(1) / normalization + essential_weight * torch.stack(
             essentials
