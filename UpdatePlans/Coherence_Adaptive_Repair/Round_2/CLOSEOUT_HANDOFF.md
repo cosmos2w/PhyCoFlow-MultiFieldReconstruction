@@ -52,9 +52,22 @@ python scripts/analysis/sensitivity_car_round2_costs.py --campaign "$C" --inputs
 
 Run final reconciliation with the current repository code so each allocated GPU job retains its verified closed-lease device UUID. The report discloses observed training UUIDs separately from saved deployment UUIDs, including the intentional FFM cross-device training arrangement. Missing cost scopes do not hide known observed device identities; incomplete coverage remains labelled. Deployment comparisons retain their same-device requirement. Different-device research clocks must not be described as a same-device hardware speedup.
 
-Create a new campaign-owned `car_round2_report_inputs_v1` JSON from the verified terminal evidence: `runs` maps all four arm IDs to run directories; `trajectories` maps each arm and `train`/`validation` to the six epoch-keyed canonical JSON paths above; `decisions`, `costs`, and `bank_decisions` map `ffm`/`senseiver` to their matching JSON paths; `source_banks` maps each family to its completed VALIDATION SOURCE bank directory (not the TRAIN SOURCE directory); `allocation_disposition` is the exact formal-freeze artifact; `allocator_audits` maps each family to a list containing its corrected completed audit receipt path; and `definition_qualification_ledger` names `C/assessment/fidelity_qualification_v1/ledger.json`. The report verifies its 35 source bindings and copies its exact Markdown/JSON into the report-owned `qualification/` directory, preserving working relative links and recording both digests. The ledger remains a pre-learning qualification snapshot; native mature fidelity and adoption must use the final matched evidence. Set `REPORT_INPUTS` to that file and execute:
+Build the report inputs only after both final decisions and cost reconciliations exist. The builder checks the explicit terminal group receipts, their child identities and hashes, all 24 TRAIN groups, both VALIDATION family receipts, and calls the report's full run/checkpoint/nomination validator. It writes immutable input and timed receipt files under the campaign:
 
-Include `cost_sensitivity` mapping `ffm` and `senseiver` to the two conditional sensitivity outputs above. The report verifies each output's cost-reconciliation hash and family, preserves its unchanged-adoption declaration, copies its exact JSON under report-owned `cost_sensitivity/` assets, and displays gate statuses and endpoint difference ranges in seconds separately from decisions. A nonpositive difference passes that cost inequality alone. Record the source bindings and remaining missing evidence even when the result is unavailable.
+```bash
+python scripts/analysis/build_car_round2_report_inputs.py --campaign "$C" \
+  --formal-group "$C/operations/senseiver_formal_uniform_pair_topology_stable_v1.json" \
+  --formal-group "$C/operations/ffm_formal_full_model_group_v1.json" \
+  --formal-group "$C/operations/ffm_formal_residual_repair_group_v1.json" \
+  --train-result "$C/operations/train_checkpoint_successor_v13_result.json" \
+  --validation-result "$C/operations/validation_successor_v11_result.json" \
+  --output "$C/assessment/final_report_inputs_v1.json"
+REPORT_INPUTS="$C/assessment/final_report_inputs_v1.json"
+```
+
+The report verifies the source-bound definition/qualification ledger and copies its exact Markdown/JSON into its `qualification/` directory. That ledger is a pre-learning snapshot; native mature fidelity and adoption use the final matched evidence. Then execute:
+
+The builder includes both conditional cost sensitivity outputs and validates their source bindings. The report copies their exact JSON under report-owned `cost_sensitivity/` assets and displays gate statuses and endpoint difference ranges separately from decisions. A nonpositive difference passes that cost inequality alone. Record the remaining missing evidence even when the result is unavailable.
 
 ```bash
 python scripts/analysis/report_car_round2.py --campaign "$C" --inputs "$REPORT_INPUTS" --output-dir "$C/reports/final_round2_report_v1"

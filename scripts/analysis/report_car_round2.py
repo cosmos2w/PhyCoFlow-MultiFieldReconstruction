@@ -138,9 +138,10 @@ def cost_sensitivity_lines(inputs, campaign, output):
         for source in refs:
             if sha(inside(campaign / source['path'], campaign)) != source['sha256']:
                 raise ValueError('conditional sensitivity source binding changed')
-        directory = output / 'cost_sensitivity'; directory.mkdir(exist_ok=True)
-        asset = directory / f'{family}.json'; asset.write_bytes(path.read_bytes())
-        hashes[family] = sha(asset)
+        if output is not None:
+            directory = output / 'cost_sensitivity'; directory.mkdir(exist_ok=True)
+            asset = directory / f'{family}.json'; asset.write_bytes(path.read_bytes())
+        hashes[family] = sha(path)
         lines.extend([f'### {family.upper()} conditional cost sensitivity', '',
                       f'[Endpoint scenarios and source bindings](cost_sensitivity/{family}.json). These calculations retain the original missing measured-time status and other unresolved evidence; they do not change accounting completeness or adoption decisions.', '',
                       'Each difference is the charged cost minus the allowed cost for that gate; a nonpositive value passes that cost inequality alone.', '',
