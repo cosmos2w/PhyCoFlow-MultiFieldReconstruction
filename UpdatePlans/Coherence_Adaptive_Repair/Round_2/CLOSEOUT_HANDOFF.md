@@ -1,0 +1,41 @@
+# Round 2 final closeout handoff
+
+Use this handoff only after the terminal TRAIN v4 and both VALIDATION v2 successor results report success and all four mature runs have completed. Do not infer an adoption result from launch, progress, or a partial trajectory. `C=cases/turbulent_combustion/runs/coherence_adaptive_repair/round_2` below is the stable campaign alias; activate the project Python environment before running the commands. The updated repository code supplies the offline accounting, final decision, and report logic. The active `5b1ed50bd6e0406c22f28827099038c90685fdbbd50bc93666b3be52c237dd04` scientific capsule and its historical qualification identities remain unchanged.
+
+## Evidence and canonical paths
+
+- Obtain the four literal run directories from the hash-bound child completion receipts in `C/operations/senseiver_formal_uniform_pair_topology_stable_v1.json`, `C/operations/ffm_formal_full_model_group_v1.json`, and `C/operations/ffm_formal_residual_repair_group_v1.json`; check each completion token, status and 12000-update endpoint. Retain each run's complete history, ordered recording definitions, and first/refreshed/final loss plots.
+- `C/operations/train_checkpoint_successor_v4_result.json` must bind all 24 completed TRAIN checkpoint groups. For each arm and epoch `000, 100, 250, 500, 750, 1000`, canonical outputs are `C/assessment/train/<arm>/epoch_<epoch>/nomination.json`, `C/assessment/deployment/<arm>/epoch_<epoch>.json`, and their associated bank and CPU receipts. `C/assessment/train/method_priority_ffm.json` and `C/assessment/train/method_priority_senseiver.json` freeze the complete trajectories and source-specific method order.
+- `C/operations/validation_successor_v2_result.json` and both family terminal receipts must bind the held-out work. Its source banks are `C/assessment/source_validation_ffm_v1` and `C/assessment/source_validation_senseiver_v1`; the six canonical readings per arm are `C/assessment/validation/<arm>/epoch_<epoch>/assessment.json`. They reuse the TRAIN-frozen checkpoint, amplitude, priority, and deployment timing. Reserved-task values are required only at epoch 1000. No TEST access is authorized.
+- Source bank decisions are `C/artifacts/selected_banks/ffm_topology_stable_v1/decision.json` and `C/artifacts/selected_banks/senseiver_topology_stable_v1/decision.json`. Corrected residual audit receipts are `C/artifacts/allocation/ffm_residual_allocator_topology_stable_v1/audit.json` and `C/artifacts/allocation/senseiver_residual_allocator_topology_stable_v1/audit.json`. Original native TRAIN SOURCE banks are `C/assessment/source_train_ffm_v1` and `C/assessment/source_train_senseiver_v1`. Read the allocation-disposition path and its hash from the final formal freeze rather than guessing or copying it.
+
+## Commands after terminal evidence arrives
+
+Set `ARM` to each of the four literal frozen arm IDs and `RUN` to its verified completed run path. Use new descriptive output names and complete independent CPU timers, including imports; preserve failed attempts. Generate one index per arm:
+
+```bash
+unset CAR_CODE_ROOT CAR_REPO_ROOT
+C=cases/turbulent_combustion/runs/coherence_adaptive_repair/round_2
+python scripts/analysis/reconcile_car_round2_costs.py --campaign "$C" index-checkpoints --arm "$ARM" --run "$RUN" --output "$C/operations/checkpoint_clock_${ARM}_final_v1.json"
+```
+
+The cost executor must first produce a new final `car_round2_cost_registry_v1` covering every closed GPU lease, independent CPU job, checkpoint index, assessment job/epoch, failed attempt, and required enclosure; inventory and open-item checks must be explicit. Register controller receipts with `independent: true` and the exact declared `active_wall_field` (`active_wall_seconds`, or `controller_active_wall_seconds` for the validation root coordinator). Record the encompassing controller/group wall only as nonadditive context. Set `REGISTRY` to that final campaign-owned file, then run:
+
+```bash
+python scripts/analysis/assemble_car_round2_cost_manifest.py --campaign "$C" --registry "$REGISTRY" --output "$C/operations/final_cost_allocation_v1.json"
+python scripts/analysis/reconcile_car_round2_costs.py --campaign "$C" reconcile --family ffm --manifest "$C/operations/final_cost_allocation_v1.json" --output "$C/assessment/ffm_final_costs_v1.json"
+python scripts/analysis/reconcile_car_round2_costs.py --campaign "$C" reconcile --family senseiver --manifest "$C/operations/final_cost_allocation_v1.json" --output "$C/assessment/senseiver_final_costs_v1.json"
+python scripts/posttraining/assess_car_round2_checkpoints.py --campaign "$C" decide --family ffm --costs "$C/assessment/ffm_final_costs_v1.json" --output "$C/assessment/ffm_final_decision_v1.json"
+python scripts/posttraining/assess_car_round2_checkpoints.py --campaign "$C" decide --family senseiver --costs "$C/assessment/senseiver_final_costs_v1.json" --output "$C/assessment/senseiver_final_decision_v1.json"
+```
+
+Full serial cost remains measurable when a controller records only aggregate active time. Its position relative to an intermediate checkpoint may be unknown: `checkpoint_cost_bounds_seconds` contains honest lower/upper costs and `checkpoint_cost_seconds` is null when the bounds differ. A 20% efficiency crossing is available only when the bounds settle it; no qualifying crossing is a concrete negative result. Incomplete receipt coverage makes cost-dependent claims unavailable rather than zero.
+
+Create a new campaign-owned `car_round2_report_inputs_v1` JSON from the verified terminal evidence: `runs` maps all four arm IDs to run directories; `trajectories` maps each arm and `train`/`validation` to the six epoch-keyed canonical JSON paths above; `decisions`, `costs`, and `bank_decisions` map `ffm`/`senseiver` to their matching JSON paths; `source_banks` maps each family to its completed VALIDATION SOURCE bank directory (not the TRAIN SOURCE directory); `allocation_disposition` is the exact formal-freeze artifact; and `allocator_audits` maps each family to a list containing its corrected completed audit receipt path. Set `REPORT_INPUTS` to that file and execute:
+
+```bash
+python scripts/analysis/report_car_round2.py --campaign "$C" --inputs "$REPORT_INPUTS" --output-dir "$C/reports/final_round2_report_v1"
+python scripts/analysis/package_car_round2_pdf.py --campaign "$C" --report-dir "$C/reports/final_round2_report_v1" --output-dir "$C/reports/final_round2_pdf_v1"
+```
+
+Verify all report pages, eight figures and all their panels and captions, decoded PNG previews, PDF masters, and relative links after rendering. Register final independent CPU work once; renderer/package group walls and their nested timers are not additional GPU costs. Expose a clearly named review alias under the HOME checkout, verify its DATA2 target and relative assets after linking, then commit/push durable code and user revisions on the active research branch, audit the full outgoing history and verify remote HEAD. Keep generated payloads ignored. Complete final cost and scientific decisions only from actual terminal evidence; the future final registry, completed mature runs, all held-out scores, decisions, and rendered report do not yet exist as established results in this handoff.
