@@ -116,6 +116,47 @@ def cost_hours(value):
     return 'unavailable' if value is None else f'{value / 3600:.4g} h'
 
 
+def cost_sensitivity_lines(inputs, campaign, output):
+    """Present source-bound endpoint analysis separately from adoption decisions."""
+    paths = inputs.get('cost_sensitivity', {})
+    if not isinstance(paths, dict) or set(paths) - {'ffm', 'senseiver'}:
+        raise ValueError('cost sensitivity must map known families to evidence')
+    lines, hashes = [], {}
+    for family, value in sorted(paths.items()):
+        path = inside(campaign / value, campaign)
+        doc = read(path, campaign, 'car_round2_cost_sensitivity_v1')
+        cost = inside(campaign / inputs['costs'][family], campaign)
+        ref = doc.get('source_bindings', {}).get('cost_reconciliation', {})
+        if (doc.get('family') != family or doc.get('conditional') is not True
+                or doc.get('adoption_unchanged') is not True
+                or inside(campaign / ref.get('path', ''), campaign) != cost
+                or ref.get('sha256') != sha(cost)):
+            raise ValueError('conditional sensitivity cost identity differs')
+        bindings = doc['source_bindings']
+        refs = [value for value in bindings.values() if isinstance(value, dict) and 'path' in value]
+        refs.extend(bindings.get('checkpoint_indexes', {}).values())
+        for source in refs:
+            if sha(inside(campaign / source['path'], campaign)) != source['sha256']:
+                raise ValueError('conditional sensitivity source binding changed')
+        directory = output / 'cost_sensitivity'; directory.mkdir(exist_ok=True)
+        asset = directory / f'{family}.json'; asset.write_bytes(path.read_bytes())
+        hashes[family] = sha(asset)
+        lines.extend([f'### {family.upper()} conditional cost sensitivity', '',
+                      f'[Endpoint scenarios and source bindings](cost_sensitivity/{family}.json). These calculations retain the original missing measured-time status and other unresolved evidence; they do not change accounting completeness or adoption decisions.', '',
+                      'Each difference is the charged cost minus the allowed cost for that gate; a nonpositive value passes that cost inequality alone.', '',
+                      '| Cost gate | Conditional status | Difference range (seconds) |', '| --- | --- | --- |'])
+        for name, status in sorted(doc.get('gate_statuses', {}).items()):
+            intervals = [scenario[name]['difference_seconds'] for scenario in doc['endpoint_scenarios']]
+            display = ('unavailable' if not intervals or any(value is None for value in intervals)
+                       else f'{min(value[0] for value in intervals):.6g} to {max(value[1] for value in intervals):.6g}')
+            lines.append(f'| {name.replace("_", " ")} | {status} | {display} |')
+        missing = doc.get('unaddressed_missing', [])
+        if missing:
+            lines.extend(['', 'Unaddressed missing evidence: ' + '; '.join(missing) + '.'])
+        lines.append('')
+    return lines, hashes
+
+
 def qualification_ledger_lines(inputs, campaign, output):
     path = inputs.get('definition_qualification_ledger')
     if not path:
@@ -531,6 +572,7 @@ def produce(inputs, campaign, output):
     if output.exists() or campaign not in output.parents:
         raise ValueError('report output must be a new campaign-owned directory')
     output.mkdir(parents=True)
+    sensitivity_lines, sensitivity_hashes = cost_sensitivity_lines(inputs, campaign, output)
     qualification = output / 'qualification'; qualification.mkdir()
     (qualification / 'ledger.json').write_bytes(ledger_path.read_bytes())
     (qualification / 'ledger.md').write_bytes(ledger_markdown.read_bytes())
@@ -687,6 +729,7 @@ def produce(inputs, campaign, output):
     allocation_verdict = ('adopt' if all(value is True for value in allocation_states) else
                           'reject' if any(value is False for value in allocation_states) else 'unavailable')
     lines.extend([f'Two-family nonuniform allocation decision: **{allocation_verdict}**. Family-specific rechecks above retain their own evidence and do not change the recorded training recipe.', ''])
+    lines.extend(sensitivity_lines)
     lines.extend(ledger_lines)
     lines.extend(['The selected amplitude and operational method order were frozen on TRAIN. Raw amplitude 1 remains a separate diagnostic; neither VALIDATION nor the reserved task chooses a new amplitude or checkpoint.',
                   'Both learner comparisons use the same source-specific selected bank, observer and fidelity target. These integrated comparisons do not isolate the effects of bank selection, learner parameterization and sampling policy.', '',
@@ -732,6 +775,7 @@ def produce(inputs, campaign, output):
         'report_sha256': sha(output / 'report.md'), 'html_sha256': sha(output / 'report.html'),
         'definition_qualification_ledger_sha256': sha(qualification / 'ledger.json'),
         'definition_qualification_markdown_sha256': sha(qualification / 'ledger.md'),
+        'cost_sensitivity_sha256': sensitivity_hashes,
         'report_inputs_sha256': sha(inputs_path), 'script_sha256': sha(Path(__file__).resolve())}, indent=2) + '\n')
 
 

@@ -135,6 +135,33 @@ def test_report_rejects_missing_four_mature_runs(tmp_path):
         report.validate_inputs({'schema': 'car_round2_report_inputs_v1', 'runs': {}}, tmp_path)
 
 
+def test_cost_sensitivity_preserves_source_binding_and_conditional_status(tmp_path):
+    report = load()
+    cost = tmp_path / 'cost.json'; cost.write_text('{"complete": false}')
+    sensitivity = tmp_path / 'sensitivity.json'
+    sensitivity.write_text(json.dumps({'schema': 'car_round2_cost_sensitivity_v1', 'family': 'ffm',
+        'source_bindings': {'cost_reconciliation': {'path': str(cost), 'sha256': report.sha(cost)}},
+        'conditional': True, 'adoption_unchanged': True,
+        'gate_statuses': {'quality_cost': 'unavailable'},
+        'endpoint_scenarios': [{'quality_cost': {'status': 'unavailable', 'difference_seconds': None}}],
+        'unaddressed_missing': ['original timer remains unmeasured']}))
+    inputs = {'costs': {'ffm': str(cost)}, 'cost_sensitivity': {'ffm': str(sensitivity)}}
+    output = tmp_path / 'output'; output.mkdir()
+    lines, hashes = report.cost_sensitivity_lines(inputs, tmp_path, output)
+    assert 'unavailable' in '\n'.join(lines) and 'do not change accounting completeness' in '\n'.join(lines)
+    assert (output / 'cost_sensitivity/ffm.json').read_bytes() == sensitivity.read_bytes()
+    assert hashes['ffm'] == report.sha(sensitivity)
+    source = tmp_path / 'bound.json'; source.write_text('{"upper_seconds": 1}')
+    doc = json.loads(sensitivity.read_text())
+    doc['source_bindings']['ffm_bound'] = {'path': str(source), 'sha256': report.sha(source)}
+    sensitivity.write_text(json.dumps(doc)); source.write_text('{"upper_seconds": 2}')
+    with pytest.raises(ValueError, match='source binding changed'):
+        report.cost_sensitivity_lines(inputs, tmp_path, output)
+    cost.write_text('{"complete": true}')
+    with pytest.raises(ValueError, match='cost identity differs'):
+        report.cost_sensitivity_lines(inputs, tmp_path, output)
+
+
 def test_training_series_requires_actual_three_family_losses():
     report = load()
     history = [{'data_loss': 0., 'coherence_family/global_distribution/raw': 1.25,
@@ -231,6 +258,7 @@ def test_native_plot_has_per_field_physical_error_annotations(tmp_path):
 @pytest.mark.parametrize('complete_costs', [True, False])
 def test_synthetic_report_renders_every_indexed_preview_and_master(tmp_path, monkeypatch, complete_costs):
     import copy
+
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
@@ -306,6 +334,25 @@ def test_synthetic_report_renders_every_indexed_preview_and_master(tmp_path, mon
         'source_receipts': [{'path': str(audit), 'sha256': report.sha(audit)}]}))
     report_inputs = {'source_banks': sources, 'allocator_audits': {'ffm': [], 'senseiver': [str(audit)]},
                      'definition_qualification_ledger': str(ledger)}
+    report_inputs['costs'], report_inputs['cost_sensitivity'] = {}, {}
+    sensitivity_spec = importlib.util.spec_from_file_location('cost_sensitivity', ROOT / 'scripts/analysis/sensitivity_car_round2_costs.py')
+    sensitivity_tool = importlib.util.module_from_spec(sensitivity_spec); sensitivity_spec.loader.exec_module(sensitivity_tool)
+    for family in ('ffm', 'senseiver'):
+        cost_doc = {'schema': 'car_round2_cost_reconciliation_v1', 'family': family, **costs[family]}
+        cost = tmp_path / f'{family}_costs.json'; cost.write_text(json.dumps(cost_doc))
+        report_inputs['costs'][family] = str(cost)
+        if complete_costs:
+            continue
+        sensitivity = tmp_path / f'{family}_sensitivity.json'
+        result = sensitivity_tool.sensitivity(family=family, costs=cost_doc,
+            decision=None, clocks={},
+            sense_bound={'bound_not_measured': True, 'lower_seconds': 0., 'upper_seconds': 1.},
+            sense_source={'external_start_unix': 1., 'external_result_unix': 2.},
+            ffm_bound={'bound_not_measured': True, 'lower_seconds': 0., 'upper_seconds': 1.,
+                       'external_start_unix': 1., 'external_result_unix': 2.})
+        result['source_bindings'] = {'cost_reconciliation': {'path': str(cost), 'sha256': report.sha(cost)}}
+        sensitivity.write_text(json.dumps(result))
+        report_inputs['cost_sensitivity'][family] = str(sensitivity)
     output = tmp_path / 'report'
     report.produce(report_inputs, tmp_path, output)
     assert (output / 'report.md').is_file()
@@ -316,6 +363,9 @@ def test_synthetic_report_renders_every_indexed_preview_and_master(tmp_path, mon
     assert '128 saved-dispatch draws' in rendered_html and 'lagged_gradient_cost' in rendered_html
     assert 'reserved-task source_minus_full' in rendered_html and 'not a confidence interval' in rendered_html
     assert 'reserved-task full_member_mean' in rendered_html
+    if not complete_costs:
+        assert 'conditional cost sensitivity' in rendered_html and 'missing assessment timer' in rendered_html
+        assert 'cost_sensitivity/ffm.json' in rendered_html
     assert 'qualification/ledger.md' in rendered_html and 'pre-learning qualification' in rendered_html
     assert (output / 'qualification/ledger.json').read_bytes() == ledger.read_bytes()
     assert (output / 'qualification/ledger.md').read_bytes() == markdown.read_bytes()
