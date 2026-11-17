@@ -66,3 +66,20 @@ def test_frozen_priority_and_mean_only_opt_in_preserve_operational_fallback():
     assert result['opt_in_function'] == 'FullModel'
     assert result['operational_recommendation'] == 'retain SOURCE/C8'
     assert not result['held_out_amplitude_search']
+
+
+def test_incomplete_costs_preserve_task_evidence_without_false_route_verdict():
+    assessments = {'ResidualRepair': {'fidelity': {'primary_pass': True, 'legacy_member_pass': True},
+                                     'core': {'pass': True}, 'reserved_normalized_improvement': .08,
+                                     'source_latency_ratio': 1.1}}
+    result = deployment_disposition(['ResidualRepair'], assessments, model_family='ffm',
+                                    complete_costs=False, within_budget=True)
+    row = result['decisions']['ResidualRepair']
+    assert row['task_useful'] is True
+    assert row['source_deployment_route'] is None and row['operational_eligible'] is None
+    assert result['cost_qualification_status'] == 'unavailable_incomplete_costs'
+    assert result['opt_in_function'] is None and result['operational_function'] is None
+    assert result['operational_recommendation'] == 'retain SOURCE/C8'
+    known = deployment_disposition(['ResidualRepair'], assessments, model_family='ffm',
+                                   complete_costs=True, within_budget=False)
+    assert known['decisions']['ResidualRepair']['source_deployment_route'] is False

@@ -41,6 +41,42 @@ def test_training_series_requires_actual_three_family_losses():
         report.training_series(history)
 
 
+def test_missing_costs_do_not_hide_measured_science_or_qualify_unknown_routes(tmp_path):
+    report = load()
+    arms = list(report.ARMS[:2])
+    cost = {'complete': False, 'missing': ['assessment timer unavailable'],
+            'arms': {arm: {'serial_cost_seconds': None, 'checkpoint_cost_seconds': {}} for arm in arms}}
+    decision = {'costs_complete': False, 'quality_route': None, 'learning_efficiency_route': None,
+                'deployment_comparison_route': None,
+                'deployment_disposition': {'opt_in_function': None, 'operational_function': None,
+                    'decisions': {'Residual': {'task_useful': True, 'source_deployment_route': None,
+                                             'operational_eligible': None}}}}
+    report.validate_cost_evidence(cost, decision, arms, tmp_path)
+    decision['quality_route'] = False
+    with pytest.raises(ValueError, match='unavailable cost-dependent routes'):
+        report.validate_cost_evidence(cost, decision, arms, tmp_path)
+    decision['quality_route'] = None
+    decision['deployment_disposition']['opt_in_function'] = 'Residual'
+    with pytest.raises(ValueError, match='cannot qualify a deployment adoption'):
+        report.validate_cost_evidence(cost, decision, arms, tmp_path)
+
+
+def test_complete_cost_evidence_still_requires_all_checkpoint_clocks(tmp_path):
+    report = load()
+    evidence = tmp_path / 'cost_evidence.json'; evidence.write_text('{}')
+    arms = list(report.ARMS[:2])
+    cost = {'complete': True, 'missing': [],
+            'source_receipts': [{'path': str(evidence), 'sha256': report.sha(evidence)}],
+            'arms': {arm: {'serial_cost_seconds': 2.,
+                           'checkpoint_cost_seconds': {str(epoch): 1. for epoch in report.EPOCHS}}
+                     for arm in arms}}
+    decision = {'costs_complete': True}
+    report.validate_cost_evidence(cost, decision, arms, tmp_path)
+    cost['arms'][arms[0]]['checkpoint_cost_seconds'].pop('250')
+    with pytest.raises(ValueError, match='six checkpoint costs'):
+        report.validate_cost_evidence(cost, decision, arms, tmp_path)
+
+
 def test_native_plot_has_per_field_physical_error_annotations(tmp_path):
     import subprocess
 
@@ -68,7 +104,8 @@ def test_native_plot_has_per_field_physical_error_annotations(tmp_path):
     assert (figures / 'native_senseiver.png').is_file()
 
 
-def test_synthetic_report_renders_every_indexed_preview_and_master(tmp_path, monkeypatch):
+@pytest.mark.parametrize('complete_costs', [True, False])
+def test_synthetic_report_renders_every_indexed_preview_and_master(tmp_path, monkeypatch, complete_costs):
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
@@ -90,12 +127,16 @@ def test_synthetic_report_renders_every_indexed_preview_and_master(tmp_path, mon
     docs = {arm: {split: {epoch: (tmp_path / 'unused.json', doc) for epoch in report.EPOCHS}
                   for split in ('train', 'validation')} for arm in report.ARMS}
     decisions = {family: {'deployment_disposition': {'operational_recommendation': 'retain SOURCE/C8',
-                                                     'opt_in_function': None}, 'quality_route': False,
-                          'learning_efficiency_route': False, 'deployment_comparison_route': False}
+                                                     'opt_in_function': None},
+                          'quality_route': False if complete_costs else None,
+                          'learning_efficiency_route': False if complete_costs else None,
+                          'deployment_comparison_route': False if complete_costs else None,
+                          'allocation_decision': {'training_mode': 'uniform', 'status': 'uniform_fallback', 'adopt': False}}
                  for family in ('ffm', 'senseiver')}
-    costs = {family: {'allocator_final': {'status': 'uniform_fallback', 'qualified': False},
-                      'arms': {arm: {'serial_cost_seconds': 1., 'gpu_seconds': .5,
-                                     'independent_cpu_seconds': .5, 'failed_attempt_seconds': 0.}
+    costs = {family: {'complete': complete_costs, 'missing': [] if complete_costs else ['missing assessment timer'],
+                      'allocator_final': {'status': 'uniform_fallback', 'qualified': False},
+                      'arms': {arm: {'serial_cost_seconds': 1. if complete_costs else None, 'gpu_seconds': .5,
+                                     'independent_cpu_seconds': .5, 'failed_attempt_seconds': 0., 'paused_attempt_seconds': 0.}
                                for arm in report.ARMS}}
              for family in ('ffm', 'senseiver')}
     banks = {family: {'selected_count': 1, 'candidate_count': 2} for family in ('ffm', 'senseiver')}
@@ -122,3 +163,11 @@ def test_synthetic_report_renders_every_indexed_preview_and_master(tmp_path, mon
     assert len(list((output / 'figures').glob('*.png'))) == 8
     assert len(list((output / 'figures').glob('*.pdf'))) == 8
     assert json.loads((output / 'paired_condition_blocks.json').read_text())['ffm']['blocks'][0]['count'] == 1
+    text = (output / 'report.md').read_text()
+    assert 'Two-family nonuniform allocation decision: **reject**' in text
+    if not complete_costs:
+        import subprocess
+        assert 'Quality route: unavailable (incomplete costs)' in text
+        assert 'complete serial unavailable' in text
+        pdf_text = subprocess.check_output(['pdftotext', str(output / 'figures/task_deployment_cost.pdf'), '-'], text=True)
+        assert 'Full model: unavailable' in pdf_text and 'Residual: unavailable' in pdf_text

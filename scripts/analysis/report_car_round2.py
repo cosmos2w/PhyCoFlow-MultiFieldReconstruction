@@ -58,6 +58,44 @@ def selected(doc, alpha=None):
     return matches[0]
 
 
+def validate_cost_evidence(cost, decision, family_arms, campaign):
+    """Keep measured science reportable while withholding missing cost claims."""
+    complete = cost.get('complete') is True
+    if decision.get('costs_complete') is not complete or (complete and cost.get('missing')):
+        raise ValueError('decision must preserve the cost reconciliation completeness')
+    if set(cost.get('arms', {})) != set(family_arms) or (complete and not cost.get('source_receipts')):
+        raise ValueError('matching per-arm cost evidence required')
+    for ref in cost.get('source_receipts', []):
+        if sha(inside(ref['path'], campaign)) != ref['sha256']:
+            raise ValueError('cost evidence changed')
+    for arm in family_arms:
+        item = cost['arms'][arm]
+        serial = item.get('serial_cost_seconds')
+        if complete:
+            if (not isinstance(serial, (int, float)) or not math.isfinite(serial) or serial <= 0
+                    or set(item.get('checkpoint_cost_seconds', {})) != {str(x) for x in EPOCHS}):
+                raise ValueError(f'{arm}: complete serial and six checkpoint costs required')
+        elif serial is not None:
+            raise ValueError('incomplete costs must withhold the complete serial cost')
+    if not complete:
+        if any(decision.get(key) is not None for key in
+               ('quality_route', 'learning_efficiency_route', 'deployment_comparison_route')):
+            raise ValueError('incomplete costs require unavailable cost-dependent routes')
+        disposition = decision.get('deployment_disposition', {})
+        if (disposition.get('opt_in_function') is not None or disposition.get('operational_function') is not None
+                or any(row.get(key) is not None for row in disposition.get('decisions', {}).values()
+                       for key in ('source_deployment_route', 'operational_eligible'))):
+            raise ValueError('incomplete costs cannot qualify a deployment adoption')
+
+
+def route_label(value):
+    return 'unavailable (incomplete costs)' if value is None else str(value)
+
+
+def cost_hours(value):
+    return 'unavailable' if value is None else f'{value / 3600:.4g} h'
+
+
 def validate_inputs(inputs, campaign):
     if inputs.get('schema') != 'car_round2_report_inputs_v1' or set(inputs['runs']) != set(ARMS):
         raise ValueError('four named mature runs and report input schema required')
@@ -114,21 +152,16 @@ def validate_inputs(inputs, campaign):
         cost_path = inside(inputs['costs'][family], campaign)
         cost = read(cost_path, campaign, 'car_round2_cost_reconciliation_v1')
         if (decision.get('family') != family or decision.get('cost_reconciliation_sha256') != sha(cost_path)
-                or cost.get('family') != family or cost.get('complete') is not True or cost.get('missing')
-                or decision.get('costs_complete') is not True):
-            raise ValueError(f'{family}: final decision and complete matching costs required')
+                or cost.get('family') != family):
+            raise ValueError(f'{family}: final decision and matching cost evidence required')
         family_arms = [arm for arm in ARMS if arm.startswith(prefix + '_')]
-        if set(cost['arms']) != set(family_arms) or not cost.get('source_receipts'):
-            raise ValueError(f'{family}: full per-arm and source cost receipts required')
-        for ref in cost['source_receipts']:
-            if sha(inside(ref['path'], campaign)) != ref['sha256']:
-                raise ValueError('cost evidence changed')
-        for arm in family_arms:
-            val = cost['arms'][arm]
-            if (not isinstance(val.get('serial_cost_seconds'), (int, float)) or not math.isfinite(val['serial_cost_seconds'])
-                    or val['serial_cost_seconds'] <= 0
-                    or set(val.get('checkpoint_cost_seconds', {})) != {str(x) for x in EPOCHS}):
-                raise ValueError(f'{arm}: complete serial and six checkpoint costs required')
+        validate_cost_evidence(cost, decision, family_arms, campaign)
+        final_allocation = decision.get('allocation_decision', {})
+        if (final_allocation.get('training_mode') != allocation['mode']
+                or final_allocation.get('final_recheck') != cost.get('allocator_final')
+                or (final_allocation.get('adopt') is True and
+                    (cost.get('complete') is not True or cost.get('allocator_final', {}).get('qualified') is not True))):
+            raise ValueError('final allocation decision must consume its actual cost recheck')
         bank = read(inputs['bank_decisions'][family], campaign, 'car_round2_bank_decision_v1')
         bank_binding = freeze['manifest']['artifacts'][f'bank_{family}']
         if sha(inside(bank_binding['path'], campaign)) != bank_binding['sha256']:
@@ -339,7 +372,12 @@ def produce(inputs, campaign, output):
             label = 'Residual' if arm.endswith('Residual_Repair') else 'Full model'
             axes_row[0].bar(label, doc['reserved_task']['normalized_improvement'])
             axes_row[1].bar(label, row['latency_seconds']/doc['source_latency_seconds'])
-            axes_row[2].bar(label, costs[family]['arms'][arm]['serial_cost_seconds']/3600)
+            serial = costs[family]['arms'][arm]['serial_cost_seconds']
+            if serial is None:
+                axes_row[2].text(.5, .5 if label == 'Full model' else .35, f'{label}: unavailable',
+                                 ha='center', transform=axes_row[2].transAxes)
+            else:
+                axes_row[2].bar(label, serial/3600)
         for ax, title in zip(axes_row, ('Reserved task: SOURCE-normalized gain', 'Nominated / SOURCE latency', 'Complete serial research cost (hours)'), strict=True):
             ax.set_title(f'{prefix}: {title}', fontsize=9)
     save_figure(fig, figures, 'task_deployment_cost')
@@ -353,7 +391,7 @@ def produce(inputs, campaign, output):
         'core_trajectory': 'Fixed common-core and reused-event readings on VALIDATION; lower differences indicate lower score than SOURCE.',
         'fidelity': 'Native field-risk summaries; FFM reports ensemble mean, legacy member and unbiased member spread separately, while Senseiver is a point predictor.',
         'paired_blocks': 'Paired residual-minus-full-model State scores, grouped into up to ten consecutive frames within each trajectory; descriptive only, not independent trajectories.',
-        'task_deployment_cost': 'Final reserved-task gain, measured nominated-function latency relative to SOURCE, and complete serial research cost.',
+        'task_deployment_cost': 'Final reserved-task gain, measured nominated-function latency relative to SOURCE, and complete serial research cost where available; missing cost evidence is labelled unavailable.',
         'native_ffm': 'FFM nominated residual ensemble mean and physical reference on the positive-mass native mask; each field shows its own physical weighted error.',
         'native_senseiver': 'Senseiver nominated residual point prediction and physical reference on the positive-mass native mask; each field shows its own physical weighted error.',
     }
@@ -363,12 +401,19 @@ def produce(inputs, campaign, output):
     for family in ('ffm', 'senseiver'):
         decision, bank, cost = decisions[family], banks[family], costs[family]
         disposition = decision['deployment_disposition']
-        lines.append(f"{family.upper()}: operational choice is **{disposition['operational_recommendation']}**; opt-in function is {disposition['opt_in_function']}. Quality route: {decision['quality_route']}; learning-efficiency route: {decision['learning_efficiency_route']}; comparative deployment route: {decision['deployment_comparison_route']}.")
-        lines.append(f"{family.upper()} bank selected {bank['selected_count']} of {bank['candidate_count']} candidates; allocation mode is {allocation['mode']}; final allocation accounting is {cost['allocator_final']['status']} (qualified: {cost['allocator_final']['qualified']}).")
+        lines.append(f"{family.upper()}: operational choice is **{disposition['operational_recommendation']}**; opt-in function is {disposition['opt_in_function']}. Quality route: {route_label(decision['quality_route'])}; learning-efficiency route: {route_label(decision['learning_efficiency_route'])}; comparative deployment route: {route_label(decision['deployment_comparison_route'])}.")
+        final_allocation = decision['allocation_decision']
+        lines.append(f"{family.upper()} bank selected {bank['selected_count']} of {bank['candidate_count']} candidates; historical training allocation mode is {allocation['mode']}; final allocation decision is {final_allocation['status']} (adopt: {final_allocation['adopt']}). Actual final accounting is {cost['allocator_final']['status']} (qualified: {cost['allocator_final'].get('qualified')}).")
+        if cost.get('complete') is not True:
+            lines.append(f"{family.upper()} cost evidence is incomplete: {'; '.join(cost.get('missing', [])) or 'required cost evidence missing'}. Measured scientific and latency results remain reportable; cost-dependent adoption is unavailable.")
         for path in inputs['allocator_audits'][family]:
             audit = read(path, campaign, 'car_round2_allocator_job_v1')
             lines.append(f"{family.upper()} allocator audit: gradient MSE-times-cost ratio {audit.get('gradient_cost_uniform_ratio')}, provisional overhead fraction {audit.get('overhead_fraction')}, one-path qualification {audit.get('qualified_one_path')}; final status follows the complete cost reconciliation.")
         lines.append('')
+    allocation_states = [decisions[family]['allocation_decision']['adopt'] for family in ('ffm', 'senseiver')]
+    allocation_verdict = ('adopt' if all(value is True for value in allocation_states) else
+                          'reject' if any(value is False for value in allocation_states) else 'unavailable')
+    lines.extend([f'Two-family nonuniform allocation decision: **{allocation_verdict}**. Family-specific rechecks above retain their own evidence and do not change the recorded training recipe.', ''])
     lines.extend(['The selected amplitude and operational method order were frozen on TRAIN. Raw amplitude 1 remains a separate diagnostic; neither VALIDATION nor the reserved task chooses a new amplitude or checkpoint.',
                   'Both learner comparisons use the same source-specific selected bank, observer and fidelity target. These integrated comparisons do not isolate the effects of bank selection, learner parameterization and sampling policy.', '',
                   '## Figure index', ''])
@@ -386,8 +431,8 @@ def produce(inputs, campaign, output):
         lines.append(f"{arm}: TRAIN-nominated amplitude {doc['selected_alpha']}; raw State/Scale/Shape/event {raw['scores']}; nominated State/Scale/Shape/event {nominee['scores']}; primary field/sensor gate {nominee['fidelity']['primary_pass']}, legacy member gate {nominee['fidelity'].get('legacy_member_pass', 'not applicable')}; reserved-task normalized gain {doc['reserved_task']['normalized_improvement']:.6g}.")
         family = 'ffm' if arm.startswith('FFM') else 'senseiver'
         item = costs[family]['arms'][arm]
-        lines.append(f"{arm} new research cost: serial {item['serial_cost_seconds'] / 3600:.4g} h, occupied GPU {item['gpu_seconds'] / 3600:.4g} h, independent CPU {item['independent_cpu_seconds'] / 3600:.4g} h, including {item['failed_attempt_seconds'] / 3600:.4g} h from failed attempts.")
-    lines.extend(['', 'Complete serial costs include occupied GPU wall and independent CPU-only wall outside the enclosing GPU lease; group wall is not added again. Historical sunk costs remain outside the matched new-cost comparison. This report rendering is separately timed in report_receipt.json.',
+        lines.append(f"{arm} new research cost: complete serial {cost_hours(item.get('serial_cost_seconds'))}; recorded occupied GPU {cost_hours(item.get('gpu_seconds'))}, independent CPU {cost_hours(item.get('independent_cpu_seconds'))}, failed attempts {cost_hours(item.get('failed_attempt_seconds'))}, planned pause segments {cost_hours(item.get('paused_attempt_seconds'))}.")
+    lines.extend(['', 'Where complete, serial costs include occupied GPU wall and independent CPU-only wall outside the enclosing GPU lease; group wall is not added again. Recorded subtotals do not replace missing complete costs. Historical sunk costs remain outside the matched new-cost comparison. This report rendering is separately timed in report_receipt.json.',
                   'The reserved task is evaluated at epoch 1000 only. The reused event is a development/continuity endpoint, not an untouched task. No independent-trajectory confirmation or causal attribution to an individual package component is claimed.', ''])
     markdown = '\n'.join(lines)
     (output / 'report.md').write_text(markdown)

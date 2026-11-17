@@ -201,7 +201,7 @@ def reconcile(*, campaign, ledger, manifest, family, checkpoint_loader=_default_
         if 'receipt' in job:
             receipt = _bound_file(job['receipt'],campaign,references)
             receipt_start,receipt_end = _interval(receipt)
-            if receipt.get('token') != token or receipt.get('gpu_uuid') != lease['gpu_uuid'] or not math.isclose(receipt_start,start,abs_tol=1e-3) or not math.isclose(receipt_end,end,abs_tol=1e-3):
+            if receipt.get('token') != token or receipt.get('gpu_uuid') != lease['gpu_uuid'] or not math.isclose(receipt_start,start,rel_tol=0.,abs_tol=1e-3) or not math.isclose(receipt_end,end,rel_tol=0.,abs_tol=1e-3):
                 raise ValueError(f'GPU job {identifier}: receipt does not match closed lease')
             status = receipt.get('status')
         else:
@@ -209,8 +209,8 @@ def reconcile(*, campaign, ledger, manifest, family, checkpoint_loader=_default_
             completion = _bound_file(job['completion'],campaign,references)
             if (launch.get('token') != token or completion.get('token') != token
                     or launch.get('gpu_uuid') != lease['gpu_uuid']
-                    or not math.isclose(launch.get('started_unix',-1),start,abs_tol=1e-3)
-                    or not math.isclose(completion.get('finished_unix',-1),end,abs_tol=1e-3)):
+                    or not math.isclose(launch.get('started_unix',-1),start,rel_tol=0.,abs_tol=1e-3)
+                    or not math.isclose(completion.get('finished_unix',-1),end,rel_tol=0.,abs_tol=1e-3)):
                 raise ValueError(f'GPU job {identifier}: launch/completion do not match closed lease')
             status = completion.get('status')
         if not status or status in {'running','created'}:
@@ -339,7 +339,8 @@ def reconcile(*, campaign, ledger, manifest, family, checkpoint_loader=_default_
                             'checkpoint_cost_seconds':checkpoints,
                             'gpu_seconds':sum(row['seconds']*row['weights'][arm] for row in own if row['kind']=='gpu'),
                             'independent_cpu_seconds':sum(row['seconds']*row['weights'][arm] for row in own if row['kind']=='cpu'),
-                            'failed_attempt_seconds':sum(row['seconds']*row['weights'][arm] for row in own if row['status'] not in {'completed','prepared'})}
+                            'paused_attempt_seconds':sum(row['seconds']*row['weights'][arm] for row in own if row['status'] == 'budget_paused'),
+                            'failed_attempt_seconds':sum(row['seconds']*row['weights'][arm] for row in own if row['status'] not in {'completed','prepared','budget_paused'})}
     allocation = manifest.get('allocator_disposition',{}).get(family)
     allocator_result: dict[str,Any] = {'status':'incomplete'}
     if allocation == 'uniform':

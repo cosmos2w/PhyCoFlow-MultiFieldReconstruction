@@ -171,13 +171,15 @@ def deployment_disposition(priority, assessments, *, model_family, complete_cost
         row = assessments[method]
         scientific = (row["fidelity"]["primary_pass"] and row["core"]["pass"]
                       and row["reserved_normalized_improvement"] >= .05)
-        route = scientific and row["source_latency_ratio"] <= 1.2 and complete_costs and within_budget
-        operational = route and (model_family == "senseiver" or row["fidelity"]["legacy_member_pass"])
-        decisions[method] = {"task_useful": bool(scientific), "source_deployment_route": bool(route),
-                             "operational_eligible": bool(operational)}
-    opt_in = next((name for name in priority if decisions[name]["source_deployment_route"]), None)
-    accepted = next((name for name in priority if decisions[name]["operational_eligible"]), None)
+        route = bool(scientific and row["source_latency_ratio"] <= 1.2 and within_budget) if complete_costs else None
+        operational = (bool(route and (model_family == "senseiver" or row["fidelity"]["legacy_member_pass"]))
+                       if route is not None else None)
+        decisions[method] = {"task_useful": bool(scientific), "source_deployment_route": route,
+                             "operational_eligible": operational}
+    opt_in = next((name for name in priority if decisions[name]["source_deployment_route"] is True), None)
+    accepted = next((name for name in priority if decisions[name]["operational_eligible"] is True), None)
     return {"schema": "car_round2_deployment_disposition_v1", "decisions": decisions,
             "opt_in_function": opt_in, "operational_function": accepted,
             "operational_recommendation": accepted or "retain SOURCE/C8",
+            "cost_qualification_status": "complete" if complete_costs else "unavailable_incomplete_costs",
             "method_priority": list(priority), "held_out_amplitude_search": False}

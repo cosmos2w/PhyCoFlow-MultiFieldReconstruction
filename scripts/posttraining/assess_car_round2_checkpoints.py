@@ -156,11 +156,13 @@ def sensor_mse(members, row, field_count):
     ids, fields, observed = row['obs_indices'].long()[0], row['obs_fields'].long()[0], row['obs_values'][0, :, 0]
     errors = members[:, 0, ids, fields] - observed
     values = torch.zeros(field_count, dtype=torch.float64)
+    counts = torch.zeros(field_count, dtype=torch.int64)
     for field in range(field_count):
         selected = fields == field
+        counts[field] = selected.sum()
         if selected.any():
             values[field] = errors[:, selected].double().square().mean()
-    return values
+    return values, counts
 
 
 def matched_rows(source, child):
@@ -804,7 +806,7 @@ def score(args, campaign):
         query = torch.tensor(panel['query_indices'], dtype=torch.long)
         if query.numel() != 4096 or query.unique().numel() != 4096 or (query < 0).any() or (query >= 40300).any():
             raise ValueError('frozen Q4096 support is invalid')
-        aggregates = {a:{'scores':{key:0. for key in normalizers}, 'risk':{}, 'sensor':None, 'per_condition':[], 'per_condition_scores':[]} for a in alphas}
+        aggregates = {a:{'scores':{key:0. for key in normalizers}, 'risk':{}, 'sensor':None, 'sensor_counts':None, 'per_condition':[], 'per_condition_scores':[]} for a in alphas}
         reserved = {'source':[], 'selected':[], 'truth':[], 'source_members':[], 'selected_members':[]}
         reserved_manifest = json.loads(args.reserved_task.read_text()) if split == 'validation' and epoch == 1000 else None
         for i, sample_id in enumerate(source['sample_ids']):
@@ -838,8 +840,10 @@ def score(args, campaign):
                         value = risks[key].double()
                         row['risk'][key] = value if key not in row['risk'] else row['risk'][key] + value
                 row['per_condition'].append(risks['per_condition_member_mse'].reshape(-1).tolist())
-                sensor = sensor_mse(blend, s, len(source['field_order'])) * scale.double().square()
+                sensor, sensor_counts = sensor_mse(blend, s, len(source['field_order']))
+                sensor = sensor * scale.double().square()
                 row['sensor'] = sensor if row['sensor'] is None else row['sensor'] + sensor
+                row['sensor_counts'] = sensor_counts if row['sensor_counts'] is None else row['sensor_counts'] + sensor_counts
                 if reserved_manifest is not None and alpha in (0., selected):
                     task_members = torch.stack([regional_covariance(member, mass, reserved_manifest, tuple(source['field_order'])) for member in blend*scale+offset])
                     task_truth = regional_covariance(zphys, mass, reserved_manifest, tuple(source['field_order']))
@@ -871,7 +875,10 @@ def score(args, campaign):
         rows = []
         for alpha,row in aggregates.items():
             rows.append({'alpha':alpha, 'scores':row['scores'], 'risk':{k:v.tolist() for k,v in row['risk'].items()},
-                         'sensor_mse':row['sensor'].tolist(), 'core':row['core'], 'fidelity':row['fidelity'],
+                         'sensor_mse':[float(value) if count else None for value,count in zip(row['sensor'], row['sensor_counts'], strict=True)],
+                         'sensor_observation_counts':row['sensor_counts'].tolist(),
+                         'sensor_mse_scope':'mean per-condition sensor MSE; null denotes an unobserved field',
+                         'core':row['core'], 'fidelity':row['fidelity'],
                          'utility':row['utility'], 'eligible':row['eligible'], 'latency_seconds':row['latency_seconds'],
                          'per_condition_member_mse':row['per_condition'], 'per_condition_scores':row['per_condition_scores']})
         # Save the actual selected nonlinear blend, retaining native model fields.
@@ -934,7 +941,7 @@ def score(args, campaign):
                   'child_checkpoint_sha256':child['checkpoint_sha256'], 'source_bank_sha256':hash_file(args.source_bank/'receipt.json'),
                   'child_bank_sha256':hash_file(args.child_bank/'receipt.json'), 'panel_sha256':hash_file(panel_path),
                   'core_sha256':hash_file(core_path), 'contract_sha256':hash_file(args.contract), 'selected_alpha':selected,
-                  'rows':rows, 'selected_files_sha256':hashes, 'reserved_task_used':False,
+                  'rows':rows, 'selected_files_sha256':hashes, 'reserved_task_used':reserved_manifest is not None,
                   'native_abs_error_tail_quantiles':[.95,.99,1.],
                   'native_abs_error_tails_scope':'per-condition unweighted positive-mass native points and members, decoded field units',
                   'selected_native_abs_error_tails':selected_tails,'raw_native_abs_error_tails':raw_tails,
@@ -1180,6 +1187,35 @@ def profile_deployment(args, campaign):
     print(output)
 
 
+def final_allocation_disposition(formal, costs):
+    """Keep the trained policy identity separate from its final cost recheck."""
+    binding = formal['manifest']['artifacts']['allocation_disposition']
+    path = Path(binding['path'])
+    if hash_file(path) != binding['sha256']:
+        raise ValueError('frozen allocation disposition changed')
+    frozen = json.loads(path.read_text())
+    mode = frozen.get('mode')
+    if frozen.get('schema') != 'car_round2_allocation_disposition_v1' or mode not in ('uniform', 'qualified_fixed'):
+        raise ValueError('frozen training allocation mode required')
+    final = costs.get('allocator_final', {})
+    status, qualified = final.get('status'), final.get('qualified')
+    if mode == 'uniform' and status == 'uniform_fallback' and qualified is False:
+        decision, adopted, reason = 'uniform_fallback', False, 'No nonuniform policy was deployed.'
+    elif mode == 'qualified_fixed' and status == 'measured' and isinstance(qualified, bool):
+        if not qualified:
+            decision, adopted, reason = 'reject', False, 'Measured final allocator overhead failed its qualification.'
+        elif costs.get('complete') is True:
+            decision, adopted, reason = 'adopt', True, 'Measured final allocator overhead passed with complete costs.'
+        else:
+            decision, adopted, reason = 'unavailable', None, 'Final campaign costs are incomplete.'
+    elif status in (None, 'incomplete', 'incomplete_campaign_costs'):
+        decision, adopted, reason = 'unavailable', None, 'Final allocator cost recheck is incomplete.'
+    else:
+        raise ValueError('final allocator accounting contradicts frozen training mode')
+    return {'training_mode':mode, 'status':decision, 'adopt':adopted, 'reason':reason,
+            'final_recheck':final, 'frozen_disposition_sha256':binding['sha256']}
+
+
 def decide(args, campaign):
     from phycoflow_reconstruction.evaluation.adaptive_campaign import immutable_json
     from phycoflow_reconstruction.evaluation.round2_assessment import deployment_disposition
@@ -1189,6 +1225,7 @@ def decide(args, campaign):
     costs = json.loads(args.costs.read_text())
     if costs.get('schema') != 'car_round2_cost_reconciliation_v1' or set(costs.get('arms',{})) != set(paths):
         raise ValueError('complete per-arm cost reconciliation required')
+    allocation = final_allocation_disposition(json.loads((campaign / 'configs/formal_freeze.json').read_text()), costs)
     complete = costs.get('complete') is True
     within = costs.get('within_budget') is True
     if complete:
@@ -1240,12 +1277,13 @@ def decide(args, campaign):
     full_cost = costs['arms'][full].get('serial_cost_seconds')
     valid_costs = all(isinstance(x,(int,float)) and math.isfinite(x) and x > 0 for x in (residual_cost,full_cost))
     residual_task_eligible = fidelity and residual_task >= .05
-    quality = bool(residual_task_eligible and residual_task-full_task >= .05 and complete and within and valid_costs
-                   and residual_cost <= 1.1*full_cost and rows[residual]['source_latency_ratio'] <= 1.2)
+    quality = (bool(residual_task_eligible and residual_task-full_task >= .05 and within and valid_costs
+                    and residual_cost <= 1.1*full_cost and rows[residual]['source_latency_ratio'] <= 1.2)
+               if complete else None)
     full_eligible = rows[full]['fidelity']['primary_pass'] and rows[full]['core']['pass'] and full_task >= .05
-    deployment = bool(residual_task_eligible and full_eligible and equivalent_task
-                      and rrow['latency_seconds'] <= .8*frow['latency_seconds']
-                      and rows[residual]['source_latency_ratio'] <= 1.2 and complete and within)
+    deployment = (bool(residual_task_eligible and full_eligible and equivalent_task
+                       and rrow['latency_seconds'] <= .8*frow['latency_seconds']
+                       and rows[residual]['source_latency_ratio'] <= 1.2 and within) if complete else None)
     crossings = {}
     for arm, trajectory in evaluated.items():
         qualifies = []
@@ -1260,11 +1298,12 @@ def decide(args, campaign):
         crossing_cost = costs['arms'][arm].get('checkpoint_cost_seconds',{}).get(str(crossing)) if crossing is not None else None
         crossings[arm] = {'qualifies_by_epoch':dict(zip(map(str,EPOCHS),qualifies)), 'crossing_epoch':crossing, 'crossing_cost_seconds':crossing_cost}
     a,b = crossings[residual]['crossing_cost_seconds'], crossings[full]['crossing_cost_seconds']
-    efficiency = bool(residual_task_eligible and full_eligible and equivalent_task and complete and within
-                      and isinstance(a,(int,float)) and isinstance(b,(int,float)) and a >= 0 and b > 0 and a <= .8*b)
+    efficiency = (bool(residual_task_eligible and full_eligible and equivalent_task and within
+                       and isinstance(a,(int,float)) and isinstance(b,(int,float)) and a >= 0 and b > 0 and a <= .8*b)
+                  if complete else None)
     result = {'schema':'car_round2_final_decision_v1','family':args.family,'frozen_priority':priority,
               'deployment_disposition':disposition,'quality_route':quality,'learning_efficiency_route':efficiency,
-              'deployment_comparison_route':deployment,'crossings':crossings,
+              'deployment_comparison_route':deployment,'crossings':crossings, 'allocation_decision':allocation,
               'cost_reconciliation_sha256':hash_file(args.costs),'costs_complete':complete,'within_budget':within,
               'heldout_selection':'TRAIN-frozen amplitude and method order; no held-out search',
               'device_uuid':next(iter({doc['gpu_uuid'] for doc in final.values()}))}

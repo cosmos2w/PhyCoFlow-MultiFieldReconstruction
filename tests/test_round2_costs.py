@@ -68,3 +68,51 @@ def test_source_residual_microcase_uses_its_saved_nested_timer(tmp_path):
     ledger = {'schema':'car_gpu_ledger_v1', 'closed':[], 'active':{}}
     result = reconcile(campaign=tmp_path, ledger=ledger, manifest=manifest, family='ffm')
     assert result['arms'][ARMS[1]]['observed_serial_cost_seconds'] == 2.
+
+
+def test_paused_segments_remain_charged_separately_from_failures(tmp_path):
+    start = 1_794_880_000.
+    statuses = ('completed', 'budget_paused', 'failed')
+    leases, jobs = [], []
+    for index, status in enumerate(statuses):
+        begin = start + 20 * index
+        token = f'lease-{index}'
+        lease = {'token': token, 'gpu_uuid': 'gpu', 'start_unix': begin, 'end_unix': begin + 10}
+        leases.append(lease)
+        receipt = _receipt(tmp_path, f'{token}.json', {**lease, 'status': status})
+        jobs.append({'id': token, 'token': token, 'scope': 'qualification',
+                     'allocations': {ARMS[0]: 1.}, 'receipt': receipt})
+    result = reconcile(campaign=tmp_path, ledger={'schema': 'car_gpu_ledger_v1', 'closed': leases},
+                       manifest={'schema': 'car_round2_cost_allocation_v1', 'gpu_jobs': jobs}, family='ffm')
+    arm = result['arms'][ARMS[0]]
+    assert arm['observed_serial_cost_seconds'] == 30.
+    assert arm['gpu_seconds'] == 30.
+    assert arm['paused_attempt_seconds'] == 10.
+    assert arm['failed_attempt_seconds'] == 10.
+
+
+@pytest.mark.parametrize('binding', ['receipt', 'launch_completion'])
+@pytest.mark.parametrize('endpoint', ['start', 'end'])
+@pytest.mark.parametrize('offset,accepted', [(0.0005, True), (0.01, False), (1., False)])
+def test_gpu_receipt_lease_tolerance_is_absolute_at_current_unix_time(tmp_path, binding, endpoint, offset, accepted):
+    start, end = 1_794_880_000., 1_794_880_010.
+    lease = {'token': 'lease', 'gpu_uuid': 'gpu', 'start_unix': start, 'end_unix': end}
+    recorded_start = start + (offset if endpoint == 'start' else 0.)
+    recorded_end = end + (offset if endpoint == 'end' else 0.)
+    job = {'id': 'gpu', 'token': 'lease', 'scope': 'qualification', 'allocations': {ARMS[0]: 1.}}
+    if binding == 'receipt':
+        job['receipt'] = _receipt(tmp_path, 'receipt.json', {'token': 'lease', 'gpu_uuid': 'gpu',
+            'start_unix': recorded_start, 'end_unix': recorded_end, 'status': 'completed'})
+    else:
+        job['launch'] = _receipt(tmp_path, 'launch.json', {'token': 'lease', 'gpu_uuid': 'gpu',
+                                                          'started_unix': recorded_start})
+        job['completion'] = _receipt(tmp_path, 'completion.json', {'token': 'lease',
+                                             'finished_unix': recorded_end, 'status': 'completed'})
+    ledger = {'schema': 'car_gpu_ledger_v1', 'closed': [lease]}
+    manifest = {'schema': 'car_round2_cost_allocation_v1', 'gpu_jobs': [job]}
+    if accepted:
+        result = reconcile(campaign=tmp_path, ledger=ledger, manifest=manifest, family='ffm')
+        assert result['arms'][ARMS[0]]['gpu_seconds'] == 10.
+    else:
+        with pytest.raises(ValueError, match='(does not|do not) match closed lease'):
+            reconcile(campaign=tmp_path, ledger=ledger, manifest=manifest, family='ffm')

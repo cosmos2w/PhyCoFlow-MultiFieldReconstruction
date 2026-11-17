@@ -29,6 +29,15 @@ def test_event_point_score_is_genuine_single_prediction():
         mod.score_event(Event(), member.expand(2, -1, -1, -1), truth, torch.tensor([1., 3.]))
 
 
+def test_sensor_mse_counts_only_observed_fields_and_preserves_actual_error():
+    members = torch.tensor([[[[2., 8.], [5., 9.]]]])
+    row = {'obs_indices':torch.tensor([[0, 1]]), 'obs_fields':torch.tensor([[0, 0]]),
+           'obs_values':torch.tensor([[[1.], [3.]]])}
+    mse, counts = mod.sensor_mse(members, row, 2)
+    torch.testing.assert_close(mse, torch.tensor([2.5, 0.], dtype=torch.float64))
+    assert counts.tolist() == [2, 0]
+
+
 def test_closeout_budget_requires_all_frozen_mature_completions(tmp_path):
     import yaml
     configs = tmp_path / 'configs'; configs.mkdir()
@@ -141,7 +150,11 @@ def test_decision_uses_frozen_priority_and_reports_crossing(tmp_path):
     import argparse
 
     formal = tmp_path/'configs/formal_freeze.json'
-    formal.parent.mkdir(); formal.write_text('{}')
+    formal.parent.mkdir()
+    allocation = tmp_path/'allocation.json'
+    allocation.write_text(json.dumps({'schema':'car_round2_allocation_disposition_v1', 'mode':'qualified_fixed'}))
+    formal.write_text(json.dumps({'manifest':{'artifacts':{'allocation_disposition':{
+        'path':str(allocation), 'sha256':mod.hash_file(allocation)}}}}))
     train = tmp_path/'assessment/train'; train.mkdir(parents=True)
     full, residual = [name for name in mod.ARMS if name.startswith('Senseiver_')]
     arms = {}
@@ -169,6 +182,7 @@ def test_decision_uses_frozen_priority_and_reports_crossing(tmp_path):
     freeze['sha256'] = mod.content_hash(freeze)
     (train/'method_priority_senseiver.json').write_text(json.dumps(freeze))
     costs = {'schema':'car_round2_cost_reconciliation_v1','complete':True,'within_budget':True,
+             'allocator_final':{'status':'measured', 'qualified':False},
              'arms':{full:{'serial_cost_seconds':100.,'checkpoint_cost_seconds':{'100':50.}},
                      residual:{'serial_cost_seconds':90.,'checkpoint_cost_seconds':{'100':30.}}}}
     receipt_path = tmp_path/'assessment/source-job.json'; receipt_path.write_text('{}')
@@ -182,6 +196,31 @@ def test_decision_uses_frozen_priority_and_reports_crossing(tmp_path):
     assert result['deployment_disposition']['operational_function'] == full
     assert result['learning_efficiency_route'] is True
     assert result['crossings'][residual]['crossing_epoch'] == 100
+    assert result['allocation_decision']['training_mode'] == 'qualified_fixed'
+    assert result['allocation_decision']['status'] == 'reject'
+    assert result['deployment_disposition']['operational_function'] == full
+    costs['complete'] = False
+    costs['allocator_final'] = {'status':'incomplete_campaign_costs', 'qualified':False}
+    cost_path.write_text(json.dumps(costs))
+    output = tmp_path/'assessment/decision_incomplete.json'
+    mod.decide(argparse.Namespace(family='senseiver',costs=cost_path,output=output),tmp_path)
+    result = json.loads(output.read_text())
+    assert result['allocation_decision']['status'] == 'unavailable'
+    assert result['quality_route'] is None and result['learning_efficiency_route'] is None
+    assert result['deployment_comparison_route'] is None
+    assert result['deployment_disposition']['decisions'][full]['task_useful'] is True
+
+
+def test_final_allocation_tracks_frozen_mode_and_actual_recheck(tmp_path):
+    allocation = tmp_path/'allocation.json'
+    allocation.write_text(json.dumps({'schema':'car_round2_allocation_disposition_v1', 'mode':'qualified_fixed'}))
+    formal = {'manifest':{'artifacts':{'allocation_disposition':{'path':str(allocation), 'sha256':mod.hash_file(allocation)}}}}
+    for qualified, expected in ((True, 'adopt'), (False, 'reject')):
+        result = mod.final_allocation_disposition(formal, {'complete':True, 'allocator_final':{'status':'measured', 'qualified':qualified}})
+        assert result['training_mode'] == 'qualified_fixed' and result['status'] == expected
+    assert mod.final_allocation_disposition(formal, {'allocator_final':{'status':'incomplete'}})['status'] == 'unavailable'
+    with pytest.raises(ValueError, match='contradicts'):
+        mod.final_allocation_disposition(formal, {'allocator_final':{'status':'uniform_fallback', 'qualified':False}})
 
 
 def test_fair_family_decomposition_uses_each_member_without_duplication():
