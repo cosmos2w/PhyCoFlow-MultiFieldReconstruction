@@ -397,7 +397,7 @@ def test_complete_consistent_uniform_freeze_is_admitted(tmp_path):
         'source_family': 'senseiver', 'parameterization': 'residual_head', 'qualified_one_path': False,
         'source_panel_sha256': artifacts['source_panel_senseiver']['sha256'],
         'core_sha256': artifacts['observer_senseiver']['sha256'], 'prefit_sha256': artifacts['coefficients_senseiver']['sha256'],
-        'selected_bank_sha256': bank_data['sha256'], 'gradient_cost_uniform_ratio': .9, 'overhead_fraction': .01,
+        'selected_bank_sha256': artifacts['bank_senseiver']['sha256'], 'gradient_cost_uniform_ratio': .9, 'overhead_fraction': .01,
         'train_population': 10, 'sample_ids': ['sample'], 'actual_head_parameters': 5, 'pair_draws': 2,
         'policies': {'uniform': {'mse_cost': 1.}, 'lagged_gradient_cost': {'mse_cost': .9}}})
     save('allocation_disposition', {'schema': 'car_round2_allocation_disposition_v1', 'mode': 'uniform',
@@ -411,6 +411,19 @@ def test_complete_consistent_uniform_freeze_is_admitted(tmp_path):
                        'arms': {arm: arms[arm] for arm in driver.ARMS[2:]},
                        'artifacts': {name: artifacts[name] for name in needed}}
     assert driver.check_freeze(family_manifest, tmp_path, 'senseiver') is family_manifest
+    profile_path = Path(profile['path'])
+    profile_data = json.loads(profile_path.read_text())
+    profile_data['selected_bank_sha256'] = bank_data['sha256']
+    profile_path.write_text(json.dumps(profile_data))
+    profile['sha256'] = driver.digest(profile_path)
+    disposition_path = Path(artifacts['allocation_disposition']['path'])
+    disposition = json.loads(disposition_path.read_text())
+    disposition['profiles']['senseiver'] = profile
+    disposition_path.write_text(json.dumps(disposition))
+    artifacts['allocation_disposition']['sha256'] = driver.digest(disposition_path)
+    family_manifest['artifacts']['allocation_disposition'] = artifacts['allocation_disposition']
+    with pytest.raises(ValueError, match='matching measured failure'):
+        driver.check_freeze(family_manifest, tmp_path, 'senseiver')
     tampered = json.loads(receipts[0].read_text())
     tampered['outside_epoch_seconds'] = 0.
     receipts[0].write_text(json.dumps(tampered))
@@ -465,7 +478,7 @@ def test_early_uniform_requires_real_matching_failed_allocator(tmp_path):
     profile = {'schema': 'car_round2_allocator_job_v1', 'status': 'completed',
                'source_family': 'senseiver', 'parameterization': 'residual_head',
                'qualified_one_path': False, 'source_panel_sha256': 'panel', 'core_sha256': 'core',
-               'prefit_sha256': prefit['sha256'], 'selected_bank_sha256': 'bank-target',
+               'prefit_sha256': prefit['sha256'], 'selected_bank_sha256': bank['sha256'],
                'gradient_cost_uniform_ratio': .9, 'overhead_fraction': .01,
                'train_population': 10, 'sample_ids': ['sample'], 'actual_head_parameters': 5, 'pair_draws': 2,
                'policies': {'uniform': {'mse_cost': 1.}, 'lagged_gradient_cost': {'mse_cost': .9}}}

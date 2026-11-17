@@ -385,13 +385,15 @@ def check_allocation_disposition(artifacts, campaign, configs, families=('ffm', 
         uniform_cost = profile.get('policies', {}).get('uniform', {}).get('mse_cost')
         candidate_cost = profile.get('policies', {}).get('lagged_gradient_cost', {}).get('mse_cost')
         population, ids = profile.get('train_population'), profile.get('sample_ids')
+        if failed_family == family:
+            check_binding(artifacts[f'bank_{family}'], campaign)
         if failed_family == family and (profile.get('schema') != 'car_round2_allocator_job_v1' or profile.get('status') != 'completed'
             or profile.get('source_family') != family or profile.get('parameterization') != 'residual_head'
             or profile.get('qualified_one_path') is not False
             or profile.get('source_panel_sha256') != core['source_panel_sha256']
             or profile.get('core_sha256') != artifacts[f'observer_{family}']['sha256']
             or profile.get('prefit_sha256') != artifacts[f'coefficients_{family}']['sha256']
-            or profile.get('selected_bank_sha256') != json.loads(check_binding(artifacts[f'bank_{family}'], campaign).read_text()).get('sha256')
+            or profile.get('selected_bank_sha256') != artifacts[f'bank_{family}']['sha256']
             or isinstance(population, bool) or not isinstance(population, int) or population < 1
             or not isinstance(ids, list) or len(ids) != max(1, math.ceil(.1 * population)) or len(set(ids)) != len(ids)
             or ids != json.loads(check_binding(artifacts[f'coefficients_{family}'], campaign).read_text())['binding']['sample_ids']
@@ -630,7 +632,7 @@ def check_family_freeze_consistency(manifest, campaign):
             raise ValueError('final freeze after early admission requires both completed allocator profiles')
         for name in ('ffm', 'senseiver'):
             profile = json.loads(check_binding(profiles[name], campaign).read_text())
-            bank = json.loads(check_binding(manifest['artifacts'][f'bank_{name}'], campaign).read_text())
+            check_binding(manifest['artifacts'][f'bank_{name}'], campaign)
             prefix = 'FFM' if name == 'ffm' else 'Senseiver'
             import yaml
             config = yaml.safe_load(check_binding(manifest['arms'][f'{prefix}_Selected_Bank_Residual_Repair']['config'], campaign).read_text())
@@ -641,7 +643,7 @@ def check_family_freeze_consistency(manifest, campaign):
                 or profile.get('source_panel_sha256') != core['source_panel_sha256']
                 or profile.get('core_sha256') != manifest['artifacts'][f'observer_{name}']['sha256']
                 or profile.get('prefit_sha256') != manifest['artifacts'][f'coefficients_{name}']['sha256']
-                or profile.get('selected_bank_sha256') != bank.get('sha256')):
+                or profile.get('selected_bank_sha256') != manifest['artifacts'][f'bank_{name}']['sha256']):
                 raise ValueError(f'{name}: final freeze requires its actual matching completed allocator audit')
 
 def check_freeze(manifest, campaign, family=None):
