@@ -1348,7 +1348,8 @@ def decide(args, campaign):
     quality = (bool(residual_task_eligible and residual_task-full_task >= .05 and within and valid_costs
                     and residual_cost <= 1.1*full_cost and rows[residual]['source_latency_ratio'] <= 1.2)
                if complete else None)
-    full_eligible = rows[full]['fidelity']['primary_pass'] and rows[full]['core']['pass'] and full_task >= .05
+    full_output_guards = rows[full]['fidelity']['primary_pass'] and rows[full]['core']['pass']
+    full_eligible = full_output_guards and full_task >= .05
     deployment = (bool(residual_task_eligible and full_eligible and equivalent_task
                        and rrow['latency_seconds'] <= .8*frow['latency_seconds']
                        and rows[residual]['source_latency_ratio'] <= 1.2 and within) if complete else None)
@@ -1370,13 +1371,13 @@ def decide(args, campaign):
         crossings[arm] = {'qualifies_by_epoch':dict(zip(map(str,EPOCHS),qualifies)), 'crossing_epoch':crossing,
                           'crossing_cost_seconds':crossing_cost, 'crossing_cost_bounds_seconds':crossing_bounds}
     efficiency = learning_efficiency_from_cost_bounds(
-        complete=complete, eligible=residual_task_eligible and full_eligible and equivalent_task and within,
+        complete=complete, eligible=residual_task_eligible and full_output_guards and equivalent_task and within,
         residual_crossing=crossings[residual]['crossing_epoch'], full_crossing=crossings[full]['crossing_epoch'],
         residual_bounds=crossings[residual]['crossing_cost_bounds_seconds'],
         full_bounds=crossings[full]['crossing_cost_bounds_seconds'])
     if not complete:
         efficiency_reason = 'complete costs unavailable'
-    elif not (residual_task_eligible and full_eligible and equivalent_task and within):
+    elif not (residual_task_eligible and full_output_guards and equivalent_task and within):
         efficiency_reason = 'scientific eligibility or budget gate failed'
     elif crossings[residual]['crossing_epoch'] is None or crossings[full]['crossing_epoch'] is None:
         efficiency_reason = 'one or both methods have no qualifying crossing'

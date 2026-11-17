@@ -226,6 +226,26 @@ def test_decision_uses_frozen_priority_and_reports_crossing(tmp_path):
     assert result['allocation_decision']['training_mode'] == 'qualified_fixed'
     assert result['allocation_decision']['status'] == 'reject'
     assert result['deployment_disposition']['operational_function'] == full
+    final_paths = {name: tmp_path/'assessment/validation'/name/'epoch_1000/assessment.json'
+                   for name in (full, residual)}
+    original = {name: json.loads(path.read_text()) for name, path in final_paths.items()}
+    for name, gain in ((full, .04), (residual, .06)):
+        doc = json.loads(final_paths[name].read_text())
+        doc['reserved_task']['normalized_improvement'] = gain
+        final_paths[name].write_text(json.dumps(doc))
+    comparison_output = tmp_path/'assessment/decision_efficiency_control.json'
+    mod.decide(argparse.Namespace(family='senseiver',costs=cost_path,output=comparison_output),tmp_path)
+    comparison = json.loads(comparison_output.read_text())
+    assert comparison['learning_efficiency_route'] is True
+    assert comparison['deployment_comparison_route'] is False
+    doc = json.loads(final_paths[full].read_text())
+    doc['rows'][1]['core']['pass'] = False
+    final_paths[full].write_text(json.dumps(doc))
+    guard_output = tmp_path/'assessment/decision_efficiency_control_guard.json'
+    mod.decide(argparse.Namespace(family='senseiver',costs=cost_path,output=guard_output),tmp_path)
+    assert json.loads(guard_output.read_text())['learning_efficiency_route'] is False
+    for name, doc in original.items():
+        final_paths[name].write_text(json.dumps(doc))
     costs['arms'][full]['checkpoint_cost_seconds']['100'] = None
     costs['arms'][residual]['checkpoint_cost_seconds']['100'] = None
     costs['arms'][full]['checkpoint_cost_bounds_seconds'] = {'100':[45., 55.]}
