@@ -257,7 +257,6 @@ def main():
         import torch
 
         from phycoflow_reconstruction.coherence import build_enabled_families
-        from phycoflow_reconstruction.coherence.adaptive_fitting import _digest
         from phycoflow_reconstruction.coherence.adaptive_profile import isolate_query_stratum
         from phycoflow_reconstruction.coherence.query_sampling import (
             LINE_WEIGHTS,
@@ -278,7 +277,7 @@ def main():
         from phycoflow_reconstruction.training.post_training import _physical_endpoint_risk
         from phycoflow_reconstruction.training.rollout import differentiable_reconstruction
         from phycoflow_reconstruction.training.run_store import file_sha256
-        from phycoflow_reconstruction.training.scalable_fitting import validate_scalable_artifacts
+        from phycoflow_reconstruction.training.scalable_fitting import _digest, validate_scalable_artifacts
         from phycoflow_reconstruction.training.scalable_runtime import ScalableRuntime
         from phycoflow_reconstruction.training.source import load_source_model
         from phycoflow_reconstruction.utils.reproducibility import seed_everything

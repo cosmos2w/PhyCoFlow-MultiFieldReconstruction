@@ -33,6 +33,35 @@ def test_shared_inner_mse_matches_exhaustive_correlated_duplicates():
     assert mod.shared_inner_mse(gram, 2, inner, proposal, draws) == pytest.approx(exact, rel=1e-12, abs=1e-12)
 
 
+def test_source_panel_guard_uses_producer_tensor_digest():
+    import ast
+
+    from phycoflow_reconstruction.training.scalable_fitting import _digest as producer_digest
+
+    tree = ast.parse(path.read_text())
+    main = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'main')
+    digest_imports = [node for node in ast.walk(main) if isinstance(node, ast.ImportFrom)
+                      and any(alias.name == '_digest' for alias in node.names)]
+    assert len(digest_imports) == 1
+    scope = {}
+    exec(compile(ast.Module(body=digest_imports, type_ignores=[]), str(path), 'exec'), scope)
+    assert scope['_digest'] is producer_digest
+    guard = next(node.test for node in ast.walk(main) if isinstance(node, ast.If)
+                 and "panel['parameter_buffer_sha256']" in ast.unparse(node.test))
+    guard_code = compile(ast.Expression(guard), str(path), 'eval')
+    model = torch.nn.BatchNorm1d(3)
+    panel = {'parameter_buffer_sha256': producer_digest(model.state_dict()), 'source_weight_view': 'source'}
+    scope.update(model=model, panel=panel, source_identity={'weight_view': 'source'})
+    assert not eval(guard_code, scope)
+    with torch.no_grad():
+        model.weight[0].add_(1)
+    assert eval(guard_code, scope)
+    with torch.no_grad():
+        model.weight[0].sub_(1)
+        model.running_mean[0].add_(1)
+    assert eval(guard_code, scope)
+
+
 def test_unique_cost_counts_duplicate_pairs_once():
     # Three draws, the two possible IDs have occurrence probabilities 7/8.
     assert mod.expected_unique_cost([.5, .5], [2., 4.], 3) == pytest.approx(5.25)
