@@ -96,3 +96,32 @@ def test_explicit_registry_open_items_block_completion(tmp_path):
                 'open_items':['pending terminal qualification receipts']}
     manifest = registry_tool.assemble(tmp_path, registry, {'closed':[], 'active':{}})
     assert 'pending terminal qualification receipts' in manifest['assembly_missing']
+
+
+def test_residual_shared_policy_receipt_is_charged_once_across_both_families(tmp_path):
+    receipt = tmp_path/'policy_research.json'
+    receipt.write_text(json.dumps({'start_unix': 10., 'end_unix': 18., 'status': 'completed'}))
+    registry = {'schema': 'car_round2_cost_registry_v1', 'registrations': [
+        {'kind': 'cpu', 'scope': 'allocation', 'owner': 'residual_shared',
+         'receipt': str(receipt), 'independent': True}],
+        'receipt_inventory_globs': [str(receipt)]}
+    ledger = {'schema': 'car_gpu_ledger_v1', 'active': {}, 'closed': []}
+    manifest = registry_tool.assemble(tmp_path, registry, ledger)
+    assert len(manifest['cpu_jobs']) == 1
+    assert manifest['cpu_jobs'][0]['allocations'] == {ARMS[1]: .5, ARMS[3]: .5}
+    costs = [reconcile(campaign=tmp_path, ledger=ledger, manifest=manifest, family=family)
+             for family in ('ffm', 'senseiver')]
+    assert costs[0]['arms'][ARMS[1]]['observed_serial_cost_seconds'] == 4.
+    assert costs[1]['arms'][ARMS[3]]['observed_serial_cost_seconds'] == 4.
+    assert costs[0]['arms'][ARMS[0]]['observed_serial_cost_seconds'] is None
+    assert costs[1]['arms'][ARMS[2]]['observed_serial_cost_seconds'] is None
+
+
+@pytest.mark.parametrize('owner', [ARMS[0], ARMS[2], 'all_shared', 'ffm_shared', 'senseiver_shared'])
+def test_allocation_scope_rejects_owners_including_full_models(tmp_path, owner):
+    receipt = tmp_path/'policy.json'
+    receipt.write_text('{}')
+    registry = {'schema': 'car_round2_cost_registry_v1', 'registrations': [
+        {'kind': 'cpu', 'scope': 'allocation', 'owner': owner, 'receipt': str(receipt), 'independent': True}]}
+    with pytest.raises(ValueError, match='residual-only work'):
+        registry_tool.assemble(tmp_path, registry, {'closed': [], 'active': {}})

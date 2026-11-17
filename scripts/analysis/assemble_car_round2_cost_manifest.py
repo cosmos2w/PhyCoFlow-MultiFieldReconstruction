@@ -2,7 +2,7 @@
 """Expand explicit receipt registrations into a Round 2 cost allocation manifest.
 
 Each registration declares kind, scope, owner (ffm_shared, senseiver_shared,
-all_shared, or a literal arm), and either receipt/glob or launch+completion.
+residual_shared, all_shared, or a literal arm), and either receipt/glob or launch+completion.
 CPU registrations also declare independent or a parent token/job ID. The
 optional checkpoint_epochs on assessment jobs associates them with all owned
 arms and those epochs. Inventory globs report unregistered receipt files.
@@ -45,6 +45,8 @@ def _weights(owner):
         return {owner: 1.}
     if owner == 'all_shared':
         return dict.fromkeys(ARMS, .25)
+    if owner == 'residual_shared':
+        return {arm: .5 for arm in ARMS if arm.endswith('Residual_Repair')}
     if owner in ('ffm_shared', 'senseiver_shared'):
         pair = [a for a in ARMS if a.lower().startswith(owner.split('_')[0])]
         return dict.fromkeys(pair, .5)
