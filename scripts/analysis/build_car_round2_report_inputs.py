@@ -138,7 +138,12 @@ def build(campaign, formal_groups, train_result, validation_result, report):
     for family in ('ffm', 'senseiver'):
         canonical(f'assessment/train/method_priority_{family}.json')
     allocation = freeze['manifest']['artifacts']['allocation_disposition']
-    ref({'path': allocation['path'], 'sha256': allocation['sha256']}, 'path', 'sha256')
+    allocation_doc = ref(allocation, 'path', 'sha256')
+    profiles = allocation_doc.get('profiles', {})
+    if set(profiles) != {'ffm', 'senseiver'}:
+        raise ValueError('final allocation disposition must bind both actual source audits')
+    for profile in profiles.values():
+        ref(profile, 'path', 'sha256')
     inputs = {'schema': 'car_round2_report_inputs_v1', 'runs': runs, 'trajectories': trajectories,
               'decisions': {f: canonical(f'assessment/{f}_final_decision_v1.json') for f in ('ffm', 'senseiver')},
               'costs': {f: canonical(f'assessment/{f}_final_costs_v1.json') for f in ('ffm', 'senseiver')},
@@ -146,7 +151,7 @@ def build(campaign, formal_groups, train_result, validation_result, report):
               'bank_decisions': {f: canonical(f'artifacts/selected_banks/{f}_topology_stable_v1/decision.json') for f in ('ffm', 'senseiver')},
               'source_banks': {f: str(path(f'assessment/source_validation_{f}_v1')) for f in ('ffm', 'senseiver')},
               'allocation_disposition': str(path(allocation['path'])),
-              'allocator_audits': {f: [canonical(f'artifacts/allocation/{f}_residual_allocator_topology_stable_v1/audit.json')] for f in ('ffm', 'senseiver')},
+              'allocator_audits': {f: [str(path(profiles[f]['path']))] for f in ('ffm', 'senseiver')},
               'definition_qualification_ledger': canonical('assessment/fidelity_qualification_v1/ledger.json')}
     for bank in inputs['source_banks'].values():
         canonical(Path(bank) / 'receipt.json')

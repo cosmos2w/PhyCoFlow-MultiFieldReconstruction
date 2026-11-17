@@ -284,3 +284,68 @@ def test_research_costs_are_bounded_by_measured_receipts(tmp_path):
         mod.measured_prior_research_seconds(costs,tmp_path)
     with pytest.raises(ValueError,match='no-prior-work'):
         mod.measured_prior_research_seconds({'schema':costs['schema'],'jobs':[]},tmp_path)
+
+
+def test_allocator_stage_resume_preserves_gradients_rng_and_complete_estimator(tmp_path):
+    import torch
+    first, second = tmp_path / 'first', tmp_path / 'second'
+    first.mkdir(); second.mkdir()
+    binding = {'sample_ids': ['sample-1', 'sample-2'], 'head': 'fixed'}
+    torch.manual_seed(740)
+    x = torch.randn(5, dtype=torch.float64, requires_grad=True)
+    vectors = []
+    for index in range(4):
+        y = torch.randn(5, dtype=torch.float64)
+        gradient, = torch.autograd.grad(((x * y) ** 2).sum(), x)
+        vectors.append(gradient.detach())
+        if index == 1:
+            mod.save_audit_stage(first, 'batch_000', binding,
+                {'vectors': torch.stack(vectors), 'rng': torch.get_rng_state()})
+    expected = torch.stack(vectors)
+    expected_gram = expected @ expected.T
+    resumed = mod.load_audit_stage([first], 'batch_000', binding)
+    torch.set_rng_state(resumed['rng'])
+    restored = list(resumed['vectors'].unbind())
+    for _ in range(2):
+        y = torch.randn(5, dtype=torch.float64)
+        gradient, = torch.autograd.grad(((x * y) ** 2).sum(), x)
+        restored.append(gradient.detach())
+    actual = torch.stack(restored)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    torch.testing.assert_close(actual @ actual.T, expected_gram, rtol=0, atol=0)
+    assert mod.load_audit_stage([first], 'batch_001', binding) is None
+    with pytest.raises(ValueError, match='binding differs'):
+        mod.load_audit_stage([first], 'batch_000', {**binding, 'head': 'changed'})
+    mod.save_audit_stage(second, 'batch_000', binding, {'vectors': actual})
+    with pytest.raises(ValueError, match='duplicate audit stage'):
+        mod.load_audit_stage([first, second], 'batch_000', binding)
+    with pytest.raises(FileExistsError):
+        mod.save_audit_stage(first, 'batch_000', binding, {})
+    assert not list(first.glob('*.tmp'))
+
+
+def test_allocator_rng_checkpoint_and_resume_cost_are_complete(tmp_path, monkeypatch):
+    import json
+    import random
+
+    import numpy as np
+
+    monkeypatch.setattr(torch.cuda, 'get_rng_state', lambda: torch.tensor([9], dtype=torch.uint8))
+    restored_cuda = []
+    monkeypatch.setattr(torch.cuda, 'set_rng_state', lambda value: restored_cuda.append(value.clone()))
+    random.seed(9); np.random.seed(10); torch.manual_seed(11)
+    state = mod.capture_audit_rng()
+    expected = (random.random(), np.random.rand(), torch.rand(1))
+    mod.restore_audit_rng(state)
+    actual = (random.random(), np.random.rand(), torch.rand(1))
+    assert actual[:2] == expected[:2]
+    torch.testing.assert_close(actual[2], expected[2])
+    assert restored_cuda[0].tolist() == [9]
+    receipt = tmp_path / 'audit.json'
+    receipt.write_text(json.dumps({'schema': 'car_round2_allocator_job_v1', 'token': 'prior', 'wall_seconds': 123.}))
+    research = {'jobs': [{'path': str(receipt), 'allocated_seconds': 123.}]}
+    mod.require_stage_research_cost({'attempt_token': 'prior'}, research)
+    with pytest.raises(ValueError, match='fully charged'):
+        mod.require_stage_research_cost({'attempt_token': 'prior'}, {'jobs': [{'path': str(receipt), 'allocated_seconds': 122.}]})
+    with pytest.raises(ValueError, match='lacks'):
+        mod.require_stage_research_cost({'attempt_token': 'other'}, research)

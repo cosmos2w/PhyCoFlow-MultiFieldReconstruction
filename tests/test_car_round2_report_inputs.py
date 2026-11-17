@@ -25,7 +25,10 @@ def fixture(tmp_path):
         path.write_text(json.dumps(data)); return path
     def binding(path):
         return {'path': str(path), 'sha256': mod.sha(path)}
-    alloc = put('configs/allocation.json', {'mode': 'uniform'})
+    audits = {family: put(f'artifacts/allocation/{family}_completed_retry/audit.json', {})
+              for family in ('ffm', 'senseiver')}
+    alloc = put('configs/allocation.json', {'mode': 'uniform',
+                'profiles': {family: binding(path) for family, path in audits.items()}})
     freeze = put('configs/formal_freeze.json', {'schema': 'car_round2_freeze_receipt_v1',
         'manifest': {'status': 'frozen', 'artifacts': {'allocation_disposition': binding(alloc)}}})
     groups = []
@@ -79,6 +82,7 @@ def test_terminal_roots_assemble_four_runs_and_all_matched_trajectories(tmp_path
     report = report_stub(lambda inputs, campaign: calls.append((inputs, campaign)))
     inputs = mod.build(tmp_path, groups, train, val, report)
     assert set(inputs['runs']) == set(mod.ARMS)
+    assert inputs['allocator_audits']['ffm'] == [str(tmp_path / 'artifacts/allocation/ffm_completed_retry/audit.json')]
     assert sum(len(epochs) for arm in inputs['trajectories'].values() for epochs in arm.values()) == 48
     assert len(calls) == 1 and inputs['source_bindings']
     missing = Path(inputs['trajectories'][mod.ARMS[0]]['validation']['250'])

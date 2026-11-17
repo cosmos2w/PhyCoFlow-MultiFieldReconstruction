@@ -217,6 +217,75 @@ def provisional_overhead_fraction(research_seconds, policy_seconds_per_update, m
     return (research_seconds + updates*policy_seconds_per_update)/(updates*minimum_observed_update_seconds)
 
 
+def save_audit_stage(directory, name, binding, payload):
+    """Publish one complete immutable stage only after its bytes reach disk."""
+    import torch
+    target = directory / f'{name}.pt'
+    temporary = directory / f'.{name}.{uuid.uuid4().hex}.tmp'
+    try:
+        with temporary.open('xb') as stream:
+            torch.save({'schema': 'car_round2_allocator_stage_v1', 'stage': name,
+                        'binding': binding, 'payload': payload}, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.link(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return target
+
+
+def load_audit_stage(directories, name, binding):
+    """Select one matching stage, rejecting conflicting and partial receipts."""
+    import torch
+    found = [directory / f'{name}.pt' for directory in directories
+             if (directory / f'{name}.pt').is_file()]
+    if len(found) > 1:
+        raise ValueError(f'duplicate audit stage: {name}')
+    if not found:
+        return None
+    saved = torch.load(found[0], map_location='cpu', weights_only=True)
+    if (saved.get('schema') != 'car_round2_allocator_stage_v1'
+            or saved.get('stage') != name or saved.get('binding') != binding):
+        raise ValueError(f'audit stage binding differs: {name}')
+    return saved['payload']
+
+
+def capture_audit_rng():
+    import random
+
+    import numpy as np
+    import torch
+    state = np.random.get_state()
+    return {'python': random.getstate(), 'numpy': (state[0], state[1].tolist(), state[2], state[3], state[4]),
+            'torch_cpu': torch.get_rng_state(), 'torch_cuda': torch.cuda.get_rng_state()}
+
+
+def restore_audit_rng(state):
+    import random
+
+    import numpy as np
+    import torch
+    random.setstate(state['python'])
+    numpy = state['numpy']
+    np.random.set_state((numpy[0], np.asarray(numpy[1], dtype=np.uint32), *numpy[2:]))
+    torch.set_rng_state(state['torch_cpu'])
+    torch.cuda.set_rng_state(state['torch_cuda'])
+
+
+def require_stage_research_cost(payload, research_costs):
+    """Charge the complete prior audit lease that produced a resumed stage."""
+    token = payload.get('attempt_token')
+    if not isinstance(token, str) or not token:
+        raise ValueError('resumed audit stage lacks its attempt token')
+    for item in research_costs['jobs']:
+        job = json.loads(Path(item['path']).read_text())
+        if job.get('token') == token and job.get('schema') == 'car_round2_allocator_job_v1':
+            if not math.isclose(float(item['allocated_seconds']), float(job['wall_seconds']), rel_tol=0., abs_tol=1e-6):
+                raise ValueError('resumed audit attempt must be fully charged')
+            return
+    raise ValueError('resumed audit stage lacks its complete prior attempt cost')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--campaign', type=Path, required=True)
@@ -230,6 +299,8 @@ def main():
     parser.add_argument('--save-margin-seconds', type=float, required=True)
     parser.add_argument('--research-costs', type=Path, required=True, help='measured allocator-specific research cost allocations')
     parser.add_argument('--replicates', type=int, default=128)
+    parser.add_argument('--batch-checkpoint-dir', type=Path, help='new immutable directory for completed audit stages')
+    parser.add_argument('--resume-batch-checkpoints', type=Path, action='append', default=[], help='prior stage directory; repeat to resume several attempts')
     args = parser.parse_args()
     import yaml
 
@@ -248,6 +319,16 @@ def main():
         raise ValueError('run and output must belong to DATA2 campaign')
     if args.output.exists():
         raise FileExistsError(args.output)
+    resume_dirs = [path.resolve(strict=True) for path in args.resume_batch_checkpoints]
+    if len(set(resume_dirs)) != len(resume_dirs) or any(campaign not in path.parents or not path.is_dir() for path in resume_dirs):
+        raise ValueError('distinct campaign-owned resume stage directories required')
+    checkpoint_dir = args.batch_checkpoint_dir.resolve() if args.batch_checkpoint_dir else None
+    if checkpoint_dir is not None:
+        if campaign not in checkpoint_dir.parents or checkpoint_dir.exists():
+            raise ValueError('new campaign-owned checkpoint directory required')
+        checkpoint_dir.mkdir(parents=True)
+    if resume_dirs and checkpoint_dir is None:
+        raise ValueError('resume requires a new stage checkpoint directory')
     from importlib.util import module_from_spec, spec_from_file_location
     spec = spec_from_file_location('car_round2_driver', CODE_ROOT / 'scripts/posttraining/run_coherence_adaptive_repair_round2.py')
     driver = module_from_spec(spec); spec.loader.exec_module(driver)
@@ -505,8 +586,33 @@ def main():
                               for p, g in zip(parameters, gradients))
             return torch.cat(pieces)
 
+        stage_binding = {'script_sha256': file_sha256(Path(__file__)), 'config_sha256': file_sha256(args.config),
+                         'panel_sha256': file_sha256(panel_path), 'core_sha256': file_sha256(artifacts_path),
+                         'source_sha256': source_sha, 'source_state_sha256': _digest(model.source.state_dict()),
+                         'head_state_sha256': _digest({name: p.detach().cpu() for name, p in named_parameters}),
+                         'parameter_order': [{'name': name, 'shape': list(p.shape), 'numel': p.numel()} for name, p in named_parameters],
+                         'family_hashes': manifest['coherence_family_state_sha256s'],
+                         'prefit_sha256': file_sha256(prefit_path), 'bank_file_sha256': bank['sha256'],
+                         'sample_ids': ids, 'pair_draws': draws, 'field_order': list(fields)}
+        receipt['stage_binding'] = stage_binding
+        receipt['resumed_stages'] = []
         rows, moments, difficulty_rows = [], torch.zeros(k, dtype=torch.float64), []
-        for group in groups:
+        for group_index, group in enumerate(groups):
+            stage_name = f'batch_{group_index:03d}'
+            expected_ids = [sample for begin, end, _, _ in group for sample in ids[begin:end]]
+            saved = load_audit_stage(resume_dirs, stage_name, stage_binding)
+            if saved is not None:
+                require_stage_research_cost(saved, research_costs)
+                if saved['row']['ids'] != expected_ids or saved['row']['fraction'] != len(expected_ids) / len(ids):
+                    raise ValueError('resumed batch identity differs')
+                rows.append(saved['row'])
+                difficulty_rows.append((saved['scale_difficulties'], saved['shape_difficulties'], saved['row']['fraction']))
+                moments += saved['moment']
+                receipt.setdefault('oracle_diagnostics', []).extend(saved['oracle_diagnostics'])
+                receipt['resumed_stages'].append(stage_name)
+                restore_audit_rng(saved['rng'])
+                continue
+            diagnostic_start = len(receipt.get('oracle_diagnostics', []))
             values = evaluate(group)
             pair_vectors, unary_vectors = [], []
             scale_difficulties = torch.zeros(k, len(inner), dtype=torch.float64)
@@ -558,9 +664,15 @@ def main():
             count = sum(end-begin for begin,end,_,_ in group)
             fraction = count / len(ids)
             difficulty_rows.append((scale_difficulties, shape_difficulties, fraction))
-            moments += fraction * (gram.diag().reshape(k, len(inner)) * weights).sum(1)
-            rows.append({'ids': [sample for begin,end,_,_ in group for sample in ids[begin:end]], 'fraction': fraction,
-                         'pair_gram': gram, 'unary_gram': unary_gram})
+            moment = fraction * (gram.diag().reshape(k, len(inner)) * weights).sum(1)
+            moments += moment
+            row = {'ids': expected_ids, 'fraction': fraction, 'pair_gram': gram, 'unary_gram': unary_gram}
+            rows.append(row)
+            if checkpoint_dir is not None:
+                save_audit_stage(checkpoint_dir, stage_name, stage_binding,
+                    {'attempt_token': token, 'row': row, 'scale_difficulties': scale_difficulties, 'shape_difficulties': shape_difficulties,
+                     'moment': moment, 'oracle_diagnostics': receipt['oracle_diagnostics'][diagnostic_start:],
+                     'rng': capture_audit_rng()})
             del values, pair_vectors, unary_vectors, pair_matrix, unary_matrix
         if [x for row in rows for x in row['ids']] != ids:
             raise ValueError('parameter audit did not cover the exact TRAIN manifest')
@@ -588,9 +700,22 @@ def main():
         receipt['timing'] = timing_evidence
         timings = []
         for timing_inner in range(len(inner)):
-            evidence = {'inner_index': timing_inner}
+            stage_name = f'timing_{timing_inner:03d}'
+            timing_binding = {**stage_binding, 'timing_gpu_uuid': args.gpu_uuid}
+            saved = load_audit_stage(resume_dirs, stage_name, timing_binding)
+            if saved is None:
+                evidence = {'inner_index': timing_inner}
+                measured = timing_module.measure_bundle_costs(timed_bundle, k, 3, evidence=evidence)
+                if checkpoint_dir is not None:
+                    save_audit_stage(checkpoint_dir, stage_name, timing_binding,
+                        {'attempt_token': token, 'evidence': evidence, 'timing': measured, 'rng': capture_audit_rng()})
+            else:
+                require_stage_research_cost(saved, research_costs)
+                evidence, measured = saved['evidence'], saved['timing']
+                receipt['resumed_stages'].append(stage_name)
+                restore_audit_rng(saved['rng'])
             timing_evidence.append(evidence)
-            timings.append(timing_module.measure_bundle_costs(timed_bundle, k, 3, evidence=evidence))
+            timings.append(measured)
         costs = sum(weights[j] * torch.tensor([row['incremental_seconds'] for row in timing], dtype=torch.float64)
                     for j, timing in enumerate(timings))
         fixed = sum(float(weights[j]) * float(timing[0]['fixed_seconds']) for j, timing in enumerate(timings))
