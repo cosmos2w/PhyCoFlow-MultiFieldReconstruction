@@ -126,6 +126,22 @@ def check_formal_code_inventory(manifest, campaign, capsule_sha256):
         raise ValueError('formal execution capsule differs from frozen code inventory')
 
 
+def scheduled_callback_bound(rows):
+    """Charge measured worst cases at the formal union of callback epochs."""
+    callback_epochs = sorted({1, *range(10, 1001, 10), *CHECKPOINTS, 1000})
+    quiet_qualification_epochs = [2, 3, 4, 5, 6, 7, 8, 11]
+    callback_max = max(row['callback_and_reporting_seconds'] for row in rows)
+    quiet_max = max(rows[epoch - 1]['callback_and_reporting_seconds'] for epoch in quiet_qualification_epochs)
+    quiet_count = 1000 - len(callback_epochs)
+    total = len(callback_epochs) * callback_max + quiet_count * quiet_max
+    return {'method': 'maximum combined qualification callback at each formal plot/checkpoint epoch; maximum quiet reporting elsewhere',
+            'formal_epochs': 1000, 'callback_epochs': callback_epochs,
+            'callback_epoch_count': len(callback_epochs), 'quiet_epoch_count': quiet_count,
+            'qualification_quiet_epochs': quiet_qualification_epochs,
+            'maximum_combined_callback_seconds': callback_max,
+            'maximum_quiet_reporting_seconds': quiet_max, 'total_seconds': total}
+
+
 def measured_forecast(campaign, arm_records, timing_paths, *, spent_seconds, remaining_cost):
     """Bind conservative per-arm forecasts to qualified complete epoch journals."""
     if len(timing_paths) != len(ARMS) or not math.isfinite(spent_seconds) or spent_seconds < 0:
@@ -145,7 +161,7 @@ def measured_forecast(campaign, arm_records, timing_paths, *, spent_seconds, rem
             check_binding(reference, campaign)
         names.add(name)
         remaining_seconds += seconds
-    timings, updates, callbacks, outside, cold = {}, [], [], [], []
+    timings, updates, callbacks, outside, cold, callback_evidence = {}, [], [], [], [], {}
     for arm, path in zip(ARMS, timing_paths, strict=True):
         path = Path(path).resolve(strict=True)
         record = {'path': str(path), 'sha256': digest(path)}
@@ -180,7 +196,8 @@ def measured_forecast(campaign, arm_records, timing_paths, *, spent_seconds, rem
         update = max(rows[i - 1]['train_seconds'] / 12 for i in timing['selected_epochs'])
         if not math.isclose(update, timing.get('complete_update_seconds', -1), rel_tol=1e-12):
             raise ValueError(f'{arm}: complete update time differs from its journal')
-        callbacks.append(sum(row['callback_and_reporting_seconds'] for row in rows) / 12)
+        callback_evidence[arm] = scheduled_callback_bound(rows)
+        callbacks.append(callback_evidence[arm]['total_seconds'] / 1000)
         walls = []
         for phase, expected in (('pause', ('budget_paused', 108)), ('resume', ('completed', 144))):
             launch = json.loads(Path(timing[f'{phase}_launch_path']).read_text())
@@ -209,7 +226,8 @@ def measured_forecast(campaign, arm_records, timing_paths, *, spent_seconds, rem
             'per_arm_update_seconds': updates, 'per_arm_callback_seconds_per_epoch': callbacks,
             'per_arm_outside_epoch_seconds': outside, 'per_arm_cold_train_excess_seconds': cold,
             'timing_receipts': timings, 'remaining_seconds': remaining_seconds, 'remaining_cost': remaining_cost,
-            'callback_estimation': 'mean observed 12-epoch callback wall extrapolated over 1000 epochs per arm',
+            'callback_estimation': 'schedule-aware maximum combined callback and maximum quiet reporting wall per arm',
+            'per_arm_callback_schedule_evidence': callback_evidence,
             'projected_seconds': total, 'cap_seconds': CAP, 'reserve_seconds': RESERVE,
             'fits': total + RESERVE <= CAP}
 

@@ -346,6 +346,7 @@ def test_complete_consistent_uniform_freeze_is_admitted(tmp_path):
         {'name': 'assessment', 'seconds': 1., 'evidence': [artifacts['train_panel']]}]})
     forecast = driver.measured_forecast(tmp_path, arms, receipts, spent_seconds=0., remaining_cost=remaining)
     assert forecast['per_arm_outside_epoch_seconds'] == [44.] * 4
+    assert forecast['per_arm_callback_schedule_evidence'][driver.ARMS[0]]['callback_epoch_count'] == 101
     assert forecast['projected_seconds'] == 4 * (12000. + 1000. + 44.) + 1.
     save('forecast', forecast)
     manifest = {'schema': 'car_round2_freeze_v1', 'status': 'frozen', 'arms': arms, 'artifacts': artifacts}
@@ -355,3 +356,19 @@ def test_complete_consistent_uniform_freeze_is_admitted(tmp_path):
     receipts[0].write_text(json.dumps(tampered))
     with pytest.raises(ValueError, match='startup/closure measurement differs'):
         driver.measured_forecast(tmp_path, arms, receipts, spent_seconds=0., remaining_cost=remaining)
+
+
+def test_callback_forecast_uses_union_of_formal_schedule_and_quiet_maximum():
+    driver = load('run_coherence_adaptive_repair_round2')
+    rows = [{'callback_and_reporting_seconds': .2} for _ in range(12)]
+    rows[0]['callback_and_reporting_seconds'] = 80.
+    rows[8]['callback_and_reporting_seconds'] = 3.  # qualification pause
+    rows[9]['callback_and_reporting_seconds'] = 82.
+    rows[11]['callback_and_reporting_seconds'] = 90.  # qualification completion
+    rows[4]['callback_and_reporting_seconds'] = .5
+    bound = driver.scheduled_callback_bound(rows)
+    assert bound['callback_epochs'] == [1, *range(10, 1001, 10)]
+    assert (bound['callback_epoch_count'], bound['quiet_epoch_count']) == (101, 899)
+    assert bound['maximum_combined_callback_seconds'] == 90.
+    assert bound['maximum_quiet_reporting_seconds'] == .5
+    assert bound['total_seconds'] == 101 * 90. + 899 * .5
