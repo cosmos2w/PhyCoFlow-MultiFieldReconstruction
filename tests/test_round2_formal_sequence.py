@@ -18,7 +18,8 @@ def load():
 
 
 @pytest.mark.parametrize('failure', [None, 'exit', 'paused', 'incomplete'])
-def test_formal_pair_receipts_and_stop(tmp_path, monkeypatch, failure):
+@pytest.mark.parametrize('selector', ['both', 'full_model', 'residual_repair'])
+def test_formal_pair_receipts_and_stop(tmp_path, monkeypatch, failure, selector):
     module = load()
     names = ['FFM_Selected_Bank_Uniform_FullModel', 'FFM_Selected_Bank_Residual_Repair',
              'Senseiver_Selected_Bank_Uniform_FullModel', 'Senseiver_Selected_Bank_Residual_Repair']
@@ -69,7 +70,7 @@ def test_formal_pair_receipts_and_stop(tmp_path, monkeypatch, failure):
     monkeypatch.setattr(module.subprocess, 'Popen', Process)
     args = Namespace(campaign=tmp_path, output=tmp_path / 'group.json', family='ffm', device='GPU-example',
                      full_max_seconds=20000., residual_max_seconds=20000., full_epoch_seconds=13., residual_epoch_seconds=13.,
-                     initial_stage_bound_seconds=300., save_margin_seconds=100.)
+                     initial_stage_bound_seconds=300., save_margin_seconds=100., arm=selector)
     if failure:
         with pytest.raises(RuntimeError, match='did not complete'):
             module.sequence(args)
@@ -77,7 +78,10 @@ def test_formal_pair_receipts_and_stop(tmp_path, monkeypatch, failure):
         module.sequence(args)
     record = json.loads(args.output.read_text())
     assert record['status'] == ('failed' if failure else 'completed')
-    assert len(record['children']) == (1 if failure else 2)
+    expected = names[:2] if selector == 'both' else [names[0 if selector == 'full_model' else 1]]
+    assert len(record['children']) == (1 if failure else len(expected))
     launch = json.loads(Path(record['launch_receipt']).read_text())
-    assert [x['completed_epochs'] for x in launch['luna_sparse_schedule']] == [500, 1000, 500, 1000]
-    assert [cmd[cmd.index('--arm') + 1] for cmd in commands] == names[:len(commands)]
+    assert [x['completed_epochs'] for x in launch['luna_sparse_schedule']] == [500, 1000] * len(expected)
+    assert [cmd[cmd.index('--arm') + 1] for cmd in commands] == expected[:len(commands)]
+    assert [record['contents']['arm'] for record in launch['arm_claims']] == expected
+    assert not any((tmp_path / 'operations/formal_arm_claims').iterdir())

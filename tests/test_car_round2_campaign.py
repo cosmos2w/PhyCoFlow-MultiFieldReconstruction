@@ -276,7 +276,7 @@ def test_complete_consistent_uniform_freeze_is_admitted(tmp_path):
         bank_binding = save(f'bank_{family}', bank)
         prefit = save(f'coefficients_{family}', {'version': 'common_prefit_calibration_v1', 'binding': {
             'source_checkpoint_sha256': driver.digest(source_path), 'support_sha256': 'support',
-            'field_order': ['a', 'b', 'c'], 'bank_target_sha256': bank_target_digest(bank)}})
+            'field_order': ['a', 'b', 'c'], 'sample_ids': ['sample'], 'bank_target_sha256': bank_target_digest(bank)}})
         save(f'assessment_contract_{family}', {'schema': 'car_round2_assessment_contract_v2', 'family': family,
             'source_checkpoint_sha256': driver.digest(source_path), 'core_sha256': observer['sha256'],
             'fidelity_reference_sha256': fidelity['sha256'], 'reserved_task_sha256': artifacts['reserved_task']['sha256'],
@@ -351,6 +351,66 @@ def test_complete_consistent_uniform_freeze_is_admitted(tmp_path):
     save('forecast', forecast)
     manifest = {'schema': 'car_round2_freeze_v1', 'status': 'frozen', 'arms': arms, 'artifacts': artifacts}
     assert driver.check_freeze(manifest, tmp_path) is manifest
+    snapshot = save('family_snapshot', {'schema': 'car_round2_ledger_snapshot_v1', 'snapshot_unix': 1.,
+                    'state': {'schema': 'car_gpu_ledger_v1', 'closed': [], 'active': {}}})
+    family_costs = save('family_remaining', {'schema': 'car_round2_remaining_cost_v1',
+        'ledger_snapshot': snapshot, 'components': [
+            {'name': 'pending_other_training', 'seconds': 100., 'evidence': [snapshot],
+             'future_reservation_rule': {'per_arm_predicted_seconds': {driver.ARMS[0]: 40., driver.ARMS[1]: 60.}}},
+            {'name': 'pending_other_qualification', 'seconds': 50., 'evidence': [snapshot],
+             'future_reservation_rule': {'gpu_uuid': 'GPU-test', 'dispatch_start_unix': 0.}},
+            {'name': 'pending_other_allocator', 'seconds': 10., 'evidence': [snapshot]},
+            {'name': 'assessment_closeout', 'seconds': 20., 'evidence': [snapshot]}]})
+    family_forecast = driver.measured_forecast(tmp_path, arms, receipts[2:], spent_seconds=0.,
+                                               remaining_cost=family_costs, arms=driver.ARMS[2:])
+    assert family_forecast['schema'] == 'car_round2_family_forecast_v1'
+    assert family_forecast['projected_seconds'] == 2 * (12000. + 1000. + 44.) + 180.
+    # Build a real two-arm admission from the same bound qualification records.
+    import hashlib
+    files = {'src/unchanged.py': 'source'}
+    capsule = hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest()
+    inventory = {'schema': 'car_execution_code_v1', 'files': files, 'sha256': capsule}
+    save('qualified_code_inventory', inventory)
+    save('code_inventory', inventory)
+    save('qualification_code_compatibility', {'schema': 'car_round2_family_code_compatibility_v1',
+         'passed': True, 'qualified_capsule_sha256': capsule, 'execution_capsule_sha256': capsule,
+         'changed_files': [], 'scientific_code_identical': True})
+    for arm, timing_path in zip(driver.ARMS[2:], receipts[2:], strict=True):
+        timing = json.loads(timing_path.read_text())
+        for phase in ('pause', 'resume'):
+            path = Path(timing[f'{phase}_launch_path'])
+            launch = json.loads(path.read_text()); launch['code_capsule_sha256'] = capsule
+            path.write_text(json.dumps(launch)); timing[f'{phase}_launch_sha256'] = driver.digest(path)
+        qpath = Path(arms[arm]['qualification']['path'])
+        qualification = json.loads(qpath.read_text())
+        qualification['pause_launch_sha256'] = timing['pause_launch_sha256']
+        qualification['resume_launch_sha256'] = timing['resume_launch_sha256']
+        qpath.write_text(json.dumps(qualification))
+        timing['qualification_receipt_sha256'] = driver.digest(qpath)
+        arms[arm]['qualification']['sha256'] = timing['qualification_receipt_sha256']
+        timing_path.write_text(json.dumps(timing))
+    family_forecast = driver.measured_forecast(tmp_path, arms, receipts[2:], spent_seconds=0.,
+                                               remaining_cost=family_costs, arms=driver.ARMS[2:])
+    save('forecast', family_forecast)
+    bank_data = json.loads(Path(artifacts['bank_senseiver']['path']).read_text())
+    profile = save('senseiver_profile', {'schema': 'car_round2_allocator_job_v1', 'status': 'completed',
+        'source_family': 'senseiver', 'parameterization': 'residual_head', 'qualified_one_path': False,
+        'source_panel_sha256': artifacts['source_panel_senseiver']['sha256'],
+        'core_sha256': artifacts['observer_senseiver']['sha256'], 'prefit_sha256': artifacts['coefficients_senseiver']['sha256'],
+        'selected_bank_sha256': bank_data['sha256'], 'gradient_cost_uniform_ratio': .9, 'overhead_fraction': .01,
+        'train_population': 10, 'sample_ids': ['sample'], 'actual_head_parameters': 5, 'pair_draws': 2,
+        'policies': {'uniform': {'mse_cost': 1.}, 'lagged_gradient_cost': {'mse_cost': .9}}})
+    save('allocation_disposition', {'schema': 'car_round2_allocation_disposition_v1', 'mode': 'uniform',
+                                    'profiles': {'senseiver': profile}})
+    needed = {'source_senseiver', 'train_panel', 'validation_panel', 'reserved_task',
+              'observer_senseiver', 'bank_senseiver', 'coefficients_senseiver', 'fidelity_senseiver',
+              'assessment_contract_senseiver', 'reserved_task_normalizer', 'development_event',
+              'allocation_disposition', 'forecast', 'code_inventory', 'qualified_code_inventory',
+              'qualification_code_compatibility'}
+    family_manifest = {'schema': 'car_round2_family_freeze_v1', 'status': 'frozen', 'family': 'senseiver',
+                       'arms': {arm: arms[arm] for arm in driver.ARMS[2:]},
+                       'artifacts': {name: artifacts[name] for name in needed}}
+    assert driver.check_freeze(family_manifest, tmp_path, 'senseiver') is family_manifest
     tampered = json.loads(receipts[0].read_text())
     tampered['outside_epoch_seconds'] = 0.
     receipts[0].write_text(json.dumps(tampered))
@@ -372,3 +432,196 @@ def test_callback_forecast_uses_union_of_formal_schedule_and_quiet_maximum():
     assert bound['maximum_combined_callback_seconds'] == 90.
     assert bound['maximum_quiet_reporting_seconds'] == .5
     assert bound['total_seconds'] == 101 * 90. + 899 * .5
+
+
+def test_family_forecast_requires_pending_family_and_closeout_reservations(tmp_path):
+    driver = load('run_coherence_adaptive_repair_round2')
+    evidence = tmp_path / 'evidence.json'
+    evidence.write_text('{}')
+    binding = {'path': str(evidence), 'sha256': driver.digest(evidence)}
+    costs = tmp_path / 'remaining.json'
+    snapshot = tmp_path / 'snapshot.json'
+    snapshot.write_text(json.dumps({'schema': 'car_round2_ledger_snapshot_v1', 'snapshot_unix': 1.,
+                                    'state': {'closed': [], 'active': {}}}))
+    snapshot_binding = {'path': str(snapshot), 'sha256': driver.digest(snapshot)}
+    costs.write_text(json.dumps({'schema': 'car_round2_remaining_cost_v1', 'ledger_snapshot': snapshot_binding, 'components': [
+        {'name': 'assessment_closeout', 'seconds': 1., 'evidence': [binding]}]}))
+    remaining = {'path': str(costs), 'sha256': driver.digest(costs)}
+    with pytest.raises(ValueError, match='reserve all pending-family'):
+        driver.measured_forecast(tmp_path, {}, [evidence, evidence], spent_seconds=0.,
+                                 remaining_cost=remaining, arms=driver.ARMS[2:])
+
+
+def test_early_uniform_requires_real_matching_failed_allocator(tmp_path):
+    driver = load('run_coherence_adaptive_repair_round2')
+    def save(name, body):
+        path = tmp_path / name
+        path.write_text(json.dumps(body))
+        return {'path': str(path), 'sha256': driver.digest(path)}
+    bank = save('bank.json', {'sha256': 'bank-target'})
+    prefit = save('prefit.json', {'binding': {'sample_ids': ['sample']}})
+    artifacts = {'bank_senseiver': bank, 'observer_senseiver': {'sha256': 'core'},
+                 'coefficients_senseiver': prefit}
+    profile = {'schema': 'car_round2_allocator_job_v1', 'status': 'completed',
+               'source_family': 'senseiver', 'parameterization': 'residual_head',
+               'qualified_one_path': False, 'source_panel_sha256': 'panel', 'core_sha256': 'core',
+               'prefit_sha256': prefit['sha256'], 'selected_bank_sha256': 'bank-target',
+               'gradient_cost_uniform_ratio': .9, 'overhead_fraction': .01,
+               'train_population': 10, 'sample_ids': ['sample'], 'actual_head_parameters': 5, 'pair_draws': 2,
+               'policies': {'uniform': {'mse_cost': 1.}, 'lagged_gradient_cost': {'mse_cost': .9}}}
+    profile_binding = save('profile.json', profile)
+    artifacts['allocation_disposition'] = save('disposition.json', {
+        'schema': 'car_round2_allocation_disposition_v1', 'mode': 'uniform',
+        'profiles': {'senseiver': profile_binding}})
+    config = {'coherence': {'scalable_anchored_coherence': {
+        'allocation': {'mode': 'uniform'}, 'common_core': {'source_panel_sha256': 'panel'}}}}
+    configs = {'Senseiver_Selected_Bank_Uniform_FullModel': config,
+               'Senseiver_Selected_Bank_Residual_Repair': config}
+    driver.check_allocation_disposition(artifacts, tmp_path, configs, ('senseiver',))
+    profile['gradient_cost_uniform_ratio'] = .7
+    profile_binding = save('profile.json', profile)
+    artifacts['allocation_disposition'] = save('disposition.json', {
+        'schema': 'car_round2_allocation_disposition_v1', 'mode': 'uniform',
+        'profiles': {'senseiver': profile_binding}})
+    with pytest.raises(ValueError, match='measured failure'):
+        driver.check_allocation_disposition(artifacts, tmp_path, configs, ('senseiver',))
+
+
+def test_family_code_compatibility_rejects_changed_training_source(tmp_path):
+    import hashlib
+
+    driver = load('run_coherence_adaptive_repair_round2')
+    def inventory(files):
+        return {'schema': 'car_execution_code_v1', 'files': files,
+                'sha256': hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest()}
+    def save(name, value):
+        path = tmp_path / name
+        path.write_text(json.dumps(value))
+        return {'path': str(path), 'sha256': driver.digest(path)}
+    original = inventory({'src/train.py': 'same', 'scripts/posttraining/sequence_car_round2_formal.py': 'old'})
+    current = inventory({'src/train.py': 'same', 'scripts/posttraining/sequence_car_round2_formal.py': 'new'})
+    proof = {'schema': 'car_round2_family_code_compatibility_v1', 'passed': True,
+             'qualified_capsule_sha256': original['sha256'], 'execution_capsule_sha256': current['sha256'],
+             'changed_files': ['scripts/posttraining/sequence_car_round2_formal.py'], 'scientific_code_identical': True}
+    launch = save('launch.json', {'code_capsule_sha256': original['sha256']})
+    timing = save('timing.json', {'pause_launch_path': launch['path'], 'resume_launch_path': launch['path']})
+    artifacts = {'qualified_code_inventory': save('old.json', original), 'code_inventory': save('new.json', current),
+                 'qualification_code_compatibility': save('proof.json', proof)}
+    driver.check_family_code_compatibility(artifacts, tmp_path, [Path(timing['path'])])
+    current = inventory({'src/train.py': 'changed', 'scripts/posttraining/sequence_car_round2_formal.py': 'new'})
+    artifacts['code_inventory'] = save('new.json', current)
+    with pytest.raises(ValueError, match='scientific code differs'):
+        driver.check_family_code_compatibility(artifacts, tmp_path, [Path(timing['path'])])
+
+
+def test_live_family_budget_consumes_reservations_once_and_rejects_unreserved_overage(tmp_path, monkeypatch):
+    driver = load('run_coherence_adaptive_repair_round2')
+    monkeypatch.setattr(driver.time, 'time', lambda: 100.)
+    monkeypatch.setattr(driver, 'CAP', 1000.)
+    monkeypatch.setattr(driver, 'RESERVE', 100.)
+    def save(name, body):
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(body))
+        return {'path': str(path), 'sha256': driver.digest(path)}
+    audit = {'gpu_uuid': 'GPU-audit', 'phase': 'residual_allocator_audit', 'start_unix': 0.}
+    snapshot = save('snapshot.json', {'schema': 'car_round2_ledger_snapshot_v1', 'snapshot_unix': 10.,
+                                     'state': {'schema': 'car_gpu_ledger_v1', 'closed': [], 'active': {'audit': audit}}})
+    costs = save('costs.json', {'schema': 'car_round2_remaining_cost_v1', 'ledger_snapshot': snapshot,
+        'components': [{'name': 'pending_other_training', 'seconds': 200.,
+                        'future_reservation_rule': {'per_arm_predicted_seconds': {driver.ARMS[0]: 100., driver.ARMS[1]: 100.}}},
+                       {'name': 'pending_other_qualification', 'seconds': 200.,
+                        'future_reservation_rule': {'gpu_uuid': 'GPU-ffm', 'dispatch_start_unix': 1.}},
+                       {'name': 'pending_other_allocator', 'seconds': 200.,
+                        'active_reservations': [{'token': 'audit', 'remaining_seconds_at_snapshot': 200.}]},
+                       {'name': 'assessment_closeout', 'seconds': 50.}]})
+    forecast = save('forecast.json', {'projected_seconds': 880., 'remaining_cost': costs,
+        'per_arm_update_seconds': [.001, .001], 'per_arm_callback_seconds_per_epoch': [0., 0.],
+        'per_arm_outside_epoch_seconds': [0., 0.], 'per_arm_cold_train_excess_seconds': [0., 0.]})
+    manifest = {'family': 'senseiver', 'arms': {arm: {} for arm in driver.ARMS[2:]},
+                'artifacts': {'forecast': forecast}}
+    ledger = {'schema': 'car_gpu_ledger_v1', 'closed': [], 'active': {'audit': audit,
+        'formal': {'gpu_uuid': 'GPU-sense', 'phase': 'formal', 'arm': driver.ARMS[2], 'start_unix': 95.}}}
+    save('operations/gpu_ledger.json', ledger)
+    result = driver.check_family_live_budget(manifest, tmp_path)
+    assert result['projected_seconds'] == 880.
+    assert result['charged_seconds_by_reservation']['pending_other_allocator'] == 90.
+    assert result['charged_seconds_by_reservation'][driver.ARMS[2]] == 5.
+    # Full Senseiver arm completes while a reserved FFM training lease runs;
+    # its elapsed usage replaces the pending FFM obligation rather than adding it.
+    ledger['active'].pop('formal')
+    ledger['closed'].append({'token': 'formal', 'gpu_uuid': 'GPU-sense', 'phase': 'formal',
+                             'arm': driver.ARMS[2], 'start_unix': 95., 'seconds': 5.})
+    ledger['active']['ffm_formal'] = {'gpu_uuid': 'GPU-ffm', 'phase': 'formal',
+                                      'arm': driver.ARMS[0], 'start_unix': 80.}
+    ledger['active']['assessment'] = {'gpu_uuid': 'GPU-assessment', 'phase': 'native_assessment',
+                                       'start_unix': 95.}
+    save('operations/gpu_ledger.json', ledger)
+    result = driver.check_family_live_budget(manifest, tmp_path)
+    assert result['projected_seconds'] == 880.
+    assert result['charged_seconds_by_reservation'][driver.ARMS[0]] == 20.
+    assert result['charged_seconds_by_reservation']['assessment_closeout'] == 5.
+    assert result['charged_seconds_by_reservation'][driver.ARMS[2]] == 5.
+    ledger['active']['ffm_formal']['start_unix'] = -1.
+    save('operations/gpu_ledger.json', ledger)
+    assert driver.check_family_live_budget(manifest, tmp_path)['projected_seconds'] == 881.
+    ledger['active']['ffm_formal']['start_unix'] = -25.
+    save('operations/gpu_ledger.json', ledger)
+    with pytest.raises(ValueError, match='exceed GPU ceiling'):
+        driver.check_family_live_budget(manifest, tmp_path)
+    ledger['active']['ffm_formal']['start_unix'] = 80.
+    ledger['active']['unexpected'] = {'gpu_uuid': 'GPU-extra', 'phase': 'unbudgeted', 'start_unix': 75.}
+    save('operations/gpu_ledger.json', ledger)
+    with pytest.raises(ValueError, match='exceed GPU ceiling'):
+        driver.check_family_live_budget(manifest, tmp_path)
+
+
+def test_formal_duplicate_guard_preserves_lineage_resume():
+    driver = load('run_coherence_adaptive_repair_round2')
+    arm = driver.ARMS[2]
+    state = {'active': {}, 'closed': [{'phase': 'formal', 'arm': arm}]}
+    with pytest.raises(ValueError, match='duplicate launch'):
+        driver.check_formal_attempt_available(state, arm, resume=False)
+    driver.check_formal_attempt_available(state, arm, resume=True)
+    driver.check_formal_attempt_available(state, driver.ARMS[3], resume=False)
+    state['active']['live'] = {'phase': 'formal', 'arm': arm}
+    with pytest.raises(ValueError, match='already active'):
+        driver.check_formal_attempt_available(state, arm, resume=True)
+
+
+def test_final_freeze_rejects_any_changed_early_admitted_arm(tmp_path, monkeypatch):
+    driver = load('run_coherence_adaptive_repair_round2')
+    directory = tmp_path / 'configs/family_admissions'
+    directory.mkdir(parents=True)
+    arm = driver.ARMS[2]
+    early = {'arms': {arm: {'config': {'sha256': 'original'}, 'qualification': {'sha256': 'qualified'}}},
+             'artifacts': {}}
+    (directory / 'senseiver.json').write_text(json.dumps(early))
+    monkeypatch.setattr(driver, 'check_freeze', lambda doc, campaign, family: doc)
+    final = {'arms': {arm: {'config': {'sha256': 'different'}, 'qualification': {'sha256': 'qualified'}}},
+             'artifacts': {}}
+    with pytest.raises(ValueError, match='changes an already admitted arm'):
+        driver.check_family_freeze_consistency(final, tmp_path)
+
+
+def test_uniform_other_failed_admission_allows_own_passing_profile(tmp_path, monkeypatch):
+    driver = load('run_coherence_adaptive_repair_round2')
+    def save(name, body):
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(body))
+        return {'path': str(path), 'sha256': driver.digest(path)}
+    failed = save('sense_audit.json', {'qualified_one_path': False})
+    passed = save('ffm_audit.json', {'qualified_one_path': True})
+    other_disposition = save('sense_disposition.json', {
+        'schema': 'car_round2_allocation_disposition_v1', 'mode': 'uniform', 'profiles': {'senseiver': failed}})
+    save('configs/family_admissions/senseiver.json', {'artifacts': {'allocation_disposition': other_disposition}})
+    disposition = save('disposition.json', {'schema': 'car_round2_allocation_disposition_v1', 'mode': 'uniform',
+                                           'profiles': {'senseiver': failed, 'ffm': passed}})
+    config = {'coherence': {'scalable_anchored_coherence': {
+        'allocation': {'mode': 'uniform'}, 'common_core': {'source_panel_sha256': 'panel'}}}}
+    configs = {'FFM_Selected_Bank_Uniform_FullModel': config, 'FFM_Selected_Bank_Residual_Repair': config}
+    verified = []
+    monkeypatch.setattr(driver, 'check_freeze', lambda doc, campaign, family: verified.append(family))
+    driver.check_allocation_disposition({'allocation_disposition': disposition}, tmp_path, configs, ('ffm',))
+    assert verified == ['senseiver']

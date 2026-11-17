@@ -387,22 +387,33 @@ def assemble_manifest(args):
         'forecast': bound_file(inputs['forecast'], campaign),
         'code_inventory': bound_file(inputs['code_inventory'], campaign),
     })
-    for family in ('ffm', 'senseiver'):
+    selected_family = getattr(args, 'family', None)
+    families = (selected_family,) if selected_family else ('ffm', 'senseiver')
+    for family in families:
         source = setup['sources'][family]['source_fit']
         artifacts[f'source_{family}'] = bound_file(source['source_checkpoint'], campaign)
         artifacts[f'fidelity_{family}'] = bound_file(source['fidelity'], campaign)
         artifacts[f'assessment_contract_{family}'] = bound_file(inputs['assessment_contracts'][family], campaign)
     arm_records = {arm: {'config': record, 'qualification': bound_file(inputs['qualifications'][arm], campaign)}
                    for arm, record in arms['arms'].items()}
-    manifest = {'schema': 'car_round2_freeze_v1', 'status': 'frozen', 'arms': arm_records, 'artifacts': artifacts}
+    manifest = {'schema': 'car_round2_family_freeze_v1' if selected_family else 'car_round2_freeze_v1', 'status': 'frozen', 'arms': arm_records, 'artifacts': artifacts}
+    if selected_family:
+        manifest['family'] = selected_family
+        artifacts['qualified_code_inventory'] = bound_file(inputs['qualified_code_inventory'], campaign)
+        artifacts['qualification_code_compatibility'] = bound_file(inputs['qualification_code_compatibility'], campaign)
     driver_path = Path(__file__).resolve().parents[1] / 'posttraining/run_coherence_adaptive_repair_round2.py'
     spec = importlib.util.spec_from_file_location('car_round2_driver', driver_path)
     driver = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(driver)
-    driver.check_freeze(manifest, campaign)
+    if selected_family:
+        driver.check_freeze(manifest, campaign, selected_family)
+    else:
+        driver.check_freeze(manifest, campaign)
     output = args.output.resolve()
     if campaign not in output.parents:
         raise ValueError('freeze manifest must be campaign-owned')
+    if selected_family and output != campaign / 'configs/family_admissions' / f'{selected_family}.json':
+        raise ValueError('family admission must use its canonical immutable campaign path')
     write_new(output, json.dumps(manifest, indent=2, allow_nan=False) + '\n')
     print(output)
 
@@ -430,6 +441,7 @@ def main():
                             help='assemble one uniform pair for independent initial qualification')
     freeze = sub.add_parser('manifest')
     freeze.add_argument('--campaign', type=Path, required=True)
+    freeze.add_argument('--family', choices=('ffm', 'senseiver'))
     freeze.add_argument('--setup', type=Path, required=True)
     freeze.add_argument('--assessment-prerequisites', type=Path, required=True)
     freeze.add_argument('--arms', type=Path, required=True)

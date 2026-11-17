@@ -51,9 +51,11 @@ def build_jobs(args, artifacts):
              '--contract', artifacts['contract'], '--event', artifacts['event'],
              '--reserved-task', artifacts['reserved'], '--deployment-timing', timing, '--output', output])
 
-    if args.phase == 'train':
-        for arm, run in arms:
-            for epoch in EPOCHS:
+    if args.phase in ('train', 'train-batch'):
+        train_arms = [(args.arm, args.run)] if args.phase == 'train-batch' else arms
+        train_epochs = args.epochs if args.phase == 'train-batch' else EPOCHS
+        for arm, run in train_arms:
+            for epoch in train_epochs:
                 bank = generate(arm, run, epoch, 'train', source_train)
                 timing = campaign / 'assessment' / 'deployment' / arm / f'epoch_{epoch:03d}.json'
                 add(f'train_{arm}_{epoch:03d}_deployment', 'gpu',
@@ -61,9 +63,10 @@ def build_jobs(args, artifacts):
                      '--gpu-uuid', args.gpu_uuid, '--max-seconds', args.deployment_seconds,
                      '--save-margin-seconds', args.save_margin_seconds, '--warmup', args.warmup, '--output', timing])
                 score(arm, epoch, 'train', source_train, bank)
-        add('freeze_train_nominations', 'cpu',
-            ['freeze-nominations', '--family', args.family, '--full-run', args.full_run,
-             '--residual-run', args.residual_run])
+        if args.phase == 'train':
+            add('freeze_train_nominations', 'cpu',
+                ['freeze-nominations', '--family', args.family, '--full-run', args.full_run,
+                 '--residual-run', args.residual_run])
         return jobs
     add('freeze_source_reserved_normalizer', 'cpu',
         ['freeze-reserved-normalizer', '--family', args.family, '--source-bank', source_train,
@@ -107,6 +110,47 @@ def execute_jobs(jobs, work, env, children, *, runner=subprocess.run):
             raise RuntimeError(f"{job['name']} failed with exit code {code}; see {stderr}")
 
 
+def validate_train_batch(args, campaign, formal, assess, driver):
+    """Bind one frozen run and its existing prescribed checkpoints without requiring completion."""
+    import yaml
+
+    prefix = 'FFM' if args.family == 'ffm' else 'Senseiver'
+    allowed = {f'{prefix}_Selected_Bank_Uniform_FullModel', f'{prefix}_Selected_Bank_Residual_Repair'}
+    if args.arm not in allowed or args.run is None or not args.epochs:
+        raise ValueError('TRAIN batch requires one named family arm, run and checkpoint epochs')
+    if len(set(args.epochs)) != len(args.epochs) or any(epoch not in EPOCHS for epoch in args.epochs):
+        raise ValueError('TRAIN batch epochs must be unique prescribed checkpoints')
+    if args.full_run is not None or args.residual_run is not None:
+        raise ValueError('TRAIN batch uses one run')
+    run = args.run.resolve(strict=True)
+    if (campaign / 'runs/formal' / args.arm).resolve() not in run.parents:
+        raise ValueError('TRAIN batch run must belong to the named formal arm')
+    binding = formal['manifest']['arms'][args.arm]['config']
+    frozen = driver.check_binding(binding, campaign)
+    cfg = yaml.safe_load((run / 'resolved_config.yaml').read_text())
+    if not assess.same_scientific_config(cfg, yaml.safe_load(frozen.read_text())):
+        raise ValueError('TRAIN batch run differs from frozen configuration')
+    source = (campaign / 'sources' / args.family).resolve(strict=True)
+    if Path(cfg['source_run']).resolve(strict=True) != source:
+        raise ValueError('TRAIN batch run has the wrong frozen source')
+    source_checkpoint = source / 'checkpoints/last.pt'
+    source_sha = digest(source_checkpoint)
+    bank = json.loads((args.train_source_bank / 'receipt.json').read_text())
+    if (bank.get('schema') != 'car_round2_native_bank_v1' or bank.get('status') != 'completed'
+            or bank.get('kind') != 'source' or bank.get('split') != 'train'
+            or bank.get('family') != args.family or bank.get('source_sha256') != source_sha):
+        raise ValueError('TRAIN source bank must bind the same frozen SOURCE checkpoint')
+    checkpoints = {}
+    for epoch in args.epochs:
+        path = (run / 'checkpoints' / f'epoch_{epoch:03d}.pt').resolve(strict=True)
+        if run not in path.parents or not path.is_file() or path.stat().st_size == 0:
+            raise ValueError('nonempty campaign-owned prescribed checkpoint required')
+        checkpoints[str(epoch)] = {'path': str(path), 'sha256': digest(path)}
+    args.run = run
+    return {'arm': args.arm, 'run': str(run), 'source_sha256': source_sha,
+            'formal_config_sha256': binding['sha256'], 'checkpoints': checkpoints}
+
+
 def sequence(args):
     campaign = args.campaign.resolve(strict=True)
     args.campaign = campaign
@@ -136,19 +180,33 @@ def sequence(args):
     artifacts = {name: driver.check_binding(bindings[key], campaign) for name, key in
                  [('contract', f'assessment_contract_{args.family}'), ('event', 'development_event'),
                   ('reserved', 'reserved_task')]}
-    for key in ('full_run', 'residual_run', 'core_run', 'train_source_bank'):
+    for key in ('core_run', 'train_source_bank'):
         value = getattr(args, key).resolve(strict=True)
         if campaign not in value.parents:
             raise ValueError(f'{key} must be campaign-owned')
         setattr(args, key, value)
-    if args.full_run == args.residual_run:
-        raise ValueError('distinct mature arm runs required')
-    completed = assess.completed_frozen_mature_runs(campaign)
-    prefix = 'FFM' if args.family == 'ffm' else 'Senseiver'
-    for suffix, run in (('Uniform_FullModel', args.full_run), ('Residual_Repair', args.residual_run)):
-        arm = f'{prefix}_Selected_Bank_{suffix}'
-        if run not in completed[arm]:
-            raise ValueError(f'{arm} requires its supplied frozen mature run completed at 12000 updates')
+    batch_binding = None
+    if args.phase == 'train-batch':
+        batch_binding = validate_train_batch(args, campaign, formal, assess, driver)
+    else:
+        if args.arm is not None or args.run is not None or args.epochs is not None:
+            raise ValueError('arm, run and epochs are only accepted for TRAIN batch')
+        for key in ('full_run', 'residual_run'):
+            value = getattr(args, key)
+            if value is None:
+                raise ValueError('both mature arm runs required')
+            value = value.resolve(strict=True)
+            if campaign not in value.parents:
+                raise ValueError(f'{key} must be campaign-owned')
+            setattr(args, key, value)
+        if args.full_run == args.residual_run:
+            raise ValueError('distinct mature arm runs required')
+        completed = assess.completed_frozen_mature_runs(campaign)
+        prefix = 'FFM' if args.family == 'ffm' else 'Senseiver'
+        for suffix, run in (('Uniform_FullModel', args.full_run), ('Residual_Repair', args.residual_run)):
+            arm = f'{prefix}_Selected_Bank_{suffix}'
+            if run not in completed[arm]:
+                raise ValueError(f'{arm} requires its supplied frozen mature run completed at 12000 updates')
     args.keops_cache.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ, CUDA_VISIBLE_DEVICES=args.gpu_uuid, KEOPS_CACHE_FOLDER=str(args.keops_cache.resolve()))
     jobs = build_jobs(args, artifacts)
@@ -159,6 +217,7 @@ def sequence(args):
                    'gpu_uuid':args.gpu_uuid, 'formal_freeze_sha256':digest(formal_path),
                    'source_bank_receipt_sha256':digest(args.train_source_bank / 'receipt.json'),
                    'full_run':str(args.full_run), 'residual_run':str(args.residual_run),
+                   'train_batch_binding': batch_binding,
                    'core_run':str(args.core_run), 'train_source_bank':str(args.train_source_bank),
                    'generation_seconds':args.generation_seconds, 'deployment_seconds':args.deployment_seconds,
                    'save_margin_seconds':args.save_margin_seconds, 'script_sha256':digest(Path(__file__)),
@@ -183,10 +242,13 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--campaign', type=Path, required=True)
     p.add_argument('--family', choices=('ffm', 'senseiver'), required=True)
-    p.add_argument('--phase', choices=('train', 'validation'), required=True)
+    p.add_argument('--phase', choices=('train', 'train-batch', 'validation'), required=True)
     p.add_argument('--final-assessment', action='store_true', help='use closeout reserve only after all four mature arms complete')
-    p.add_argument('--full-run', type=Path, required=True)
-    p.add_argument('--residual-run', type=Path, required=True)
+    p.add_argument('--full-run', type=Path)
+    p.add_argument('--residual-run', type=Path)
+    p.add_argument('--arm', help='one frozen family arm for TRAIN checkpoint batch')
+    p.add_argument('--run', type=Path, help='the named arm run for TRAIN checkpoint batch')
+    p.add_argument('--epochs', type=int, nargs='+', help='unique prescribed TRAIN checkpoint epochs')
     p.add_argument('--core-run', type=Path, required=True)
     p.add_argument('--train-source-bank', type=Path, required=True)
     p.add_argument('--gpu-uuid', required=True)

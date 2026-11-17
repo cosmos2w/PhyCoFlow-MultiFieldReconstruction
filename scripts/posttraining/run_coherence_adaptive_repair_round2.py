@@ -142,9 +142,9 @@ def scheduled_callback_bound(rows):
             'maximum_quiet_reporting_seconds': quiet_max, 'total_seconds': total}
 
 
-def measured_forecast(campaign, arm_records, timing_paths, *, spent_seconds, remaining_cost):
+def measured_forecast(campaign, arm_records, timing_paths, *, spent_seconds, remaining_cost, arms=ARMS):
     """Bind conservative per-arm forecasts to qualified complete epoch journals."""
-    if len(timing_paths) != len(ARMS) or not math.isfinite(spent_seconds) or spent_seconds < 0:
+    if len(timing_paths) != len(arms) or not math.isfinite(spent_seconds) or spent_seconds < 0:
         raise ValueError('four timing receipts and nonnegative spent time required')
     cost_path = check_binding(remaining_cost, campaign)
     cost = json.loads(cost_path.read_text())
@@ -161,8 +161,50 @@ def measured_forecast(campaign, arm_records, timing_paths, *, spent_seconds, rem
             check_binding(reference, campaign)
         names.add(name)
         remaining_seconds += seconds
+    if 'ledger_snapshot' in cost:
+        snapshot = json.loads(check_binding(cost['ledger_snapshot'], campaign).read_text())
+        if (snapshot.get('schema') != 'car_round2_ledger_snapshot_v1'
+            or not math.isclose(spent_seconds, spent(snapshot['state'], now=snapshot['snapshot_unix']), rel_tol=1e-12, abs_tol=1e-9)):
+            raise ValueError('forecast spent must match its bound ledger snapshot')
+    if tuple(arms) != tuple(ARMS):
+        snapshot = json.loads(check_binding(cost['ledger_snapshot'], campaign).read_text())
+        if (snapshot.get('schema') != 'car_round2_ledger_snapshot_v1'
+            or not math.isclose(spent_seconds, spent(snapshot['state'], now=snapshot['snapshot_unix']), rel_tol=1e-12, abs_tol=1e-9)):
+            raise ValueError('family forecast spent must match its bound ledger snapshot')
+        if len(arms) != 2 or not all(a.startswith('FFM_') for a in arms) and not all(a.startswith('Senseiver_') for a in arms):
+            raise ValueError('family forecast needs exactly one source pair')
+        required_reservations = {'pending_other_training', 'pending_other_qualification',
+                                 'pending_other_allocator', 'assessment_closeout'}
+        if not required_reservations.issubset(names):
+            raise ValueError('family forecast must reserve all pending-family and assessment obligations')
+        active_tokens = set()
+        for item in components:
+            reservations = item.get('active_reservations', [])
+            if not isinstance(reservations, list):
+                raise TypeError('active reservations must be a list')
+            total_reserved = 0.
+            for reservation in reservations:
+                token, amount = reservation.get('token'), reservation.get('remaining_seconds_at_snapshot')
+                if (token in active_tokens or token not in snapshot['state']['active']
+                    or not isinstance(amount, (int, float)) or not math.isfinite(amount) or amount < 0):
+                    raise ValueError('active reservation must bind a unique active ledger token')
+                active_tokens.add(token)
+                total_reserved += amount
+            if total_reserved > item['seconds'] + 1e-9:
+                raise ValueError('active reservations exceed component allocation')
+        training = next(item for item in components if item['name'] == 'pending_other_training')
+        per_arm = training.get('future_reservation_rule', {}).get('per_arm_predicted_seconds', {})
+        other_arms = set(ARMS) - set(arms)
+        if (not isinstance(per_arm, dict) or set(per_arm) != other_arms
+            or any(not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0 for value in per_arm.values())
+            or not math.isclose(sum(per_arm.values()), training['seconds'], rel_tol=1e-12, abs_tol=1e-9)):
+            raise ValueError('pending other-family training must reserve each arm separately')
+        qualification = next(item for item in components if item['name'] == 'pending_other_qualification')
+        rule = qualification.get('future_reservation_rule', {})
+        if not isinstance(rule.get('gpu_uuid'), str) or not isinstance(rule.get('dispatch_start_unix'), (int, float)):
+            raise ValueError('pending qualification reservation requires runtime dispatch identity')
     timings, updates, callbacks, outside, cold, callback_evidence = {}, [], [], [], [], {}
-    for arm, path in zip(ARMS, timing_paths, strict=True):
+    for arm, path in zip(arms, timing_paths, strict=True):
         path = Path(path).resolve(strict=True)
         record = {'path': str(path), 'sha256': digest(path)}
         check_binding(record, campaign)
@@ -222,7 +264,7 @@ def measured_forecast(campaign, arm_records, timing_paths, *, spent_seconds, rem
         updates.append(update)
         timings[arm] = record
     total = spent_seconds + sum(updates) * 12000 + sum(callbacks) * 1000 + sum(outside) + sum(cold) + remaining_seconds
-    return {'schema': 'car_round2_forecast_v2', 'spent_seconds': spent_seconds,
+    return {'schema': 'car_round2_forecast_v2' if tuple(arms) == tuple(ARMS) else 'car_round2_family_forecast_v1', 'spent_seconds': spent_seconds,
             'per_arm_update_seconds': updates, 'per_arm_callback_seconds_per_epoch': callbacks,
             'per_arm_outside_epoch_seconds': outside, 'per_arm_cold_train_excess_seconds': cold,
             'timing_receipts': timings, 'remaining_seconds': remaining_seconds, 'remaining_cost': remaining_cost,
@@ -262,7 +304,7 @@ def check_common_core_binding(common_core, observer, campaign):
                    'sha256': common_core['source_panel_sha256']}, campaign)
 
 
-def check_assessment_contracts(artifacts, campaign, configs):
+def check_assessment_contracts(artifacts, campaign, configs, families=('ffm', 'senseiver')):
     """Bind assessment observers and truth-only normalization before training."""
     task = artifacts['reserved_task']['sha256']
     panel = json.loads(check_binding(artifacts['train_panel'], campaign).read_text())
@@ -275,7 +317,7 @@ def check_assessment_contracts(artifacts, campaign, configs):
         or evidence.get('sample_ids') != panel.get('sample_ids')
         or isinstance(value, bool) or not isinstance(value, (float, int)) or not math.isfinite(value) or value <= 0):
         raise ValueError('reserved task normalization must bind positive TRAIN-truth evidence')
-    for family in ('ffm', 'senseiver'):
+    for family in families:
         doc = json.loads(check_binding(artifacts[f'assessment_contract_{family}'], campaign).read_text())
         expected = {'source_checkpoint_sha256': artifacts[f'source_{family}']['sha256'],
                     'core_sha256': artifacts[f'observer_{family}']['sha256'],
@@ -308,7 +350,7 @@ def check_assessment_contracts(artifacts, campaign, configs):
             raise ValueError(f'{family}: assessment observer and source bank identities required')
 
 
-def check_allocation_disposition(artifacts, campaign, configs):
+def check_allocation_disposition(artifacts, campaign, configs, families=('ffm', 'senseiver')):
     """Reject policy claims without both exact matched parameter-gradient audits."""
     disposition = json.loads(check_binding(artifacts['allocation_disposition'], campaign).read_text())
     mode = disposition.get('mode')
@@ -319,7 +361,51 @@ def check_allocation_disposition(artifacts, campaign, configs):
         raise ValueError('allocation profiles must be named by source family')
     if mode == 'qualified_fixed' and set(profiles) != {'ffm', 'senseiver'}:
         raise ValueError('qualified allocation requires measured profiles for both source families')
-    for family in ('ffm', 'senseiver'):
+    if len(families) == 1:
+        if mode != 'uniform':
+            raise ValueError('qualified allocation requires the complete two-family freeze')
+        family = families[0]
+        failed_family = family
+        own_profile = json.loads(check_binding(profiles[family], campaign).read_text()) if family in profiles else None
+        if own_profile is None or own_profile.get('qualified_one_path') is True:
+            other = 'senseiver' if family == 'ffm' else 'ffm'
+            other_path = campaign / 'configs/family_admissions' / f'{other}.json'
+            if other not in profiles or not other_path.is_file():
+                raise ValueError('early uniform admission requires a completed failed family audit')
+            other_doc = json.loads(other_path.read_text())
+            other_disposition = json.loads(check_binding(other_doc['artifacts']['allocation_disposition'], campaign).read_text())
+            if other_disposition.get('mode') != 'uniform' or other_disposition.get('profiles', {}).get(other) != profiles[other]:
+                raise ValueError('other family failure must match its immutable admitted audit')
+            check_freeze(other_doc, campaign, other)
+            failed_family = other
+        profile = json.loads(check_binding(profiles[failed_family], campaign).read_text())
+        residual = configs[('FFM' if family == 'ffm' else 'Senseiver') + '_Selected_Bank_Residual_Repair']
+        core = residual['coherence']['scalable_anchored_coherence']['common_core']
+        ratio, overhead = profile.get('gradient_cost_uniform_ratio'), profile.get('overhead_fraction')
+        uniform_cost = profile.get('policies', {}).get('uniform', {}).get('mse_cost')
+        candidate_cost = profile.get('policies', {}).get('lagged_gradient_cost', {}).get('mse_cost')
+        population, ids = profile.get('train_population'), profile.get('sample_ids')
+        if failed_family == family and (profile.get('schema') != 'car_round2_allocator_job_v1' or profile.get('status') != 'completed'
+            or profile.get('source_family') != family or profile.get('parameterization') != 'residual_head'
+            or profile.get('qualified_one_path') is not False
+            or profile.get('source_panel_sha256') != core['source_panel_sha256']
+            or profile.get('core_sha256') != artifacts[f'observer_{family}']['sha256']
+            or profile.get('prefit_sha256') != artifacts[f'coefficients_{family}']['sha256']
+            or profile.get('selected_bank_sha256') != json.loads(check_binding(artifacts[f'bank_{family}'], campaign).read_text()).get('sha256')
+            or isinstance(population, bool) or not isinstance(population, int) or population < 1
+            or not isinstance(ids, list) or len(ids) != max(1, math.ceil(.1 * population)) or len(set(ids)) != len(ids)
+            or ids != json.loads(check_binding(artifacts[f'coefficients_{family}'], campaign).read_text())['binding']['sample_ids']
+            or isinstance(profile.get('actual_head_parameters'), bool) or not isinstance(profile.get('actual_head_parameters'), int)
+            or profile['actual_head_parameters'] < 1 or isinstance(profile.get('pair_draws'), bool)
+            or not isinstance(profile.get('pair_draws'), int) or profile['pair_draws'] < 1
+            or isinstance(ratio, bool) or not isinstance(ratio, (float, int)) or not math.isfinite(ratio) or ratio < 0
+            or isinstance(overhead, bool) or not isinstance(overhead, (float, int)) or not math.isfinite(overhead) or overhead < 0
+            or not isinstance(uniform_cost, (float, int)) or not math.isfinite(uniform_cost) or uniform_cost <= 0
+            or not isinstance(candidate_cost, (float, int)) or not math.isfinite(candidate_cost) or candidate_cost < 0
+            or not math.isclose(ratio, candidate_cost / uniform_cost, rel_tol=1e-8, abs_tol=1e-12)
+            or (ratio <= .8 and overhead <= .05)):
+            raise ValueError('early uniform admission requires matching measured failure of the allocation gate')
+    for family in families:
         prefix = 'FFM' if family == 'ffm' else 'Senseiver'
         full = configs[f'{prefix}_Selected_Bank_Uniform_FullModel']
         residual = configs[f'{prefix}_Selected_Bank_Residual_Repair']
@@ -370,25 +456,224 @@ def check_allocation_disposition(artifacts, campaign, configs):
             raise ValueError(f'{family}: allocation profile, target, probabilities or measured qualification differs')
 
 
-def check_freeze(manifest, campaign):
+
+
+def build_family_code_compatibility(campaign, qualified, execution):
+    """Prove executable scientific files and core scientific validators are unchanged."""
+    import ast
+    allowed = {'scripts/posttraining/run_coherence_adaptive_repair_round2.py',
+               'scripts/posttraining/sequence_car_round2_formal.py',
+               'scripts/posttraining/sequence_car_round2_assessment.py',
+               'scripts/analysis/assemble_car_round2.py'}
+    roots, inventories = [], []
+    for identity in (qualified, execution):
+        root = (campaign / 'operations/code' / identity).resolve(strict=True)
+        if root.parent != (campaign / 'operations/code').resolve() or root.name != identity:
+            raise ValueError('invalid capsule identity')
+        doc = json.loads((root / 'execution_receipt.json').read_text())
+        files = doc.get('files', {})
+        if (doc.get('schema') != 'car_execution_code_v1' or doc.get('sha256') != identity
+            or hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest() != identity):
+            raise ValueError('invalid capsule inventory')
+        for name, expected in files.items():
+            path = (root / name).resolve(strict=True)
+            if root not in path.parents or digest(path) != expected:
+                raise ValueError(f'capsule contents changed: {name}')
+        roots.append(root)
+        inventories.append(doc)
+    left, right = (doc['files'] for doc in inventories)
+    changed = {key for key in set(left) | set(right) if left.get(key) != right.get(key)}
+    if not changed.issubset(allowed):
+        raise ValueError(f'qualification scientific code differs: {sorted(changed - allowed)}')
+    driver = 'scripts/posttraining/run_coherence_adaptive_repair_round2.py'
+    critical = ('check_config', 'common_pair_view', 'check_source_pair', 'check_common_core_binding')
+    definitions = []
+    for root in roots:
+        tree = ast.parse((root / driver).read_text())
+        definitions.append({node.name: ast.dump(node, include_attributes=False) for node in tree.body
+                            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in critical})
+    if any(name not in definitions[0] or definitions[0][name] != definitions[1].get(name) for name in critical):
+        raise ValueError('core scientific admission validator changed')
+    return {'schema': 'car_round2_family_code_compatibility_v1', 'passed': True,
+            'qualified_capsule_sha256': qualified, 'execution_capsule_sha256': execution,
+            'changed_files': sorted(changed), 'scientific_code_identical': True,
+            'critical_validator_ast_identical': list(critical),
+            'scope': 'complete source tree and qualification code identical; only listed orchestration files may differ'}
+
+def check_family_code_compatibility(artifacts, campaign, timing_paths):
+    """Verify qualified code and execution code differ only in orchestration."""
+    reference = json.loads(check_binding(artifacts['qualified_code_inventory'], campaign).read_text())
+    current = json.loads(check_binding(artifacts['code_inventory'], campaign).read_text())
+    proof = json.loads(check_binding(artifacts['qualification_code_compatibility'], campaign).read_text())
+    for inventory in (reference, current):
+        files = inventory.get('files', {})
+        if (inventory.get('schema') != 'car_execution_code_v1' or not files
+            or hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest() != inventory.get('sha256')):
+            raise ValueError('invalid code inventory in family admission')
+    allowed = {'scripts/posttraining/run_coherence_adaptive_repair_round2.py',
+               'scripts/posttraining/sequence_car_round2_formal.py',
+               'scripts/posttraining/sequence_car_round2_assessment.py',
+               'scripts/analysis/assemble_car_round2.py'}
+    left, right = reference['files'], current['files']
+    changed = {key for key in set(left) | set(right) if left.get(key) != right.get(key)}
+    if not changed.issubset(allowed):
+        raise ValueError(f'qualification scientific code differs: {sorted(changed - allowed)}')
+    if (proof.get('schema') != 'car_round2_family_code_compatibility_v1' or proof.get('passed') is not True
+        or proof.get('qualified_capsule_sha256') != reference['sha256']
+        or proof.get('execution_capsule_sha256') != current['sha256']
+        or set(proof.get('changed_files', [])) != changed
+        or proof.get('scientific_code_identical') is not True):
+        raise ValueError('explicit family qualification code compatibility proof required')
+    for path in timing_paths:
+        timing = json.loads(Path(path).read_text())
+        for phase in ('pause', 'resume'):
+            launch = json.loads(Path(timing[f'{phase}_launch_path']).read_text())
+            if launch.get('code_capsule_sha256') != reference['sha256']:
+                raise ValueError('qualification launch capsule differs from qualified inventory')
+
+
+
+
+def check_formal_attempt_available(state, arm, *, resume):
+    """Forbid duplicate fresh attempts while preserving exact-lineage resumes."""
+    if any(v.get('phase') == 'formal' and v.get('arm') == arm for v in state['active'].values()):
+        raise ValueError('formal arm already active; duplicate launch forbidden')
+    if not resume and any(v.get('phase') == 'formal' and v.get('arm') == arm for v in state['closed']):
+        raise ValueError('formal arm already has an attempt; duplicate launch forbidden')
+
+def check_family_live_budget(manifest, campaign):
+    """Charge post-snapshot GPU use against its existing obligation exactly once."""
+    forecast = json.loads(check_binding(manifest['artifacts']['forecast'], campaign).read_text())
+    cost = json.loads(check_binding(forecast['remaining_cost'], campaign).read_text())
+    snapshot = json.loads(check_binding(cost['ledger_snapshot'], campaign).read_text())
+    then, before = snapshot['snapshot_unix'], snapshot['state']
+    components = {item['name']: item for item in cost['components']}
+    limits = {name: float(item['seconds']) for name, item in components.items()}
+    other_arm_limits = components['pending_other_training']['future_reservation_rule']['per_arm_predicted_seconds']
+    limits.update({arm: float(value) for arm, value in other_arm_limits.items()})
+    pair = tuple(arm for arm in ARMS if arm in manifest['arms'])
+    for index, arm in enumerate(pair):
+        limits[arm] = (12000 * forecast['per_arm_update_seconds'][index]
+                       + 1000 * forecast['per_arm_callback_seconds_per_epoch'][index]
+                       + forecast['per_arm_outside_epoch_seconds'][index]
+                       + forecast['per_arm_cold_train_excess_seconds'][index])
+    allocation = {token['token']: item['name'] for item in cost['components']
+                  for token in item.get('active_reservations', [])}
+    # Pending qualification identity is tied to its immutable launch receipt,
+    # not to a permanent device policy.
+    rule = components['pending_other_qualification']['future_reservation_rule']
+    qual_device = rule['gpu_uuid']
+    qual_start = rule['dispatch_start_unix']
+    snapshot_active = before['active']
+    old_closed = {item['token']: item for item in before['closed']}
+    with locked_ledger(campaign / 'operations/gpu_ledger.json') as state:
+        now = time.time()
+        current_closed = {item['token']: item for item in state['closed']}
+        for token, item in old_closed.items():
+            if current_closed.get(token) != item:
+                raise ValueError('ledger closed history changed since family forecast')
+        current = {**current_closed, **state['active']}
+        if not set(snapshot_active).issubset(current):
+            raise ValueError('forecast active lease disappeared from ledger')
+        charged = {name: 0. for name in limits}
+        unreserved = 0.
+        for token, item in current.items():
+            if token in old_closed:
+                continue
+            initial = max(0., then - float(snapshot_active[token]['start_unix'])) if token in snapshot_active else 0.
+            total = (float(item['seconds']) if token in current_closed else max(0., now - float(item['start_unix'])))
+            delta = max(0., total - initial)
+            if token in allocation:
+                scope = allocation[token]
+            elif item.get('phase') == 'formal' and item.get('arm') in (*pair, *other_arm_limits):
+                scope = item['arm']
+            elif item.get('phase') == 'qualification' and item.get('gpu_uuid') == qual_device and float(item['start_unix']) >= qual_start:
+                scope = 'pending_other_qualification'
+            elif item.get('phase') == 'residual_allocator_audit' and float(item['start_unix']) >= then:
+                scope = 'pending_other_allocator'
+            elif item.get('phase') in ('native_assessment', 'deployment_timing') and float(item['start_unix']) >= then:
+                scope = 'assessment_closeout'
+            else:
+                scope = None
+            if scope in charged:
+                charged[scope] += delta
+            else:
+                unreserved += delta
+        overage = unreserved + sum(max(0., value - limits[name]) for name, value in charged.items())
+        projected = forecast['projected_seconds'] + overage
+        if projected + RESERVE > CAP:
+            raise ValueError('current whole-round obligations exceed GPU ceiling with protected closeout')
+    return {'snapshot_unix': then, 'checked_unix': now, 'projected_seconds': projected,
+            'unreserved_extra_seconds': overage, 'charged_seconds_by_reservation': charged}
+
+def check_family_freeze_consistency(manifest, campaign):
+    """A later four-arm freeze must preserve every already-admitted pair."""
+    for family in ('ffm', 'senseiver'):
+        path = campaign / 'configs/family_admissions' / f'{family}.json'
+        if not path.exists():
+            continue
+        early = check_freeze(json.loads(path.read_text()), campaign, family)
+        for arm, bindings in early['arms'].items():
+            if manifest['arms'].get(arm) != bindings:
+                raise ValueError(f'{family}: final freeze changes an already admitted arm')
+        for name, reference in early['artifacts'].items():
+            if name in ('forecast', 'allocation_disposition', 'qualified_code_inventory', 'qualification_code_compatibility'):
+                continue
+            if manifest['artifacts'].get(name) != reference:
+                raise ValueError(f'{family}: final freeze changes admitted artifact {name}')
+        prior = json.loads(check_binding(early['artifacts']['allocation_disposition'], campaign).read_text())
+        final = json.loads(check_binding(manifest['artifacts']['allocation_disposition'], campaign).read_text())
+        if prior.get('mode') != final.get('mode'):
+            raise ValueError(f'{family}: final freeze changes admitted allocation mode')
+        profiles = final.get('profiles', {})
+        if set(profiles) != {'ffm', 'senseiver'}:
+            raise ValueError('final freeze after early admission requires both completed allocator profiles')
+        for name in ('ffm', 'senseiver'):
+            profile = json.loads(check_binding(profiles[name], campaign).read_text())
+            bank = json.loads(check_binding(manifest['artifacts'][f'bank_{name}'], campaign).read_text())
+            prefix = 'FFM' if name == 'ffm' else 'Senseiver'
+            import yaml
+            config = yaml.safe_load(check_binding(manifest['arms'][f'{prefix}_Selected_Bank_Residual_Repair']['config'], campaign).read_text())
+            core = config['coherence']['scalable_anchored_coherence']['common_core']
+            if (profile.get('schema') != 'car_round2_allocator_job_v1' or profile.get('status') != 'completed'
+                or profile.get('source_family') != name or profile.get('parameterization') != 'residual_head'
+                or not isinstance(profile.get('qualified_one_path'), bool)
+                or profile.get('source_panel_sha256') != core['source_panel_sha256']
+                or profile.get('core_sha256') != manifest['artifacts'][f'observer_{name}']['sha256']
+                or profile.get('prefit_sha256') != manifest['artifacts'][f'coefficients_{name}']['sha256']
+                or profile.get('selected_bank_sha256') != bank.get('sha256')):
+                raise ValueError(f'{name}: final freeze requires its actual matching completed allocator audit')
+
+def check_freeze(manifest, campaign, family=None):
     import yaml
-    if manifest.get('schema') != 'car_round2_freeze_v1' or manifest.get('status') != 'frozen':
+    scoped_family = family
+    expected_schema = 'car_round2_freeze_v1' if family is None else 'car_round2_family_freeze_v1'
+    if manifest.get('schema') != expected_schema or manifest.get('status') != 'frozen':
         raise ValueError('invalid freeze schema/status')
-    if set(manifest.get('arms', {})) != set(ARMS):
-        raise ValueError('all four arms are required')
+    if family is not None and manifest.get('family') != family:
+        raise ValueError('family admission identity differs')
+    if family is not None and family not in ('ffm', 'senseiver'):
+        raise ValueError('invalid source family')
+    active_arms = ARMS if family is None else tuple(a for a in ARMS if a.startswith('FFM_' if family == 'ffm' else 'Senseiver_'))
+    if set(manifest.get('arms', {})) != set(active_arms):
+        raise ValueError('all four arms are required' if scoped_family is None else 'both family arms are required')
     required = {'source_ffm', 'source_senseiver', 'train_panel', 'validation_panel', 'reserved_task',
                 'observer_ffm', 'observer_senseiver', 'bank_ffm', 'bank_senseiver',
                 'coefficients_ffm', 'coefficients_senseiver', 'fidelity_ffm', 'fidelity_senseiver',
                 'assessment_contract_ffm', 'assessment_contract_senseiver',
                 'reserved_task_normalizer', 'development_event',
                 'allocation_disposition', 'forecast', 'code_inventory'}
+    if family is not None:
+        required |= {'qualified_code_inventory', 'qualification_code_compatibility'}
+        other = 'senseiver' if family == 'ffm' else 'ffm'
+        required -= {f'{key}_{other}' for key in ('source', 'observer', 'bank', 'coefficients', 'fidelity', 'assessment_contract')}
     artifacts = manifest.get('artifacts', {})
     if required - artifacts.keys():
         raise ValueError(f'missing freeze artifacts: {sorted(required - artifacts.keys())}')
     for value in artifacts.values():
         check_binding(value, campaign)
     configs = {}
-    for arm in ARMS:
+    for arm in active_arms:
         binding = manifest['arms'][arm]
         config_path = check_binding(binding['config'], campaign)
         config = yaml.safe_load(config_path.read_text())
@@ -417,7 +702,7 @@ def check_freeze(manifest, campaign):
             raise ValueError(f'{arm}: passing 12-epoch fresh-process qualification required')
         if q.get('pause_step') != 108 or q.get('final_step') != 144 or q.get('formal_config_sha256') != binding['config']['sha256']:
             raise ValueError(f'{arm}: qualification does not bind formal configuration and clock')
-    for family in ('ffm', 'senseiver'):
+    for family in (('ffm', 'senseiver') if scoped_family is None else (scoped_family,)):
         check_source_pair(configs, family)
         from phycoflow_reconstruction.coherence.adaptive_fitting import (
             validate_bank,
@@ -436,21 +721,26 @@ def check_freeze(manifest, campaign):
         validate_bank(bank, field_order=field_order, support_identity=binding.get('support_sha256'),
                       source_identity=artifacts[f'source_{family}']['sha256'])
         validate_bank_target_binding(binding, bank)
-    check_assessment_contracts(artifacts, campaign, configs)
-    check_allocation_disposition(artifacts, campaign, configs)
+    families = ('ffm', 'senseiver') if scoped_family is None else (scoped_family,)
+    check_assessment_contracts(artifacts, campaign, configs, families)
+    check_allocation_disposition(artifacts, campaign, configs, families)
     forecast = json.loads(check_binding(artifacts['forecast'], campaign).read_text())
-    if (forecast.get('schema') != 'car_round2_forecast_v2' or forecast.get('fits') is not True
+    if (forecast.get('schema') != ('car_round2_forecast_v2' if scoped_family is None else 'car_round2_family_forecast_v1') or forecast.get('fits') is not True
             or forecast.get('cap_seconds') != CAP or forecast.get('reserve_seconds', 0) < RESERVE):
         raise ValueError('complete measured forecast with protected closeout is required')
-    timing_paths = [check_binding(forecast['timing_receipts'][arm], campaign) for arm in ARMS]
-    for arm, path in zip(ARMS, timing_paths, strict=True):
+    timing_paths = [check_binding(forecast['timing_receipts'][arm], campaign) for arm in active_arms]
+    for arm, path in zip(active_arms, timing_paths, strict=True):
         timing = json.loads(path.read_text())
         if timing['qualification_receipt_sha256'] != manifest['arms'][arm]['qualification']['sha256']:
             raise ValueError(f'{arm}: forecast timing qualification differs from formal qualification')
+    if scoped_family is not None:
+        check_family_code_compatibility(artifacts, campaign, timing_paths)
     measured = measured_forecast(campaign, manifest['arms'], timing_paths,
-                                 spent_seconds=forecast['spent_seconds'], remaining_cost=forecast['remaining_cost'])
+                                 spent_seconds=forecast['spent_seconds'], remaining_cost=forecast['remaining_cost'], arms=active_arms)
     if measured != forecast:
         raise ValueError('forecast differs from its measured qualification timings')
+    if scoped_family is None:
+        check_family_freeze_consistency(manifest, campaign)
     return manifest
 
 
@@ -459,6 +749,10 @@ def main():
     p.add_argument('--campaign', type=Path, required=True)
     sub = p.add_subparsers(dest='command', required=True)
     sub.add_parser('freeze-code')
+    proof = sub.add_parser('prove-family-code')
+    proof.add_argument('--qualified-capsule', required=True)
+    proof.add_argument('--execution-capsule', required=True)
+    proof.add_argument('--output', type=Path, required=True)
     cfg = sub.add_parser('prepare-config')
     cfg.add_argument('--template', type=Path, required=True)
     cfg.add_argument('--arm', choices=ARMS, required=True)
@@ -471,11 +765,19 @@ def main():
     forecast.add_argument('--timing-receipts', type=Path, nargs=4, required=True, help='FFM full/residual, then Senseiver full/residual')
     forecast.add_argument('--remaining-cost', type=Path, required=True, help='evidenced remaining assessment and closeout costs')
     forecast.add_argument('--output', type=Path, required=True)
+    forecast.add_argument('--ledger-snapshot', type=Path, help='reuse the family admission accounting snapshot')
+    family_forecast = sub.add_parser('family-forecast')
+    family_forecast.add_argument('--family', choices=('ffm', 'senseiver'), required=True)
+    family_forecast.add_argument('--arm-configs', type=Path, required=True)
+    family_forecast.add_argument('--timing-receipts', type=Path, nargs=2, required=True)
+    family_forecast.add_argument('--remaining-cost', type=Path, required=True)
+    family_forecast.add_argument('--output', type=Path, required=True)
     run = sub.add_parser('run')
     run.add_argument('--arm', choices=ARMS, required=True)
     run.add_argument('--config', type=Path, required=True)
     run.add_argument('--device', required=True, help='runtime physical GPU UUID or index')
     run.add_argument('--qualification', action='store_true')
+    run.add_argument('--family-admission', type=Path, help='immutable family admission receipt')
     run.add_argument('--prepare-only', action='store_true', help='fit source artifacts without updates')
     run.add_argument('--resume', type=Path)
     run.add_argument('--pause-at-epoch', type=int, choices=[9])
@@ -510,6 +812,13 @@ def main():
                                          'scripts/benchmarks/profile_car_round2_allocator.py',
                                          'scripts/benchmarks/profile_car_allocator.py'])
         print(capsule)
+    elif args.command == 'prove-family-code':
+        output = args.output.resolve()
+        if campaign not in output.parents:
+            raise ValueError('compatibility proof must be campaign-owned')
+        proof_doc = build_family_code_compatibility(campaign, args.qualified_capsule, args.execution_capsule)
+        immutable_json(output, proof_doc)
+        print(json.dumps(proof_doc, indent=2))
     elif args.command == 'prepare-config':
         import yaml
         if args.preparation and args.qualification:
@@ -580,18 +889,33 @@ def main():
             raise ValueError('config must be inside campaign')
         write_new(output, yaml.safe_dump(c, sort_keys=False))
         print(output)
-    elif args.command == 'forecast':
+    elif args.command in ('forecast', 'family-forecast'):
         assembly = json.loads(args.arm_configs.read_text())
         if assembly.get('schema') != 'car_round2_assembled_arms_v1':
             raise ValueError('assembled arm configurations required')
-        arms = {arm: {'config': assembly['arms'][arm]} for arm in ARMS}
+        forecast_arms = ARMS if args.command == 'forecast' else tuple(a for a in ARMS if a.startswith('FFM_' if args.family == 'ffm' else 'Senseiver_'))
+        arms = {arm: {'config': assembly['arms'][arm]} for arm in forecast_arms}
         for record in arms.values():
             check_binding(record['config'], campaign)
-        with locked_ledger(campaign / 'operations/gpu_ledger.json') as state:
-            used = spent(state)
         cost_path = args.remaining_cost.resolve(strict=True)
+        if args.command == 'family-forecast':
+            cost_doc = json.loads(cost_path.read_text())
+            snapshot = json.loads(check_binding(cost_doc['ledger_snapshot'], campaign).read_text())
+            if snapshot.get('schema') != 'car_round2_ledger_snapshot_v1':
+                raise ValueError('family forecast requires an immutable ledger snapshot')
+            used = spent(snapshot['state'], now=snapshot['snapshot_unix'])
+        elif args.ledger_snapshot:
+            cost_doc = json.loads(cost_path.read_text())
+            snapshot_path = check_binding(cost_doc['ledger_snapshot'], campaign)
+            if snapshot_path != args.ledger_snapshot.resolve(strict=True):
+                raise ValueError('global forecast must bind its declared ledger snapshot')
+            snapshot = json.loads(snapshot_path.read_text())
+            used = spent(snapshot['state'], now=snapshot['snapshot_unix'])
+        else:
+            with locked_ledger(campaign / 'operations/gpu_ledger.json') as state:
+                used = spent(state)
         result = measured_forecast(campaign, arms, args.timing_receipts, spent_seconds=used,
-                                   remaining_cost={'path': str(cost_path), 'sha256': digest(cost_path)})
+                                   remaining_cost={'path': str(cost_path), 'sha256': digest(cost_path)}, arms=forecast_arms)
         output = args.output.resolve()
         if campaign not in output.parents:
             raise ValueError('forecast output must belong to campaign')
@@ -605,6 +929,8 @@ def main():
     elif args.command == 'run':
         import yaml
         capsule_sha256 = check_code_capsule(campaign)
+        if args.family_admission and (args.qualification or args.prepare_only):
+            raise ValueError('family admission is only for formal training')
         if args.prepare_only and (args.qualification or args.resume or args.pause_at_epoch):
             raise ValueError('preparation requires a fresh, non-qualification attempt')
         config = yaml.safe_load(args.config.read_text())
@@ -627,8 +953,21 @@ def main():
         if not args.qualification and not args.prepare_only:
             if args.pause_at_epoch:
                 raise ValueError('qualification pause only')
-            doc = json.loads((campaign / 'configs/formal_freeze.json').read_text())['manifest']
-            check_freeze(doc, campaign)
+            if args.family_admission:
+                family = 'ffm' if args.arm.startswith('FFM_') else 'senseiver'
+                admission = check_binding({'path': str(args.family_admission.resolve()), 'sha256': digest(args.family_admission)}, campaign)
+                if admission != (campaign / 'configs/family_admissions' / f'{family}.json').resolve():
+                    raise ValueError('family admission must use canonical immutable path')
+                doc = json.loads(admission.read_text())
+                check_freeze(doc, campaign, family)
+                live_budget = check_family_live_budget(doc, campaign)
+            else:
+                doc = json.loads((campaign / 'configs/formal_freeze.json').read_text())['manifest']
+                check_freeze(doc, campaign)
+                early = [campaign / 'configs/family_admissions' / f'{name}.json' for name in ('ffm', 'senseiver')]
+                existing = next((path for path in early if path.is_file()), None)
+                if existing is not None:
+                    live_budget = check_family_live_budget(json.loads(existing.read_text()), campaign)
             check_formal_code_inventory(doc, campaign, capsule_sha256)
             if doc['arms'][args.arm]['config']['sha256'] != digest(args.config):
                 raise ValueError('config differs from frozen arm')
@@ -662,7 +1001,10 @@ def main():
                 raise ValueError('insufficient remaining budget for safe save and closeout')
             if any(v['gpu_uuid'] == device for v in state['active'].values()):
                 raise ValueError('device already leased by campaign')
-            state['active'][token] = {'gpu_uuid': device, 'phase': 'preparation' if args.prepare_only else ('qualification' if args.qualification else 'formal'), 'start_unix': start}
+            if not args.prepare_only and not args.qualification:
+                check_formal_attempt_available(state, args.arm, resume=args.resume is not None)
+            state['active'][token] = {'gpu_uuid': device, 'arm': args.arm,
+                'phase': 'preparation' if args.prepare_only else ('qualification' if args.qualification else 'formal'), 'start_unix': start}
         receipt = {'schema': 'car_round2_launch_v1', 'token': token, 'arm': args.arm, 'gpu_uuid': device,
                    'started_unix': start, 'pid': os.getpid(), 'config_sha256': digest(args.config),
                    'driver_sha256': digest(Path(__file__)), 'resume': str(args.resume) if args.resume else None,
@@ -670,6 +1012,10 @@ def main():
                    'pause_at_epoch': args.pause_at_epoch,
                    'initial_stage_bound_seconds': args.initial_stage_bound_seconds,
                    'platform': platform.platform()}
+        if args.family_admission:
+            receipt['family_admission_sha256'] = digest(args.family_admission)
+        if 'live_budget' in locals():
+            receipt['family_live_budget'] = live_budget
         atomic_json(campaign / 'operations/launches' / f'{token}.json', receipt)
         if args.launch_receipt_output is not None:
             immutable_json(launch_copy, receipt)
