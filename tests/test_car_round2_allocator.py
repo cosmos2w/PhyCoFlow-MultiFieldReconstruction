@@ -12,6 +12,66 @@ mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 
 
+@pytest.mark.parametrize('stratum', ['pair', 'self'])
+@pytest.mark.parametrize('exhaustive', [False, True])
+@pytest.mark.parametrize('dtype', [torch.float64, torch.float32])
+def test_joint_family_isolation_matches_real_family_values_and_gradients(stratum, exhaustive, dtype):
+    from phycoflow_reconstruction.coherence.adaptive_profile import isolate_query_stratum
+    from phycoflow_reconstruction.coherence.query_sampling import (
+        LINE_WEIGHTS,
+        Draw,
+        QueryBatch,
+        full_target_query_batch,
+    )
+    from phycoflow_reconstruction.coherence.scale_compute import sampled_scale
+    from phycoflow_reconstruction.coherence.shape_compute import LazyPooledShape
+
+    torch.manual_seed(610)
+    c = 3
+    head = torch.nn.Parameter(torch.randn(c, 4, 4, dtype=dtype) * .2)
+    prediction = torch.randn(1, c, 4, 4, dtype=dtype) + head.unsqueeze(0)
+    truth = torch.randn_like(prediction)
+    shape = LazyPooledShape([0] * c, [1] * c, dimensions=(0,), projections=3)
+    full = full_target_query_batch(c)
+    shape.accumulate(prediction.detach(), truth, full)
+    shape.freeze(provenance={'split': 'train', 'sample_ids': ['synthetic'], 'source_checkpoint_sha256': 'a' * 64})
+    spectral = prediction.flatten(2)[..., :4].transpose(1, 2).unsqueeze(0)
+    target = truth.flatten(2)[..., :4].transpose(1, 2)
+    desc = prediction.flatten(2)[..., :2].reshape(1, 1, 2*c)
+    target_desc = truth.flatten(2)[..., :2].reshape(1, 2*c)
+    mean_kw = {'draw_piece_means': prediction.mean((-1, -2)).unsqueeze(0).unsqueeze(2),
+               'target_piece_means': truth.mean((-1, -2)).unsqueeze(1),
+               'piece_weights': torch.ones(1, dtype=dtype),
+               'mean_scales': torch.ones(1, c, dtype=dtype)}
+    query = full if exhaustive else QueryBatch(
+        (Draw(0, 1, 1/c, c, 1, (1,), None, .5),),
+        (Draw(0, 1, 1/3, 3, 1, (1, 1), 0, LINE_WEIGHTS[0]/4),), 1)
+    calls = []
+
+    def score_both(batch):
+        calls.append(batch)
+        scale = sampled_scale(spectral, target, batch, filters=torch.ones(2, 4, dtype=dtype),
+            scales=torch.ones(2, c, dtype=dtype), mass=torch.ones(4, dtype=dtype),
+            power_floor=torch.ones(2, c, dtype=dtype), band_weights=torch.tensor([.5, .5], dtype=dtype),
+            self_descriptors=desc, target_self_descriptor=target_desc, mean_kwargs=mean_kw, mode='paired')
+        topology = shape.score(prediction, None, truth, batch, exhaustive=exhaustive, mode='paired')
+        anchor = prediction.square().mean() * .31
+        return ([1.7 * (scale['signed'] + scale['rho'] + scale['joint'] + scale['log_power_self']).mean() + anchor,
+                 .6 * (topology['self'] + topology['mutual']).mean() + anchor], [scale, topology])
+
+    old = [isolate_query_stratum(lambda draw, j=j: score_both(draw)[0][j], query, stratum) for j in range(2)]
+    assert len(calls) == 4
+    calls.clear()
+    new, leaves = mod.isolate_family_query_stratum(score_both, query, stratum)
+    assert len(calls) == 2 and calls[1] is query
+    assert len(leaves) == 2 and 'signed' in leaves[0] and 'mutual' in leaves[1]
+    for original, optimized in zip(old, new):
+        torch.testing.assert_close(optimized, original, rtol=0, atol=0)
+        old_grad = torch.autograd.grad(original, head, retain_graph=True)[0]
+        new_grad = torch.autograd.grad(optimized, head, retain_graph=True)[0]
+        torch.testing.assert_close(new_grad, old_grad, rtol=0, atol=0)
+
+
 def test_shared_inner_mse_matches_exhaustive_correlated_duplicates():
     # Four scalar parameter gradients: two outer IDs, each with two inner outcomes.
     vectors = torch.tensor([[1., -2.], [3., 1.], [-1., 2.], [2., 4.]], dtype=torch.float64)

@@ -30,6 +30,20 @@ if os.environ.get('KEOPS_CACHE_FOLDER') and os.environ.get('CUDA_VISIBLE_DEVICES
     (Path(os.environ['KEOPS_CACHE_FOLDER']) / f"{build}_CUDA_VISIBLE_DEVICES_{os.environ['CUDA_VISIBLE_DEVICES']}").mkdir(parents=True, exist_ok=True)
 
 
+def isolate_family_query_stratum(score_families, batch, stratum):
+    """Score both families at doubled and baseline counts, retaining baseline leaves."""
+    if stratum not in ('pair', 'self'):
+        raise ValueError('pair or self query stratum required')
+    attr = 'pair_queries' if stratum == 'pair' else 'self_queries'
+    queries = getattr(batch, attr)
+    if not queries:
+        raise ValueError('nonempty query stratum required')
+    doubled = replace(batch, **{attr: tuple(replace(query, count=2 * query.count) for query in queries)})
+    doubled_losses, _ = score_families(doubled)
+    baseline_losses, baseline_leaves = score_families(batch)
+    return [doubled_loss - baseline_loss for doubled_loss, baseline_loss in zip(doubled_losses, baseline_losses)], baseline_leaves
+
+
 def shared_inner_mse(gram, outer_count, inner_weights, probabilities, draws):
     """Exact MSE for multinomial outer counts and one shared inner draw per ID.
 
@@ -280,7 +294,6 @@ def main():
         import torch
 
         from phycoflow_reconstruction.coherence import build_enabled_families
-        from phycoflow_reconstruction.coherence.adaptive_profile import isolate_query_stratum
         from phycoflow_reconstruction.coherence.query_sampling import (
             LINE_WEIGHTS,
             PAIR_SIGNS,
@@ -464,10 +477,12 @@ def main():
             ctx = {'conditional_draws': tuple(members[1:]), 'generated_weights': mass, 'reference_weights': mass}
             return members, target, coord, masks, mass, ctx
 
-        def losses(values, q):
+        def score_families(values, q):
             members, target, coord, _mask, _mass, context = values
-            return [runtime._score(name, families[name], members[0], target, coord, context, q)[0].scalar_loss * family_weights[name]
-                    for name in ('multiscale_spectrum', 'topology')]
+            results = [runtime._score(name, families[name], members[0], target, coord, context, q)
+                       for name in ('multiscale_spectrum', 'topology')]
+            return ([result[0].scalar_loss * family_weights[name] for name, result in
+                     zip(('multiscale_spectrum', 'topology'), results)], [result[2] for result in results])
 
         groups = []
         for pos in range(0, len(chunks), 8):
@@ -499,18 +514,16 @@ def main():
             for pair in range(k):
                 for index in range(len(inner)):
                     q = query(pair, index)
-                    family_cells = [isolate_query_stratum(lambda draw, j=j, values=values: losses(values, draw)[j], q, 'pair') for j in range(2)]
+                    family_cells, family_leaves = isolate_family_query_stratum(lambda draw, values=values: score_families(values, draw), q, 'pair')
                     pair_vectors.append(concatenate_grads(family_cells))
-                    members, target, coord, _mask, _mass, context = values
-                    for name, destination in (('multiscale_spectrum',scale_difficulties), ('topology',shape_difficulties)):
-                        _, _, leaves = runtime._score(name, families[name], members[0], target, coord, context, q)
+                    for leaves, destination in zip(family_leaves, (scale_difficulties, shape_difficulties)):
                         # Returned leaf is already conditional on this outer/inner
                         # draw; never divide it by its selection probability.
                         destination[pair,index] = float(leaves['pair'][pair])
             for field in range(len(fields)):
                 for sign in (1, -1):
                     q = query(0, unary_field=field, unary_sign=sign)
-                    family_cells = [isolate_query_stratum(lambda draw, j=j, values=values: losses(values, draw)[j], q, 'self') for j in range(2)]
+                    family_cells, _ = isolate_family_query_stratum(lambda draw, values=values: score_families(values, draw), q, 'self')
                     unary_vectors.append(concatenate_grads(family_cells))
             pair_matrix, unary_matrix = torch.stack(pair_vectors), torch.stack(unary_vectors)
             exhaustive = full_target_query_batch(len(fields))
@@ -519,7 +532,8 @@ def main():
                 ('pair', pair_matrix, weights.repeat(k)/k),
                 ('self', unary_matrix, torch.full((2*len(fields),), 1/(2*len(fields)), dtype=torch.float64)),
             ):
-                exact = concatenate_grads([isolate_query_stratum(lambda draw, j=j, values=exhaustive_values: losses(values, draw)[j], exhaustive, stratum) for j in range(2)])
+                exact_cells, _ = isolate_family_query_stratum(lambda draw, values=exhaustive_values: score_families(values, draw), exhaustive, stratum)
+                exact = concatenate_grads(exact_cells)
                 weighted = target_weights @ matrix
                 group_ids = [sample for begin, end, _, _ in group for sample in ids[begin:end]]
                 receipt.setdefault('oracle_diagnostics', []).append({
