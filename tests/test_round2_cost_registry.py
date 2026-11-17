@@ -125,3 +125,21 @@ def test_allocation_scope_rejects_owners_including_full_models(tmp_path, owner):
         {'kind': 'cpu', 'scope': 'allocation', 'owner': owner, 'receipt': str(receipt), 'independent': True}]}
     with pytest.raises(ValueError, match='residual-only work'):
         registry_tool.assemble(tmp_path, registry, {'closed': [], 'active': {}})
+
+
+def test_controller_active_wall_requires_explicit_independent_registration(tmp_path):
+    receipt = tmp_path / 'controller.json'
+    receipt.write_text(json.dumps({'schema':'car_round2_independent_cpu_job_v1', 'status':'completed',
+        'start_unix':1., 'end_unix':11., 'wall_seconds':10., 'independent_cpu':True,
+        'blocked_wait_seconds':3., 'nested_child_wall_seconds':5., 'active_wall_seconds':2.}))
+    entry = {'kind':'cpu', 'scope':'qualification', 'owner':ARMS[0], 'receipt':str(receipt),
+             'independent':True, 'active_wall_field':'active_wall_seconds'}
+    registry = {'schema':'car_round2_cost_registry_v1', 'registrations':[entry],
+                'receipt_inventory_globs':[str(receipt)]}
+    ledger = {'schema':'car_gpu_ledger_v1', 'active':{}, 'closed':[]}
+    manifest = registry_tool.assemble(tmp_path, registry, ledger)
+    assert manifest['cpu_jobs'][0]['active_wall_field'] == 'active_wall_seconds'
+    result = reconcile(campaign=tmp_path, ledger=ledger, manifest=manifest, family='ffm')
+    assert result['arms'][ARMS[0]]['observed_serial_cost_seconds'] == 2.
+    with pytest.raises(ValueError, match='active wall registration'):
+        registry_tool.assemble(tmp_path, {**registry, 'registrations':[{**entry, 'independent':False}]}, ledger)

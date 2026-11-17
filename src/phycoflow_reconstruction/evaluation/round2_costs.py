@@ -103,12 +103,69 @@ def _overlap(start, end, intervals):
     return total + (last_b-last_a if last_a is not None else 0.)
 
 
+class _UnknownActivePrefix(ValueError):
+    """An aggregate active timer does not locate work within its enclosure."""
+
+
+def _active_wall(receipt, field):
+    """Validate an explicitly independent disjoint controller timer."""
+    schema = receipt.get('schema')
+    if field == 'active_wall_seconds' and receipt.get('independent_cpu') is True:
+        if schema == 'car_round2_independent_cpu_job_v1' and 'nested_child_wall_seconds' in receipt:
+            waits = ('blocked_wait_seconds', 'nested_child_wall_seconds')
+        elif schema == 'car_round2_independent_cpu_job_v1':
+            waits = ('blocked_wait_seconds', 'gpu_child_wall_seconds', 'score_wait_seconds')
+        elif schema == 'car_round2_cpu_coordination_v1':
+            waits = ('normalizer_child_wait_seconds', 'gpu_child_wait_seconds', 'score_parent_wait_seconds')
+        else:
+            raise ValueError('unsupported independent active-wall receipt schema')
+    elif (field == 'controller_active_wall_seconds' and schema == 'car_round2_cpu_coordination_v1'
+          and receipt.get('controller_active_wall_independent_cpu') is True):
+        waits = ('blocked_wait_seconds', 'nomination_child_wall_seconds', 'parallel_family_enclosure_seconds')
+    else:
+        raise ValueError('active wall requires an explicit independent CPU declaration')
+    start, end = _interval(receipt)
+    values = [receipt.get(name) for name in waits]
+    value = receipt.get(field)
+    if not _number(value) or any(not _number(item) for item in values):
+        raise ValueError('active wall and disjoint waits must be finite and nonnegative')
+    expected = end - start - sum(values)
+    if expected < -1e-3 or not math.isclose(value, max(0., expected), abs_tol=1e-3, rel_tol=1e-9):
+        raise ValueError('active wall does not equal enclosure minus disjoint waits')
+    return float(value)
+
+
 def _prefix_cost(job, cutoff):
     start,end = job['interval']
     stop = min(end,cutoff)
     if stop <= start:
         return 0.
+    if 'active_wall_seconds' in job:
+        if stop < end:
+            raise _UnknownActivePrefix('aggregate active timer has no checkpoint-time placement')
+        return job['active_wall_seconds']
     return stop-start-_overlap(start,stop,job.get('excluded_intervals',[]))
+
+
+def _prefix_bounds(job, cutoff):
+    """Return honest bounds when an aggregate active interval crosses cutoff."""
+    start, end = job['interval']
+    if 'active_wall_seconds' in job and start < cutoff < end:
+        return 0., job['active_wall_seconds']
+    value = _prefix_cost(job, cutoff)
+    return value, value
+
+
+def _checkpoint_cost_bounds(jobs, extras, arm, cutoff):
+    lower, upper = 0., 0.
+    for row in jobs:
+        # Every declared assessment extra is counted in full even if its
+        # underlying work occurred after the training checkpoint.
+        lo, hi = ((row['seconds'], row['seconds']) if row['id'] in extras
+                  else _prefix_bounds(row, cutoff))
+        lower += lo * row['weights'][arm]
+        upper += hi * row['weights'][arm]
+    return lower, upper
 
 
 def _default_checkpoint_loader(path):
@@ -235,10 +292,19 @@ def reconcile(*, campaign, ledger, manifest, family, checkpoint_loader=_default_
         if receipt.get('status') in {'running','created'}:
             raise ValueError('CPU job receipt must be terminal')
         cpu_status = receipt.get('status', 'completed' if receipt.get('returncode', 0) == 0 else 'failed')
-        cpu_pending.append({'id':identifier,'kind':'cpu','scope':job['scope'],'status':cpu_status,
-                            'interval':(start,end),'weights':_weights(job),'parent_gpu_token':job.get('parent_gpu_token'),
-                            'parent_cpu_job':job.get('parent_cpu_job'),'independent':job.get('independent'),
-                            'checkpoint_epochs':job.get('checkpoint_epochs',[])})
+        row = {'id':identifier,'kind':'cpu','scope':job['scope'],'status':cpu_status,
+               'interval':(start,end),'weights':_weights(job),'parent_gpu_token':job.get('parent_gpu_token'),
+               'parent_cpu_job':job.get('parent_cpu_job'),'independent':job.get('independent'),
+               'checkpoint_epochs':job.get('checkpoint_epochs',[])}
+        if (job.get('independent') is True and 'active_wall_field' not in job
+                and ('active_wall_seconds' in receipt or 'controller_active_wall_seconds' in receipt)):
+            raise ValueError('independent controller receipt must explicitly select its active wall field')
+        if 'active_wall_field' in job:
+            if job.get('independent') is not True or job.get('parent_gpu_token') or job.get('parent_cpu_job'):
+                raise ValueError('aggregate active wall must be declared independent and have no parent')
+            row['active_wall_seconds'] = _active_wall(receipt, job['active_wall_field'])
+            row['active_wall_field'] = job['active_wall_field']
+        cpu_pending.append(row)
     cpu_index = {row['id']:row for row in cpu_pending}
     for row in cpu_pending:
         excluded = []
@@ -316,7 +382,7 @@ def reconcile(*, campaign, ledger, manifest, family, checkpoint_loader=_default_
     for arm in arms:
         own = [row for row in jobs if row['weights'].get(arm,0.) > 0]
         measured = sum(row['seconds']*row['weights'][arm] for row in own)
-        checkpoints = {}
+        checkpoints, checkpoint_bounds = {}, {}
         if arm in checkpoint_clocks:
             for epoch,cutoff in checkpoint_clocks[arm].items():
                 extras = manifest.get('checkpoint_extras',{}).get(arm,{}).get(str(epoch))
@@ -331,12 +397,13 @@ def reconcile(*, campaign, ledger, manifest, family, checkpoint_loader=_default_
                 if any(by_id[j]['scope'] != 'assessment' or by_id[j]['weights'].get(arm,0.) <= 0
                        or epoch not in by_id[j]['checkpoint_epochs'] for j in extras):
                     raise ValueError('checkpoint extras must be attributable assessment jobs')
-                value = sum(_prefix_cost(row,cutoff)*row['weights'][arm] for row in own)
-                value += sum((by_id[j]['seconds']-_prefix_cost(by_id[j],cutoff))*by_id[j]['weights'][arm] for j in extras)
-                checkpoints[str(epoch)] = value
+                lower, upper = _checkpoint_cost_bounds(own, extras, arm, cutoff)
+                checkpoint_bounds[str(epoch)] = [lower, upper]
+                checkpoints[str(epoch)] = lower if lower == upper else None
         arm_results[arm] = {'serial_cost_seconds':measured if own else None,
                             'observed_serial_cost_seconds':measured if own else None,
                             'checkpoint_cost_seconds':checkpoints,
+                            'checkpoint_cost_bounds_seconds':checkpoint_bounds,
                             'gpu_seconds':sum(row['seconds']*row['weights'][arm] for row in own if row['kind']=='gpu'),
                             'independent_cpu_seconds':sum(row['seconds']*row['weights'][arm] for row in own if row['kind']=='cpu'),
                             'paused_attempt_seconds':sum(row['seconds']*row['weights'][arm] for row in own if row['status'] == 'budget_paused'),
@@ -390,6 +457,7 @@ def reconcile(*, campaign, ledger, manifest, family, checkpoint_loader=_default_
         for value in arm_results.values():
             value['serial_cost_seconds'] = None
             value['checkpoint_cost_seconds'] = {}
+            value['checkpoint_cost_bounds_seconds'] = {}
         if allocator_result.get('status') == 'measured':
             allocator_result['qualified'] = False
             allocator_result['status'] = 'incomplete_campaign_costs'

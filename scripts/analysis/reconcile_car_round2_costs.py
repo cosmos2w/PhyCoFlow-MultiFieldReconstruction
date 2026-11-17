@@ -76,6 +76,7 @@ def main():
             for arm in result['arms'].values():
                 arm['serial_cost_seconds'] = None
                 arm['checkpoint_cost_seconds'] = {}
+                arm['checkpoint_cost_bounds_seconds'] = {}
         result['source_receipts'].extend([
             {'path': str(manifest_path), 'sha256': manifest_hash},
             {'path': str(ledger_path), 'sha256': ledger_hash},

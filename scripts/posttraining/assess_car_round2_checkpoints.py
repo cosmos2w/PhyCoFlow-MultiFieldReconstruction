@@ -1261,6 +1261,29 @@ def final_allocation_disposition(formal, costs):
             'final_recheck':final, 'frozen_disposition_sha256':binding['sha256']}
 
 
+def learning_efficiency_from_cost_bounds(*, complete, eligible, residual_crossing, full_crossing,
+                                         residual_bounds, full_bounds):
+    """Decide the 20% route only when recorded crossing-cost bounds settle it."""
+    if not complete:
+        return None
+    if not eligible or residual_crossing is None or full_crossing is None:
+        return False
+    if not all(isinstance(bounds, (list, tuple)) and len(bounds) == 2
+               and all(isinstance(value, (int, float)) and not isinstance(value, bool)
+                       and math.isfinite(value) and value >= 0 for value in bounds)
+               and bounds[0] <= bounds[1] for bounds in (residual_bounds, full_bounds)):
+        return None
+    low_res, high_res = residual_bounds
+    low_full, high_full = full_bounds
+    if high_full <= 0:
+        return None
+    if high_res <= .8 * low_full and low_full > 0:
+        return True
+    if low_res > .8 * high_full:
+        return False
+    return None
+
+
 def decide(args, campaign):
     from phycoflow_reconstruction.evaluation.adaptive_campaign import immutable_json
     from phycoflow_reconstruction.evaluation.round2_assessment import deployment_disposition
@@ -1341,14 +1364,30 @@ def decide(args, campaign):
                              and (row['scores']['state']-base['scores']['state'])/doc['normalizers']['state'] <= .02)
         crossing = next((EPOCHS[i] for i in range(1,len(EPOCHS)) if qualifies[i-1] and qualifies[i]), None)
         crossing_cost = costs['arms'][arm].get('checkpoint_cost_seconds',{}).get(str(crossing)) if crossing is not None else None
-        crossings[arm] = {'qualifies_by_epoch':dict(zip(map(str,EPOCHS),qualifies)), 'crossing_epoch':crossing, 'crossing_cost_seconds':crossing_cost}
-    a,b = crossings[residual]['crossing_cost_seconds'], crossings[full]['crossing_cost_seconds']
-    efficiency = (bool(residual_task_eligible and full_eligible and equivalent_task and within
-                       and isinstance(a,(int,float)) and isinstance(b,(int,float)) and a >= 0 and b > 0 and a <= .8*b)
-                  if complete else None)
+        crossing_bounds = costs['arms'][arm].get('checkpoint_cost_bounds_seconds',{}).get(str(crossing)) if crossing is not None else None
+        if crossing_bounds is None and isinstance(crossing_cost, (int, float)):
+            crossing_bounds = [crossing_cost, crossing_cost]
+        crossings[arm] = {'qualifies_by_epoch':dict(zip(map(str,EPOCHS),qualifies)), 'crossing_epoch':crossing,
+                          'crossing_cost_seconds':crossing_cost, 'crossing_cost_bounds_seconds':crossing_bounds}
+    efficiency = learning_efficiency_from_cost_bounds(
+        complete=complete, eligible=residual_task_eligible and full_eligible and equivalent_task and within,
+        residual_crossing=crossings[residual]['crossing_epoch'], full_crossing=crossings[full]['crossing_epoch'],
+        residual_bounds=crossings[residual]['crossing_cost_bounds_seconds'],
+        full_bounds=crossings[full]['crossing_cost_bounds_seconds'])
+    if not complete:
+        efficiency_reason = 'complete costs unavailable'
+    elif not (residual_task_eligible and full_eligible and equivalent_task and within):
+        efficiency_reason = 'scientific eligibility or budget gate failed'
+    elif crossings[residual]['crossing_epoch'] is None or crossings[full]['crossing_epoch'] is None:
+        efficiency_reason = 'one or both methods have no qualifying crossing'
+    elif efficiency is None:
+        efficiency_reason = 'crossing cost bounds do not settle the 20 percent threshold'
+    else:
+        efficiency_reason = 'crossing cost bounds settle the 20 percent threshold'
     result = {'schema':'car_round2_final_decision_v1','family':args.family,'frozen_priority':priority,
               'deployment_disposition':disposition,'quality_route':quality,'learning_efficiency_route':efficiency,
               'deployment_comparison_route':deployment,'crossings':crossings, 'allocation_decision':allocation,
+              'learning_efficiency_reason':efficiency_reason,
               'cost_reconciliation_sha256':hash_file(args.costs),'costs_complete':complete,'within_budget':within,
               'heldout_selection':'TRAIN-frozen amplitude and method order; no held-out search',
               'device_uuid':next(iter({doc['gpu_uuid'] for doc in final.values()}))}

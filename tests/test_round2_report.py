@@ -94,6 +94,26 @@ def test_complete_cost_evidence_still_requires_all_checkpoint_clocks(tmp_path):
         report.validate_cost_evidence(cost, decision, arms, tmp_path)
 
 
+def test_exact_full_costs_accept_honest_checkpoint_bounds_without_fabricated_times(tmp_path):
+    report = load()
+    evidence = tmp_path / 'cost_evidence.json'; evidence.write_text('{}')
+    arms = list(report.ARMS[:2])
+    cost = {'complete': True, 'missing': [],
+            'source_receipts': [{'path': str(evidence), 'sha256': report.sha(evidence)}],
+            'arms': {arm: {'serial_cost_seconds': 2.,
+                           'checkpoint_cost_seconds': {str(epoch): 1. for epoch in report.EPOCHS},
+                           'checkpoint_cost_bounds_seconds': {str(epoch): [1., 1.] for epoch in report.EPOCHS}}
+                     for arm in arms}}
+    item = cost['arms'][arms[0]]
+    item['checkpoint_cost_seconds']['100'] = None
+    item['checkpoint_cost_bounds_seconds']['100'] = [.5, 1.5]
+    report.validate_cost_evidence(cost, {'costs_complete': True}, arms, tmp_path)
+    assert report.route_label(None, 'checkpoint cost bounds overlap') == 'unavailable (checkpoint cost bounds overlap)'
+    item['checkpoint_cost_bounds_seconds']['100'] = [1., 1.]
+    with pytest.raises(ValueError, match='nondegenerate measured bound'):
+        report.validate_cost_evidence(cost, {'costs_complete': True}, arms, tmp_path)
+
+
 def test_native_plot_has_per_field_physical_error_annotations(tmp_path):
     import subprocess
 
@@ -136,11 +156,16 @@ def test_synthetic_report_renders_every_indexed_preview_and_master(tmp_path, mon
     scores = {'state': 1., 'scale': 1., 'shape': 1., 'event': 1.}
     row = {'alpha': 0., 'scores': scores, 'risk': {'member_mse': [1., 2.]},
            'per_condition_scores': [{'state': 1., 'scale': 1., 'shape': 1.}],
-           'fidelity': {'primary_pass': True}, 'latency_seconds': 1.}
+           'fidelity': {'primary_pass': True}, 'latency_seconds': 1., 'sensor_mse': [.1, None]}
     raw = {**row, 'alpha': 1.}
     doc = {'selected_alpha': 0., 'rows': [row, raw], 'normalizers': scores,
            'sample_ids': ['trajectory:1'], 'reserved_task': {'normalized_improvement': 0.},
-           'source_latency_seconds': 1.}
+           'source_latency_seconds': 1., 'native_abs_error_tail_quantiles': [.95, .99, 1.],
+           'raw_native_abs_error_tails': [[[.1, .2], [.3, .4], [.5, .6]]],
+           'selected_native_abs_error_tails': [[[.1, .2], [.3, .4], [.5, .6]]],
+           'represented_decomposition': {label: [{'attraction': {'state': 2., 'scale': 3., 'shape': 4.},
+               'fair_separation_correction': {'state': 1., 'scale': 2., 'shape': 3.}}]
+               for label in ('raw', 'selected')}}
     docs = {arm: {split: {epoch: (tmp_path / 'unused.json', doc) for epoch in report.EPOCHS}
                   for split in ('train', 'validation')} for arm in report.ARMS}
     decisions = {family: {'deployment_disposition': {'operational_recommendation': 'retain SOURCE/C8',
@@ -182,9 +207,34 @@ def test_synthetic_report_renders_every_indexed_preview_and_master(tmp_path, mon
     assert json.loads((output / 'paired_condition_blocks.json').read_text())['ffm']['blocks'][0]['count'] == 1
     text = (output / 'report.md').read_text()
     assert 'Two-family nonuniform allocation decision: **reject**' in text
+    assert 'Raw separation correction' in text
+    assert 'Sensor MSE: raw / nominated' in text
     if not complete_costs:
         import subprocess
         assert 'Quality route: unavailable (incomplete costs)' in text
         assert 'complete serial unavailable' in text
         pdf_text = subprocess.check_output(['pdftotext', str(output / 'figures/task_deployment_cost.pdf'), '-'], text=True)
         assert 'Full model: unavailable' in pdf_text and 'Residual: unavailable' in pdf_text
+
+
+def test_native_tables_distinguish_conditional_quantile_means_from_maximum():
+    report = load()
+    row = {'alpha': 0., 'risk': {'member_mse': [1., 2.]}, 'sensor_mse': [.2, None]}
+    doc = {'selected_alpha': 0., 'rows': [row, {**row, 'alpha': 1.}],
+           'sample_ids': ['trajectory:0', 'trajectory:1'],
+           'native_abs_error_tail_quantiles': [.95, .99, 1.],
+           'raw_native_abs_error_tails': [[[1., 2.], [3., 4.], [5., 6.]],
+                                          [[3., 4.], [5., 6.], [9., 10.]]],
+           'selected_native_abs_error_tails': [[[1., 2.], [3., 4.], [5., 6.]],
+                                               [[3., 4.], [5., 6.], [9., 10.]]],
+           'represented_decomposition': {label: [{'attraction': {'state': a, 'scale': a, 'shape': a},
+                'fair_separation_correction': {'state': .5, 'scale': .5, 'shape': .5}} for a in (2., 4.)]
+                for label in ('raw', 'selected')}}
+    docs = {arm: {'validation': {1000: (None, doc)}} for arm in report.ARMS}
+    text = '\n'.join(report.native_diagnostic_tables(docs, {'ffm': ['T', 'CO'], 'senseiver': ['T', 'CO']}))
+    assert '| T | 1 / 1 | 0.2 / 0.2 | 2, 4, 9 | 2, 4, 9 |' in text
+    assert '| State | 3 | 0.5 | 3 | 0.5 |' in text
+    assert 'unobserved / unobserved' in text
+    doc['raw_native_abs_error_tails'][1][2][0] = float('nan')
+    with pytest.raises(ValueError, match='complete finite per-condition native tails'):
+        report.native_diagnostic_tables(docs, {'ffm': ['T', 'CO'], 'senseiver': ['T', 'CO']})

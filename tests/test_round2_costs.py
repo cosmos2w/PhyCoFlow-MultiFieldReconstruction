@@ -116,3 +116,62 @@ def test_gpu_receipt_lease_tolerance_is_absolute_at_current_unix_time(tmp_path, 
     else:
         with pytest.raises(ValueError, match='(does not|do not) match closed lease'):
             reconcile(campaign=tmp_path, ledger=ledger, manifest=manifest, family='ffm')
+
+
+def test_controller_active_wall_is_charged_once_without_inventing_prefix(tmp_path):
+    from phycoflow_reconstruction.evaluation.round2_costs import _prefix_cost, _UnknownActivePrefix
+
+    receipt = _receipt(tmp_path, 'controller.json', {
+        'schema': 'car_round2_independent_cpu_job_v1', 'status': 'completed',
+        'start_unix': 10., 'end_unix': 110., 'wall_seconds': 100.,
+        'blocked_wait_seconds': 20., 'gpu_child_wall_seconds': 50., 'score_wait_seconds': 15.,
+        'active_wall_seconds': 15., 'independent_cpu': True,
+    })
+    job = {'id': 'controller', 'scope': 'qualification', 'allocations': {ARMS[0]: 1.},
+           'receipt': receipt, 'independent': True, 'active_wall_field': 'active_wall_seconds'}
+    result = reconcile(campaign=tmp_path, ledger={'schema':'car_gpu_ledger_v1','closed':[],'active':{}},
+                       manifest={'schema':'car_round2_cost_allocation_v1','cpu_jobs':[job]}, family='ffm')
+    row = next(row for row in result['allocated_jobs'] if row['id'] == 'controller')
+    assert row['seconds'] == 15.
+    assert result['arms'][ARMS[0]]['observed_serial_cost_seconds'] == 15.
+    assert _prefix_cost(row, 10.) == 0.
+    assert _prefix_cost(row, 110.) == 15.
+    with pytest.raises(_UnknownActivePrefix, match='no checkpoint-time placement'):
+        _prefix_cost(row, 60.)
+    with pytest.raises(ValueError, match='explicitly select'):
+        reconcile(campaign=tmp_path, ledger={'schema':'car_gpu_ledger_v1','closed':[],'active':{}},
+                  manifest={'schema':'car_round2_cost_allocation_v1','cpu_jobs':[{k:v for k,v in job.items() if k != 'active_wall_field'}]}, family='ffm')
+
+
+def test_active_timer_requires_valid_independent_disjoint_accounting(tmp_path):
+    from phycoflow_reconstruction.evaluation.round2_costs import _active_wall
+
+    base = {'schema':'car_round2_cpu_coordination_v1','start_unix':10.,'end_unix':110.,'wall_seconds':100.,
+            'blocked_wait_seconds':20.,'nomination_child_wall_seconds':10.,'parallel_family_enclosure_seconds':60.,
+            'controller_active_wall_seconds':10.,'controller_active_wall_independent_cpu':True,'independent_cpu':False}
+    assert _active_wall(base, 'controller_active_wall_seconds') == 10.
+    with pytest.raises(ValueError, match='disjoint waits'):
+        _active_wall({**base, 'controller_active_wall_seconds':11.}, 'controller_active_wall_seconds')
+    with pytest.raises(ValueError, match='independent CPU declaration'):
+        _active_wall({**base, 'controller_active_wall_independent_cpu':False}, 'controller_active_wall_seconds')
+
+
+def test_aggregate_active_prefix_bounds_are_honest():
+    from phycoflow_reconstruction.evaluation.round2_costs import _prefix_bounds
+
+    job = {'interval': (10., 110.), 'active_wall_seconds': 15.}
+    assert _prefix_bounds(job, 9.) == (0., 0.)
+    assert _prefix_bounds(job, 60.) == (0., 15.)
+    assert _prefix_bounds(job, 110.) == (15., 15.)
+
+
+def test_checkpoint_bounds_count_assessment_extra_once():
+    from phycoflow_reconstruction.evaluation.round2_costs import _checkpoint_cost_bounds
+
+    arm = ARMS[0]
+    controller = {'id':'controller', 'interval':(10.,110.), 'active_wall_seconds':15.,
+                  'seconds':15., 'weights':{arm:1.}}
+    assessment = {'id':'assessment', 'interval':(20.,120.), 'active_wall_seconds':7.,
+                  'seconds':7., 'weights':{arm:1.}}
+    assert _checkpoint_cost_bounds([controller, assessment], ['assessment'], arm, 60.) == (7.,22.)
+    assert _checkpoint_cost_bounds([controller, assessment], ['assessment'], arm, 150.) == (22.,22.)

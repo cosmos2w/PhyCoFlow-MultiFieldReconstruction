@@ -126,9 +126,12 @@ def assemble(campaign, registry, ledger):
                     continue
                 job['token'] = token
             else:
-                for key in ('independent', 'parent_gpu_token', 'parent_cpu_job'):
+                for key in ('independent', 'parent_gpu_token', 'parent_cpu_job', 'active_wall_field'):
                     if key in entry:
                         job[key] = entry[key]
+                if 'active_wall_field' in job and (job.get('independent') is not True
+                        or job.get('parent_gpu_token') or job.get('parent_cpu_job')):
+                    raise ValueError('active wall registration requires independent CPU without a parent')
                 if job.get('independent') is not True and not job.get('parent_gpu_token') and not job.get('parent_cpu_job'):
                     raise ValueError('CPU registration must declare independent work or its parent')
             jobs[kind].append(job)

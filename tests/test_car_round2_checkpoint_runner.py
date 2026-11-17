@@ -226,6 +226,19 @@ def test_decision_uses_frozen_priority_and_reports_crossing(tmp_path):
     assert result['allocation_decision']['training_mode'] == 'qualified_fixed'
     assert result['allocation_decision']['status'] == 'reject'
     assert result['deployment_disposition']['operational_function'] == full
+    costs['arms'][full]['checkpoint_cost_seconds']['100'] = None
+    costs['arms'][residual]['checkpoint_cost_seconds']['100'] = None
+    costs['arms'][full]['checkpoint_cost_bounds_seconds'] = {'100':[45., 55.]}
+    costs['arms'][residual]['checkpoint_cost_bounds_seconds'] = {'100':[30., 50.]}
+    cost_path.write_text(json.dumps(costs))
+    bounded_output = tmp_path/'assessment/decision_bounded.json'
+    mod.decide(argparse.Namespace(family='senseiver',costs=cost_path,output=bounded_output),tmp_path)
+    bounded = json.loads(bounded_output.read_text())
+    assert bounded['costs_complete'] is True
+    assert bounded['learning_efficiency_route'] is None
+    assert bounded['crossings'][residual]['crossing_cost_bounds_seconds'] == [30., 50.]
+    assert 'bounds' in bounded['learning_efficiency_reason']
+    assert bounded['quality_route'] == result['quality_route']
     costs['complete'] = False
     costs['allocator_final'] = {'status':'incomplete_campaign_costs', 'qualified':False}
     cost_path.write_text(json.dumps(costs))
@@ -342,3 +355,13 @@ def test_source_normalizer_is_frozen_after_nominations_and_applied_before_valida
     (train/'reserved_normalizer_senseiver.json').write_text(json.dumps(result))
     with pytest.raises(ValueError, match='fallback rule'):
         mod.validate_reserved_freeze(tmp_path, 'senseiver')
+
+
+def test_efficiency_decision_uses_honest_cost_bounds():
+    decide = mod.learning_efficiency_from_cost_bounds
+    common = {'complete':True, 'eligible':True, 'residual_crossing':500, 'full_crossing':500}
+    assert decide(**common, residual_bounds=[70., 75.], full_bounds=[100., 110.]) is True
+    assert decide(**common, residual_bounds=[90., 95.], full_bounds=[100., 110.]) is False
+    assert decide(**common, residual_bounds=[70., 90.], full_bounds=[100., 110.]) is None
+    assert decide(**{**common, 'residual_crossing':None}, residual_bounds=None, full_bounds=[100., 110.]) is False
+    assert decide(**{**common, 'complete':False}, residual_bounds=[70., 75.], full_bounds=[100., 110.]) is None

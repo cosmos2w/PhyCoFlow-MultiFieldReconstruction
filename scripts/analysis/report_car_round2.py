@@ -72,9 +72,27 @@ def validate_cost_evidence(cost, decision, family_arms, campaign):
         item = cost['arms'][arm]
         serial = item.get('serial_cost_seconds')
         if complete:
+            clocks = item.get('checkpoint_cost_seconds', {})
+            expected = {str(x) for x in EPOCHS}
             if (not isinstance(serial, (int, float)) or not math.isfinite(serial) or serial <= 0
-                    or set(item.get('checkpoint_cost_seconds', {})) != {str(x) for x in EPOCHS}):
+                    or set(clocks) != expected):
                 raise ValueError(f'{arm}: complete serial and six checkpoint costs required')
+            bounds = item.get('checkpoint_cost_bounds_seconds')
+            if bounds is not None and set(bounds) != expected:
+                raise ValueError('all six checkpoint cost bounds required')
+            for epoch, exact in clocks.items():
+                pair = [exact, exact] if bounds is None else bounds[epoch]
+                if (not isinstance(pair, (tuple, list)) or len(pair) != 2
+                        or any(not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0 for value in pair)
+                        or pair[0] > pair[1]):
+                    raise ValueError('finite ordered nonnegative checkpoint cost bounds required')
+                if exact is None:
+                    if pair[0] == pair[1]:
+                        raise ValueError('null checkpoint cost requires a nondegenerate measured bound')
+                elif (not isinstance(exact, (int, float)) or not math.isfinite(exact)
+                      or not math.isclose(exact, pair[0], abs_tol=1e-9, rel_tol=1e-12)
+                      or not math.isclose(exact, pair[1], abs_tol=1e-9, rel_tol=1e-12)):
+                    raise ValueError('exact checkpoint cost must match its degenerate bound')
         elif serial is not None:
             raise ValueError('incomplete costs must withhold the complete serial cost')
     if not complete:
@@ -88,8 +106,8 @@ def validate_cost_evidence(cost, decision, family_arms, campaign):
             raise ValueError('incomplete costs cannot qualify a deployment adoption')
 
 
-def route_label(value):
-    return 'unavailable (incomplete costs)' if value is None else str(value)
+def route_label(value, reason='incomplete costs'):
+    return f'unavailable ({reason})' if value is None else str(value)
 
 
 def cost_hours(value):
@@ -308,6 +326,63 @@ def deployment_memory_table(docs):
     return lines
 
 
+def native_diagnostic_tables(docs, field_orders):
+    """Expose saved point/law diagnostics without another model evaluation."""
+    import numpy as np
+
+    lines = ['## Native sensor and tail diagnostics', '',
+             'Each paired MSE entry is raw / TRAIN-nominated, in physical field units squared. An unobserved field has no sensor MSE. Each tail entry is the mean per-condition p95, mean per-condition p99, and maximum observed absolute error, in physical field units; these means are not pooled-population quantiles. Native tail quantiles use unweighted positive-mass points and members.', '']
+    for arm in ARMS:
+        family = 'ffm' if arm.startswith('FFM_') else 'senseiver'
+        fields = field_orders[family]
+        doc = docs[arm]['validation'][1000][1]
+        count = len(doc['sample_ids'])
+        if doc.get('native_abs_error_tail_quantiles') != [.95, .99, 1.]:
+            raise ValueError('saved native p95/p99/maximum diagnostics required')
+        tail_summaries = []
+        for label in ('raw', 'selected'):
+            values = np.asarray(doc[f'{label}_native_abs_error_tails'], dtype=float)
+            if values.shape != (count, 3, len(fields)) or not np.isfinite(values).all() or (values < 0).any():
+                raise ValueError('complete finite per-condition native tails required')
+            tail_summaries.append(np.stack((values[:, 0].mean(0), values[:, 1].mean(0), values[:, 2].max(0))))
+        raw, nominee = selected(doc, 1.), selected(doc)
+        lines.extend([f'### {arm}', '',
+                      '| Field | Member/point MSE: raw / nominated | Sensor MSE: raw / nominated | Raw tails: mean p95, mean p99, maximum | Nominated tails: mean p95, mean p99, maximum |',
+                      '| --- | ---: | ---: | ---: | ---: |'])
+        for index, field in enumerate(fields):
+            sensor = []
+            for row in (raw, nominee):
+                value = row['sensor_mse'][index]
+                if value is None:
+                    sensor.append('unobserved')
+                elif not math.isfinite(value) or value < 0:
+                    raise ValueError('finite nonnegative physical sensor MSE required')
+                else:
+                    sensor.append(f'{value:.6g}')
+            member = ' / '.join(f"{row['risk']['member_mse'][index]:.6g}" for row in (raw, nominee))
+            tails = [', '.join(f'{value:.6g}' for value in values[:, index]) for values in tail_summaries]
+            lines.append(f'| {field} | {member} | {" / ".join(sensor)} | {tails[0]} | {tails[1]} |')
+        lines.append('')
+        if family == 'ffm':
+            decomposition = doc['represented_decomposition']
+            if any(len(decomposition[label]) != count for label in ('raw', 'selected')):
+                raise ValueError('complete saved FFM attraction/separation diagnostics required')
+            lines.extend(['Paired attraction and fair separation correction are reported separately below in each represented family\'s score units. Fair score equals attraction minus the correction; these finite J4 observables do not establish complete-law calibration.', '',
+                          '| Representation | Raw attraction | Raw separation correction | Nominated attraction | Nominated separation correction |',
+                          '| --- | ---: | ---: | ---: | ---: |'])
+            for key in ('state', 'scale', 'shape'):
+                summaries = []
+                for label in ('raw', 'selected'):
+                    for term in ('attraction', 'fair_separation_correction'):
+                        values = np.asarray([row[term][key] for row in decomposition[label]], dtype=float)
+                        if not np.isfinite(values).all():
+                            raise ValueError('finite FFM attraction/separation values required')
+                        summaries.append(f'{values.mean():.6g}')
+                lines.append(f'| {key.title()} | ' + ' | '.join(summaries) + ' |')
+            lines.append('')
+    return lines
+
+
 def produce(inputs, campaign, output):
     start, cpu = time.time(), time.process_time()
     import matplotlib
@@ -360,9 +435,11 @@ def produce(inputs, campaign, output):
         arms = [arm for arm in ARMS if arm.startswith(prefix + '_')]
         labels = ['full model', 'residual']
         rows = [selected(docs[a]['validation'][1000][1]) for a in arms]
+        metrics = ((('member_mse', 'legacy member MSE'), ('ensemble_mean_mse', 'ensemble mean MSE'),
+                    ('signed_mean_risk', 'signed mean risk'), ('unbiased_member_variance', 'unbiased member spread'))
+                   if family == 'ffm' else (('member_mse', 'point MSE'),))
         for index, (ax, field) in enumerate(zip(axes_row, fields, strict=True)):
-            for metric, label in (('member_mse', 'legacy member MSE'), ('ensemble_mean_mse', 'ensemble mean MSE'),
-                                  ('signed_mean_risk', 'signed mean risk'), ('unbiased_member_variance', 'unbiased member spread')):
+            for metric, label in metrics:
                 if metric in rows[0]['risk'] and metric in rows[1]['risk']:
                     ax.plot(labels, [float(row['risk'][metric][index]) for row in rows], marker='o', label=label)
             ax.set_title(f'{family.upper()} {field}'); ax.set_ylabel('Physical field units squared'); ax.tick_params(axis='x', labelrotation=20)
@@ -418,7 +495,10 @@ def produce(inputs, campaign, output):
     for family in ('ffm', 'senseiver'):
         decision, bank, cost = decisions[family], banks[family], costs[family]
         disposition = decision['deployment_disposition']
-        lines.append(f"{family.upper()}: operational choice is **{disposition['operational_recommendation']}**; opt-in function is {disposition['opt_in_function']}. Quality route: {route_label(decision['quality_route'])}; learning-efficiency route: {route_label(decision['learning_efficiency_route'])}; comparative deployment route: {route_label(decision['deployment_comparison_route'])}.")
+        efficiency_reason = 'checkpoint cost bounds overlap' if cost.get('complete') is True else 'incomplete costs'
+        lines.append(f"{family.upper()}: operational choice is **{disposition['operational_recommendation']}**; opt-in function is {disposition['opt_in_function']}. Quality route: {route_label(decision['quality_route'])}; learning-efficiency route: {route_label(decision['learning_efficiency_route'], efficiency_reason)}; comparative deployment route: {route_label(decision['deployment_comparison_route'])}.")
+        if cost.get('complete') is True and decision['learning_efficiency_route'] is None:
+            lines.append('Full serial costs are measured. An enclosing controller receipt records disjoint active CPU duration without its exact positions relative to early checkpoints; its checkpoint contribution is bounded rather than assigned invented timestamps. Those bounds cannot settle the learning-efficiency threshold; other measured routes retain their own decisions.')
         final_allocation = decision['allocation_decision']
         lines.append(f"{family.upper()} bank selected {bank['selected_count']} of {bank['candidate_count']} candidates; historical training allocation mode is {allocation['mode']}; final allocation decision is {final_allocation['status']} (adopt: {final_allocation['adopt']}). Actual final accounting is {cost['allocator_final']['status']} (qualified: {cost['allocator_final'].get('qualified')}).")
         lines.append(f"{family.upper()} selected-bank decision: retain the documented source-specific target for task-conditioned use. This comparison does not qualify an isolated learned-selection advantage or complete-law sufficiency.")
@@ -449,6 +529,7 @@ def produce(inputs, campaign, output):
         lines.extend([f'## Figure {name.replace("_", "-")}', '', f'![{caption}](figures/{name}.png)', '',
                       f'{caption} [PDF master](figures/{name}.pdf)', ''])
     lines.extend(deployment_memory_table(docs))
+    lines.extend(native_diagnostic_tables(docs, field_orders))
     lines.extend(['## Final raw and nominated results', ''])
     for arm in ARMS:
         doc = docs[arm]['validation'][1000][1]
