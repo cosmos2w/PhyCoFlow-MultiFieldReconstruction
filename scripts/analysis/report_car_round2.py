@@ -114,6 +114,39 @@ def cost_hours(value):
     return 'unavailable' if value is None else f'{value / 3600:.4g} h'
 
 
+def device_provenance_lines(docs, costs):
+    lines = ['## Device provenance', '']
+    for family in ('ffm', 'senseiver'):
+        arms = [arm for arm in ARMS if arm.lower().startswith(family)]
+        training, deployment = {}, {}
+        cost = costs[family]
+        for arm in arms:
+            training[arm] = sorted({job['gpu_uuid'] for job in cost.get('allocated_jobs', [])
+                                    if job.get('kind') == 'gpu' and job.get('scope') == 'training'
+                                    and job.get('weights', {}).get(arm) == 1 and job.get('gpu_uuid')})
+            device = docs[arm]['validation'][1000][1].get('gpu_uuid')
+            deployment[arm] = device if isinstance(device, str) and device else None
+            training_label = ', '.join(training[arm]) if training[arm] else 'unavailable'
+            lines.append(f'{arm}: observed training GPU UUID(s): {training_label}; final deployment GPU UUID: {deployment[arm] or "unavailable"}.')
+        training_jobs = [job for job in cost.get('allocated_jobs', [])
+                         if job.get('kind') == 'gpu' and job.get('scope') == 'training'
+                         and any(job.get('weights', {}).get(arm) == 1 for arm in arms)]
+        if all(training.values()) and all(job.get('gpu_uuid') for job in training_jobs):
+            relation = 'same device' if len(set().union(*(set(v) for v in training.values()))) == 1 else 'different devices or multiple devices'
+            lines.append(f'{family.upper()} observed training clocks and attempts use {relation}; device identity is not evidence of a hardware speedup.')
+            if cost.get('complete') is not True:
+                lines.append(f'{family.upper()} cost evidence is incomplete, so the observed training device coverage may be incomplete.')
+        else:
+            lines.append(f'{family.upper()} training device comparison: unavailable from verified lease evidence.')
+        if all(deployment.values()):
+            relation = 'same device' if len(set(deployment.values())) == 1 else 'different devices'
+            lines.append(f'{family.upper()} final deployment measurements use the {relation}.')
+        else:
+            lines.append(f'{family.upper()} deployment device comparison: unavailable from saved assessments.')
+        lines.append('')
+    return lines
+
+
 def validate_inputs(inputs, campaign):
     if inputs.get('schema') != 'car_round2_report_inputs_v1' or set(inputs['runs']) != set(ARMS):
         raise ValueError('four named mature runs and report input schema required')
@@ -528,6 +561,7 @@ def produce(inputs, campaign, output):
     for name, caption in captions.items():
         lines.extend([f'## Figure {name.replace("_", "-")}', '', f'![{caption}](figures/{name}.png)', '',
                       f'{caption} [PDF master](figures/{name}.pdf)', ''])
+    lines.extend(device_provenance_lines(docs, costs))
     lines.extend(deployment_memory_table(docs))
     lines.extend(native_diagnostic_tables(docs, field_orders))
     lines.extend(['## Final raw and nominated results', ''])

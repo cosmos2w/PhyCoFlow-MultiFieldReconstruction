@@ -272,7 +272,7 @@ def reconcile(*, campaign, ledger, manifest, family, checkpoint_loader=_default_
             status = completion.get('status')
         if not status or status in {'running','created'}:
             raise ValueError(f'GPU job {identifier}: terminal status required')
-        value = {'id':identifier, 'kind':'gpu','scope':job['scope'], 'token':token,
+        value = {'id':identifier, 'kind':'gpu','scope':job['scope'], 'token':token, 'gpu_uuid':lease['gpu_uuid'],
                  'status':status,'interval':(start,end),'seconds':end-start,'weights':weights,
                  'checkpoint_epochs':job.get('checkpoint_epochs',[])}
         jobs.append(value); by_id[identifier] = value

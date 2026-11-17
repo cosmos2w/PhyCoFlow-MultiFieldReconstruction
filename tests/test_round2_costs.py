@@ -41,6 +41,7 @@ def test_nested_cpu_is_excluded_but_independent_and_failed_work_are_charged(tmp_
         {'id': 'independent', 'scope': 'bank_selection', 'allocations': weights,
          'receipt': cpu_receipt, 'independent': True}]}
     result = reconcile(campaign=tmp_path, ledger=ledger, manifest=manifest, family='ffm')
+    assert next(job for job in result['allocated_jobs'] if job['id'] == 'gpu')['gpu_uuid'] == 'gpu'
     assert result['arms'][full]['observed_serial_cost_seconds'] == 8
     assert result['arms'][full]['failed_attempt_seconds'] == 5
     assert next(job for job in result['allocated_jobs'] if job['id'] == 'nested')['seconds'] == 0

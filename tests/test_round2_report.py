@@ -33,6 +33,28 @@ def test_deployment_memory_table_uses_selected_and_raw_values():
     assert '| Raw | 1 | unavailable | unavailable |' in '\n'.join(report.deployment_memory_table(docs))
 
 
+def test_training_and_deployment_device_provenance_labels_cross_device_and_unknown():
+    report = load()
+    docs = {arm: {'validation': {1000: (None, {'gpu_uuid': 'deployment-gpu'})}} for arm in report.ARMS}
+    full, residual = report.ARMS[:2]
+    costs = {'ffm': {'complete': True, 'allocated_jobs': [
+        {'kind': 'gpu', 'scope': 'training', 'weights': {full: 1}, 'gpu_uuid': 'training-gpu-0'},
+        {'kind': 'gpu', 'scope': 'training', 'weights': {residual: 1}, 'gpu_uuid': 'training-gpu-1'}]},
+        'senseiver': {'complete': False}}
+    text = '\n'.join(report.device_provenance_lines(docs, costs))
+    assert 'training-gpu-0' in text and 'training-gpu-1' in text
+    assert 'FFM observed training clocks and attempts use different devices or multiple devices' in text
+    assert 'FFM final deployment measurements use the same device' in text
+    assert 'device identity is not evidence of a hardware speedup' in text
+    assert 'SENSEIVER training device comparison: unavailable' in text
+    costs['ffm']['complete'] = False
+    text = '\n'.join(report.device_provenance_lines(docs, costs))
+    assert 'FFM observed training clocks and attempts use different devices or multiple devices' in text
+    assert 'FFM cost evidence is incomplete, so the observed training device coverage may be incomplete' in text
+    docs[full]['validation'][1000][1].pop('gpu_uuid')
+    assert 'FFM deployment device comparison: unavailable' in '\n'.join(report.device_provenance_lines(docs, costs))
+
+
 def test_adjacent_blocks_do_not_bridge_missing_frames_or_trajectories():
     report = load()
     ids = [f'first:{i}' for i in range(12)] + ['first:15', 'second:2']
