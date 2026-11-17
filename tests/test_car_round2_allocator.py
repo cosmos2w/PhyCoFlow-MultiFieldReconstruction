@@ -62,6 +62,28 @@ def test_source_panel_guard_uses_producer_tensor_digest():
     assert eval(guard_code, scope)
 
 
+def test_profiler_accepts_adapter_default_detached_difficulty(monkeypatch):
+    import ast
+
+    from phycoflow_reconstruction.coherence import query_runtime
+
+    leaf = torch.tensor([2., 4.], requires_grad=True)
+    monkeypatch.setattr(query_runtime, 'score', lambda *args, **kwargs: (None, {}, {'pair': {0: leaf}, 'self': {}}))
+    adapter = object.__new__(query_runtime.ScalableQueryAdapter)
+    adapter.families = {'multiscale_spectrum': object()}
+    adapter.shape = None
+    _, _, leaves = adapter.score('multiscale_spectrum', None, None, coordinates=None,
+                                 context={}, batch=None, coefficients={})
+    assert leaves['pair'][0] == 3.0 and isinstance(leaves['pair'][0], float)
+    tree = ast.parse(path.read_text())
+    assignment = next(node for node in ast.walk(tree) if isinstance(node, ast.Assign)
+                      and 'destination[pair, index]' in ast.unparse(node))
+    destination = torch.zeros((1, 1), dtype=torch.float64)
+    destination[0, 0] = eval(compile(ast.Expression(assignment.value), str(path), 'eval'),
+                             {'pair': 0, 'index': 0, 'leaves': leaves})
+    assert destination[0, 0].item() == 3.0
+
+
 def test_unique_cost_counts_duplicate_pairs_once():
     # Three draws, the two possible IDs have occurrence probabilities 7/8.
     assert mod.expected_unique_cost([.5, .5], [2., 4.], 3) == pytest.approx(5.25)

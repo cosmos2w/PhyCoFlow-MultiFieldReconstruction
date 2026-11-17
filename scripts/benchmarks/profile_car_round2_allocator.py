@@ -519,7 +519,7 @@ def main():
                         _, _, leaves = runtime._score(name, families[name], members[0], target, coord, context, q)
                         # Returned leaf is already conditional on this outer/inner
                         # draw; never divide it by its selection probability.
-                        destination[pair,index] = float(leaves['pair'][pair].detach().mean())
+                        destination[pair,index] = float(leaves['pair'][pair])
             for field in range(len(fields)):
                 for sign in (1, -1):
                     q = query(0, unary_field=field, unary_sign=sign)
