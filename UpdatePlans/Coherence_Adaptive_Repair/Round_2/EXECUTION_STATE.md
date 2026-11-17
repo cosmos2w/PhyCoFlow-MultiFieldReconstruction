@@ -2,7 +2,7 @@
 
 Execution authorized on 2026-11-16. This is an operational continuation record, not the final scientific report or an adoption result. The intended endpoint remains all four 1000-reporting-epoch comparisons, corrected allocation assessment, separate point/law fidelity qualification, measured deployment and separate adoption decisions under the 130 additive GPU-hour ceiling, including six protected closeout hours.
 
-Current phase, November 17: all four actual B64/12 uniform paths passed strict fresh-process resume qualification on their unchanged final-target YAMLs. The two actual residual-head allocation audits are running as named detached-difficulty retry attempts after two corrected profiler defects. No mature arm or formal scientific admission freeze has been launched. Native final assessment and all adoption decisions remain pending.
+Current phase, November 17: both corrected preparations have exact saved SOURCE-panel parity, the final setup binds both, and refreshed native TRAIN assessment contracts are complete. Corrected provisional common fitting and actual optimizer probes are dispatched for FFM on runtime GPU0 and Senseiver on runtime GPU1 under scheduled Luna monitoring. The tied Shape-gradient correction invalidates reuse of the four earlier execution qualifications; dependent final bank selection/fitting, four replacement B64/12 qualifications and both complete allocation audits remain required. No mature arm or formal scientific admission freeze has been launched. Native final assessment and all adoption decisions remain pending. Detailed attempt history below is chronological; superseded qualifications remain preserved evidence for their original code only.
 
 ## Authorization and protected state
 
