@@ -709,6 +709,20 @@ def generate(args, campaign):
     print(output / 'receipt.json')
 
 
+def choose_train_amplitude(aggregates, latency):
+    """Preserve the declared latency tie-break; fall back when it is unavailable."""
+    feasible = [alpha for alpha, row in aggregates.items() if row['eligible']]
+    if not feasible:
+        return 0., False, 'no feasible TRAIN amplitude'
+    best = min(aggregates[alpha]['utility'] for alpha in feasible)
+    tied = [alpha for alpha in feasible if aggregates[alpha]['utility'] <= best + 1e-6]
+    if len(tied) == 1:
+        return tied[0], True, 'unique TRAIN utility minimum'
+    if any(latency.get(alpha) is None for alpha in tied):
+        return 0., False, 'SOURCE fallback: missing latency prevents declared TRAIN tie-break'
+    return min(tied, key=lambda alpha:(latency[alpha],alpha)), True, 'measured latency tie-break'
+
+
 def score(args, campaign):
     import torch
     import yaml
@@ -763,15 +777,23 @@ def score(args, campaign):
     if hash_file(args.event) != contract['event_sha256'] or hash_file(args.reserved_task) != contract['reserved_task_sha256']:
         raise ValueError('task manifest differs from the frozen assessment contract')
     event = FrozenRedesignedEvent(json.loads(args.event.read_text()))
-    timing = json.loads(args.deployment_timing.read_text())
-    if (timing.get('schema') != 'car_round2_deployment_timing_v1' or timing.get('status') != 'completed' or timing.get('arm') != arm
-            or timing.get('epoch') != epoch or timing.get('checkpoint_sha256') != child['checkpoint_sha256']
-            or timing.get('source_checkpoint_sha256') != source['source_sha256']):
-        raise ValueError('measured deployment timing must bind the same actual functions')
-    latency = {float(k):float(v) for k,v in timing['alpha_seconds'].items()}
-    if set(latency) != set(AMPLITUDES) or any(not math.isfinite(v) or v <= 0 for v in latency.values()):
-        raise ValueError('measured deployment latency for each declared amplitude required')
-    memory = deployment_memory_by_alpha(timing, AMPLITUDES)
+    timing_path = args.deployment_timing
+    if timing_path is None:
+        if not getattr(args, 'allow_missing_latency', False):
+            raise ValueError('measured deployment timing required unless explicitly unavailable')
+        timing = None
+        latency = dict.fromkeys(AMPLITUDES)
+        memory = dict.fromkeys(AMPLITUDES)
+    else:
+        timing = json.loads(timing_path.read_text())
+        if (timing.get('schema') != 'car_round2_deployment_timing_v1' or timing.get('status') != 'completed' or timing.get('arm') != arm
+                or timing.get('epoch') != epoch or timing.get('checkpoint_sha256') != child['checkpoint_sha256']
+                or timing.get('source_checkpoint_sha256') != source['source_sha256']):
+            raise ValueError('measured deployment timing must bind the same actual functions')
+        latency = {float(k):float(v) for k,v in timing['alpha_seconds'].items()}
+        if set(latency) != set(AMPLITUDES) or any(not math.isfinite(v) or v <= 0 for v in latency.values()):
+            raise ValueError('measured deployment latency for each declared amplitude required')
+        memory = deployment_memory_by_alpha(timing, AMPLITUDES)
     if split == 'validation':
         _freeze, nomination = validation_freeze(campaign, family, arm, epoch)
         validate_reserved_freeze(campaign, family)
@@ -868,12 +890,10 @@ def score(args, campaign):
             row['latency_seconds'] = latency[alpha]
             row['deployment_memory'] = memory[alpha]
         if split == 'train':
-            feasible = [a for a,row in aggregates.items() if row['eligible']]
-            if feasible:
-                best = min(aggregates[a]['utility'] for a in feasible)
-                selected = min((a for a in feasible if aggregates[a]['utility'] <= best+1e-6), key=lambda a:(latency[a],a))
-            else:
-                selected = 0.
+            selected, nomination_qualified, nomination_reason = choose_train_amplitude(aggregates, latency)
+        else:
+            nomination_qualified = nomination.get('nomination_qualified', True)
+            nomination_reason = nomination.get('nomination_reason', 'TRAIN-frozen nomination')
         rows = []
         for alpha,row in aggregates.items():
             rows.append({'alpha':alpha, 'scores':row['scores'], 'risk':{k:v.tolist() for k,v in row['risk'].items()},
@@ -953,8 +973,10 @@ def score(args, campaign):
                   'selected_and_raw_scale_components':scale_components,
                   'scale_component_scope':'Q4096 complete signed, joint, log-power and rho blocks with unit internal coefficients',
                   'reused_event_area_distributions':event_distributions,
-                  'normalizers':normalizers, 'source_latency_seconds':latency[0.], 'gpu_uuid':timing['gpu_uuid'],
-                  'deployment_timing_sha256':hash_file(args.deployment_timing), 'start_unix':started, 'end_unix':time.time()}
+                  'normalizers':normalizers, 'source_latency_seconds':latency[0.], 'gpu_uuid':timing['gpu_uuid'] if timing else None,
+                  'deployment_timing_available':timing is not None, 'nomination_qualified':nomination_qualified,
+                  'nomination_reason':nomination_reason,
+                  'deployment_timing_sha256':hash_file(timing_path) if timing_path else None, 'start_unix':started, 'end_unix':time.time()}
         if reserved_manifest is not None:
             source_score = sum(reserved['source'])/count
             selected_score = source_score if selected == 0. else sum(reserved['selected'])/count
@@ -1015,17 +1037,26 @@ def freeze_nominations(args, campaign):
             if epoch == 1000:
                 alpha = float(value['selected_alpha'])
                 row = next(item for item in value['rows'] if item['alpha'] == alpha)
-                final_devices.append(value['gpu_uuid'])
+                final_devices.append(value.get('gpu_uuid'))
                 final_rows.append({'method':arm, 'alpha':alpha, 'eligible':row['eligible'],
-                                   'utility':row['utility'], 'latency_seconds':row['latency_seconds']})
+                                   'utility':row['utility'], 'latency_seconds':row['latency_seconds'],
+                                   'nomination_qualified':value.get('nomination_qualified', True)})
         records[arm] = entries
     if len({str(p) for p in runs.values()}) != 2:
         raise ValueError('distinct completed arm runs required')
-    if len(set(final_devices)) != 1:
+    measured = [row for row in final_rows if row['latency_seconds'] is not None]
+    missing_latency = any(row['latency_seconds'] is None for row in final_rows)
+    comparable_devices = len({device for device in final_devices if device is not None}) <= 1
+    if (missing_latency or not comparable_devices) and not getattr(args, 'allow_missing_latency', False):
         raise ValueError('TRAIN method priority requires same-device deployment measurements')
+    # Unmeasured candidates have no latency priority or deployment promotion.
+    priority = freeze_method_priority([row for row in measured if row['nomination_qualified']]) if comparable_devices else []
     result = {'schema':'car_round2_assessment_freeze_v1', 'family':args.family,
               'formal_freeze_sha256':hash_file(formal_path), 'arms':records,
-              'method_priority':freeze_method_priority(final_rows), 'final_train_candidates':final_rows,
+              'method_priority':priority, 'final_train_candidates':final_rows,
+              'latency_priority_available':not missing_latency and comparable_devices,
+              'unmeasured_methods':[row['method'] for row in final_rows if row['latency_seconds'] is None],
+              'unmeasured_disposition':'scientific comparison only; no latency priority or deployment promotion',
               'reserved_task_used':False, 'frozen_unix':time.time()}
     result['sha256'] = content_hash(result)
     path = campaign / 'assessment/train' / f'method_priority_{args.family}.json'
@@ -1066,6 +1097,9 @@ def timed_deployment_call(cuda, invoke, clock=time.perf_counter):
 
 
 def profile_deployment(args, campaign):
+    runtime = json.loads((campaign / 'operations/runtime.json').read_text())
+    if runtime.get('deployment_latency_profiling_enabled', True) is not True:
+        raise ValueError('deployment latency profiling is disabled in runtime configuration')
     import yaml
 
     from phycoflow_reconstruction.evaluation.adaptive_campaign import (
@@ -1322,16 +1356,24 @@ def decide(args, campaign):
         final[arm] = evaluated[arm][1000]
         if 'reserved_task' not in final[arm]:
             raise ValueError('final fixed reserved task assessment is missing')
-    if len({doc['gpu_uuid'] for doc in final.values()}) != 1:
-        raise ValueError('deployment comparison requires measured same-device timing')
+    measured_devices = {doc.get('gpu_uuid') for doc in final.values() if doc.get('gpu_uuid') is not None}
+    comparable_latency = len(measured_devices) == 1 and all(doc.get('gpu_uuid') is not None for doc in final.values())
     rows = {}
     for arm, doc in final.items():
         row = next(row for row in doc['rows'] if row['alpha'] == doc['selected_alpha'])
+        timing_available = row.get('latency_seconds') is not None and doc.get('source_latency_seconds') is not None
         rows[arm] = {'fidelity':row['fidelity'], 'core':row['core'],
                      'reserved_normalized_improvement':doc['reserved_task']['normalized_improvement'],
-                     'source_latency_ratio':row['latency_seconds']/doc['source_latency_seconds']}
-    disposition = deployment_disposition(priority, rows, model_family=args.family,
+                     'source_latency_ratio':row['latency_seconds']/doc['source_latency_seconds'] if timing_available else None}
+    measured_priority = [arm for arm in priority if rows[arm]['source_latency_ratio'] is not None]
+    disposition = deployment_disposition(measured_priority, rows, model_family=args.family,
                                          complete_costs=complete, within_budget=within)
+    for arm in paths:
+        if arm not in disposition['decisions']:
+            row = rows[arm]
+            scientific = row['fidelity']['primary_pass'] and row['core']['pass'] and row['reserved_normalized_improvement'] >= .05
+            disposition['decisions'][arm] = {'task_useful':bool(scientific), 'source_deployment_route':None,
+                                             'operational_eligible':None, 'reason':'latency priority or measurement unavailable'}
     full = next(arm for arm in paths if arm.endswith('Uniform_FullModel'))
     residual = next(arm for arm in paths if arm.endswith('Residual_Repair'))
     frow = next(row for row in final[full]['rows'] if row['alpha'] == final[full]['selected_alpha'])
@@ -1347,12 +1389,12 @@ def decide(args, campaign):
     residual_task_eligible = fidelity and residual_task >= .05
     quality = (bool(residual_task_eligible and residual_task-full_task >= .05 and within and valid_costs
                     and residual_cost <= 1.1*full_cost and rows[residual]['source_latency_ratio'] <= 1.2)
-               if complete else None)
+               if complete and rows[residual]['source_latency_ratio'] is not None else None)
     full_output_guards = rows[full]['fidelity']['primary_pass'] and rows[full]['core']['pass']
     full_eligible = full_output_guards and full_task >= .05
     deployment = (bool(residual_task_eligible and full_eligible and equivalent_task
                        and rrow['latency_seconds'] <= .8*frow['latency_seconds']
-                       and rows[residual]['source_latency_ratio'] <= 1.2 and within) if complete else None)
+                       and rows[residual]['source_latency_ratio'] <= 1.2 and within) if complete and comparable_latency else None)
     crossings = {}
     for arm, trajectory in evaluated.items():
         qualifies = []
@@ -1391,7 +1433,9 @@ def decide(args, campaign):
               'learning_efficiency_reason':efficiency_reason,
               'cost_reconciliation_sha256':hash_file(args.costs),'costs_complete':complete,'within_budget':within,
               'heldout_selection':'TRAIN-frozen amplitude and method order; no held-out search',
-              'device_uuid':next(iter({doc['gpu_uuid'] for doc in final.values()}))}
+              'device_uuid':next(iter(measured_devices)) if len(measured_devices) == 1 else None,
+              'comparable_deployment_latency_available':comparable_latency,
+              'scientific_results':rows}
     if campaign / 'assessment' not in args.output.resolve().parents:
         raise ValueError('decision output must reside in campaign assessment storage')
     immutable_json(args.output, result)
@@ -1439,7 +1483,8 @@ def main():
     evaluate.add_argument('--contract', type=Path, required=True)
     evaluate.add_argument('--event', type=Path, required=True)
     evaluate.add_argument('--reserved-task', type=Path, required=True)
-    evaluate.add_argument('--deployment-timing', type=Path, required=True)
+    evaluate.add_argument('--deployment-timing', type=Path)
+    evaluate.add_argument('--allow-missing-latency', action='store_true')
     evaluate.add_argument('--output', type=Path, required=True)
     reserved_freeze = sub.add_parser('freeze-reserved-normalizer')
     reserved_freeze.add_argument('--family', choices=('ffm','senseiver'), required=True)
@@ -1449,6 +1494,7 @@ def main():
     freeze.add_argument('--family', choices=('ffm','senseiver'), required=True)
     freeze.add_argument('--full-run', type=Path, required=True)
     freeze.add_argument('--residual-run', type=Path, required=True)
+    freeze.add_argument('--allow-missing-latency', action='store_true')
     profile = sub.add_parser('profile-deployment')
     profile.add_argument('--arm', choices=ARMS, required=True)
     profile.add_argument('--final-assessment', action='store_true', help='use closeout reserve after all four frozen mature runs complete')

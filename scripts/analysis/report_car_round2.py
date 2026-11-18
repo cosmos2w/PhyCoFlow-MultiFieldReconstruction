@@ -675,7 +675,11 @@ def produce(inputs, campaign, output):
             doc = docs[arm]['validation'][1000][1]; row = selected(doc)
             label = 'Residual' if arm.endswith('Residual_Repair') else 'Full model'
             axes_row[0].bar(label, doc['reserved_task']['normalized_improvement'])
-            axes_row[1].bar(label, row['latency_seconds']/doc['source_latency_seconds'])
+            if row.get('latency_seconds') is None or doc.get('source_latency_seconds') is None:
+                axes_row[1].text(.5, .5 if label == 'Full model' else .35, f'{label}: unavailable',
+                                 ha='center', transform=axes_row[1].transAxes)
+            else:
+                axes_row[1].bar(label, row['latency_seconds']/doc['source_latency_seconds'])
             serial = costs[family]['arms'][arm]['serial_cost_seconds']
             if serial is None:
                 axes_row[2].text(.5, .5 if label == 'Full model' else .35, f'{label}: unavailable',

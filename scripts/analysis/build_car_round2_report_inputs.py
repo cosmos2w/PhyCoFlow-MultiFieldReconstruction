@@ -23,7 +23,7 @@ def sha(path):
     return h.hexdigest()
 
 
-def build(campaign, formal_groups, train_result, validation_result, report):
+def build(campaign, formal_groups, train_result, validation_result, report, continuation_result=None):
     campaign = Path(campaign).resolve(strict=True)
     bindings = {}
     def path(value):
@@ -65,7 +65,7 @@ def build(campaign, formal_groups, train_result, validation_result, report):
                 raise ValueError('formal completion token or horizon differs')
             tokens.add(token)
             run = path(completion['run_dir'])
-            if campaign / 'runs/formal' / arm not in run.parents:
+            if (campaign / 'runs/formal' / arm).resolve(strict=True) not in run.parents:
                 raise ValueError('formal run identity differs from arm')
             status = read(run / 'status.json')
             if status.get('status') != 'completed' or status.get('global_step') != 12000:
@@ -74,61 +74,73 @@ def build(campaign, formal_groups, train_result, validation_result, report):
     if set(runs) != set(ARMS):
         raise ValueError('exactly four terminal formal arms required')
 
-    train = read(train_result)
-    if (train.get('schema') != 'car_round2_train_checkpoint_successor_result_v1' or train.get('status') != 'completed'
-            or train.get('freeze_sha256') != sha(freeze_path)):
-        raise ValueError('TRAIN terminal result or freeze differs')
-    expected = {(arm, epoch) for arm in ARMS for epoch in EPOCHS}
-    seen = set()
-    for item in train.get('groups', []):
-        key = (item.get('arm'), item.get('epoch'))
-        if key not in expected or key in seen:
-            raise ValueError('TRAIN checkpoint identity duplicated or unexpected')
-        group = ref(item, 'group', 'group_sha256')
-        if (group.get('schema') != 'car_round2_assessment_sequence_v1' or group.get('status') != 'completed'
-                or group.get('phase') != 'train-batch' or len(group.get('children', [])) != 3):
-            raise ValueError('incomplete TRAIN checkpoint group')
-        launch = ref(group, 'launch_receipt', 'launch_sha256')
-        binding = launch.get('train_batch_binding', {})
-        if binding.get('arm') != key[0] or set(binding.get('checkpoints', {})) != {str(key[1])}:
-            raise ValueError('TRAIN checkpoint launch identity differs')
-        if len({str(path(child['path'])) for child in group['children']}) != 3:
-            raise ValueError('TRAIN checkpoint child receipts duplicated')
-        children = [ref(child, 'path', 'sha256') for child in group['children']]
-        if any(child.get('schema') != 'car_round2_assessment_sequence_child_v1' or child.get('returncode') != 0 for child in children) or sorted(child.get('kind') for child in children) != ['cpu', 'gpu', 'gpu']:
-            raise ValueError('TRAIN checkpoint child failed')
-        seen.add(key)
-    if seen != expected:
-        raise ValueError('all 24 TRAIN checkpoint groups required')
+    if continuation_result is not None:
+        continuation = read(continuation_result)
+        children = continuation.get('children')
+        if (continuation.get('schema') != 'car_round2_independent_cpu_job_v1'
+                or continuation.get('status') != 'completed' or not isinstance(children, list)
+                or any(child.get('returncode') != 0 for child in children)):
+            raise ValueError('completed GPU0-only assessment continuation and successful child commands required')
+        if any('profile-deployment' in child.get('command', []) for child in children):
+            raise ValueError('continuation must not add deployment latency measurements')
+    else:
+        if train_result is None or validation_result is None:
+            raise ValueError('TRAIN and VALIDATION terminal results or a completed continuation required')
+        train = read(train_result)
+        if (train.get('schema') != 'car_round2_train_checkpoint_successor_result_v1' or train.get('status') != 'completed'
+                or train.get('freeze_sha256') != sha(freeze_path)):
+            raise ValueError('TRAIN terminal result or freeze differs')
+        expected = {(arm, epoch) for arm in ARMS for epoch in EPOCHS}
+        seen = set()
+        for item in train.get('groups', []):
+            key = (item.get('arm'), item.get('epoch'))
+            if key not in expected or key in seen:
+                raise ValueError('TRAIN checkpoint identity duplicated or unexpected')
+            group = ref(item, 'group', 'group_sha256')
+            if (group.get('schema') != 'car_round2_assessment_sequence_v1' or group.get('status') != 'completed'
+                    or group.get('phase') != 'train-batch' or len(group.get('children', [])) != 3):
+                raise ValueError('incomplete TRAIN checkpoint group')
+            launch = ref(group, 'launch_receipt', 'launch_sha256')
+            binding = launch.get('train_batch_binding', {})
+            if binding.get('arm') != key[0] or set(binding.get('checkpoints', {})) != {str(key[1])}:
+                raise ValueError('TRAIN checkpoint launch identity differs')
+            if len({str(path(child['path'])) for child in group['children']}) != 3:
+                raise ValueError('TRAIN checkpoint child receipts duplicated')
+            children = [ref(child, 'path', 'sha256') for child in group['children']]
+            if any(child.get('schema') != 'car_round2_assessment_sequence_child_v1' or child.get('returncode') != 0 for child in children) or sorted(child.get('kind') for child in children) != ['cpu', 'gpu', 'gpu']:
+                raise ValueError('TRAIN checkpoint child failed')
+            seen.add(key)
+        if seen != expected:
+            raise ValueError('all 24 TRAIN checkpoint groups required')
 
-    val = read(validation_result)
-    if (val.get('schema') != 'car_round2_validation_successor_result_v1' or val.get('status') != 'completed'
-            or val.get('formal_freeze_sha256') != sha(freeze_path)):
-        raise ValueError('VALIDATION terminal result or freeze differs')
-    ref(val, 'barrier', 'barrier_sha256')
-    seen_families = set()
-    for entry in val.get('families', []):
-        family = entry.get('family')
-        if family not in ('ffm', 'senseiver') or family in seen_families:
-            raise ValueError('VALIDATION family duplicated or unknown')
-        group = ref(entry, 'path', 'sha256')
-        if group.get('schema') != 'car_round2_validation_successor_v11' or group.get('status') != 'completed' or group.get('family') != family or group.get('failure'):
-            raise ValueError('VALIDATION family incomplete')
-        ref(group, 'launch_receipt', 'launch_sha256')
-        child_refs = group.get('children', [])
-        if len(child_refs) != 26 or len({str(path(child['path'])) for child in child_refs}) != 26:
-            raise ValueError('VALIDATION family requires 26 unique child receipts')
-        kinds = []
-        for child_ref in child_refs:
-            child = ref(child_ref, 'path', 'sha256')
-            if child.get('schema') != 'car_round2_assessment_sequence_child_v1' or child.get('returncode') != 0:
-                raise ValueError('VALIDATION child failed')
-            kinds.append(child.get('kind'))
-        if sorted(kinds) != ['cpu'] * 13 + ['gpu'] * 13:
-            raise ValueError('VALIDATION child kinds differ')
-        seen_families.add(family)
-    if seen_families != {'ffm', 'senseiver'}:
-        raise ValueError('both VALIDATION family completions required')
+        val = read(validation_result)
+        if (val.get('schema') != 'car_round2_validation_successor_result_v1' or val.get('status') != 'completed'
+                or val.get('formal_freeze_sha256') != sha(freeze_path)):
+            raise ValueError('VALIDATION terminal result or freeze differs')
+        ref(val, 'barrier', 'barrier_sha256')
+        seen_families = set()
+        for entry in val.get('families', []):
+            family = entry.get('family')
+            if family not in ('ffm', 'senseiver') or family in seen_families:
+                raise ValueError('VALIDATION family duplicated or unknown')
+            group = ref(entry, 'path', 'sha256')
+            if group.get('schema') != 'car_round2_validation_successor_v11' or group.get('status') != 'completed' or group.get('family') != family or group.get('failure'):
+                raise ValueError('VALIDATION family incomplete')
+            ref(group, 'launch_receipt', 'launch_sha256')
+            child_refs = group.get('children', [])
+            if len(child_refs) != 26 or len({str(path(child['path'])) for child in child_refs}) != 26:
+                raise ValueError('VALIDATION family requires 26 unique child receipts')
+            kinds = []
+            for child_ref in child_refs:
+                child = ref(child_ref, 'path', 'sha256')
+                if child.get('schema') != 'car_round2_assessment_sequence_child_v1' or child.get('returncode') != 0:
+                    raise ValueError('VALIDATION child failed')
+                kinds.append(child.get('kind'))
+            if sorted(kinds) != ['cpu'] * 13 + ['gpu'] * 13:
+                raise ValueError('VALIDATION child kinds differ')
+            seen_families.add(family)
+        if seen_families != {'ffm', 'senseiver'}:
+            raise ValueError('both VALIDATION family completions required')
 
     def canonical(value):
         p = path(value); bindings[str(p)] = sha(p); return str(p)
@@ -165,8 +177,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--campaign', type=Path, required=True)
     parser.add_argument('--formal-group', type=Path, action='append', required=True)
-    parser.add_argument('--train-result', type=Path, required=True)
-    parser.add_argument('--validation-result', type=Path, required=True)
+    parser.add_argument('--train-result', type=Path)
+    parser.add_argument('--validation-result', type=Path)
+    parser.add_argument('--continuation-result', type=Path)
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
     campaign = args.campaign.resolve(strict=True); output = args.output.resolve()
@@ -181,7 +194,7 @@ def main():
         module_path = Path(__file__).with_name('report_car_round2.py')
         spec = importlib.util.spec_from_file_location('car_round2_report', module_path)
         report = importlib.util.module_from_spec(spec); spec.loader.exec_module(report)
-        inputs = build(campaign, args.formal_group, args.train_result, args.validation_result, report)
+        inputs = build(campaign, args.formal_group, args.train_result, args.validation_result, report, args.continuation_result)
         with output.open('x') as f:
             json.dump(inputs, f, indent=2); f.write('\n')
         result.update(status='completed', output=str(output), output_sha256=sha(output),

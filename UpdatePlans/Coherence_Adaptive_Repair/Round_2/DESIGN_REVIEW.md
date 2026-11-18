@@ -6,6 +6,8 @@ Execution authorization received later on 2026-11-16: the user's Round 2 goal ap
 
 Scheduling correction authorized on 2026-11-17: source-local qualification, allocation audits and mature admission proceed independently when their actual inputs and the whole-round budget permit. Earlier wording requiring all four execution qualifications before either source can advance is superseded by the amended [workplan](WORKPLAN.md) and [scheduling review](SCHEDULING_REVIEW.md). The two-family nonuniform-allocation gate, immutable scientific identities, four mature horizons and TRAIN-selection-before-VALIDATION barrier remain unchanged.
 
+User amendment on 2026-11-18: cancel further GPU deployment-latency measurements, release GPU1, and use GPU0 for remaining necessary GPU work. The amended [workplan](WORKPLAN.md) governs execution; historical deployment proposals below remain the design record. Preserve completed measurements, report missing latency explicitly, and continue the fixed scientific comparison without reopening qualification. Latency-dependent routes remain unavailable where their measurement or priority is absent; the scientific gates, authorized horizons and information barrier are unchanged.
+
 ## Joint recommendations
 
 - Preserve the Round 1 expanded representation and measured event gain, while keeping its negative allocation/output-promotion disposition intact. New Scale retention, complete costs and actual deployment address the unfinished branch question.

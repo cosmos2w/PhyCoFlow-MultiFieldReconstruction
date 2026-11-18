@@ -798,6 +798,7 @@ def main():
                                          'scripts/posttraining/sequence_car_round2_qualification.py',
                                          'scripts/posttraining/sequence_car_round2_formal.py',
                                          'scripts/posttraining/sequence_car_round2_assessment.py',
+                                         'scripts/posttraining/continue_car_round2_assessment_gpu0.py',
                                          'scripts/posttraining/assess_car_round2_checkpoints.py',
                                          'scripts/posttraining/freeze_car_event.py',
                                          'scripts/analysis/fit_car_round2_prefit.py',
