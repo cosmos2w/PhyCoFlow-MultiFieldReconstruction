@@ -1,0 +1,24 @@
+{
+  "schema": "car_round2_raw_closeout_plan_v1",
+  "arms": {
+    "FFM_Selected_Bank_Uniform_FullModel": {
+      "run": "runs/formal/FFM_Selected_Bank_Uniform_FullModel/20261118T001357Z_f8b517be",
+      "epoch": 750,
+      "alpha": 1,
+      "checkpoint_sha256": "2046e762d59d1747a7af5e074b2e8cd9fc457468289713e8c439bd2b8f704a13"
+    },
+    "Senseiver_Selected_Bank_Uniform_FullModel": {
+      "run": "runs/formal/Senseiver_Selected_Bank_Uniform_FullModel/20261117T154021Z_e8a03738",
+      "epoch": 1000,
+      "alpha": 1,
+      "checkpoint_sha256": "3b3b7f4efedbfabdbb23d2a85e6b326adb60a4e53513c9f8d6a1bfad1466402c"
+    },
+    "Senseiver_Selected_Bank_Residual_Repair": {
+      "run": "runs/formal/Senseiver_Selected_Bank_Residual_Repair/20261117T194634Z_93dff570",
+      "epoch": 1000,
+      "alpha": 1,
+      "checkpoint_sha256": "6b3ddd68c3b4bbda1f60539c5b8bf722f1d3d4efb28272f869aa4998737b26c0"
+    }
+  },
+  "scope": "SOURCE and fixed raw model outputs on matched VALIDATION100. FFM residual is already rejected on TRAIN continuity and is not evaluated on VALIDATION."
+}

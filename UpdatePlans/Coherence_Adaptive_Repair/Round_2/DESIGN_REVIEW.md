@@ -1,5 +1,7 @@
 # Round 2 design discussion
 
+Execution scope was explicitly shortened by the user on November 19: stop owned training, cancel obsolete queues, preserve histories/checkpoints/curves, freeze a minimal raw-checkpoint comparison before approximately 10% matched VALIDATION, and finish the concise English early-termination report. Remaining horizons, exhaustive checkpoints, amplitude sweeps and deployment benchmarks are cancelled. The early-closeout amendment at the top of [WORKPLAN.md](WORKPLAN.md) and current [CLOSEOUT_HANDOFF.md](CLOSEOUT_HANDOFF.md) govern execution; the original discussion below is preserved history.
+
 Date: 2026-11-16. Participants: the primary agent and the user-requested GPT-6.1 Terra max subagent, `round2_terra_review`. Scope: read-only source/evidence review and preparation of the [Round 2 workplan](WORKPLAN.md); no training, source changes or branch mutation. The subagent independently read the branch roadmap, Round 1 plan/design/report and actual training, model, allocator and source artifacts.
 
 Execution authorization received later on 2026-11-16: the user's Round 2 goal approves execution within the reviewed 130 GPU-hour ceiling and explicitly permits GPUs 0 and 1 in parallel. This supersedes the preparatory GPU1/GPU2 recommendations below. The historical design discussion remains preserved; live execution provenance is in [execution state](EXECUTION_STATE.md).
