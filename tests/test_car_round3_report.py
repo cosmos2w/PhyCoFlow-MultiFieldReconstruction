@@ -53,8 +53,13 @@ def inputs_for(tmp_path, complete, endpoint_epoch=100):
         inputs['exact_compute']=write_ref(tmp_path/'exact.json',{'schema':'car_round3_exact_compute_disposition_v1',
             'disposition':'rejected','reason':'No meaningful timing improvement.', 'baseline_epoch_seconds':115.,'reused_epoch_seconds':114.})
         v={'physical_weighted_total':{'mean':1.,'sample_sd':.1}}
-        inputs['shape']=write_ref(tmp_path/'shape.json',{'schema':'car_round3_shape_query_diagnostic_v1','seeds':[1,2],
-            'shared_dispersion':v,'condition_specific_dispersion':v,'scorer_worker_seconds':100.})
+        seeds = [{'seed':i, 'shared':{'scores':{'physical_weighted_total':1.+i*.1}},
+                  'condition_specific':{'scores':{'physical_weighted_total':1.+i*.02}}} for i in (1,2)]
+        inputs['shape']=write_ref(tmp_path/'shape.json',{'schema':'car_round3_shape_query_diagnostic_v1','seeds':seeds,
+            'shared_dispersion':v,'condition_specific_dispersion':v,'scorer_worker_seconds':100.,
+            'sample_count':800,'members':[0,1],'elapsed_worker_seconds':110.,'worker_seconds_limit':200.,
+            'prior_conservative_worker_seconds':2812.,'accounted_upper_bound_worker_seconds':2922.,
+            'total_worker_seconds_ceiling':7200.})
         inputs['costs']=write_ref(tmp_path/'cost.json',{'schema':'car_round3_costs_v1',
             'training':{arm:{'seconds_per_epoch':110.,'occupied_gpu_seconds':11000.} for arm in report.ARMS},
             'assessment':{'gpu_seconds':200.,'cpu_seconds':300.,'wall_seconds':180.},'failed_attempt_gpu_seconds':None})
@@ -87,7 +92,18 @@ def test_complete_report_renders_figures_and_rejects_evidence_drift(tmp_path, en
     assert result['status']=='completed' and result['pending']==[]
     output=campaign/'reports/complete'
     assert (output/'report.html').is_file()
-    assert len(result['figures'])==2
+    assert len(result['figures'])==3
+    text = (output/'report.md').read_text()
+    assert 'figures/shape_query_variation.png' in text and 'figures/shape_query_variation.pdf' in text
+    assert 'sampled query variation, not learning or gradient variance' in text
+    assert '800 cached TRAIN conditions' in text and 'SOURCE member pair [0, 1]' in text
+    assert 'recovery-attempt scorer worker time 100 s' in text
+    assert 'recovery-attempt elapsed worker time 110 s' in text
+    assert 'recovery-attempt worker limit 200 s' in text
+    assert 'prior-attempt conservative worker bound 2812 s' in text
+    assert 'all-attempt accounted worker upper bound 2922 s' in text
+    assert 'total worker ceiling 7200 s' in text
+    assert 'Exact prior-attempt CPU costs are unavailable' in text
     for figure in result['figures']:
         assert (output/'figures'/f'{figure}.png').is_file()
         assert (output/'figures'/f'{figure}.pdf').is_file()
@@ -156,3 +172,16 @@ def test_optional_campaign_gpu_accounting_and_device_labels(tmp_path):
     assert 'supplied total campaign upper bound: 22700 GPU s' in text
     assert 'other disjoint measured occupancy:' not in text
     assert 'parallel speedup' not in text
+
+
+def test_paired_shape_figure_uses_recorded_values_and_rejects_duplicate_seeds():
+    data = {'seeds': [
+        {'seed':7, 'shared':{'scores':{'physical_weighted_total':1.2}},
+         'condition_specific':{'scores':{'physical_weighted_total':1.4}}},
+        {'seed':8, 'shared':{'scores':{'physical_weighted_total':1.6}},
+         'condition_specific':{'scores':{'physical_weighted_total':1.3}}},
+    ]}
+    assert report.paired_shape_values(data) == [(7,1.2,1.4), (8,1.6,1.3)]
+    data['seeds'][1]['seed'] = 7
+    with pytest.raises(ValueError, match='unique'):
+        report.paired_shape_values(data)

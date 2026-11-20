@@ -148,6 +148,43 @@ def plot_scores(assessment, figdir):
     save_figure(fig, figdir, 'matched_core_differences')
 
 
+def paired_shape_values(shape):
+    """Extract recorded paired scores without running a Shape scorer."""
+    seeds = shape.get('seeds', []) if shape else []
+    if not seeds or not all(isinstance(seed, dict) for seed in seeds):
+        return []
+    pairs = []
+    for entry in seeds:
+        seed = entry['seed']
+        shared = entry['shared']['scores']['physical_weighted_total']
+        specific = entry['condition_specific']['scores']['physical_weighted_total']
+        if (isinstance(seed, bool) or not isinstance(seed, int)
+                or any(isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x)
+                       for x in (shared, specific))):
+            raise ValueError('paired Shape query seeds and scores must be finite')
+        pairs.append((seed, shared, specific))
+    if len({seed for seed, _, _ in pairs}) != len(pairs):
+        raise ValueError('paired Shape query seeds must be unique')
+    return pairs
+
+
+def plot_shape_queries(pairs, figdir):
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    fig, axis = plt.subplots(figsize=(8, 4.2), constrained_layout=True)
+    seed, shared, specific = zip(*pairs, strict=True)
+    axis.plot(seed, shared, marker='o', linewidth=1.3, color='#2165a4', label='Shared query')
+    axis.plot(seed, specific, marker='s', linewidth=1.3, color='#b84d2d', label='Condition-specific queries')
+    axis.set_xticks(seed)
+    axis.set_xlabel('Paired query seed')
+    axis.set_ylabel('Physical-weighted Shape score')
+    axis.set_title('Sampled query variation on fixed SOURCE endpoints')
+    axis.grid(alpha=.2)
+    axis.legend(fontsize=8)
+    save_figure(fig, figdir, 'shape_query_variation')
+
+
 def validate_assessment(value, label):
     if value is None:
         return
@@ -234,6 +271,10 @@ def produce(inputs_path, campaign, output):
     if assessment is not None:
         plot_scores(assessment, figdir)
         captions['matched_core_differences'] = 'State, Scale and Shape score changes on the matched VALIDATION100 panel, normalized by the frozen TRAIN SOURCE score units; negative values are improvements.'
+    shape_pairs = paired_shape_values(shape)
+    if shape_pairs:
+        plot_shape_queries(shape_pairs, figdir)
+        captions['shape_query_variation'] = 'Paired shared and condition-specific physical-weighted Shape scores by query seed on fixed SOURCE endpoints; these show sampled query variation, not learning or gradient variance.'
     status = 'INCOMPLETE — required evidence remains pending' if pending else 'COMPLETE — bounded endpoint decision'
     lines = ['# Coherence Adaptive Repair: Round 3', '', f'**Status:** {status}.', '']
     if pending:
@@ -297,7 +338,7 @@ def produce(inputs_path, campaign, output):
         lines += ['Resume qualification disposition is pending.', '']
     if shape and shape.get('shared_dispersion') and shape.get('condition_specific_dispersion'):
         shared = shape['shared_dispersion']['physical_weighted_total']; diverse = shape['condition_specific_dispersion']['physical_weighted_total']
-        lines += [f"Cached TRAIN Shape query replay: {len(shape['seeds'])} paired seeds; shared-query mean {fmt(shared['mean'])}, sample SD {fmt(shared['sample_sd'])}; condition-specific mean {fmt(diverse['mean'])}, sample SD {fmt(diverse['sample_sd'])}; scorer worker time {fmt(shape.get('scorer_worker_seconds'), ' s')}.", '',
+        lines += [f"Cached TRAIN Shape query replay: {len(shape['seeds'])} paired seeds; shared-query mean {fmt(shared['mean'])}, sample SD {fmt(shared['sample_sd'])}; condition-specific mean {fmt(diverse['mean'])}, sample SD {fmt(diverse['sample_sd'])}; recovery-attempt scorer worker time {fmt(shape.get('scorer_worker_seconds'), ' s')}.", '',
             'This fixed-endpoint scalar dispersion does not establish parameter-gradient variance, a better ConFIG direction or model improvement.', '']
         if shape.get('conclusion') or shape.get('reason'):
             explanation = ' '.join(str(shape.get(key, '')).strip() for key in ('conclusion', 'reason') if shape.get(key))
@@ -308,6 +349,26 @@ def produce(inputs_path, campaign, output):
             'No complete dispersion comparison is available; this diagnostic does not establish parameter-gradient variance, a better ConFIG direction or model improvement.', '']
     else:
         lines += ['The cached Shape-query diagnostic remains pending; it is independent of the learned-output decision.', '']
+    if shape:
+        details = []
+        if shape.get('sample_count') is not None:
+            details.append(f"{shape['sample_count']} cached TRAIN conditions")
+        if shape.get('members') is not None:
+            details.append(f"SOURCE member pair {shape['members']}")
+        if shape.get('elapsed_worker_seconds') is not None:
+            details.append(f"recovery-attempt elapsed worker time {fmt(shape['elapsed_worker_seconds'], ' s')}")
+        if shape.get('worker_seconds_limit') is not None:
+            details.append(f"recovery-attempt worker limit {fmt(shape['worker_seconds_limit'], ' s')}")
+        if shape.get('prior_conservative_worker_seconds') is not None:
+            details.append(f"prior-attempt conservative worker bound {fmt(shape['prior_conservative_worker_seconds'], ' s')}")
+        if shape.get('accounted_upper_bound_worker_seconds') is not None:
+            details.append(f"all-attempt accounted worker upper bound {fmt(shape['accounted_upper_bound_worker_seconds'], ' s')}")
+        if shape.get('total_worker_seconds_ceiling') is not None:
+            details.append(f"total worker ceiling {fmt(shape['total_worker_seconds_ceiling'], ' s')}")
+        if details:
+            lines += ['Shape replay panel and budget: ' + '; '.join(details) + '.', '']
+        if shape.get('prior_conservative_worker_seconds') is not None:
+            lines += ['Exact prior-attempt CPU costs are unavailable; the supplied prior-attempt figure is a conservative bound.', '']
     lines += ['## Cost and provenance', '']
     if costs:
         for arm in ARMS:
