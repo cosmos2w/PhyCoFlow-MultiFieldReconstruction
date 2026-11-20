@@ -14,7 +14,7 @@ def write_ref(path, data):
 
 def assessment(epoch, tasks=False):
     risk = {'member_mse':[1.,2.], 'signed_mean_risk':[.8,1.8]}
-    fidelity = {'field_difference':[0.,0.], 'primary_field_pass':True, 'sensor_pass':True, 'legacy_member_pass':True}
+    fidelity = {'field_difference':[0.,0.], 'field_allowance':[.1,.2], 'primary_field_pass':True, 'sensor_pass':True, 'legacy_member_pass':True}
     candidates = {}
     for arm in report.ARMS:
         row = {'risk':risk, 'fidelity':fidelity, 'normalized_core_differences':{'state':-.06,'scale':0.,'shape':0.}}
@@ -71,6 +71,9 @@ def test_incomplete_report_does_not_claim_completion(tmp_path):
     assert '**Status:** INCOMPLETE' in text
     assert 'Both event and regional task scores were excluded' in text
     assert '![Sampled TRAIN' in text and '[PDF master]' in text
+    assert 'Fixed TRAIN allowance' in text
+    assert '| u | 1 | 1 | 1 | 0 | 0 | 0.1 |' in text
+    assert 'max-width: 100%' in (campaign/'reports/incomplete/report.html').read_text()
 
 
 @pytest.mark.parametrize("endpoint_epoch", [100, 500])

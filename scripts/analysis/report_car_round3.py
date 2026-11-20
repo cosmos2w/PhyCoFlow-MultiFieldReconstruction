@@ -237,12 +237,15 @@ def produce(inputs_path, campaign, output):
         'The compared paths use one FFM SOURCE, uniform allocation, a 50-epoch warmup and matched reporting epochs. This previously accessed same-trajectory VALIDATION100 panel is development evidence, not independent confirmation; TEST remains locked.', '']
     if assessment is not None:
         lines += [f"The latest matched assessment is epoch {assessment['epoch']} with J4 members and {len(assessment['sample_ids'])} conditions. SOURCE checkpoint `{assessment.get('source_checkpoint_sha256', 'see source-bank receipt')}`, panel SHA-256 `{assessment['panel_sha256']}` and SOURCE bank receipt SHA-256 `{assessment['source_bank_sha256']}` bind the comparison.", '',
-            '| Field | SOURCE member MSE | Raw-risk member MSE | SOURCE-scaled member MSE | Raw signed-risk difference | Scaled signed-risk difference |',
-            '| --- | ---: | ---: | ---: | ---: | ---: |']
+            '| Field | SOURCE member MSE | Raw-risk member MSE | SOURCE-scaled member MSE | Raw signed-risk difference | Scaled signed-risk difference | Fixed TRAIN allowance |',
+            '| --- | ---: | ---: | ---: | ---: | ---: | ---: |']
         source = assessment['source']; raw, scaled = (assessment['candidates'][arm] for arm in ARMS)
+        if raw['fidelity']['field_allowance'] != scaled['fidelity']['field_allowance']:
+            raise ValueError('candidate native TRAIN allowances differ')
         for i, field in enumerate(assessment['field_order']):
             vals = (source['risk']['member_mse'][i], raw['risk']['member_mse'][i], scaled['risk']['member_mse'][i],
-                    raw['fidelity']['field_difference'][i], scaled['fidelity']['field_difference'][i])
+                    raw['fidelity']['field_difference'][i], scaled['fidelity']['field_difference'][i],
+                    raw['fidelity']['field_allowance'][i])
             lines.append('| ' + str(field) + ' | ' + ' | '.join(fmt(v) for v in vals) + ' |')
         lines += ['', 'Field values are mass-weighted MSE in the respective native field units squared; signed-risk differences use the matched SOURCE baseline and the fixed TRAIN allowance converted fieldwise to native units. Member MSE, ensemble mean MSE, unbiased member variance and sensor results are saved in the linked assessment evidence.', '']
         for arm in ARMS:
@@ -330,7 +333,7 @@ def render_and_validate(output, captions):
             return f'<h{level} id="{anchor}">{text}</h{level}>\n'
     markdown=(output/'report.md').read_text(encoding='utf-8')
     rendered=mistune.create_markdown(renderer=Renderer(),plugins=['table'])(markdown)
-    (output/'report.html').write_text('<!doctype html><html><head><meta charset="utf-8"><title>Round 3 report</title></head><body>'+rendered+'</body></html>',encoding='utf-8')
+    (output/'report.html').write_text('<!doctype html><html><head><meta charset="utf-8"><title>Round 3 report</title><style>img { max-width: 100%; height: auto; }</style></head><body>'+rendered+'</body></html>',encoding='utf-8')
     for name in captions:
         png, pdf=output/'figures'/f'{name}.png', output/'figures'/f'{name}.pdf'
         with Image.open(png) as image: image.verify()
