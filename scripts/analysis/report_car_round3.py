@@ -150,6 +150,18 @@ def validate_assessment(value, label):
         raise ValueError('review must be epoch 100 with both tasks excluded')
 
 
+def shape_evidence_complete(shape):
+    if shape is None:
+        return False
+    dispersion = (bool(shape.get('seeds')) and 'shared_dispersion' in shape
+                  and 'condition_specific_dispersion' in shape)
+    terminal = (str(shape.get('disposition', '')).strip().lower() in {
+        'inconclusive', 'budget-exhausted', 'budget_exhausted', 'completed',
+        'closed', 'rejected', 'supported'} and isinstance(shape.get('reason'), str)
+        and bool(shape['reason'].strip()))
+    return dispersion or terminal
+
+
 def pending_items(review, endpoint, decision, qualification, exact, shape, costs, rows):
     pending = []
     if review is None: pending.append('epoch-100 matched review')
@@ -161,7 +173,7 @@ def pending_items(review, endpoint, decision, qualification, exact, shape, costs
         pending.append('resume qualification disposition')
     if exact is None or not exact.get('disposition') or str(exact['disposition']).lower() in ('pending', 'unknown') or not exact.get('reason'):
         pending.append('exact-compute disposition')
-    if shape is None or not shape.get('seeds') or 'shared_dispersion' not in shape or 'condition_specific_dispersion' not in shape:
+    if not shape_evidence_complete(shape):
         pending.append('cached Shape diagnostic result or disposition')
     if costs is None or any(arm not in costs.get('training', {}) for arm in ARMS) or not isinstance(costs.get('assessment'), dict):
         pending.append('training and assessment cost receipt')
@@ -272,6 +284,13 @@ def produce(inputs_path, campaign, output):
         shared = shape['shared_dispersion']['physical_weighted_total']; diverse = shape['condition_specific_dispersion']['physical_weighted_total']
         lines += [f"Cached TRAIN Shape query replay: {len(shape['seeds'])} paired seeds; shared-query mean {fmt(shared['mean'])}, sample SD {fmt(shared['sample_sd'])}; condition-specific mean {fmt(diverse['mean'])}, sample SD {fmt(diverse['sample_sd'])}; scorer worker time {fmt(shape.get('scorer_worker_seconds'), ' s')}.", '',
             'This fixed-endpoint scalar dispersion does not establish parameter-gradient variance, a better ConFIG direction or model improvement.', '']
+        if shape.get('conclusion') or shape.get('reason'):
+            explanation = ' '.join(str(shape.get(key, '')).strip() for key in ('conclusion', 'reason') if shape.get(key))
+            lines += [f"Shape diagnostic conclusion: {' '.join(explanation.split())}", '']
+    elif shape_evidence_complete(shape):
+        explanation = ' '.join(str(shape.get(key, '')).strip() for key in ('conclusion', 'reason') if shape.get(key))
+        lines += [f"Cached Shape-query diagnostic closed as {shape['disposition']}: {' '.join(explanation.split())}", '',
+            'No complete dispersion comparison is available; this diagnostic does not establish parameter-gradient variance, a better ConFIG direction or model improvement.', '']
     else:
         lines += ['The cached Shape-query diagnostic remains pending; it is independent of the learned-output decision.', '']
     lines += ['## Cost and provenance', '']

@@ -87,3 +87,38 @@ def test_complete_report_renders_figures_and_rejects_evidence_drift(tmp_path, en
     (tmp_path/'endpoint.json').write_text('{}')
     with pytest.raises(ValueError, match='hash mismatch'):
         report.produce(inputs,campaign,campaign/'reports/invalid')
+
+
+def test_terminal_inconclusive_shape_disposition_closes_diagnostic(tmp_path):
+    campaign, inputs_path = inputs_for(tmp_path, True)
+    inputs = json.loads(inputs_path.read_text())
+    shape = {'schema':'car_round3_shape_query_diagnostic_v1', 'seeds':[],
+             'disposition':'budget-exhausted', 'reason':'Only one paired replay fit the budget.',
+             'conclusion':'The scalar variance comparison is inconclusive.'}
+    inputs['shape'] = write_ref(tmp_path/'shape_terminal.json', shape)
+    inputs_path.write_text(json.dumps(inputs))
+    result = report.produce(inputs_path, campaign, campaign/'reports/terminal_shape')
+    assert result['status'] == 'completed'
+    text = (campaign/'reports/terminal_shape/report.md').read_text()
+    assert 'closed as budget-exhausted' in text
+    assert 'The scalar variance comparison is inconclusive.' in text
+    assert 'Only one paired replay fit the budget.' in text
+    shape['reason'] = ''
+    assert not report.shape_evidence_complete(shape)
+    shape['reason'] = None
+    assert not report.shape_evidence_complete(shape)
+
+
+def test_shape_conclusion_is_shown_with_dispersion(tmp_path):
+    campaign, inputs_path = inputs_for(tmp_path, True)
+    inputs = json.loads(inputs_path.read_text())
+    shape = json.loads((tmp_path/'shape.json').read_text())
+    shape.update(disposition='inconclusive', reason='The replicates do not resolve the comparison.',
+                 conclusion='The result is inconclusive.')
+    inputs['shape'] = write_ref(tmp_path/'shape_with_conclusion.json', shape)
+    inputs_path.write_text(json.dumps(inputs))
+    report.produce(inputs_path, campaign, campaign/'reports/shape_conclusion')
+    text = (campaign/'reports/shape_conclusion/report.md').read_text()
+    assert 'shared-query mean' in text
+    assert 'The result is inconclusive.' in text
+    assert 'The replicates do not resolve the comparison.' in text
