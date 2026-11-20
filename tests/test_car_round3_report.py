@@ -70,6 +70,10 @@ def test_incomplete_report_does_not_claim_completion(tmp_path):
     text=(campaign/'reports/incomplete/report.md').read_text()
     assert '**Status:** INCOMPLETE' in text
     assert 'Both event and regional task scores were excluded' in text
+    assert 'RawRisk uses unit risk scales and a dual step of 0.01' in text
+    assert 'max(TRAIN SOURCE member MSE, 1e-8) risk scales and a dual step of 0.0001' in text
+    assert 'identical fixed allowances and the same feasible set' in text
+    assert 'does not causally isolate denominator scaling' in text
     assert '![Sampled TRAIN' in text and '[PDF master]' in text
     assert 'Fixed TRAIN allowance' in text
     assert '| u | 1 | 1 | 1 | 0 | 0 | 0.1 |' in text

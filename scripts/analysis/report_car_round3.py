@@ -245,7 +245,8 @@ def produce(inputs_path, campaign, output):
     else:
         lines += ['The learned-output decision remains pending.', '']
     lines += ['## Evidence and scientific scope', '',
-        'The compared paths use one FFM SOURCE, uniform allocation, a 50-epoch warmup and matched reporting epochs. This previously accessed same-trajectory VALIDATION100 panel is development evidence, not independent confirmation; TEST remains locked.', '']
+        'The compared paths use one FFM SOURCE, uniform allocation, a 50-epoch warmup and matched reporting epochs. This previously accessed same-trajectory VALIDATION100 panel is development evidence, not independent confirmation; TEST remains locked.', '',
+        'RawRisk uses unit risk scales and a dual step of 0.01; SourceScaledRisk uses fieldwise max(TRAIN SOURCE member MSE, 1e-8) risk scales and a dual step of 0.0001. Both use identical fixed allowances and the same feasible set. This compares two feedback rules and does not causally isolate denominator scaling.', '']
     if assessment is not None:
         lines += [f"The latest matched assessment is epoch {assessment['epoch']} with J4 members and {len(assessment['sample_ids'])} conditions. SOURCE checkpoint `{assessment.get('source_checkpoint_sha256', 'see source-bank receipt')}`, panel SHA-256 `{assessment['panel_sha256']}` and SOURCE bank receipt SHA-256 `{assessment['source_bank_sha256']}` bind the comparison.", '',
             '| Field | SOURCE member MSE | Raw-risk member MSE | SOURCE-scaled member MSE | Raw signed-risk difference | Scaled signed-risk difference | Fixed TRAIN allowance |',
