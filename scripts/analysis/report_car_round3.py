@@ -444,7 +444,7 @@ def render_and_validate(output, captions):
             return f'<h{level} id="{anchor}">{text}</h{level}>\n'
     markdown=(output/'report.md').read_text(encoding='utf-8')
     rendered=mistune.create_markdown(renderer=Renderer(),plugins=['table'])(markdown)
-    (output/'report.html').write_text('<!doctype html><html><head><meta charset="utf-8"><title>Round 3 report</title><style>img { max-width: 100%; height: auto; }</style></head><body>'+rendered+'</body></html>',encoding='utf-8')
+    (output/'report.html').write_text('<!doctype html><html><head><meta charset="utf-8"><title>Round 3 report</title><style>img { max-width: 100%; height: auto; } table { border-collapse: collapse; } th, td { padding: 0.35rem 0.55rem; border-bottom: 1px solid #ddd; }</style></head><body>'+rendered+'</body></html>',encoding='utf-8')
     for name in captions:
         png, pdf=output/'figures'/f'{name}.png', output/'figures'/f'{name}.pdf'
         with Image.open(png) as image: image.verify()
