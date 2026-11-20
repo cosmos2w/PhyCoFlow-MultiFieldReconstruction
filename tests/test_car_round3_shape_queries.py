@@ -16,3 +16,17 @@ def test_query_plans_preserve_production_law_and_coupled_batch_anchor():
         assert sum(d.count for d in query.pair_queries) == 3
         assert all(d.weight == d.count / 3 for d in query.pair_queries)
         assert len({d.index for d in query.pair_queries}) == len(query.pair_queries)
+
+
+def test_replay_enforces_deadline_and_records_partial_panel():
+    import time
+    import pytest
+    import torch
+    from scripts.analysis.diagnose_car_round3_shape_queries import BudgetExpired, replay
+
+    fields = ('temperature', 'co', 'oxygen', 'velocity', 'pressure')
+    shared, _ = query_plan(fields, 1, 2, 64)
+    progress = {}
+    with pytest.raises(BudgetExpired):
+        replay(None, [torch.zeros(2)] * 3, None, shared, 64, time.monotonic() - 1, progress)
+    assert progress == {'conditions_scored': 0, 'panel_conditions': 2}
