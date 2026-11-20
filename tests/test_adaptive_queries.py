@@ -96,6 +96,28 @@ def test_fair_added_leaves_and_member_gradients():
     assert all(x.grad[i].abs().sum() > 0 for i in range(4))
 
 
+def test_packed_group_projections_match_independent_embeddings_at_ties():
+    from phycoflow_reconstruction.coherence.state_compute import exact_common_embeddings
+
+    torch.manual_seed(19)
+    x = torch.randint(-2, 3, (2, 3, 7, 3)).double().requires_grad_()
+    y = torch.randint(-2, 3, (3, 7, 3)).double().requires_grad_()
+    mass = torch.tensor([1., 2., 1., 3., 1., 2., 1.], dtype=torch.double)
+    directions = torch.tensor([[1., -1., 0.], [0., 1., 1.], [1., 0., -1.]], dtype=torch.double)
+    packed = group_projection_scores(x, y, mass, mass, directions)
+    columns = []
+    for d in directions:
+        vec = [item[1] for item in exact_common_embeddings([*x, y], [mass, mass, mass], d[None])]
+        columns.append((torch.linalg.vector_norm(vec[0] - vec[2], dim=-1)
+                        + torch.linalg.vector_norm(vec[1] - vec[2], dim=-1)
+                        - torch.linalg.vector_norm(vec[0] - vec[1], dim=-1)) / 2)
+    separate = torch.stack(columns, -1)
+    torch.testing.assert_close(packed, separate, rtol=0, atol=0)
+    packed_gradients = torch.autograd.grad(packed.sum(), (x, y), retain_graph=True)
+    separate_gradients = torch.autograd.grad(separate.sum(), (x, y))
+    for actual, expected in zip(packed_gradients, separate_gradients):
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
 def test_compiled_state_reference_value_and_gradient_parity():
     from phycoflow_reconstruction.coherence.state_compute import (
         exact_common_embeddings,

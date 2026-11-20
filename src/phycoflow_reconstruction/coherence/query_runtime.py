@@ -118,6 +118,8 @@ def score(
             draw_coef, draw_means, desc = (
                 torch.stack([item[i] for item in stats]) for i in range(3)
             )
+            if context is not None and context.get("_reuse_scale_for_expanded", False):
+                context["_expanded_scale_coefficients"] = (draw_coef, target)
             blocks = sampled_scale(
                 draw_coef,
                 target,

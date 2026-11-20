@@ -152,6 +152,13 @@ def test_real_spectral_filter_follows_fitted_family():
         g["filters"],
     )
     torch.testing.assert_close(actual, expected)
+    from phycoflow_reconstruction.coherence.query_runtime import _scale_statistics
+    shared, _, _ = _scale_statistics(family, x)
+    reused = spectral_filter(family, x, coefficients=shared)
+    torch.testing.assert_close(reused, actual, rtol=0, atol=0)
+    torch.testing.assert_close(torch.autograd.grad(reused.square().sum(), x, retain_graph=True)[0],
+                               torch.autograd.grad(actual.square().sum(), x, retain_graph=True)[0],
+                               rtol=0, atol=0)
     actual.square().sum().backward()
     assert x.grad is not None and x.grad.abs().sum() > 0
 

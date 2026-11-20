@@ -225,9 +225,16 @@ class ScalableRuntime:
             leaves = group_projection_scores(members, reference, left, right, bank[spec])
         else:
             scale_family = self.families["multiscale_spectrum"]
+            shared = context.get("_expanded_scale_coefficients")
+            member_coef = None if shared is None else shared[0][:len(members)]
+            # A live reference still needs its own graph; the core treats it as fixed.
+            reference_coef = None if shared is None or reference.requires_grad else shared[1]
+            def filtered(endpoint, coef):
+                return (spectral_filter(scale_family, endpoint) if coef is None
+                        else spectral_filter(scale_family, endpoint, coefficients=coef))
             leaves = third_order_scores(
-                spectral_filter(scale_family, members),
-                spectral_filter(scale_family, reference),
+                filtered(members, member_coef),
+                filtered(reference, reference_coef),
                 bank[spec],
                 bank["region_masses"],
                 bank["triple_scales"],
@@ -240,6 +247,8 @@ class ScalableRuntime:
     def _score(self, name, family, prediction, reference, coordinates, context, batch):
         coefficients = self.coefficients
         context = {**context, "scoring_mode": self.scoring_mode, "field_order": self.fields}
+        if name == "multiscale_spectrum" and self.bank is not None and self.bank["triples"]:
+            context["_reuse_scale_for_expanded"] = True
         if name == "global_distribution":
             result, blocks = self._state(family, prediction, reference, context, coefficients)
             difficulties = None

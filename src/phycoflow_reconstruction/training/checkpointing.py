@@ -40,6 +40,7 @@ class PeriodicCheckpointManager:
         self.steps_per_epoch = max(1, int(steps_per_epoch))
         self.store = store
         self.selection_metric = str(settings.get("selection_metric", "native_validation_loss"))
+        self.external_assessment = bool(config.get("evaluation", {}).get("external_assessment", False))
         self.best_name, self.best_value = self._existing_best_metric()
         self.last_validation_report: dict[str, Any] | None = None
         self.last_best_checked = False
@@ -151,7 +152,10 @@ class PeriodicCheckpointManager:
         )
         if self.panel_milestones_only:
             panel_due = force or milestone_due
-        if self.selection_metric == "topology_with_fidelity" and not panel_due:
+        if self.external_assessment:
+            metric_name, metric_value = "unavailable_external_assessment", None
+            eligible_for_best = False
+        elif self.selection_metric == "topology_with_fidelity" and not panel_due:
             eligible_for_best = False
         elif self.selection_metric == "topology_with_fidelity":
             if self.panel_evaluator is None:
@@ -199,8 +203,8 @@ class PeriodicCheckpointManager:
             "name": metric_name,
             "value": metric_value,
         }
-        checkpoint["best_metric_value"] = self.best_value
-        checkpoint["best_metric_name"] = self.best_name
+        checkpoint["best_metric_value"] = None if self.external_assessment else self.best_value
+        checkpoint["best_metric_name"] = None if self.external_assessment else self.best_name
         if panel_report is not None:
             checkpoint["topology_selection"] = {
                 key: value for key, value in panel_report.items() if key != "metrics"
@@ -247,7 +251,8 @@ class PeriodicCheckpointManager:
             checkpoint_hashes = {**existing_hashes, **checkpoint_hashes}
         manifest_details: dict[str, Any] = {
             "checkpoint_hashes": checkpoint_hashes,
-            "best_metric": {"name": self.best_name, "value": self.best_value},
+            "best_metric": ({"name": None, "value": None} if self.external_assessment
+                            else {"name": self.best_name, "value": self.best_value}),
         }
         if panel_report is not None:
             manifest_details["best_panel_mse"] = self.best_fidelity_value
@@ -285,8 +290,8 @@ class PeriodicCheckpointManager:
                     else None
                 ),
                 "selection_metric": {"name": metric_name, "value": metric_value},
-                "best_metric_name": self.best_name,
-                "best_metric_value": self.best_value,
+                "best_metric_name": None if self.external_assessment else self.best_name,
+                "best_metric_value": None if self.external_assessment else self.best_value,
                 "best_updated": improved,
                 "best_fidelity_updated": best_fidelity_path is not None,
             },
@@ -300,6 +305,7 @@ class PeriodicCheckpointManager:
                 if existing_last.is_file()
                 else None
             ),
-            best_metric={"name": self.best_name, "value": self.best_value},
+            best_metric=({"name": None, "value": None} if self.external_assessment
+                         else {"name": self.best_name, "value": self.best_value}),
         )
         return last_path if last_path is not None else milestone_path, best_path

@@ -94,6 +94,22 @@ def test_scheduled_model_lr_uses_global_completed_updates_and_plateaus():
     assert _scheduled_model_lr(optimization, 38) == pytest.approx(2.78e-5)
 
 
+def test_epoch_warmup_uses_elapsed_reporting_epochs_and_rejects_conflicts():
+    config = _candidate()
+    config["optimization"]["lr_warmup"] = {"enabled": True, "start_lr": 5e-6, "epochs": 50}
+    validate_config(config)
+    opt = config["optimization"]
+    assert _scheduled_model_lr(opt, 0, 12) == pytest.approx(5e-6)
+    assert _scheduled_model_lr(opt, 300, 12) == pytest.approx(2.75e-5)
+    assert _scheduled_model_lr(opt, 599, 12) < 5e-5
+    assert _scheduled_model_lr(opt, 600, 12) == pytest.approx(5e-5)
+    opt["lr_warmup"]["updates"] = 600
+    with pytest.raises(ValueError, match="both epochs and updates"):
+        validate_config(config)
+    with pytest.raises(ValueError, match="both epochs and updates"):
+        _scheduled_model_lr(opt, 0, 12)
+
+
 def test_missing_or_disabled_lr_warmup_is_a_no_op():
     assert _scheduled_model_lr({"lr": 5.0e-5}, 0) is None
     assert _scheduled_model_lr(

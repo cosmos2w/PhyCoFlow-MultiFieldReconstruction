@@ -330,7 +330,7 @@ def fit_train_bank(
     return bank
 
 
-def spectral_filter(family, endpoints):
+def spectral_filter(family, endpoints, *, coefficients=None):
     """Apply the fitted C8 spectral filters on its declared analysis support."""
     from .families.multiscale_spectrum.statistics import (
         band_fields,
@@ -351,7 +351,12 @@ def spectral_filter(family, endpoints):
         raise ValueError("adaptive filters require the complete declared support and fields")
     g = family._geometry_tensors(family.compute_dtype)
     g = {k: v.to(selected.device) for k, v in g.items()}
-    fluct = piecewise_fluctuations(selected, g["piece_measures"], g["pieces"])
-    coeff = spectral_coefficients(fluct, g["basis"] * g["mass"][:, None])
+    if coefficients is None:
+        fluct = piecewise_fluctuations(selected, g["piece_measures"], g["pieces"])
+        coeff = spectral_coefficients(fluct, g["basis"] * g["mass"][:, None])
+    else:
+        coeff = coefficients.reshape(-1, *coefficients.shape[-2:])
+        if coeff.shape != (len(flat), g["basis"].shape[1], flat.shape[-1]):
+            raise ValueError("incompatible shared spectral coefficients")
     result = band_fields(coeff, g["basis"], g["filters"])
     return result.reshape(*leading, *result.shape[1:])

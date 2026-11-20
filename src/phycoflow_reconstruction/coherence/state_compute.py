@@ -400,28 +400,36 @@ def group_projection_scores(members, reference, member_weights, reference_weight
         return members.new_empty((members.shape[1], 0))
     if (d.norm(dim=1) == 0).any():
         raise ValueError("projection direction must be nonzero")
-    # A separate embedding retains each complete W2 metric before weighting.
-    scores = []
-    for direction in d:
-        embeds = exact_common_embeddings(
-            [*members, reference],
-            [member_weights] * len(members) + [reference_weights],
-            direction[None, :],
-        )
-        vectors = [e[1] for e in embeds]
-
-        def distance(a, b):
-            return torch.linalg.vector_norm(a - b, dim=-1)
-
-        attraction = torch.stack([distance(v, vectors[-1]) for v in vectors[:-1]]).mean(0)
-        if len(members) > 1:
-            attraction = attraction - sum(
-                (
-                    distance(vectors[i], vectors[k])
-                    for i in range(len(members))
-                    for k in range(i + 1, len(members))
-                ),
-                torch.zeros_like(attraction),
-            ) / (len(members) * (len(members) - 1))
-        scores.append(attraction)
-    return torch.stack(scores, dim=-1)
+    # Preserve the original per-direction matrix multiplication (including its
+    # tie behaviour), but sort all independent projected columns together.
+    values, cdfs = [], []
+    for x, raw_mass in zip([*members, reference], [member_weights] * len(members) + [reference_weights]):
+        mass = torch.as_tensor(raw_mass, device=x.device, dtype=x.dtype).detach()
+        if mass.ndim == 1:
+            mass = mass.expand(x.shape[0], -1)
+        if mass.shape != x.shape[:2] or not torch.isfinite(mass).all() or (mass < 0).any() or (mass.sum(-1) <= 0).any() or not torch.isfinite(x).all():
+            raise ValueError("invalid endpoint or masses")
+        mass = mass / mass.sum(-1, keepdim=True)
+        projected = torch.cat([x @ direction[None, :].T for direction in d], dim=-1)
+        value, index = projected.sort(dim=1)
+        sorted_mass = mass.unsqueeze(-1).expand_as(projected).gather(1, index)
+        if sorted_mass.is_cuda and torch.are_deterministic_algorithms_enabled():
+            cdf = sorted_mass.cpu().cumsum(1).to(sorted_mass.device)
+        else:
+            cdf = sorted_mass.cumsum(1)
+        values.append(value.transpose(1, 2).contiguous())
+        cdfs.append(cdf.clamp(max=1).transpose(1, 2).contiguous())
+    breaks = torch.cat([torch.zeros_like(cdfs[0][..., :1]), *cdfs], -1).sort(dim=-1).values
+    lengths = (breaks[..., 1:] - breaks[..., :-1]).clamp_min(0)
+    mid = ((breaks[..., 1:] + breaks[..., :-1]) / 2).contiguous()
+    vectors = [value.gather(-1, torch.searchsorted(cdf, mid).clamp_max(value.shape[-1] - 1)) * lengths.sqrt()
+               for value, cdf in zip(values, cdfs)]
+    def distance(a, b):
+        return torch.linalg.vector_norm(a - b, dim=-1)
+    attraction = torch.stack([distance(v, vectors[-1]) for v in vectors[:-1]]).mean(0)
+    if len(members) > 1:
+        attraction = attraction - sum(
+            (distance(vectors[i], vectors[k]) for i in range(len(members)) for k in range(i + 1, len(members))),
+            torch.zeros_like(attraction),
+        ) / (len(members) * (len(members) - 1))
+    return attraction

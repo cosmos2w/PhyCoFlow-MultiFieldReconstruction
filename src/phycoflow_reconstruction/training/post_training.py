@@ -119,13 +119,27 @@ from .topology_selection import fidelity_eligibility, topology_selection_report
 from .update_budget import post_training_steps_per_epoch, sample_exposure
 
 
-def _scheduled_model_lr(optimization: Mapping[str, Any], completed_updates: int) -> float | None:
+def _warmup_updates(optimization: Mapping[str, Any], steps_per_epoch: int | None = None) -> float:
+    warmup = optimization["lr_warmup"]
+    if "epochs" in warmup and "updates" in warmup:
+        raise ValueError("optimization.lr_warmup cannot define both epochs and updates")
+    if "epochs" in warmup:
+        if steps_per_epoch is None or steps_per_epoch < 1:
+            raise ValueError("epoch warmup requires resolved steps_per_epoch")
+        return float(warmup["epochs"]) * steps_per_epoch
+    return int(warmup["updates"])
+
+
+def _scheduled_model_lr(optimization: Mapping[str, Any], completed_updates: int, steps_per_epoch: int | None = None) -> float | None:
     """Return the opt-in model LR for the next update, using restored global count."""
     warmup = optimization.get("lr_warmup", {})
     if not warmup.get("enabled", False):
         return None
     base_lr = float(optimization.get("lr", 5e-5))
-    last_warmup_index = int(warmup["updates"]) - 1
+    duration = _warmup_updates(optimization, steps_per_epoch)
+    # Historical update schedules reached their endpoint on the final indexed
+    # update. Epoch schedules use elapsed fractional reporting epochs.
+    last_warmup_index = duration if "epochs" in warmup else duration - 1
     if completed_updates >= last_warmup_index:
         return base_lr
     start_lr = float(warmup["start_lr"])
@@ -2559,56 +2573,60 @@ def run_post_training(
         coherence_family_balance_mode=calibration["mode"],
     )
 
+    external_assessment = bool(config.get("evaluation", {}).get("external_assessment", False))
     evaluation_split = config.get("evaluation", {}).get("split", "validation")
-    evaluation_dataset = open_field_dataset(
-        config["dataset"], split=evaluation_split, normalizer=train_dataset.normalizer
-    )
-    protocol = sensor_protocol_from_config(config)
-    evaluation_batch = _build_evaluation_batch(evaluation_dataset, config, protocol, device)
-    comparison_batch = _build_comparison_batch(evaluation_batch, config)
-    if any(
-        getattr(family, "strategy", None) == "cubical_persistence" for family in families.values()
-    ):
-        contract_batch = (
-            evaluation_batch if model.capabilities.structured_grid_required else comparison_batch
+    evaluation_dataset = evaluation_manifest = before_metrics = source_metrics = None
+    if not external_assessment:
+        evaluation_split = config.get("evaluation", {}).get("split", "validation")
+        evaluation_dataset = open_field_dataset(
+            config["dataset"], split=evaluation_split, normalizer=train_dataset.normalizer
         )
-        report = verify_rollout_contract(
-            model, _without_target(_slice_batch(contract_batch, 1)), config
+        protocol = sensor_protocol_from_config(config)
+        evaluation_batch = _build_evaluation_batch(evaluation_dataset, config, protocol, device)
+        comparison_batch = _build_comparison_batch(evaluation_batch, config)
+        if any(
+            getattr(family, "strategy", None) == "cubical_persistence" for family in families.values()
+        ):
+            contract_batch = (
+                evaluation_batch if model.capabilities.structured_grid_required else comparison_batch
+            )
+            report = verify_rollout_contract(
+                model, _without_target(_slice_batch(contract_batch, 1)), config
+            )
+            store.write_json("evaluation/rollout_contract.json", report)
+        # Bind sensors and the exact fixed comparison queries into one replayable
+        # evaluation contract. The complete batch remains available only for
+        # structured-model reconstruction before gathering these comparison IDs.
+        evaluation_manifest = manifest_from_batch(
+            comparison_batch, evaluation_dataset.path, evaluation_split
         )
-        store.write_json("evaluation/rollout_contract.json", report)
-    # Bind sensors and the exact fixed comparison queries into one replayable
-    # evaluation contract. The complete batch remains available only for
-    # structured-model reconstruction before gathering these comparison IDs.
-    evaluation_manifest = manifest_from_batch(
-        comparison_batch, evaluation_dataset.path, evaluation_split
-    )
-    evaluation_manifest.save(store.run_dir / "artifacts" / "evaluation_sensor_manifest.json")
-    query_path = store.save_artifact(
-        "evaluation_query_indices.pt",
-        {"query_indices": comparison_batch.metadata.get("query_indices")},
-    )
-    store.update_manifest(evaluation_query_indices_sha256=file_sha256(query_path))
-    before_metrics = None
-    if resume is None:
-        before_metrics = _evaluate(
-            model,
-            evaluation_batch,
-            comparison_batch,
-            families,
-            banks,
-            train_dataset.field_names,
-            config,
-            normalizer=train_dataset.normalizer,
-            family_scales=family_scales,
-            scalable_runtime=scalable_runtime,
+        evaluation_manifest.save(store.run_dir / "artifacts" / "evaluation_sensor_manifest.json")
+        query_path = store.save_artifact(
+            "evaluation_query_indices.pt",
+            {"query_indices": comparison_batch.metadata.get("query_indices")},
         )
-        before_metrics["sensor_manifest_sha256"] = evaluation_manifest.digest()
-        store.write_json("evaluation/before.json", before_metrics)
-    source_metrics = (
-        before_metrics
-        if before_metrics is not None
-        else json.loads((store.run_dir / "evaluation" / "before.json").read_text(encoding="utf-8"))
-    )
+        store.update_manifest(evaluation_query_indices_sha256=file_sha256(query_path))
+        before_metrics = None
+        if resume is None:
+            before_metrics = _evaluate(
+                model,
+                evaluation_batch,
+                comparison_batch,
+                families,
+                banks,
+                train_dataset.field_names,
+                config,
+                normalizer=train_dataset.normalizer,
+                family_scales=family_scales,
+                scalable_runtime=scalable_runtime,
+            )
+            before_metrics["sensor_manifest_sha256"] = evaluation_manifest.digest()
+            store.write_json("evaluation/before.json", before_metrics)
+        source_metrics = (
+            before_metrics
+            if before_metrics is not None
+            else json.loads((store.run_dir / "evaluation" / "before.json").read_text(encoding="utf-8"))
+        )
     # Evaluation initializes geometry-dependent fixed artifacts. Persist those
     # exact tensors rather than the empty lazy-construction placeholders.
     family_paths = {
@@ -2741,7 +2759,7 @@ def run_post_training(
         steps_per_epoch=steps_per_epoch,
     )
     panel_metrics_cache = {}
-    if policy is not None and checkpoint_manager.selection_metric == "reconstruction_mse":
+    if not external_assessment and policy is not None and checkpoint_manager.selection_metric == "reconstruction_mse":
 
         def evaluate_endpoint_panel(step):
             metrics = _evaluate(
@@ -2767,7 +2785,7 @@ def run_post_training(
             return {"metrics": metrics}
 
         checkpoint_manager.panel_evaluator = evaluate_endpoint_panel
-    if checkpoint_manager.selection_metric == "topology_with_fidelity":
+    if not external_assessment and checkpoint_manager.selection_metric == "topology_with_fidelity":
 
         def evaluate_panel(step):
             metrics = (
@@ -2835,7 +2853,7 @@ def run_post_training(
         )
         store.update_manifest(epoch_zero_checkpoint_sha256=file_sha256(initial_path))
         _record_checkpoint_clock(store.run_dir, 0, 0, initial_path)
-        if evaluation_split == "train":
+        if not external_assessment and evaluation_split == "train":
             store.write_json(
                 "evaluation/train_core_epoch_000.json",
                 {"global_step": 0, "epoch": 0, "metrics": source_metrics},
@@ -2853,7 +2871,8 @@ def run_post_training(
                              reporting_epoch=start_step / steps_per_epoch,
                              source_immutable_verified=True)
             train_dataset.close()
-            evaluation_dataset.close()
+            if evaluation_dataset is not None:
+                evaluation_dataset.close()
             return store.run_dir
         checkpoint_manager.save(
             _post_checkpoint_payload(
@@ -2879,7 +2898,7 @@ def run_post_training(
             scalable_runtime.begin_step(global_step)
         post_training_mode(model, config)
         step_started = perf_counter()
-        scheduled_lr = _scheduled_model_lr(config["optimization"], global_step)
+        scheduled_lr = _scheduled_model_lr(config["optimization"], global_step, steps_per_epoch)
         if scheduled_lr is not None:
             for group in optimizer.param_groups:
                 group["lr"] = scheduled_lr
@@ -3354,8 +3373,8 @@ def run_post_training(
                 every if config["coherence"]["schedule"].get("interval_rescale", False) else 1
             )
         row["optimizer_lr"] = float(optimizer.param_groups[0]["lr"])
-        if scheduled_lr is not None and global_step < int(
-            config["optimization"]["lr_warmup"]["updates"]
+        if scheduled_lr is not None and global_step < _warmup_updates(
+            config["optimization"], steps_per_epoch
         ):
             # Endpoint risks and coherence are measured on the shared prediction
             # before this model step; the LR is the value actually used by AdamW.
@@ -3436,7 +3455,8 @@ def run_post_training(
                 source_immutable_verified=True,
             )
             train_dataset.close()
-            evaluation_dataset.close()
+            if evaluation_dataset is not None:
+                evaluation_dataset.close()
             return store.run_dir
         checkpoint_result = None
         if checkpoint_manager.due_for_preview_or_checkpoint(global_step + 1, preview):
@@ -3500,51 +3520,54 @@ def run_post_training(
     if device.type == "cuda":
         torch.cuda.synchronize(device)
     post_training_seconds = perf_counter() - training_started
-    after_metrics = panel_metrics_cache.get(final_step)
-    if after_metrics is None:
-        after_metrics = _evaluate(
-            model,
-            evaluation_batch,
-            comparison_batch,
-            families,
-            banks,
-            train_dataset.field_names,
-            config,
-            normalizer=train_dataset.normalizer,
-            family_scales=family_scales,
-            scalable_runtime=scalable_runtime,
-        )
-    after_metrics["sensor_manifest_sha256"] = evaluation_manifest.digest()
-    if policy is not None:
-        after_metrics["validation_source_endpoint_mse_model_units"] = source_metrics[
-            "endpoint_mse_model_units"
-        ]
-        after_metrics["validation_endpoint_source_ratios"] = {
-            name: (
-                value / source_metrics["endpoint_mse_model_units"][name]
-                if source_metrics["endpoint_mse_model_units"][name] > 0
-                else None
+    after_metrics = fidelity_guard = None
+    guard_failed = False
+    if not external_assessment:
+        after_metrics = panel_metrics_cache.get(final_step)
+        if after_metrics is None:
+            after_metrics = _evaluate(
+                model,
+                evaluation_batch,
+                comparison_batch,
+                families,
+                banks,
+                train_dataset.field_names,
+                config,
+                normalizer=train_dataset.normalizer,
+                family_scales=family_scales,
+                scalable_runtime=scalable_runtime,
             )
-            for name, value in after_metrics["endpoint_mse_model_units"].items()
-        }
-    if scalable_runtime is not None:
-        source_physical = source_metrics["physical_member_mse_model_units"]
-        after_metrics["validation_source_physical_member_mse_model_units"] = source_physical
-        after_metrics["validation_physical_member_source_ratios"] = {
-            name: value / source_physical[name] if source_physical[name] > 0 else None
-            for name, value in after_metrics["physical_member_mse_model_units"].items()
-        }
-    _add_source_relative_coherence(source_metrics, after_metrics)
-    store.write_json("evaluation/after.json", after_metrics)
-    fidelity_guard = _fidelity_guard_report(source_metrics, after_metrics, config)
-    store.write_json("evaluation/fidelity_guard.json", fidelity_guard)
-    if fidelity_guard["exceeded"] and fidelity_guard["behavior"] == "warn":
-        warnings.warn(
-            "post-training reconstruction MSE exceeded the configured fidelity guard",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-    guard_failed = fidelity_guard["exceeded"] and fidelity_guard["behavior"] == "error"
+        after_metrics["sensor_manifest_sha256"] = evaluation_manifest.digest()
+        if policy is not None:
+            after_metrics["validation_source_endpoint_mse_model_units"] = source_metrics[
+                "endpoint_mse_model_units"
+            ]
+            after_metrics["validation_endpoint_source_ratios"] = {
+                name: (
+                    value / source_metrics["endpoint_mse_model_units"][name]
+                    if source_metrics["endpoint_mse_model_units"][name] > 0
+                    else None
+                )
+                for name, value in after_metrics["endpoint_mse_model_units"].items()
+            }
+        if scalable_runtime is not None:
+            source_physical = source_metrics["physical_member_mse_model_units"]
+            after_metrics["validation_source_physical_member_mse_model_units"] = source_physical
+            after_metrics["validation_physical_member_source_ratios"] = {
+                name: value / source_physical[name] if source_physical[name] > 0 else None
+                for name, value in after_metrics["physical_member_mse_model_units"].items()
+            }
+        _add_source_relative_coherence(source_metrics, after_metrics)
+        store.write_json("evaluation/after.json", after_metrics)
+        fidelity_guard = _fidelity_guard_report(source_metrics, after_metrics, config)
+        store.write_json("evaluation/fidelity_guard.json", fidelity_guard)
+        if fidelity_guard["exceeded"] and fidelity_guard["behavior"] == "warn":
+            warnings.warn(
+                "post-training reconstruction MSE exceeded the configured fidelity guard",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        guard_failed = fidelity_guard["exceeded"] and fidelity_guard["behavior"] == "error"
     family_paths = {
         name: store.save_artifact(f"{name}_family.pt", _bound_family_artifact(family, train_dataset, config))
         for name, family in families.items()
@@ -3566,11 +3589,11 @@ def run_post_training(
         scalarizer=scalarizer,
         policy=policy,
     )
-    if checkpoint_manager.selection_metric == "topology_with_fidelity":
+    if not external_assessment and checkpoint_manager.selection_metric == "topology_with_fidelity":
         checkpoint_manager.panel_evaluator = lambda step: topology_selection_report(
             source_metrics, after_metrics, config["posttrain_fidelity"]
         )
-    elif policy is not None and checkpoint_manager.selection_metric == "reconstruction_mse":
+    elif not external_assessment and policy is not None and checkpoint_manager.selection_metric == "reconstruction_mse":
         checkpoint_manager.panel_evaluator = lambda step: {"metrics": after_metrics}
     saved = checkpoint_manager.save(
         checkpoint_payload,
@@ -3578,7 +3601,7 @@ def run_post_training(
         preview=preview,
         global_step=final_step,
         fallback_metric=(
-            float(after_metrics["mse_normalized"]) if reporting_only else float(row["data_loss"])
+            0.0 if external_assessment and reporting_only else (float(after_metrics["mse_normalized"]) if reporting_only else float(row["data_loss"]))
         ),
         force=True,
     )
@@ -3593,7 +3616,7 @@ def run_post_training(
     monitor.record_validation(checkpoint_manager.last_validation_report)
     best_checkpoint_saved = saved_best_path is not None
     best_path = store.run_dir / "checkpoints" / "best.pt"
-    if not best_path.is_file():
+    if not external_assessment and not best_path.is_file():
         best_path = store.save_checkpoint("best", checkpoint_payload)
         best_checkpoint_saved = True
     monitor.close(
@@ -3614,7 +3637,7 @@ def run_post_training(
             "checkpoint_hashes", {}
         ),
         "last": file_sha256(last_path),
-        "best": file_sha256(best_path),
+        **({"best": file_sha256(best_path)} if best_path.is_file() else {}),
     }
     best_fidelity_path = store.run_dir / "checkpoints" / "best_fidelity.pt"
     if best_fidelity_path.is_file():
@@ -3623,9 +3646,9 @@ def run_post_training(
         checkpoint_hashes=final_checkpoint_hashes,
         source_hashes_after=source_hashes_after,
         source_immutable_verified=True,
-        evaluation_sensor_manifest_sha256=evaluation_manifest.digest(),
+        evaluation_sensor_manifest_sha256=None if evaluation_manifest is None else evaluation_manifest.digest(),
         before_metric=None if before_metrics is None else before_metrics.get("mse_normalized"),
-        after_metric=after_metrics.get("mse_normalized"),
+        after_metric=None if after_metrics is None else after_metrics.get("mse_normalized"),
         fidelity_guard=fidelity_guard,
         coherence_family_state_sha256s={
             name: file_sha256(path) for name, path in family_paths.items()
@@ -3655,7 +3678,8 @@ def run_post_training(
         ),
     )
     train_dataset.close()
-    evaluation_dataset.close()
+    if evaluation_dataset is not None:
+        evaluation_dataset.close()
     if guard_failed:
         raise RuntimeError(
             "post-training reconstruction MSE exceeded the fidelity guard; recovery checkpoint saved"

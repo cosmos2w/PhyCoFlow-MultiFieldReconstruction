@@ -210,10 +210,21 @@ def _validate_common_sections(config: Mapping[str, Any]) -> None:
             "native_topology",
             "group_size",
             "batch_size",
+            "external_assessment",
             "reconstruction_panel",
         },
         "evaluation",
     )
+    external_assessment = config.get("evaluation", {}).get("external_assessment", False)
+    if not isinstance(external_assessment, bool):
+        raise TypeError("evaluation.external_assessment must be boolean")
+    if external_assessment:
+        if config["stage"] != "post_training":
+            raise ValueError("external assessment is only supported for post-training")
+        if config.get("evaluation", {}).get("preview", {}).get("enabled", True):
+            raise ValueError("external assessment requires evaluation.preview.enabled: false")
+        if config.get("checkpointing", {}).get("selection_metric") == "topology_with_fidelity":
+            raise ValueError("external assessment cannot use internal topology selection")
     group_size = config.get("evaluation", {}).get("group_size")
     evaluation_batch_size = evaluation.get("batch_size")
     if evaluation_batch_size is not None and (
@@ -418,15 +429,20 @@ def _validate_lr_warmup(settings: Mapping[str, Any]) -> None:
     warmup = settings["lr_warmup"]
     if not isinstance(warmup, Mapping):
         raise TypeError("optimization.lr_warmup must be a mapping")
-    _reject_unknown(warmup, {"enabled", "start_lr", "updates"}, "optimization.lr_warmup")
+    _reject_unknown(warmup, {"enabled", "start_lr", "updates", "epochs"}, "optimization.lr_warmup")
     if "enabled" not in warmup or not isinstance(warmup["enabled"], bool):
         raise TypeError("optimization.lr_warmup.enabled must be boolean")
 
     enabled = warmup["enabled"]
     if enabled and "start_lr" not in warmup:
         raise ValueError("optimization.lr_warmup.start_lr is required when enabled")
-    if enabled and "updates" not in warmup:
+    if "updates" in warmup and "epochs" in warmup:
+        raise ValueError("optimization.lr_warmup cannot define both epochs and updates")
+    if enabled and "updates" not in warmup and "epochs" not in warmup:
         raise ValueError("optimization.lr_warmup.updates is required when enabled")
+
+    if "epochs" in warmup:
+        _method_parameter(warmup["epochs"], "optimization.lr_warmup.epochs")
 
     start_lr = None
     if "start_lr" in warmup:
@@ -1706,6 +1722,7 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
             "native_topology",
             "group_size",
             "batch_size",
+            "external_assessment",
         },
         "evaluation",
     )
