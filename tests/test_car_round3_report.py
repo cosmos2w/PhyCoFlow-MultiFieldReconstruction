@@ -152,6 +152,8 @@ def test_optional_campaign_gpu_accounting_and_device_labels(tmp_path):
     inputs = json.loads(inputs_path.read_text())
     costs = json.loads((tmp_path/'cost.json').read_text())
     costs['training'][report.ARMS[0]]['runtime_device'] = 'RTX device 0'
+    costs['training'][report.ARMS[0]].update(update_work_seconds=8000.,
+        data_wait_and_loop_overhead_seconds=2000., callback_and_reporting_seconds=1000.)
     costs['training'][report.ARMS[1]]['runtime_device'] = 'RTX device 1'
     costs['campaign_gpu_accounting'] = {
         'setup_upper_bound_gpu_seconds': 500.,
@@ -165,6 +167,9 @@ def test_optional_campaign_gpu_accounting_and_device_labels(tmp_path):
     text = (campaign/'reports/accounting/report.md').read_text()
     assert 'Raw-risk control on RTX device 0' in text
     assert 'SOURCE-scaled feedback on RTX device 1' in text
+    assert 'update work: 8000 s; data waits plus loop overhead: 2000 s; callbacks and reporting: 1000 s' in text
+    assert 'Pure data-wait time was not separately measured.' in text
+    assert 'SOURCE-scaled feedback recorded timing:' not in text
     assert 'against the 45 GPU-hour ceiling' in text
     assert 'conservative setup and qualification upper bound: 500 GPU s' in text
     assert 'measured training occupancy: 22000 GPU s' in text

@@ -15,6 +15,12 @@ reported as pending and prevents a complete status.
 
 Optional costs.training[arm].runtime_device is the recorded device label for
 that arm's training; it is descriptive, not evidence of a same-device comparison.
+Optional per-arm update_work_seconds is the sum of recorded update timers,
+data_wait_and_loop_overhead_seconds is the remaining training-loop time including
+data waits and loop overhead (not a separate measurement of pure data wait),
+and callback_and_reporting_seconds is the residual between epoch wall time and
+training-loop time, including callbacks and reporting. These are supplied totals
+in seconds; do not infer missing values.
 Optional costs.campaign_gpu_accounting fields are additive GPU occupancy in
 seconds: setup_upper_bound_gpu_seconds is a conservative bound for setup and
 qualification, measured_training_gpu_seconds and measured_assessment_gpu_seconds
@@ -378,6 +384,16 @@ def produce(inputs_path, campaign, output):
                 raise ValueError('training runtime_device must be a nonempty single-line label')
             label = f' on {device}' if device is not None else ''
             lines += [f"{SHORT[arm]}{label}: {fmt(item.get('seconds_per_epoch'), ' s/epoch')} and {fmt(item.get('occupied_gpu_seconds'), ' occupied GPU s')}.", '']
+            components = (
+                ('update_work_seconds', 'update work'),
+                ('data_wait_and_loop_overhead_seconds', 'data waits plus loop overhead'),
+                ('callback_and_reporting_seconds', 'callbacks and reporting'),
+            )
+            supplied = [f'{name}: {fmt(item[key], " s")}' for key, name in components if item.get(key) is not None]
+            if supplied:
+                lines += [f"{SHORT[arm]} recorded timing: " + '; '.join(supplied) + '.', '']
+                if item.get('data_wait_and_loop_overhead_seconds') is not None:
+                    lines += ['Pure data-wait time was not separately measured.', '']
         item = costs.get('assessment', {})
         lines += [f"Assessment: {fmt(item.get('gpu_seconds'), ' GPU s')}, {fmt(item.get('cpu_seconds'), ' CPU s')}, {fmt(item.get('wall_seconds'), ' wall s')}; failed attempts {fmt(costs.get('failed_attempt_gpu_seconds'), ' GPU s')}. Unknown values remain unavailable; overlapping wall and CPU/GPU times must not be added as independent costs.", '']
         accounting = costs.get('campaign_gpu_accounting')
