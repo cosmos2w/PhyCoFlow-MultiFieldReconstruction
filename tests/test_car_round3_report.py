@@ -125,3 +125,30 @@ def test_shape_conclusion_is_shown_with_dispersion(tmp_path):
     assert 'shared-query mean' in text
     assert 'The result is inconclusive.' in text
     assert 'The replicates do not resolve the comparison.' in text
+
+
+def test_optional_campaign_gpu_accounting_and_device_labels(tmp_path):
+    campaign, inputs_path = inputs_for(tmp_path, True)
+    inputs = json.loads(inputs_path.read_text())
+    costs = json.loads((tmp_path/'cost.json').read_text())
+    costs['training'][report.ARMS[0]]['runtime_device'] = 'RTX device 0'
+    costs['training'][report.ARMS[1]]['runtime_device'] = 'RTX device 1'
+    costs['campaign_gpu_accounting'] = {
+        'setup_upper_bound_gpu_seconds': 500.,
+        'measured_training_gpu_seconds': 22000.,
+        'measured_assessment_gpu_seconds': 200.,
+        'accounted_upper_bound_gpu_seconds': 22700.,
+    }
+    inputs['costs'] = write_ref(tmp_path/'cost_with_accounting.json', costs)
+    inputs_path.write_text(json.dumps(inputs))
+    report.produce(inputs_path, campaign, campaign/'reports/accounting')
+    text = (campaign/'reports/accounting/report.md').read_text()
+    assert 'Raw-risk control on RTX device 0' in text
+    assert 'SOURCE-scaled feedback on RTX device 1' in text
+    assert 'against the 45 GPU-hour ceiling' in text
+    assert 'conservative setup and qualification upper bound: 500 GPU s' in text
+    assert 'measured training occupancy: 22000 GPU s' in text
+    assert 'measured assessment occupancy: 200 GPU s' in text
+    assert 'supplied total campaign upper bound: 22700 GPU s' in text
+    assert 'other disjoint measured occupancy:' not in text
+    assert 'parallel speedup' not in text

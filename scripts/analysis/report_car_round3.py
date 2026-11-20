@@ -12,6 +12,17 @@ are null, not zero. Decision has recommendation, reason, and arm_dispositions
 keyed by both names. Exact-compute has disposition and reason, plus optional
 baseline_epoch_seconds and reused_epoch_seconds. A missing evidence binding is
 reported as pending and prevents a complete status.
+
+Optional costs.training[arm].runtime_device is the recorded device label for
+that arm's training; it is descriptive, not evidence of a same-device comparison.
+Optional costs.campaign_gpu_accounting fields are additive GPU occupancy in
+seconds: setup_upper_bound_gpu_seconds is a conservative bound for setup and
+qualification, measured_training_gpu_seconds and measured_assessment_gpu_seconds
+are measured occupation outside that setup bound, other_measured_gpu_seconds is
+any remaining disjoint measured occupation, and accounted_upper_bound_gpu_seconds
+is the supplied overall conservative bound across the campaign, including failed
+attempts. Components must be disjoint; omit fields when unknown. The report
+does not infer a total or remaining budget from incomplete components.
 """
 from __future__ import annotations
 
@@ -300,9 +311,31 @@ def produce(inputs_path, campaign, output):
     if costs:
         for arm in ARMS:
             item = costs.get('training', {}).get(arm, {})
-            lines += [f"{SHORT[arm]}: {fmt(item.get('seconds_per_epoch'), ' s/epoch')} and {fmt(item.get('occupied_gpu_seconds'), ' occupied GPU s')}.", '']
+            device = item.get('runtime_device')
+            if device is not None and (not isinstance(device, str) or not device.strip() or '\n' in device or '\r' in device):
+                raise ValueError('training runtime_device must be a nonempty single-line label')
+            label = f' on {device}' if device is not None else ''
+            lines += [f"{SHORT[arm]}{label}: {fmt(item.get('seconds_per_epoch'), ' s/epoch')} and {fmt(item.get('occupied_gpu_seconds'), ' occupied GPU s')}.", '']
         item = costs.get('assessment', {})
         lines += [f"Assessment: {fmt(item.get('gpu_seconds'), ' GPU s')}, {fmt(item.get('cpu_seconds'), ' CPU s')}, {fmt(item.get('wall_seconds'), ' wall s')}; failed attempts {fmt(costs.get('failed_attempt_gpu_seconds'), ' GPU s')}. Unknown values remain unavailable; overlapping wall and CPU/GPU times must not be added as independent costs.", '']
+        accounting = costs.get('campaign_gpu_accounting')
+        if accounting is not None:
+            if not isinstance(accounting, dict):
+                raise ValueError('campaign_gpu_accounting must be a mapping')
+            labels = (
+                ('setup_upper_bound_gpu_seconds', 'conservative setup and qualification upper bound'),
+                ('measured_training_gpu_seconds', 'measured training occupancy'),
+                ('measured_assessment_gpu_seconds', 'measured assessment occupancy'),
+                ('other_measured_gpu_seconds', 'other disjoint measured occupancy'),
+                ('accounted_upper_bound_gpu_seconds', 'supplied total campaign upper bound'),
+            )
+            for key, _ in labels:
+                value = accounting.get(key)
+                if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0):
+                    raise ValueError(f'{key} must be finite and nonnegative')
+            supplied = [f'{label}: {fmt(accounting[key], " GPU s")}' for key, label in labels if accounting.get(key) is not None]
+            if supplied:
+                lines += ['Campaign GPU accounting against the 45 GPU-hour ceiling: ' + '; '.join(supplied) + '. Setup, training, assessment and other occupancy are disjoint components; the total summarizes them. The setup value is a conservative bound, while training and assessment occupancy are measured.', '']
     else:
         lines += ['Measured training and assessment costs are pending.', '']
     lines += ['Evidence identities below refer to the literal supplied artifacts; saved predictions and histories were read only. No inference, task scoring or new model evaluation was run while producing this report.', '']
