@@ -190,3 +190,44 @@ def test_paired_shape_figure_uses_recorded_values_and_rejects_duplicate_seeds():
     data['seeds'][1]['seed'] = 7
     with pytest.raises(ValueError, match='unique'):
         report.paired_shape_values(data)
+
+
+def test_labelled_native_and_sensor_tables_preserve_field_order(tmp_path):
+    campaign, inputs_path = inputs_for(tmp_path, False)
+    inputs = json.loads(inputs_path.read_text())
+    result = json.loads((tmp_path/'review.json').read_text())
+    rows = [result['source'], *(result['candidates'][arm] for arm in report.ARMS)]
+    for i, row in enumerate(rows):
+        row['risk'] = dict(row['risk'])
+        row['risk']['ensemble_mean_mse'] = [11.+i, 21.+i]
+        row['risk']['unbiased_member_variance'] = [31.+i, 41.+i]
+        row['sensor_mse'] = [None, .1+i*.1]
+    inputs['review'] = write_ref(tmp_path/'review_tables.json', result)
+    inputs_path.write_text(json.dumps(inputs))
+    report.produce(inputs_path, campaign, campaign/'reports/labelled')
+    text = (campaign/'reports/labelled/report.md').read_text()
+    assert '| u | 11 | 12 | 13 | 31 | 32 | 33 |' in text
+    assert '| v | 21 | 22 | 23 | 41 | 42 | 43 |' in text
+    assert '| v | 0.1 | 0.2 | 0.3 |' in text
+    assert '| u | unavailable | unavailable | unavailable |' not in text
+    assert "{'state':" not in text
+
+
+def test_paired_endpoint_effects_are_labelled_and_field_ordered(tmp_path):
+    campaign, inputs_path = inputs_for(tmp_path, True)
+    inputs = json.loads(inputs_path.read_text())
+    endpoint = json.loads((tmp_path/'endpoint.json').read_text())
+    endpoint['paired_scaled_minus_raw'] = {'regional_normalized_improvement':.07, 'event_score':-.03,
+        'normalized_core_differences':{'state':.01, 'scale':.02, 'shape':-.03},
+        'signed_mean_risk':[4.,5.], 'member_mse':[6.,7.]}
+    inputs['endpoint'] = write_ref(tmp_path/'endpoint_paired.json', endpoint)
+    decision = json.loads((tmp_path/'decision.json').read_text())
+    decision['assessment_sha256'] = inputs['endpoint']['sha256']
+    inputs['decision'] = write_ref(tmp_path/'decision_paired.json', decision)
+    inputs_path.write_text(json.dumps(inputs))
+    report.produce(inputs_path, campaign, campaign/'reports/paired')
+    text = (campaign/'reports/paired/report.md').read_text()
+    assert 'regional normalized improvement 0.07; event score -0.03' in text
+    assert '| Scaled minus raw | 0.01 | 0.02 | -0.03 |' in text
+    assert '| u | 4 | 6 |' in text and '| v | 5 | 7 |' in text
+    assert 'Both event and regional task scores were excluded from the learning review.' not in text

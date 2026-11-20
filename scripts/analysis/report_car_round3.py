@@ -82,6 +82,27 @@ def fmt(value, suffix=''):
     return f'{value:.5g}{suffix}'
 
 
+def field_value(row, section, key, index):
+    values = row.get(section, {}).get(key)
+    return None if values is None else values[index]
+
+
+def gate(value):
+    return 'pass' if value is True else 'fail' if value is False else 'unavailable'
+
+
+def core_table(assessment):
+    lines = ['| Path | State change | Scale change | Shape change | Signed field | Sensor | Member risk |',
+             '| --- | ---: | ---: | ---: | --- | --- | --- |']
+    for arm in ARMS:
+        row = assessment['candidates'][arm]
+        differences, fidelity = row['normalized_core_differences'], row['fidelity']
+        cells = [SHORT[arm], *(fmt(differences[k]) for k in ('state', 'scale', 'shape')),
+                 *(gate(fidelity.get(k)) for k in ('primary_field_pass','sensor_pass','legacy_member_pass'))]
+        lines.append('| ' + ' | '.join(cells) + ' |')
+    return lines
+
+
 def histories(inputs, epoch):
     result = {}
     for arm in ARMS:
@@ -307,25 +328,56 @@ def produce(inputs_path, campaign, output):
                     raw['fidelity']['field_allowance'][i])
             lines.append('| ' + str(field) + ' | ' + ' | '.join(fmt(v) for v in vals) + ' |')
         lines += ['', 'Field values are mass-weighted MSE in the respective native field units squared; signed-risk differences use the matched SOURCE baseline and the fixed TRAIN allowance converted fieldwise to native units. Member MSE, ensemble mean MSE, unbiased member variance and sensor results are saved in the linked assessment evidence.', '']
-        for arm in ARMS:
-            row = assessment['candidates'][arm]
-            lines += [f"{SHORT[arm]}: normalized State/Scale/Shape changes {row['normalized_core_differences']}; signed-field pass {row['fidelity']['primary_field_pass']}, sensor pass {row['fidelity']['sensor_pass']}, separate legacy member-risk pass {row['fidelity']['legacy_member_pass']}.", '']
-            lines += [f"{SHORT[arm]} native ensemble-mean MSE {row['risk'].get('ensemble_mean_mse', 'unavailable')}, unbiased member variance {row['risk'].get('unbiased_member_variance', 'unavailable')}, and sensor MSE {row.get('sensor_mse', 'unavailable')}; SOURCE sensor MSE {source.get('sensor_mse', 'unavailable')}. Field order follows the table above; null sensors indicate unobserved fields.", '']
-            if 'reused_tasks' in row:
-                task = row['reused_tasks']
-                lines += [f"{SHORT[arm]} reused tasks: event normalized change {fmt(task['event_normalized_difference'])}; regional normalized improvement {fmt(task['regional_normalized_improvement'])}.", '']
+        lines += ['Core changes are relative to SOURCE in frozen TRAIN SOURCE units; negative values improve the score. The member-risk column is the separate legacy guard.', '']
+        lines += core_table(assessment) + ['']
+        lines += ['Native ensemble-mean MSE and unbiased member variance are mass-weighted and use each field’s native units squared.', '',
+                  '| Field | SOURCE mean MSE | Raw mean MSE | Scaled mean MSE | SOURCE variance | Raw variance | Scaled variance |',
+                  '| --- | ---: | ---: | ---: | ---: | ---: | ---: |']
+        for i, field in enumerate(assessment['field_order']):
+            vals = [field_value(row,'risk',key,i) for key in ('ensemble_mean_mse','unbiased_member_variance') for row in (source,raw,scaled)]
+            lines.append('| ' + str(field) + ' | ' + ' | '.join(fmt(value) for value in vals) + ' |')
+        lines += ['']
+        observed = []
+        for i, field in enumerate(assessment['field_order']):
+            vals = [(row.get('sensor_mse') or [None]*len(assessment['field_order']))[i] for row in (source,raw,scaled)]
+            if any(value is not None for value in vals):
+                observed.append((field, vals))
+        if observed:
+            lines += ['Observed-sensor MSE uses the same native field units squared; fields without observations are omitted.', '',
+                      '| Observed field | SOURCE sensor MSE | Raw sensor MSE | Scaled sensor MSE |',
+                      '| --- | ---: | ---: | ---: |']
+            for field, vals in observed:
+                lines.append('| ' + str(field) + ' | ' + ' | '.join(fmt(value) for value in vals) + ' |')
+            lines += ['']
+        else:
+            lines += ['Observed-sensor MSE is unavailable in the supplied assessment.', '']
+        if all('reused_tasks' in assessment['candidates'][arm] for arm in ARMS):
+            lines += ['Reused development task scores and changes:', '',
+                      '| Path | Event score | Event normalized change | Regional score | Regional normalized improvement |',
+                      '| --- | ---: | ---: | ---: | ---: |']
+            task_source = source.get('reused_tasks', {})
+            lines.append('| SOURCE | ' + ' | '.join((fmt(task_source.get('event_score')), '0', fmt(task_source.get('regional_score')), '0')) + ' |')
+            for arm in ARMS:
+                task = assessment['candidates'][arm]['reused_tasks']
+                vals = (task.get('event_score'),task.get('event_normalized_difference'),task.get('regional_score'),task.get('regional_normalized_improvement'))
+                lines.append('| ' + SHORT[arm] + ' | ' + ' | '.join(fmt(value) for value in vals) + ' |')
+            lines += ['']
         if assessment.get('paired_scaled_minus_raw'):
             pair = assessment['paired_scaled_minus_raw']
-            lines += [f"Paired SOURCE-scaled minus raw-risk effects: regional normalized improvement {fmt(pair['regional_normalized_improvement'])}, event score {fmt(pair['event_score'])}; signed native risk differences {pair['signed_mean_risk']} and normalized State/Scale/Shape differences {pair['normalized_core_differences']}.", '']
-        elif assessment['epoch'] == 100:
+            lines += [f"Paired SOURCE-scaled minus raw-risk task effects: regional normalized improvement {fmt(pair['regional_normalized_improvement'])}; event score {fmt(pair['event_score'])}.", '',
+                      '| Paired core change | State | Scale | Shape |', '| --- | ---: | ---: | ---: |',
+                      '| Scaled minus raw | ' + ' | '.join(fmt(pair['normalized_core_differences'][k]) for k in ('state','scale','shape')) + ' |', '',
+                      '| Field | Paired signed-risk difference | Paired member-MSE difference |', '| --- | ---: | ---: |']
+            for i, field in enumerate(assessment['field_order']):
+                lines.append(f"| {field} | {fmt(pair['signed_mean_risk'][i])} | {fmt(pair.get('member_mse', [None]*len(assessment['field_order']))[i])} |")
+            lines += ['']
+        elif assessment['epoch'] == 100 and all('reused_tasks' not in assessment['candidates'][arm] for arm in ARMS):
             lines += ['Both event and regional task scores were excluded from the learning review.', '']
         for arm in ARMS:
             lines += [f"{SHORT[arm]} epoch-{assessment['epoch']} checkpoint SHA-256: `{assessment.get('checkpoint_sha256', {}).get(arm, 'unavailable')}`.", '']
     if review is not None and endpoint is not None and endpoint['epoch'] != review['epoch']:
         lines += ['The epoch-100 review used the same matched panel and excluded both task scores.', '']
-        for arm in ARMS:
-            first = review['candidates'][arm]
-            lines += [f"At the review, {SHORT[arm]} normalized State/Scale/Shape changes were {first['normalized_core_differences']}; signed-field pass {first['fidelity']['primary_field_pass']}, sensor pass {first['fidelity']['sensor_pass']}, and legacy member-risk pass {first['fidelity']['legacy_member_pass']}.", '']
+        lines += core_table(review) + ['']
     if captions:
         lines += ['## Figure index', '']
         for name, caption in captions.items():
