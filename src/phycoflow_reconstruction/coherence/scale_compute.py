@@ -82,9 +82,9 @@ def sampled_scale(
     s = scales.to(draws)
     norm = mass.to(draws).sum().sqrt()
     if (
-        mode not in ("paired", "conditional")
+        mode not in ("paired", "conditional", "empirical")
         or (mode == "paired" and len(draws) != 1)
-        or (mode == "conditional" and len(draws) < 2)
+        or (mode in ("conditional", "empirical") and len(draws) < 2)
     ):
         raise ValueError(
             "paired mode needs one prediction; conditional mode needs at least two draws"
@@ -93,7 +93,7 @@ def sampled_scale(
 
     def vector_score(x, y):
         return (
-            torch.linalg.vector_norm(x[0] - y, dim=-1) if paired else vector_energy_score(x, y)[0]
+            torch.linalg.vector_norm(x[0] - y, dim=-1) if paired else vector_energy_score(x, y, empirical=mode == "empirical")[0]
         )
 
     def leaf(a, b=None):
@@ -133,7 +133,7 @@ def sampled_scale(
             (rho(draws, *index_pair(c, d.index))[0] - rho(target, *index_pair(c, d.index))).abs()
             if paired
             else almost_fair_crps(
-                rho(draws, *index_pair(c, d.index)), rho(target, *index_pair(c, d.index))
+                rho(draws, *index_pair(c, d.index)), rho(target, *index_pair(c, d.index)), empirical=mode == "empirical"
             )
         ).mean(-1)
         for d in batch.pair_queries
@@ -148,11 +148,11 @@ def sampled_scale(
         self_anchor = torch.linalg.vector_norm(self_descriptors[0] - target_self_descriptor, dim=-1)
     else:
         joint = joint_spectral_energy_score(
-            draws, target, filters=f, scales=s, mass=mass, **mean_kwargs
+            draws, target, filters=f, scales=s, mass=mass, empirical=mode == "empirical", **mean_kwargs
         )[0]
-        self_anchor = vector_energy_score(self_descriptors, target_self_descriptor)[0]
+        self_anchor = vector_energy_score(self_descriptors, target_self_descriptor, empirical=mode == "empirical")[0]
     return {
-        "version": PAIRED_VERSION if paired else VERSION,
+        "version": "round4_empirical_v_scale_v1" if mode == "empirical" else (PAIRED_VERSION if paired else VERSION),
         "signed": signed,
         "rho": rho_score,
         "joint": joint,
@@ -161,7 +161,7 @@ def sampled_scale(
     }
 
 
-def third_order_scores(members, reference, queries, region_masses, scales):
+def third_order_scores(members, reference, queries, region_masses, scales, *, empirical=False):
     """Regional centered triple fair leaves on already filtered physical fields.
 
     Inputs members [J,B,S,N,C], reference [B,S,N,C], queries iterable of
@@ -217,6 +217,6 @@ def third_order_scores(members, reference, queries, region_masses, scales):
                     for k in range(i + 1, len(members))
                 ),
                 torch.zeros_like(leaf),
-            ) / (len(members) * (len(members) - 1))
+            ) / (len(members) * (len(members) if empirical else len(members) - 1))
         leaves.append(leaf)
     return torch.stack(leaves, -1) if leaves else members.new_empty((members.shape[1], 0))

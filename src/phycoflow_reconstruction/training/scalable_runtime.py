@@ -171,7 +171,7 @@ class ScalableRuntime:
         needed = 0 if self.scoring_mode == "deterministic" else int(family.conditional_draws) - 1
         if len(supplied) < needed:
             raise ValueError("conditional State requires independent draws")
-        members = (prediction, *supplied[:needed])
+        members = (prediction, *supplied) if context.get("_empirical_teacher") else (prediction, *supplied[:needed])
         converted = [family._in_declared_units(x, reference)[0] for x in members]
         target = family._in_declared_units(prediction, reference)[1]
         left, right = family._endpoint_measures(prediction, reference, context, required=True)
@@ -188,6 +188,7 @@ class ScalableRuntime:
             marginal_coefficient=coefficients["state.marginal"],
             mixed_coefficient=coefficients["state.mixed"],
             mode="paired" if self.scoring_mode == "deterministic" else "conditional",
+            empirical=bool(context.get("_empirical_teacher")),
         )
         return result, blocks
 
@@ -206,7 +207,8 @@ class ScalableRuntime:
         if self.scoring_mode == "conditional" and not supplied:
             raise ValueError("expanded fair score requires two independent members")
         members = torch.stack(
-            (prediction,) if self.scoring_mode == "deterministic" else (prediction, supplied[0])
+            (prediction,) if self.scoring_mode == "deterministic" else
+            ((prediction, *supplied) if context.get("_empirical_teacher") else (prediction, supplied[0]))
         )
         family = self.families["global_distribution"]
         left, right = family._endpoint_measures(prediction, reference, context, required=True)
@@ -222,7 +224,7 @@ class ScalableRuntime:
             ):
                 raise ValueError("adaptive bank physical support mismatch")
         if name == "global_distribution":
-            leaves = group_projection_scores(members, reference, left, right, bank[spec])
+            leaves = group_projection_scores(members, reference, left, right, bank[spec], empirical=bool(context.get("_empirical_teacher")))
         else:
             scale_family = self.families["multiscale_spectrum"]
             shared = context.get("_expanded_scale_coefficients")
@@ -238,6 +240,7 @@ class ScalableRuntime:
                 bank[spec],
                 bank["region_masses"],
                 bank["triple_scales"],
+                empirical=bool(context.get("_empirical_teacher")),
             )
         weights = torch.as_tensor(
             bank["target_weights"][key], device=leaves.device, dtype=leaves.dtype

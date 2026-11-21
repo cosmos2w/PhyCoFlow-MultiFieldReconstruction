@@ -291,6 +291,7 @@ def score_family(
     channel_weights=None,
     mode="conditional",
     compiled_reference=None,
+    empirical=False,
 ):
     """FamilyResult and exact autograd semantic channel probe tensors.
 
@@ -350,7 +351,7 @@ def score_family(
     vals = [sum((p[n] for p in attract), torch.zeros_like(attract[0][n])) / j for n in range(3)]
     if mode == "conditional":
         vals = [
-            v - sum((p[n] for p in separate), torch.zeros_like(v)) / (j * (j - 1))
+            v - sum((p[n] for p in separate), torch.zeros_like(v)) / (j * (j if empirical else j - 1))
             for n, v in enumerate(vals)
         ]
     score = vals[0]
@@ -365,7 +366,7 @@ def score_family(
         score,
         score.mean(),
         {
-            "score_definition": PAIRED_VERSION if mode == "paired" else VERSION,
+            "score_definition": "round4_empirical_v_state_v1" if empirical else (PAIRED_VERSION if mode == "paired" else VERSION),
             "directions_sha256": bank["sha256"],
             "quantile_representation": "exact_merged_weighted_cdf_v1",
             "conditional_draws": j,
@@ -385,7 +386,7 @@ def state_channel_contribution(channel_squared, common_squared, weight):
     return factor * channel_squared
 
 
-def group_projection_scores(members, reference, member_weights, reference_weights, directions):
+def group_projection_scores(members, reference, member_weights, reference_weights, directions, *, empirical=False):
     """Complete per-projection W2 energy leaves [B,P], outside the C8 norm.
 
     Members are [J,B,N,C], reference is [B,N,C]; masses are [N] or [B,N].
@@ -431,5 +432,5 @@ def group_projection_scores(members, reference, member_weights, reference_weight
         attraction = attraction - sum(
             (distance(vectors[i], vectors[k]) for i in range(len(members)) for k in range(i + 1, len(members))),
             torch.zeros_like(attraction),
-        ) / (len(members) * (len(members) - 1))
+        ) / (len(members) * (len(members) if empirical else len(members) - 1))
     return attraction

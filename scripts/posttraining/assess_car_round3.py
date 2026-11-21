@@ -124,7 +124,7 @@ def finalize_decision(result):
     result['predeclared_recommendation'] = choice
 
 
-def generate(args, ctx):
+def generate(args, ctx, *, config_name='resolved_config.yaml'):
     import torch
     import yaml
     from phycoflow_reconstruction.data.factory import open_field_dataset
@@ -140,7 +140,8 @@ def generate(args, ctx):
     run = args.run.resolve(strict=True)
     if (ctx['campaign'] / 'runs/formal' / args.arm).resolve() not in run.parents:
         raise ValueError('named formal run required')
-    cfg = yaml.safe_load((run / 'resolved_config.yaml').read_text())
+    config_path = run / config_name
+    cfg = yaml.safe_load(config_path.read_text())
     expected = yaml.safe_load(verify(ctx['prepared']['arms'][args.arm]).read_text())
     if not same_scientific_config(cfg, expected):
         raise ValueError('resolved run differs from prepared scientific config')
@@ -157,7 +158,7 @@ def generate(args, ctx):
     started = time.time()
     receipt = dict(schema='car_round3_native_bank_v1', status='failed', arm=args.arm, epoch=args.epoch,
         checkpoint=str(checkpoint), checkpoint_sha256=checkpoint_sha,
-        config_path=str(run / 'resolved_config.yaml'), config_sha256=hash_file(run / 'resolved_config.yaml'), prepared_sha256=hash_file(ctx['prepared_path']),
+        config_path=str(config_path), config_sha256=hash_file(config_path), prepared_sha256=hash_file(ctx['prepared_path']),
         source_bank_sha256=hash_file(ctx['source_receipt']), panel_sha256=hash_file(ctx['panel_path']),
         source_checkpoint_sha256=ctx['source']['source_sha256'], device=args.device, start_unix=started,
         code_sha256=hash_file(Path(__file__)), members=4, sample_ids=ctx['source']['sample_ids'])

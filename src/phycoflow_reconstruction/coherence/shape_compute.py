@@ -325,6 +325,8 @@ class LazyPooledShape:
         return_leaves=False,
         exhaustive=False,
         mode="conditional",
+        additional_members=(),
+        empirical=False,
     ):
         if mode not in {"paired", "conditional"} or (mode == "paired") != (second is None):
             raise ValueError(
@@ -337,14 +339,26 @@ class LazyPooledShape:
             self._validate(second, reference)
         norm = self._domain(first, valid_mask)
         queries = tuple(self._queries(batch) if exhaustive else self._sampled_queries(batch))
-        a = self._diagram_bank(first, queries, valid_mask)
-        b = None if second is None else self._diagram_bank(second, queries, valid_mask)
+        if additional_members and mode != "conditional":
+            raise ValueError("additional Shape atoms require conditional mode")
+        for member in additional_members:
+            self._validate(member, reference)
+        atoms = (first,) if second is None else (first, second, *additional_members)
+        banks = [self._diagram_bank(atom, queries, valid_mask) for atom in atoms]
         with torch.no_grad():
             t = self._diagram_bank(reference.detach(), queries, valid_mask)
         shape = (len(queries), len(first), len(self.dimensions), 2)
-        raw = self._distance(a, t, norm)
-        if mode == "conditional":
-            raw = (raw + self._distance(b, t, norm) - self._distance(a, b, norm)) / 2
+        if mode == "conditional" and len(banks) == 2 and not empirical:
+            # Retain the historical arithmetic order and its tie gradients.
+            raw = (self._distance(banks[0], t, norm) + self._distance(banks[1], t, norm)
+                   - self._distance(banks[0], banks[1], norm)) / 2
+        else:
+            raw = sum(self._distance(bank, t, norm) for bank in banks) / len(banks)
+            if mode == "conditional":
+                count = len(banks)
+                separation = sum(self._distance(banks[i], banks[j], norm)
+                                 for i in range(count) for j in range(i + 1, count))
+                raw = raw - separation / (count * (count if empirical else count - 1))
         raw = raw.reshape(shape)
         scales = torch.stack([self.scales[q[0]] for q in queries]).to(raw)
         leaf = raw / scales[:, None]

@@ -138,7 +138,7 @@ def score(
                     "mean_scales": f.piece_mean_scale,
                     "mean_weight": f.settings.mean_weight,
                 },
-                mode="paired" if deterministic else "conditional",
+                mode="paired" if deterministic else ("empirical" if context.get("_empirical_teacher") else "conditional"),
             )
         score_version = blocks.pop("version")
         raw_leaves = blocks.pop("leaves")
@@ -177,7 +177,7 @@ def score(
             with torch.no_grad():
                 target = grid(reference.detach())
             mask = f.domain_mask if f.native_masked else None
-            if len(draws) > 2:
+            if len(draws) > 2 and not context.get("_empirical_teacher"):
                 queries = shape.compile_queries((sampler_batch,))
                 compiled = shape.compile_reference(target, queries, valid_mask=mask)
                 blocks = shape.score_compiled(
@@ -195,6 +195,8 @@ def score(
                     return_leaves=True,
                     exhaustive=bool((context or {}).get("exhaustive_shape_queries", False)),
                     mode="paired" if deterministic else "conditional",
+                    additional_members=tuple(grid(x) for x in draws[2:]),
+                    empirical=bool(context.get("_empirical_teacher")),
                 )
         physical = {
             "self": f.spatial_objective.weights.get("self.persistence", 0.0),
@@ -225,7 +227,7 @@ def score(
     if family == "multiscale_spectrum":
         result.diagnostics["score_definition"] = score_version
         result.diagnostics["scoring_mode"] = (
-            "deterministic" if deterministic else "conditional_fair"
+            "deterministic" if deterministic else ("empirical_v" if context.get("_empirical_teacher") else "conditional_fair")
         )
     if family == "topology":
         from .query_sampling import SHAPE_SAMPLING_VERSION
@@ -233,11 +235,11 @@ def score(
         from .shape_compute import VERSION as SHAPE_VERSION
 
         result.diagnostics["score_definition"] = (
-            PAIRED_SHAPE_VERSION if deterministic else SHAPE_VERSION
+            PAIRED_SHAPE_VERSION if deterministic else ("round4_empirical_v_shape_v1" if context.get("_empirical_teacher") else SHAPE_VERSION)
         )
         result.diagnostics["shape_sampling"] = SHAPE_SAMPLING_VERSION
         result.diagnostics["scoring_mode"] = (
-            "deterministic" if deterministic else "conditional_fair"
+            "deterministic" if deterministic else ("empirical_v" if context.get("_empirical_teacher") else "conditional_fair")
         )
     semantic = {
         key: physical[key] * value.mean() for key, value in blocks.items() if value is not None

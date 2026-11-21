@@ -917,7 +917,8 @@ class TopologyFamily(nn.Module):
             raise ValueError(
                 "topology family artifact scientific source mismatch; rebuild the artifact"
             )
-        if self.version == "6" and artifact.get("scientific_source") != _pooled_source():
+        from ...observer_compatibility import compatible_pooled_source
+        if self.version == "6" and not compatible_pooled_source(artifact.get("scientific_source"), _pooled_source()):
             raise ValueError("pooled Shape source mismatch; rebuild the artifact")
         if self.version in {"3", "4", "5"} and not _compatible_persistence_source(
             artifact.get("scientific_source"),

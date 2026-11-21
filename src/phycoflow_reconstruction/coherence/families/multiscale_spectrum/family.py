@@ -1095,9 +1095,10 @@ class MultiscaleSpectrumFamily(nn.Module):
             raise ValueError("multiscale_spectrum family artifact config mismatch")
         if self.mean_augmented and artifact.get("input_data_contract") != self.input_data_contract:
             raise ValueError("multiscale_spectrum mean-augmented input field order/units mismatch")
+        from ...observer_compatibility import compatible_scale_source
         if (
             self.mean_augmented
-            and artifact.get("implementation_identity") != _implementation_identity()
+            and not compatible_scale_source(artifact.get("implementation_identity"), _implementation_identity())
         ):
             raise ValueError(
                 "multiscale_spectrum mean-augmented implementation/backend identity mismatch"

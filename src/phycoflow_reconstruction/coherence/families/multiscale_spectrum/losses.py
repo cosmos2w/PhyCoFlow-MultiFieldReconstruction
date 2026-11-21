@@ -22,6 +22,7 @@ def vector_energy_score(
     *,
     alpha: float = 1.0,
     pair_chunk_size: int = 32,
+    empirical: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Euclidean score for draws [J,...,D], target [...,D].
 
@@ -33,7 +34,7 @@ def vector_energy_score(
     if draws.ndim < 2 or draws.shape[1:] != target.shape:
         raise ValueError("energy-score draws [J,...,D] must match target [...,D]")
     count = draws.shape[0]
-    factor = almost_fair_repulsion_factor(count, alpha)
+    factor = (count - 1) / count if empirical else almost_fair_repulsion_factor(count, alpha)
     if pair_chunk_size < 1:
         raise ValueError("pair_chunk_size must be positive")
     attraction = torch.linalg.vector_norm(draws - target[None], dim=-1).mean(dim=0)
@@ -293,6 +294,7 @@ def joint_spectral_energy_score(
     piece_weights: torch.Tensor | None = None,
     mean_scales: torch.Tensor | None = None,
     mean_weight: float = 1.0,
+    empirical: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Fair score of the full signed-band vector, evaluated in coefficient space.
 
@@ -318,7 +320,7 @@ def joint_spectral_energy_score(
         mean_scales=mean_scales,
         mean_weight=mean_weight,
     )
-    return vector_energy_score(draw_embedding, target_embedding)
+    return vector_energy_score(draw_embedding, target_embedding, empirical=empirical)
 
 
 def _joint_spectral_embeddings(
@@ -433,12 +435,12 @@ def band_coherence(gram: torch.Tensor, floor: torch.Tensor) -> torch.Tensor:
 
 
 def almost_fair_crps(
-    draw_values: torch.Tensor, target: torch.Tensor, alpha: float = 1.0
+    draw_values: torch.Tensor, target: torch.Tensor, alpha: float = 1.0, *, empirical: bool = False
 ) -> torch.Tensor:
     """Almost-fair CRPS of scalar descriptors; ``draw_values`` [J,B,...], ``target`` [B,...]."""
     if draw_values.ndim < 2 or draw_values.shape[1:] != target.shape:
         raise ValueError("almost-fair CRPS expects draws [J,B,...] matching the target [B,...]")
-    return vector_energy_score(draw_values[..., None], target[..., None], alpha=alpha)[0]
+    return vector_energy_score(draw_values[..., None], target[..., None], alpha=alpha, empirical=empirical)[0]
 
 
 def selected_band_coherence(statistics, floor):
