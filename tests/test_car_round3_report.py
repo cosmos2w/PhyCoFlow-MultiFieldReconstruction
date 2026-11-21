@@ -62,7 +62,7 @@ def inputs_for(tmp_path, complete, endpoint_epoch=100):
             'total_worker_seconds_ceiling':7200.})
         inputs['costs']=write_ref(tmp_path/'cost.json',{'schema':'car_round3_costs_v1',
             'training':{arm:{'seconds_per_epoch':110.,'occupied_gpu_seconds':11000.} for arm in report.ARMS},
-            'assessment':{'gpu_seconds':200.,'cpu_seconds':300.,'wall_seconds':180.},'failed_attempt_gpu_seconds':None})
+            'assessment':{'gpu_seconds':200.,'cpu_seconds':300.,'wall_seconds':1581.0245759,'cpu_scoring_wall_seconds':285.},'failed_attempt_gpu_seconds':None})
     input_path=tmp_path/'inputs.json'; input_path.write_text(json.dumps(inputs))
     return campaign,input_path
 
@@ -175,6 +175,8 @@ def test_optional_campaign_gpu_accounting_and_device_labels(tmp_path):
     assert 'measured training occupancy: 22000 GPU s' in text
     assert 'measured assessment occupancy: 200 GPU s' in text
     assert 'supplied total campaign upper bound: 22700 GPU s' in text
+    assert 'assessment-stage wall 1581 s includes generation, coordination waits and the CPU tail' in text
+    assert 'enclosing CPU-scoring wall 285 s is nested within it' in text
     assert 'other disjoint measured occupancy:' not in text
     assert 'parallel speedup' not in text
 

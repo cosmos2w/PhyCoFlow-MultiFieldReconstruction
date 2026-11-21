@@ -447,7 +447,8 @@ def produce(inputs_path, campaign, output):
                 if item.get('data_wait_and_loop_overhead_seconds') is not None:
                     lines += ['Pure data-wait time was not separately measured.', '']
         item = costs.get('assessment', {})
-        lines += [f"Assessment: {fmt(item.get('gpu_seconds'), ' GPU s')}, {fmt(item.get('cpu_seconds'), ' CPU s')}, {fmt(item.get('wall_seconds'), ' wall s')}; failed attempts {fmt(costs.get('failed_attempt_gpu_seconds'), ' GPU s')}. Unknown values remain unavailable; overlapping wall and CPU/GPU times must not be added as independent costs.", '']
+        stage_text = fmt(item.get('wall_seconds'), ' s')
+        lines += [f"Assessment: {fmt(item.get('gpu_seconds'), ' GPU s')}, {fmt(item.get('cpu_seconds'), ' CPU s')}; assessment-stage wall {stage_text} includes generation, coordination waits and the CPU tail; enclosing CPU-scoring wall {fmt(item.get('cpu_scoring_wall_seconds'), ' s')} is nested within it. Failed attempts {fmt(costs.get('failed_attempt_gpu_seconds'), ' GPU s')}. Unknown values remain unavailable; overlapping wall and CPU/GPU times must not be added as independent costs.", '']
         accounting = costs.get('campaign_gpu_accounting')
         if accounting is not None:
             if not isinstance(accounting, dict):
