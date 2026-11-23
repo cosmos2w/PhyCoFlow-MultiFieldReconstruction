@@ -25,7 +25,8 @@ posttrain_constraints = ["cooper-optim==1.0.1"]
 multitask = ["torchjd[cagrad,quadprog-projector]==0.17.1"]
 topology = ["gudhi>=3.13,<4"]
 plot = ["matplotlib>=3.7"]
-dev = ["pytest>=8", "ruff>=0.5"]
+docs = ["mistune>=3.3,<4"]
+dev = ["pytest>=8", "ruff>=0.5", "mistune>=3.3,<4"]
 all = [
   "gudhi>=3.13,<4",
   "matplotlib>=3.7",
@@ -36,6 +37,7 @@ all = [
   "pykeops==2.3",
   "pytest>=8",
   "ruff>=0.5",
+  "mistune>=3.3,<4",
   "wrapt>=1.16,<2",
 ]
 

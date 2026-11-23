@@ -6,28 +6,31 @@ datasets/**/*.pt
 datasets/**/*.pth
 datasets/**/*.npy
 datasets/**/*.npz
-datasets/**/cache/
-datasets/**/generated/
-datasets/**/manifests/
+datasets/**/cache
+datasets/**/generated
+datasets/**/manifests
 
 # Local case runs, generated manifests, comparisons, and experiment profiles.
 cases/**/runs/
-cases/**/manifests/
+cases/**/runs
+cases/**/manifests
 cases/**/comparisons/*.json
 cases/**/comparisons/*.csv
 cases/**/comparisons/*.html
 cases/**/comparisons/*.png
 cases/**/comparisons/*.md
-cases/**/configs/_experiments/
+cases/**/configs/_experiments
 
 # Root-level run/checkpoint directories are local when used by ad-hoc tools.
 runs/
 checkpoints/
+/runs
+/checkpoints
 
 # Benchmark reports and derived output. Protocols, configs, scripts, and
 # deliberately retained tiny fixtures remain source files.
-benchmarks/**/reports/
-benchmarks/**/generated/
+benchmarks/**/reports
+benchmarks/**/generated
 benchmarks/**/report/*.json
 benchmarks/**/report/*.csv
 benchmarks/**/report/*.html
@@ -40,12 +43,17 @@ benchmarks/**/comparison/*.csv
 benchmarks/**/comparison/*.html
 benchmarks/**/baseline/*.json
 benchmarks/**/baseline/*.csv
-benchmarks/**/runs_summary/
+benchmarks/**/runs_summary
 
-# Exported figures and report directories are generated artifacts, not source.
-figures/
-reports/
-artifacts/
+# Raw historical exports and machine-local aliases. Reviewed publications live
+# as ordinary files in UpdatePlans/_Reports and are deliberately trackable.
+/figures/
+/reports/
+/artifacts/
+/figures
+/reports
+/artifacts
+cases/**/diagnostics/**/.work
 
 # Python, test, editor, and build caches.
 __pycache__/
@@ -64,7 +72,7 @@ venv/
 .DS_Store
 
 # Local benchmark/experiment notes may be kept outside the tracked tree.
-local-experiments/
+local-experiments
 
 # Dated operational reports retained locally; shared method/protocol guides
 # live in docs/Posttraining_*.md and docs/Fidelity_Budget_Posttraining.md.
@@ -76,9 +84,34 @@ local-experiments/
 
 # Optional historical source retained only for local compatibility checks.
 LegacyCoherence/
+/LegacyCoherence
 
-# Local planning, research notes and post-processing materials.
-/UpdatePlans/
+# Publish reviewed plans/reports, not entire historical research collections.
+# A slash-only directory rule does not ignore a directory symlink: retain the
+# exact-path rules below when a local collection is moved to DATA2.
+!/UpdatePlans/
+/UpdatePlans/*
+!/UpdatePlans/README.md
+!/UpdatePlans/_Plans/
+!/UpdatePlans/_Reports/
+/UpdatePlans/_Plans/_bk/Legacy_Local_Plans
+/UpdatePlans/_Reports/_bk/Legacy_Local_Reports
+/UpdatePlans/_Plans/*.md
+/UpdatePlans/_Plans/*.pdf
+/UpdatePlans/_Plans/*.html
+/UpdatePlans/_Reports/*.md
+!/UpdatePlans/_Reports/README.md
+/UpdatePlans/_Reports/Posttraining_Theory_Review_20261105
+/UpdatePlans/_Reports/figures
+/UpdatePlans/_Reports/reports
+/UpdatePlans/_Plans/CoherenceComputeEnhancement_Audit
+/UpdatePlans/_Plans/CoherenceCompute_Round9_Review_20261112
+/UpdatePlans/_Plans/CoherenceRepair_Branch_Review_20261113
+/UpdatePlans/_Plans/Research_Branch_Archive_89a5a84_before_main_f311845
+!/UpdatePlans/_Plans/README.md
+UpdatePlans/**/.render/
+UpdatePlans/**/*.preview.html
+UpdatePlans/**/__pycache__/
 
 # Generated Round 2 early-closeout review alias
 /Coherence_Adaptive_Repair_Round2_Early_Closeout_Review

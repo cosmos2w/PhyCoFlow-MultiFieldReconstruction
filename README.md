@@ -1,5 +1,7 @@
 # PhyCoFlow Multi-Field Reconstruction
 
+Research navigation: [plans and reports](UpdatePlans/README.md), [Round 5 final report](UpdatePlans/_Reports/Coherence_Adaptive_Repair/Round_5/report.md), [storage map](docs/Storage_Map.md), and [artifact rules](docs/Experiment_Artifacts.md). Closed rounds are collected under `_bk`; use the report library for Markdown reading.
+
 > **UPDATE — State, Scale and Shape for your own data:** The new **Scalable Anchored Coherence** profile adds physical-measure State distances, signed multiscale fields with complete joint anchors, and fixed-transform persistence. It shares sampled field/pair queries between Scale and Shape, freezes informative State directions from TRAIN/SOURCE, and calibrates internal gradient strengths during the first 10 epochs. See [the profile guide](docs/Scalable_Anchored_Coherence.md) and [the mathematical definitions](ModelExplain.md#7-data-driven-coherence-model).
 
 > <strong style="color: #d1242f;">🔴 Recommended new profile: Scalable Anchored Coherence, with dense SOURCE-relative Lagrangian fidelity and three-family ConFIG.</strong> Start from [the shared fragment](configs/defaults/scalable_anchored_coherence.yaml); supply your case's fields, geometry, physical measure, units and completed SOURCE. Existing profiles retain their definitions and behavior.

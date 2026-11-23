@@ -8,6 +8,18 @@ on:
   workflow_dispatch:
 
 jobs:
+  portable-publications:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install the Markdown parser
+        run: python -m pip install 'mistune>=3.3,<4'
+      - name: Check portable report links and previews
+        run: python tools/docs/check_markdown_links.py UpdatePlans/_Reports --portable
   cpu-contracts:
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -46,6 +58,7 @@ jobs:
             case "$path" in
               *.md|*.rst|*.adoc|LICENSE|LICENSE.*|NOTICE|NOTICE.*|COPYING|COPYING.*) ;;
               docs/*.png|docs/*.jpg|docs/*.jpeg|docs/*.gif|docs/*.svg|docs/*.webp|docs/*.pdf) ;;
+              UpdatePlans/_Reports/*.png|UpdatePlans/_Reports/*.pdf) ;;
               *) run_full=true; break ;;
             esac
           done < "$RUNNER_TEMP/changed-files"
@@ -74,7 +87,7 @@ jobs:
         if: steps.changes.outputs.run_full == 'true'
         run: |
           python -m pip install 'ruff>=0.5'
-          ruff check src tests scripts cases benchmarks
+          ruff check src tests scripts cases benchmarks tools
       - name: Install project and development dependencies
         if: steps.changes.outputs.run_full == 'true'
         run: |
