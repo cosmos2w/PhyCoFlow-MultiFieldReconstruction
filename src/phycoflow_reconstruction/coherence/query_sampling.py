@@ -66,6 +66,22 @@ class QueryBatch:
     number: int
 
 
+@dataclass(frozen=True)
+class ConditionQueryGroups:
+    """Independent query batches for contiguous, balanced condition groups."""
+    batches: tuple[QueryBatch, ...]
+
+    def slices(self, condition_count):
+        if not self.batches or condition_count < 1:
+            raise ValueError("nonempty query groups and condition batch required")
+        count = min(len(self.batches), condition_count)
+        sizes = [condition_count // count + (i < condition_count % count) for i in range(count)]
+        start = 0
+        for size, batch in zip(sizes, self.batches):
+            yield slice(start, start + size), batch
+            start += size
+
+
 def full_target_query_batch(field_count):
     """Enumerate every outer unary and pair leaf with exact uniform weights.
 

@@ -32,6 +32,8 @@ def sampled_scale(
     target_self_descriptor,
     mean_kwargs,
     mode="conditional",
+    _skip_anchors=False,
+    _anchors_only=False,
 ):
     """Return separate signed, rho, joint and log-power-self [B] blocks.
 
@@ -111,14 +113,14 @@ def sampled_scale(
         )
         return ((plus + minus) * 0.5 * bw).sum(-1)
 
-    self_leaves = {d.index: leaf(d.index) for d in batch.self_queries}
-    pair_leaves = {d.index: leaf(*index_pair(c, d.index)) for d in batch.pair_queries}
-    signed_self = sum(d.weight * self_leaves[d.index] for d in batch.self_queries)
+    self_leaves = {} if _anchors_only else {d.index: leaf(d.index) for d in batch.self_queries}
+    pair_leaves = {} if _anchors_only else {d.index: leaf(*index_pair(c, d.index)) for d in batch.pair_queries}
+    signed_self = sum(d.weight * self_leaves[d.index] for d in batch.self_queries) if not _anchors_only else None
     signed_pair = sum(
         (d.weight * pair_leaves[d.index] for d in batch.pair_queries),
         start=target.new_zeros(target.shape[0]),
-    )
-    signed = signed_self / c + (1 - 1 / c) * signed_pair
+    ) if not _anchors_only else None
+    signed = signed_self / c + (1 - 1 / c) * signed_pair if not _anchors_only else None
 
     def rho(x, a, b):
         xa, xb = x[..., a], x[..., b]
@@ -136,10 +138,12 @@ def sampled_scale(
                 rho(draws, *index_pair(c, d.index)), rho(target, *index_pair(c, d.index)), empirical=mode == "empirical"
             )
         ).mean(-1)
-        for d in batch.pair_queries
+        for d in (() if _anchors_only else batch.pair_queries)
     }
-    rho_score = None if c == 1 else sum(d.weight * rho_leaves[d.index] for d in batch.pair_queries)
-    if paired:
+    rho_score = None if c == 1 or _anchors_only else sum(d.weight * rho_leaves[d.index] for d in batch.pair_queries)
+    if _skip_anchors:
+        joint = self_anchor = None
+    elif paired:
         kwargs = dict(mean_kwargs)
         kwargs["prediction_piece_means"] = kwargs.pop("draw_piece_means")[0]
         joint = paired_joint_spectral_mean_distance(

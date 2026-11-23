@@ -15,6 +15,7 @@ from .families.multiscale_spectrum.statistics import (
 from .families.topology.betti_curves import gaussian_blur
 from .families.topology.geometry import rasterize_fields
 from .scale_compute import sampled_scale
+from .query_sampling import ConditionQueryGroups
 
 
 def _scale_statistics(family, fields):
@@ -120,26 +121,50 @@ def score(
             )
             if context is not None and context.get("_reuse_scale_for_expanded", False):
                 context["_expanded_scale_coefficients"] = (draw_coef, target)
-            blocks = sampled_scale(
-                draw_coef,
-                target,
-                sampler_batch,
+            scale_args = dict(
                 filters=f.filters,
                 scales=f.band_scale,
                 mass=f.mass,
                 power_floor=f.power_floor,
                 band_weights=f._band_weights(f.compute_dtype, prediction.device),
-                self_descriptors=desc,
-                target_self_descriptor=target_desc,
-                mean_kwargs={
-                    "draw_piece_means": draw_means,
-                    "target_piece_means": target_means,
-                    "piece_weights": f.piece_measures.sum(dim=1),
-                    "mean_scales": f.piece_mean_scale,
-                    "mean_weight": f.settings.mean_weight,
-                },
                 mode="paired" if deterministic else ("empirical" if context.get("_empirical_teacher") else "conditional"),
             )
+            mean_args = {
+                "draw_piece_means": draw_means,
+                "target_piece_means": target_means,
+                "piece_weights": f.piece_measures.sum(dim=1),
+                "mean_scales": f.piece_mean_scale,
+                "mean_weight": f.settings.mean_weight,
+            }
+            if isinstance(sampler_batch, ConditionQueryGroups):
+                groups = list(sampler_batch.slices(len(prediction)))
+                blocks = sampled_scale(draw_coef, target, groups[0][1],
+                    self_descriptors=desc, target_self_descriptor=target_desc,
+                    mean_kwargs=mean_args, _anchors_only=True, **scale_args)
+                pieces = []
+                for sl, group in groups:
+                    group_means = {**mean_args, "draw_piece_means": draw_means[:, sl],
+                                   "target_piece_means": target_means[sl]}
+                    pieces.append(sampled_scale(draw_coef[:, sl], target[sl], group,
+                        self_descriptors=desc[:, sl], target_self_descriptor=target_desc[sl],
+                        mean_kwargs=group_means, _skip_anchors=True, **scale_args))
+                for key in ("signed", "rho"):
+                    blocks[key] = None if pieces[0][key] is None else torch.cat([part[key] for part in pieces])
+                blocks["leaves"] = {
+                    kind: {index: torch.cat([part["leaves"][kind][index] for part in pieces if index in part["leaves"][kind]])
+                           for index in set().union(*(part["leaves"][kind] for part in pieces))}
+                    for kind in ("self", "pair_signed", "pair_rho")
+                }
+            else:
+                blocks = sampled_scale(
+                draw_coef,
+                target,
+                sampler_batch,
+                **scale_args,
+                self_descriptors=desc,
+                target_self_descriptor=target_desc,
+                mean_kwargs=mean_args,
+                )
         score_version = blocks.pop("version")
         raw_leaves = blocks.pop("leaves")
         unit = coefficients.get("_difficulty_units", {})
@@ -178,6 +203,8 @@ def score(
                 target = grid(reference.detach())
             mask = f.domain_mask if f.native_masked else None
             if len(draws) > 2 and not context.get("_empirical_teacher"):
+                if isinstance(sampler_batch, ConditionQueryGroups):
+                    raise ValueError("grouped queries support paired or J2 training, not compiled assessment")
                 queries = shape.compile_queries((sampler_batch,))
                 compiled = shape.compile_reference(target, queries, valid_mask=mask)
                 blocks = shape.score_compiled(
@@ -185,6 +212,18 @@ def score(
                 )
                 # This branch is assessment-only; no adaptive difficulty update.
                 leaves = {"self": {}, "pair": {}}
+            elif isinstance(sampler_batch, ConditionQueryGroups):
+                grids = [grid(x) for x in draws]
+                pieces = [shape.score(grids[0][sl], None if deterministic else grids[1][sl],
+                    target[sl], group, valid_mask=mask, return_leaves=True,
+                    exhaustive=bool(context.get("exhaustive_shape_queries", False)),
+                    mode="paired" if deterministic else "conditional",
+                    additional_members=tuple(value[sl] for value in grids[2:]),
+                    empirical=bool(context.get("_empirical_teacher")))
+                    for sl, group in sampler_batch.slices(len(prediction))]
+                blocks = {key: torch.cat([p[0][key] for p in pieces]) for key in ("self", "mutual")}
+                leaves = {kind: {index: torch.cat([p[1][kind][index] for p in pieces if index in p[1][kind]])
+                    for index in set().union(*(p[1][kind] for p in pieces))} for kind in ("self", "pair")}
             else:
                 blocks, leaves = shape.score(
                     grid(draws[0]),

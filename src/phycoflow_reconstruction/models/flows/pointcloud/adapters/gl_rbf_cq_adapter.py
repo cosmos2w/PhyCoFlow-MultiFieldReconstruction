@@ -185,6 +185,8 @@ class GLRbfCQ(PortablePointCloudFFM):
         self.coordinate_dim = int(coordinate_dim)
         self.backbone_name = "GL_rbf_ENH_CQ"
         self.portable_config = dict(resolved)
+        self.rollout_context_cache = str(config.get("rollout_context_cache", "none"))
+        self.rollout_checkpointing = bool(config.get("rollout_checkpointing", False))
 
         self.train_query_microbatch_size = max(
             1,

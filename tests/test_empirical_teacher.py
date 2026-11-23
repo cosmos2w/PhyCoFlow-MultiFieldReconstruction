@@ -164,13 +164,38 @@ def test_expanded_empirical_leaves_match_pairwise_reduction():
 
 
 def test_observer_compatibility_is_limited_to_pinned_changes():
+    from itertools import product
     from phycoflow_reconstruction.coherence.observer_compatibility import _PAIRS, compatible_pooled_source, compatible_scale_source
     for name, key, check in (("pooled", "source_sha256", compatible_pooled_source), ("scale", "sources", compatible_scale_source)):
         saved = {key: {k: hashes[0] for k, hashes in _PAIRS[name].items()}, 'backend': 'fixed'}
         current = {key: {k: hashes[1] for k, hashes in _PAIRS[name].items()}, 'backend': 'fixed'}
         assert check(saved, current)
+        for choices in product((0, 1), repeat=len(_PAIRS[name])):
+            mixed = {key: {filename: hashes[choice] for (filename, hashes), choice in zip(_PAIRS[name].items(), choices)}, 'backend': 'fixed'}
+            assert check(mixed, current)
         assert not check({**saved, 'backend': 'changed'}, current)
         assert not check(saved, {**current, key: {**current[key], next(iter(current[key])): 'changed'}})
+        assert not check({**saved, key: {**saved[key], next(iter(saved[key])): 'unknown'}}, current)
+        assert not check({**saved, key: {**saved[key], 'other.py': 'changed'}}, current)
+
+
+def test_query_group_addition_preserves_all_prior_sampler_ast():
+    import ast
+    import hashlib
+    from pathlib import Path
+    import subprocess
+    from phycoflow_reconstruction.coherence.observer_compatibility import _PAIRS
+
+    root = Path(__file__).resolve().parents[1]
+    path = 'src/phycoflow_reconstruction/coherence/query_sampling.py'
+    old = subprocess.check_output(['git', 'show', f'de86b1f:{path}'], cwd=root)
+    new = (root / path).read_bytes()
+    assert (hashlib.sha256(old).hexdigest(), hashlib.sha256(new).hexdigest()) == _PAIRS['pooled']['query_sampling.py']
+    old_tree, new_tree = ast.parse(old), ast.parse(new)
+    inserted = [node for node in new_tree.body if isinstance(node, ast.ClassDef) and node.name == 'ConditionQueryGroups']
+    assert len(inserted) == 1
+    new_tree.body.remove(inserted[0])
+    assert ast.dump(old_tree, include_attributes=False) == ast.dump(new_tree, include_attributes=False)
 
 
 def test_reference_transform_cache_reuses_condition_identity(monkeypatch):

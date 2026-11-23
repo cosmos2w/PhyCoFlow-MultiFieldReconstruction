@@ -134,15 +134,36 @@ def differentiable_rf_rollout(
 
     times = torch.linspace(0.0, 1.0, steps + 1, device=state.device, dtype=state.dtype)
 
+    # The context belongs to this graph and this model invocation only.
+    cache_level = getattr(model, "rollout_context_cache", "none")
+    condition = query = None
+    if cache_level != "none":
+        if model.training:
+            raise ValueError("shared rollout context requires eval mode")
+        model._validate_batch(batch, require_target=False)
+        backbone = model.model
+        condition = backbone.prepare_condition_context(
+            batch.obs_coords, batch.obs_values, batch.obs_valid_mask, batch.obs_field_ids
+        )
+        if cache_level != "condition":
+            query = backbone.prepare_rollout_query_context(
+                batch.query_coords, condition, cache_level=cache_level
+            )
+
+    def evaluate(value, time):
+        if condition is None:
+            return model.velocity(batch, value, time)
+        return model.model.forward_query_chunk(time, value, batch.query_coords, condition, query)
+
     def velocity(value, time):
         if getattr(model, "rollout_checkpointing", False) and torch.is_grad_enabled():
             from torch.utils.checkpoint import checkpoint
 
             return checkpoint(
-                lambda x, t: model.velocity(batch, x, t), value, time,
+                evaluate, value, time,
                 use_reentrant=False, preserve_rng_state=True,
             )
-        return model.velocity(batch, value, time)
+        return evaluate(value, time)
 
     for step in range(steps):
         time0 = times[step].expand(state.shape[0])

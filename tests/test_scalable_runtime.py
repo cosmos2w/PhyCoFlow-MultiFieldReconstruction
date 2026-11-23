@@ -63,6 +63,28 @@ def test_runtime_deploys_and_restores_fixed_profile(monkeypatch):
     assert delayed.batch == resumed.batch
     assert delayed.sampler.fixed_probabilities == (.2, .3, .5)
 
+    grouped = ScalableRuntime(artifact, families, steps_per_epoch=1, expected_provenance=provenance,
+                              allocation_mode="uniform", condition_query_groups=8)
+    grouped.calibration.load_prefit(prefit)
+    grouped.begin_step(0)
+    initial = grouped.batch
+    grouped.finish_step(False)
+    grouped.begin_step(0)
+    assert grouped.batch == initial
+    values = {kind: {q.index: 1. for batch in grouped.batch.batches
+                     for q in getattr(batch, f"{kind}_queries")}
+              for kind in ("self", "pair")}
+    grouped.difficulties = {name: values for name in ("multiscale_spectrum", "topology")}
+    receipt = grouped.finish_step(False, consume_rejected=True)
+    assert not receipt["update_accepted"]
+    restored_grouped = ScalableRuntime(artifact, families, steps_per_epoch=1, expected_provenance=provenance,
+                                       allocation_mode="uniform", condition_query_groups=8)
+    restored_grouped.calibration.load_prefit(prefit)
+    restored_grouped.load_state_dict(grouped.state_dict())
+    grouped.begin_step(1)
+    restored_grouped.begin_step(1)
+    assert grouped.batch == restored_grouped.batch
+
 
 def test_runtime_acceptance_calibration_and_resume(monkeypatch):
     import phycoflow_reconstruction.training.scalable_runtime as module

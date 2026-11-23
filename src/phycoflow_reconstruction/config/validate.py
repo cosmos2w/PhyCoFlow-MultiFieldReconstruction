@@ -939,7 +939,7 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
         raise TypeError("coherence.scalable_anchored_coherence must be a mapping")
     _reject_unknown(
         scalable,
-        {"enabled", "max_samples", "candidate_count", "shape_batches", "field_floor", "adaptive", "source_members", "source_sensor_count", "save_source_panel", "common_core", "common_prefit", "allocation"},
+        {"enabled", "max_samples", "candidate_count", "shape_batches", "field_floor", "adaptive", "source_members", "source_sensor_count", "save_source_panel", "common_core", "common_prefit", "allocation", "condition_query_groups"},
         "coherence.scalable_anchored_coherence",
     )
     if not isinstance(scalable.get("enabled", False), bool):
@@ -950,6 +950,11 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
             or allocation["mode"] not in {"uniform", "qualified_fixed"}
             or isinstance(allocation["uniform_epochs"], bool) or not isinstance(allocation["uniform_epochs"], int) or allocation["uniform_epochs"] < 0):
         raise ValueError("allocation requires uniform/qualified_fixed mode and nonnegative uniform_epochs")
+    groups = scalable.get("condition_query_groups", 1)
+    if type(groups) is not int or groups not in (1, 8):
+        raise ValueError("condition_query_groups must be 1 or 8")
+    if groups == 8 and (not scalable.get("adaptive", {}).get("bank_artifact") or scalable.get("allocation", {}).get("mode") not in ("uniform", "qualified_fixed")):
+        raise ValueError("eight condition-query groups require an adaptive bank and uniform or qualified_fixed allocation")
     prefit = scalable.get("common_prefit")
     if prefit is not None:
         if not isinstance(prefit, Mapping) or set(prefit) != {"path", "sha256"} or not isinstance(prefit["path"], str) or not Path(prefit["path"]).is_absolute() or not isinstance(prefit["sha256"], str) or len(prefit["sha256"]) != 64 or any(c not in "0123456789abcdef" for c in prefit["sha256"]):
@@ -1449,6 +1454,8 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
             "weight_decay",
             "grad_clip",
             "multitask",
+            "direct_supervision",
+            "adam_betas",
             "fast_lagrangian",
             "execution_strategy",
             "lpc_ordered",
@@ -1466,6 +1473,46 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
         },
         "optimization",
     )
+    direct = optimization.get("direct_supervision")
+    if direct is not None:
+        if not isinstance(direct, Mapping):
+            raise TypeError("optimization.direct_supervision must be a mapping")
+        _reject_unknown(direct, {"mode", "units", "source_member_mse", "field_tolerance", "dot_tolerance"}, "optimization.direct_supervision")
+        if direct.get("mode") not in {"native", "safeguarded"}:
+            raise ValueError("direct_supervision.mode must be native or safeguarded")
+        if any(optimization.get(k) is not None for k in ("multitask", "fast_lagrangian", "execution_strategy", "lpc_ordered")):
+            raise ValueError("direct_supervision cannot be combined with another optimization policy")
+        if optimization.get("gradient_balance", "weighted_sum") != "weighted_sum":
+            raise ValueError("direct_supervision requires the weighted_sum route")
+        if optimization.get("model_mode", "eval") != "eval":
+            raise ValueError("direct_supervision requires matching deterministic eval-mode endpoints")
+        units = direct.get("units")
+        if not isinstance(units, Mapping) or set(units) != {"native", "state", "scale", "shape"}:
+            raise ValueError("direct_supervision.units requires native, state, scale and shape")
+        if any(not isinstance(v, (int, float)) or isinstance(v, bool) or not math.isfinite(v) or v <= 0 for v in units.values()):
+            raise ValueError("direct_supervision units must be positive and finite")
+        if direct["mode"] == "safeguarded":
+            from ..coherence.compose import three_family_order
+            three_family_order(name for name, settings in config["coherence"]["families"].items() if settings.get("enabled", True))
+            for key, positive in (("source_member_mse", True), ("field_tolerance", False)):
+                values = direct.get(key)
+                if not isinstance(values, list) or not values or any(not isinstance(v, (int, float)) or isinstance(v, bool) or not math.isfinite(v) or (v <= 0 if positive else v < 0) for v in values):
+                    raise ValueError(f"direct_supervision.{key} has invalid field values")
+            if len(direct["source_member_mse"]) != len(direct["field_tolerance"]):
+                raise ValueError("direct_supervision field arrays differ in length")
+            if not config["coherence"].get("scalable_anchored_coherence", {}).get("enabled", False):
+                raise ValueError("safeguarded direct supervision requires scalable physical coherence")
+        elif config["coherence"].get("scalable_anchored_coherence", {}).get("enabled", False):
+            raise ValueError("native direct supervision must disable scalable coherence")
+        dot_tolerance = direct.get("dot_tolerance", 0.0)
+        if not isinstance(dot_tolerance, (int, float)) or isinstance(dot_tolerance, bool) or not math.isfinite(dot_tolerance) or dot_tolerance < 0:
+            raise ValueError("direct_supervision.dot_tolerance must be nonnegative and finite")
+        if any(config.get("objectives", {}).get(k, {}).get("enabled", False) for k in ("endpoint", "source_anchor")):
+            raise ValueError("direct supervision does not combine extra endpoint objectives")
+    if "adam_betas" in optimization:
+        betas = optimization["adam_betas"]
+        if not isinstance(betas, (list, tuple)) or len(betas) != 2 or any(not isinstance(v, (int, float)) or isinstance(v, bool) or not math.isfinite(v) or not 0 <= v < 1 for v in betas):
+            raise ValueError("optimization.adam_betas must contain two values in [0,1)")
     _validate_optimization_values(optimization)
     _validate_lr_warmup(optimization)
     _validate_multitask(optimization)
@@ -1541,15 +1588,8 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
     if execution:
         model = config["model"]
         # The CLI resolves name-only source templates before validating again.
-        inherited_model_pending = config.get("inherit_base_config", True) and model == {
-            "name": "gl_rbf_cq"
-        }
-        if execution.get("context_cache", "none") != "none" and (
-            model.get("name") != "gl_rbf_cq" or (
-                not model.get("physical_field_transform") and not inherited_model_pending
-            )
-        ):
-            raise ValueError("rollout context caching requires a physical CQ model")
+        if execution.get("context_cache", "none") != "none" and model.get("name") != "gl_rbf_cq":
+            raise ValueError("rollout context caching requires a CQ model")
         if model.get("name") not in {"gl_rbf_cq", "diffusion_pde"}:
             raise ValueError("rollout checkpointing requires a qualified generative source")
         if execution.get("context_cache", "none") not in {

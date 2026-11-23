@@ -130,11 +130,46 @@ def test_inherited_source_allows_live_ema_evaluation_for_persistence(tmp_path):
 
 
 @pytest.mark.parametrize("inherit", [False, True])
-def test_rollout_execution_rejects_resolved_model_without_physical_transform(tmp_path, inherit):
+def test_rollout_execution_accepts_ordinary_cq(tmp_path, inherit):
     from phycoflow_reconstruction.config import validate_config
 
     config = post_config(tmp_path / "synthetic.h5", tmp_path / "source")
     config["inherit_base_config"] = inherit
     config["model"].pop("physical_field_transform")
-    with pytest.raises(ValueError, match="requires a physical CQ model"):
-        validate_config(config)
+    validate_config(config)
+
+
+@pytest.mark.parametrize("cache", ["condition", "geometry", "static_features"])
+@pytest.mark.parametrize("checkpointed", [False, True])
+@pytest.mark.parametrize("mode", ["none", "hard", "endpoint_smooth"])
+def test_ordinary_cq_rollout_context_parity(cache, checkpointed, mode):
+    from phycoflow_reconstruction.training.rollout import differentiable_rf_rollout
+
+    torch.manual_seed(216)
+    field = sample()
+    batch = build_observation_batch(
+        [field], SensorProtocol(name="structured_block_mean", field_counts={"phi": 16, "vx": 4, "vy": 4})
+    )
+    # Duplicate sensor coordinates exercise tied nearest-neighbor choices.
+    batch.obs_coords[:, 1] = batch.obs_coords[:, 0]
+    config = model_config()
+    config.pop("physical_field_transform")
+    baseline = build_model(config, DataSpec(field.field_names, ("dimensionless",) * 3, 3, (8, 8))).eval()
+    optimized = deepcopy(baseline)
+    optimized.rollout_context_cache = cache
+    baseline.rollout_checkpointing = optimized.rollout_checkpointing = checkpointed
+    optimizers = [torch.optim.Adam(m.parameters(), lr=1e-5) for m in (baseline, optimized)]
+    outcomes = []
+    for model, optimizer in zip((baseline, optimized), optimizers):
+        prediction = differentiable_rf_rollout(model, batch, steps=4, solver="euler", generator=torch.Generator().manual_seed(234), observation_config={"mode": mode})
+        prediction.square().mean().backward()
+        gradients = [None if p.grad is None else p.grad.detach().clone() for p in model.parameters()]
+        optimizer.step()
+        outcomes.append((prediction.detach(), gradients))
+    torch.testing.assert_close(outcomes[0][0], outcomes[1][0], rtol=2e-5, atol=3e-6)
+    for left, right in zip(outcomes[0][1], outcomes[1][1]):
+        assert (left is None) == (right is None)
+        if left is not None:
+            torch.testing.assert_close(left, right, rtol=2e-4, atol=3e-6)
+    for left, right in zip(baseline.parameters(), optimized.parameters()):
+        torch.testing.assert_close(left, right, rtol=2e-5, atol=2e-7)

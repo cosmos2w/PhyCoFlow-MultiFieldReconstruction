@@ -347,6 +347,9 @@ def _coherence_objective(
             query_indices=selected.metadata.get("query_indices"),
             coupling_selected_batch=selected,
             rollout_generator_state_sha256=hashlib.sha256(initial_generator_state.cpu().numpy().tobytes()).hexdigest(),
+            rollout_generator_state=initial_generator_state.clone(),
+            rollout_model_batch=model_batch,
+            rollout_complete_batch=complete,
         )
     if step_context is not None:
 
@@ -2030,7 +2033,7 @@ def run_post_training(
     ):
         if key in execution:
             if not hasattr(model, attribute) and key != "checkpointing":
-                raise ValueError("rollout_execution requires a compatible physical CQ model")
+                raise ValueError("rollout_execution requires a compatible CQ model")
             setattr(model, attribute, execution[key])
     subset_manifest = None
     if "training_subset" in config["optimization"]:
@@ -2039,12 +2042,16 @@ def run_post_training(
         subset_manifest = apply_training_subset(
             train_dataset, config["optimization"]["training_subset"]
         )
+    direct_settings = config["optimization"].get("direct_supervision")
+    direct_safeguarded = direct_settings is not None and direct_settings["mode"] == "safeguarded"
     constrained = config["optimization"].get("gradient_balance") in {
         "component_constrained",
         "topology_regularized",
     }
+    if direct_safeguarded and len(direct_settings["source_member_mse"]) != len(train_dataset.field_names):
+        raise ValueError("direct supervision field values must match dataset field order and count")
     source_anchor_model = None
-    if constrained or config.get("objectives", {}).get("source_anchor", {}).get("enabled", False):
+    if constrained or direct_safeguarded or config.get("objectives", {}).get("source_anchor", {}).get("enabled", False):
         # Snapshot before loading a resumed child: the anchor is always the source.
         source_anchor_model = deepcopy(model).eval().requires_grad_(False)
     if not len(train_dataset):
@@ -2071,6 +2078,7 @@ def run_post_training(
         [parameter for parameter in model.parameters() if parameter.requires_grad],
         lr=float(config["optimization"].get("lr", 5e-5)),
         weight_decay=float(config["optimization"].get("weight_decay", 0.0)),
+        betas=tuple(config["optimization"].get("adam_betas", (0.9, 0.999))),
     )
     multitask = config["optimization"].get("multitask")
     external_settings = (multitask or {}).get("external_policy")
@@ -2130,7 +2138,22 @@ def run_post_training(
         load_training_aux_state(model, checkpoint)
         optimizer.load_state_dict(checkpoint["optimizer"])
         start_step = int(checkpoint["global_step"])
+        if direct_settings is not None:
+            stream = checkpoint.get("native_stream", {})
+            expected = torch.Generator(device=device).manual_seed(seed + 2_000_003 + start_step).get_state()
+            if stream.get("scheme") != "per_attempt_seed_v1" or stream.get("next_attempt") != start_step or not torch.equal(stream.get("next_state", torch.empty(0, dtype=torch.uint8)).cpu(), expected.cpu()):
+                raise ValueError("direct native random stream checkpoint mismatch")
         store.recover_metric_histories(start_step)
+        if direct_settings is not None:
+            from .journals import recover_journal
+            direct_journal = store.run_dir / "logs" / "direct_updates.jsonl"
+            if start_step and not direct_journal.is_file():
+                raise FileNotFoundError("direct checkpoint is missing its attempt history")
+            recover_journal(direct_journal, start_step)
+            cursors = ([json.loads(line)["step"] for line in direct_journal.read_text().splitlines() if line.strip()]
+                       if direct_journal.is_file() else [])
+            if cursors != list(range(1, start_step + 1)):
+                raise ValueError("direct attempt history is not contiguous through the checkpoint")
         torch.set_rng_state(checkpoint["rng_state"]["torch_cpu"])
         if device.type == "cuda" and checkpoint["rng_state"].get("torch_cuda"):
             torch.cuda.set_rng_state_all(checkpoint["rng_state"]["torch_cuda"])
@@ -2286,6 +2309,7 @@ def run_post_training(
             scoring_mode="conditional" if model.capabilities.generative else "deterministic",
             allocation_mode=scalable_settings.get("allocation", {}).get("mode"),
             uniform_epochs=int(scalable_settings.get("allocation", {}).get("uniform_epochs", 0)),
+            condition_query_groups=int(scalable_settings.get("condition_query_groups", 1)),
         )
         prefit_declaration = scalable_settings.get("common_prefit")
         if prefit_declaration is not None:
@@ -2538,6 +2562,7 @@ def run_post_training(
         source_checkpoint=str(source_checkpoint_path(config)),
         source_hashes=source_hashes_before,
         source_metadata=source_metadata,
+        effective_child_ema_enabled=getattr(model, "_ema", None) is not None,
         inherited_base_keys=config.get("source", {}).get("inherited_base_keys", []),
         config_origins=config.get("source", {}).get("config_origins", {}),
         trainable_scope=config["trainable"],
@@ -2889,27 +2914,49 @@ def run_post_training(
                                      store.run_dir / 'checkpoints' / f'epoch_{start_step // steps_per_epoch:03d}.pt')
         store.update_manifest(pending_panel_step=None)
     last_coherence_loss = None
+    direct_batch_wait_started = perf_counter() if direct_settings is not None else None
     for offset, batch in enumerate(batch_source):
+        direct_data_wait_seconds = (perf_counter() - direct_batch_wait_started) if direct_batch_wait_started is not None else None
+        if direct_settings is not None:
+            step_started = perf_counter()
         global_step = start_step + offset
         if not full_pass:
             torch.randperm(len(train_dataset), generator=index_generator)
         epoch = global_step // steps_per_epoch + 1
-        if scalable_runtime is not None:
+        if scalable_runtime is not None and (direct_settings is None or direct_safeguarded):
             scalable_runtime.begin_step(global_step)
         post_training_mode(model, config)
-        step_started = perf_counter()
+        if direct_settings is None:
+            step_started = perf_counter()
         scheduled_lr = _scheduled_model_lr(config["optimization"], global_step, steps_per_epoch)
         if scheduled_lr is not None:
             for group in optimizer.param_groups:
                 group["lr"] = scheduled_lr
-        data_loss = (
-            torch.zeros((), device=device)
-            if constrained or policy is not None
-            else model.training_loss(batch).total
-        )
+        if direct_settings is not None:
+            from ..models.flows.pointcloud.adapters.gl_rbf_cq_adapter import _generator_rng_context
+            native_seed = seed + 2_000_003 + global_step
+            native_generator = torch.Generator(device=device).manual_seed(native_seed)
+            with _generator_rng_context(native_generator, device):
+                data_loss = model.training_loss(batch).total
+            from .scalable_fitting import _digest
+            direct_native_coupling = {
+                "sample_ids": list(batch.sample_ids),
+                "observation_sha256": _digest([batch.obs_indices, batch.obs_field_ids, batch.obs_coords, batch.obs_values, batch.obs_valid_mask]),
+                "query_sha256": _digest([batch.metadata.get("query_indices"), batch.query_coords, batch.query_valid_mask]),
+                "native_seed": native_seed,
+                "native_generator_state_after_sha256": _digest(native_generator.get_state()),
+            }
+        else:
+            data_loss = (
+                torch.zeros((), device=device)
+                if constrained or policy is not None
+                else model.training_loss(batch).total
+            )
         every = int(config["coherence"]["schedule"].get("every_n_steps", 1))
         coherence_weight = _coherence_weight(config, epoch)
         coherence_active = coherence_weight > 0 and global_step % every == 0
+        if direct_settings is not None:
+            coherence_active = direct_safeguarded
         retention_active = (
             any(
                 config["objectives"].get(name, {}).get("enabled", False)
@@ -2934,7 +2981,7 @@ def run_post_training(
             step_context = {} if constrained else None
             endpoint_context = {} if policy is not None or scalable_runtime is not None else None
             retention_losses: dict[str, torch.Tensor] = {}
-            raw_family_losses = {} if scalarizer is not None else None
+            raw_family_losses = {} if scalarizer is not None or direct_safeguarded else None
             rollout_generator = torch.Generator(device=device).manual_seed(
                 seed + 1_000_003 + global_step
             )
@@ -3046,7 +3093,44 @@ def run_post_training(
             )
             row["data_update_weight"] = data_update_weight
             row["coherence_update_weight"] = coherence_update_weight
-            if policy is not None:
+            if direct_safeguarded:
+                row["data_update_weight"] = 1.0 / float(direct_settings["units"]["native"])
+                row["coherence_update_weight"] = 1.0 / 3.0
+                row["direct_family_units"] = {key: float(direct_settings["units"][key]) for key in ("state", "scale", "shape")}
+                if len(endpoint_context["members"]) != 2:
+                    raise ValueError("direct safeguard requires exactly two independent endpoint members")
+                from .direct_supervision import direct_scalar, finite_field_action
+                scalar = direct_scalar(data_loss, raw_family_losses, direct_settings["units"], family_scales, families)
+                post_training_mode(source_anchor_model, config)
+                def replay(candidate):
+                    members = []
+                    for member in range(len(endpoint_context["members"])):
+                        gen = torch.Generator(device=device)
+                        if member == 0:
+                            gen.set_state(endpoint_context["rollout_generator_state"])
+                        else:
+                            gen.manual_seed(_conditional_draw_seed(rollout_generator.initial_seed(), member))
+                        value = differentiable_reconstruction(candidate, endpoint_context["rollout_model_batch"],
+                            steps=int(config["rollout"]["steps"]), solver=config["rollout"]["solver"],
+                            generator=gen, observation_config=dict(config["observation_consistency"]))
+                        if candidate.capabilities.structured_grid_required:
+                            value = _gather_prediction(value, endpoint_context["rollout_complete_batch"], endpoint_context["coupling_selected_batch"])
+                        members.append(value)
+                    replay_endpoint = dict(endpoint_context, prediction=members[0], members=members)
+                    return _physical_endpoint_risk(replay_endpoint, train_dataset, mean_risk=True).mean(dim=0)
+                with torch.no_grad():
+                    source_risk = replay(source_anchor_model)
+                    pre_excess = _physical_endpoint_risk(endpoint_context, train_dataset, mean_risk=True).mean(dim=0) - source_risk
+                gradient = finite_field_action(model, optimizer, scalar, pre_excess,
+                    direct_settings["source_member_mse"], direct_settings["field_tolerance"],
+                    lambda: replay(model) - source_risk,
+                    config["optimization"].get("grad_clip"), direct_settings.get("dot_tolerance", 0.0))
+                gradient["field_source_risk"] = source_risk.detach().cpu().tolist()
+                gradient["field_source_ensemble_checks"] = 1
+                gradient["direct_scalar"] = float(scalar.detach().cpu())
+                gradient["direct_loss_order"] = ["native", "state", "scale", "shape"]
+                row["data_retention_objective"] = "native_with_paired_source_finite_field_filter"
+            elif policy is not None:
                 ordered = getattr(policy, "lpc_ordered", None)
                 if ordered is not None:
                     ordered_losses = {
@@ -3291,22 +3375,22 @@ def run_post_training(
             del result, coherence_loss, coherence_objectives
             del retention_losses, step_context, raw_family_losses, endpoint_context
         else:
-            row["data_update_weight"] = _data_weight(config)
+            row["data_update_weight"] = (1.0 / float(direct_settings["units"]["native"]) if direct_settings is not None else _data_weight(config))
             row["coherence_update_weight"] = 0.0
             row.update(
                 data_only_update(
                     model,
                     optimizer,
                     data_loss,
-                    weight=_data_weight(config),
+                    weight=(1.0 / float(direct_settings["units"]["native"]) if direct_settings is not None else _data_weight(config)),
                     grad_clip=config["optimization"].get("grad_clip"),
                 )
             )
-        if scalable_runtime is not None:
+        if scalable_runtime is not None and (direct_settings is None or direct_safeguarded):
             accepted = row.get("update_accepted", True)
             scalable_runtime.record_occupied_time(perf_counter() - step_started)
-            scalable_row = scalable_runtime.finish_step(accepted)
-            if not accepted:
+            scalable_row = scalable_runtime.finish_step(accepted, consume_rejected=direct_safeguarded)
+            if not accepted and not direct_safeguarded:
                 raise FloatingPointError(
                     "scalable coherence cannot advance a rejected optimizer update"
                 )
@@ -3320,6 +3404,11 @@ def run_post_training(
                 "a", encoding="utf-8"
             ) as stream:
                 stream.write(json.dumps(coupling, allow_nan=False) + "\n")
+        if direct_settings is not None:
+            row["native_coupling"] = direct_native_coupling
+            row["data_wait_seconds"] = direct_data_wait_seconds
+            row["attempted_condition_visits"] = len(batch.sample_ids)
+            row["accepted_objective_condition_visits"] = len(batch.sample_ids) if row.get("update_accepted", True) else 0
         if row.get("update_accepted", True):
             after_optimizer_step(model)
         if scalarizer is not None and (global_step + 1) % steps_per_epoch == 0:
@@ -3357,7 +3446,10 @@ def run_post_training(
         ] * row.get("coherence_loss", 0.0) * (
             every if config["coherence"]["schedule"].get("interval_rescale", False) else 1
         )
-        if policy is not None:
+        if direct_settings is not None:
+            row["total"] = (row["direct_scalar"] if direct_safeguarded else row["native_data_loss"] / float(direct_settings["units"]["native"]))
+            row["total_semantics"] = "native_state_scale_shape_normalized_scalar" if direct_safeguarded else "normalized_native_scalar"
+        elif policy is not None:
             # ConFIG supplies a parameter direction, not a scalar surrogate
             # whose derivative equals that direction. Retain scientific A/B/T
             # metrics and leave the scalar-objective history empty for it.
@@ -3406,6 +3498,9 @@ def run_post_training(
             }
             with (store.run_dir / "metrics/lr_warmup_updates.jsonl").open("a") as handle:
                 handle.write(json.dumps(detail, allow_nan=False) + "\n")
+        if direct_settings is not None:
+            with (store.run_dir / "logs" / "direct_updates.jsonl").open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps(_json_safe(row), allow_nan=False) + "\n")
         monitor.record(row, lr=row["optimizer_lr"])
         # Campaign accounting is checked only at a durable accepted-update
         # boundary, before potentially expensive inference callbacks. A budget
@@ -3514,6 +3609,8 @@ def run_post_training(
                 checkpoint_result is not None and checkpoint_result[1] is not None
             ),
         )
+        if direct_settings is not None:
+            direct_batch_wait_started = perf_counter()
 
     batch_source.close()
 
@@ -3729,6 +3826,9 @@ def _post_checkpoint_payload(
             "index_generator": index_generator.get_state(),
         },
     }
+    if config["optimization"].get("direct_supervision") is not None:
+        next_native = torch.Generator(device=device).manual_seed(int(config["runtime"].get("seed", 42)) + 2_000_003 + int(global_step))
+        payload["native_stream"] = {"scheme": "per_attempt_seed_v1", "next_attempt": int(global_step), "next_state": next_native.get_state()}
     if hasattr(train_dataset, "scalable_runtime"):
         payload["scalable_runtime"] = train_dataset.scalable_runtime.state_dict()
     if hasattr(train_dataset, "training_monitor"):

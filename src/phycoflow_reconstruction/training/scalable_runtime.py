@@ -11,7 +11,7 @@ import torch
 
 from ..coherence.adaptive_fitting import spectral_filter, validate_bank
 from ..coherence.query_runtime import ScalableQueryAdapter
-from ..coherence.query_sampling import HierarchicalQuerySampler, SharedQuerySampler
+from ..coherence.query_sampling import ConditionQueryGroups, HierarchicalQuerySampler, SharedQuerySampler
 from ..coherence.scale_compute import third_order_scores
 from ..coherence.state_compute import group_projection_scores
 from ..coherence.state_compute import score_family as state_score
@@ -35,6 +35,7 @@ class ScalableRuntime:
         core_only=False,
         allocation_mode=None,
         uniform_epochs=0,
+        condition_query_groups=1,
     ):
         validate_scalable_artifacts(artifacts, expected_provenance)
         if scoring_mode not in {"conditional", "deterministic"}:
@@ -125,6 +126,13 @@ class ScalableRuntime:
             sampler_options.pop("profile_sha256", None)
         self.sampler = sampler_class(self.fields, seed=int(seed), **sampler_options)
         self.probe_sampler = sampler_class(self.fields, seed=int(seed) + 104729, **sampler_options)
+        if type(condition_query_groups) is not int or condition_query_groups not in (1, 8):
+            raise ValueError("condition_query_groups must be 1 or 8")
+        if condition_query_groups > 1 and self.bank is None:
+            raise ValueError("grouped queries require the fixed or uniform bank sampler")
+        self.condition_query_groups = condition_query_groups
+        self.group_samplers = [sampler_class(self.fields, seed=int(seed) + 7919 * i, **sampler_options)
+                               for i in range(1, condition_query_groups)]
         self._gradient_cost_measurements = None
         self.policy_seconds = 0.0
         self.occupied_seconds = 0.0
@@ -156,11 +164,15 @@ class ScalableRuntime:
         if self.batch is not None or step != self.step:
             raise ValueError("runtime cursor mismatch or pending update")
         if self._fixed_probabilities is not None and step >= self.uniform_epochs * self.steps_per_epoch:
-            self.sampler.fixed_probabilities = tuple(self._fixed_probabilities)
-            self.sampler.profile_sha256 = self._fixed_profile_sha256
-        self._before = (self.sampler.state_dict(), self.probe_sampler.state_dict())
+            for sampler in (self.sampler, *self.group_samplers):
+                sampler.fixed_probabilities = tuple(self._fixed_probabilities)
+                sampler.profile_sha256 = self._fixed_profile_sha256
+        self._before = (self.sampler.state_dict(), self.probe_sampler.state_dict(),
+                        [sampler.state_dict() for sampler in self.group_samplers])
         sampler_started = perf_counter()
-        self.batch = self.sampler.draw()
+        first = self.sampler.draw()
+        self.batch = (ConditionQueryGroups((first, *(sampler.draw() for sampler in self.group_samplers)))
+                      if self.group_samplers else first)
         self.sampler_seconds += perf_counter() - sampler_started
         self.blocks, self.difficulties, self.pending_probe = {}, {}, None
         self._gradient_cost_measurements = None
@@ -399,15 +411,16 @@ class ScalableRuntime:
         }
         self.probe_sampler.finish()
 
-    def finish_step(self, accepted):
+    def finish_step(self, accepted, *, consume_rejected=False):
         if self.batch is None:
             raise ValueError("no pending runtime update")
-        if not accepted:
+        if not accepted and not consume_rejected:
             sampler_class = (
                 HierarchicalQuerySampler if self.bank is not None else SharedQuerySampler
             )
             self.sampler = sampler_class.from_state_dict(self._before[0])
             self.probe_sampler = sampler_class.from_state_dict(self._before[1])
+            self.group_samplers = [sampler_class.from_state_dict(state) for state in self._before[2]]
             self.batch = None
             self.pending_probe = None
             return
@@ -431,14 +444,21 @@ class ScalableRuntime:
         exposure = []
         sampler_started = perf_counter()
         if self.bank is not None:
+            first_exposure = [] if self.group_samplers else exposure
             if self._gradient_cost_measurements is None:
-                self.sampler.finish(exposure_sink=exposure.append)
+                self.sampler.finish(exposure_sink=first_exposure.append)
             else:
                 self.sampler.finish_measurements(
                     self_measurements=self._gradient_cost_measurements[0],
                     pair_measurements=self._gradient_cost_measurements[1],
-                    exposure_sink=exposure.append,
+                    exposure_sink=first_exposure.append,
                 )
+            if self.group_samplers:
+                exposure.extend({**row, "condition_group": 0} for row in first_exposure)
+            for group_index, sampler in enumerate(self.group_samplers, start=1):
+                group_exposure = []
+                sampler.finish(exposure_sink=group_exposure.append)
+                exposure.extend({**row, "condition_group": group_index} for row in group_exposure)
         else:
             self.sampler.finish(
                 self_difficulties=values["self"],
@@ -449,6 +469,8 @@ class ScalableRuntime:
         self.step += 1
         if self.step % self.steps_per_epoch == 0:
             self.sampler.refresh(epoch)
+            for sampler in self.group_samplers:
+                sampler.refresh(epoch)
             self.sampler_seconds += perf_counter() - sampler_started
             if epoch == 10 and self.calibration.coefficients is None:
                 self.calibration.freeze(epoch)
@@ -459,6 +481,7 @@ class ScalableRuntime:
         return {
             "step": self.step,
             "epoch": epoch,
+            "update_accepted": bool(accepted),
             "exposure": exposure,
             "probe_norms": probe,
             "probe_identity": self.probe_identity if probe is not None else None,
@@ -479,6 +502,8 @@ class ScalableRuntime:
             "core_only": self.core_only,
             "allocation_mode": self.allocation_mode,
             "uniform_epochs": self.uniform_epochs,
+            "condition_query_groups": self.condition_query_groups,
+            "group_samplers": [sampler.state_dict() for sampler in self.group_samplers],
             "adaptive_bank_sha256": self.bank["sha256"] if self.bank is not None else None,
             "policy_seconds": self.policy_seconds,
             "occupied_seconds": self.occupied_seconds,
@@ -501,6 +526,7 @@ class ScalableRuntime:
             or state.get("core_only", False) != self.core_only
             or state.get("allocation_mode") != self.allocation_mode
             or state.get("uniform_epochs", 0) != self.uniform_epochs
+            or state.get("condition_query_groups", 1) != self.condition_query_groups
             or state.get("adaptive_bank_sha256")
             != (self.bank["sha256"] if self.bank is not None else None)
         ):
@@ -511,6 +537,16 @@ class ScalableRuntime:
         sampler_class = HierarchicalQuerySampler if self.bank is not None else SharedQuerySampler
         sampler = sampler_class.from_state_dict(state["sampler"])
         probe_sampler = sampler_class.from_state_dict(state["probe_sampler"])
+        group_samplers = [sampler_class.from_state_dict(item) for item in state.get("group_samplers", [])]
+        if len(group_samplers) != len(self.group_samplers):
+            raise ValueError("runtime group sampler count mismatch")
+        for actual, initial in zip(group_samplers, self.group_samplers):
+            if (actual.pending is not None or actual.counter != step
+                    or actual.inner_seed != initial.inner_seed or actual.fields != initial.fields
+                    or any(getattr(actual, key) != getattr(sampler, key) for key in
+                           ("mutual_draws", "epsilon", "decay", "capacity", "refresh_epochs",
+                            "hierarchy_weight", "fixed_probabilities", "profile_sha256"))):
+                raise ValueError("runtime group sampler identity or cursor mismatch")
         calibration = InternalCalibration.from_state_dict(state["calibration"])
         for actual, initial in ((sampler, self.sampler), (probe_sampler, self.probe_sampler)):
             keys = (
@@ -566,6 +602,7 @@ class ScalableRuntime:
         if state.get("policy_enabled", False):
             raise ValueError("online changing policy has no deployment qualification")
         self.policy_enabled = False
+        self.group_samplers = group_samplers
         if (not all(math.isfinite(x) and x >= 0 for x in (self.policy_seconds, self.occupied_seconds, self.sampler_seconds))
                 or self.sampler_completed_updates < 0 or self.sampler_completed_updates > step):
             raise ValueError("invalid policy timing state")

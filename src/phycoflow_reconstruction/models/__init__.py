@@ -320,11 +320,10 @@ def build_model(config: Mapping[str, Any], data_spec: DataSpec, physics_provider
         from .compatibility.physical_gl_rbf_cq import PhysicalGLRbfCQ
 
         return PhysicalGLRbfCQ(**common, **kwargs)
-    if name == "gl_rbf_cq" and kwargs.get("rollout_checkpointing"):
-        raise ValueError("rollout_checkpointing requires physical_field_transform")
-    kwargs.pop("rollout_checkpointing", None)
-    if kwargs.pop("rollout_context_cache", "none") != "none":
-        raise ValueError("rollout_context_cache requires physical_field_transform")
+    if name != "gl_rbf_cq":
+        kwargs.pop("rollout_checkpointing", None)
+        if kwargs.pop("rollout_context_cache", "none") != "none":
+            raise ValueError("rollout_context_cache requires a CQ model")
     if "data_query_points" in kwargs:
         raise ValueError("data_query_points requires physical_field_transform")
     return MODEL_REGISTRY.build(name, **common, **kwargs)

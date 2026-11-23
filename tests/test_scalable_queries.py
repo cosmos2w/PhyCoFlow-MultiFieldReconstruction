@@ -131,6 +131,44 @@ def test_sampled_scale_exhaustive_value_and_gradient():
     assert result["rho"].shape == result["joint"].shape == (batch_size,)
 
 
+@pytest.mark.parametrize('mode', ['paired', 'conditional'])
+def test_default_scale_values_and_gradients_match_pinned_round4(mode):
+    import subprocess
+    import types
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    source = subprocess.check_output(['git', 'show',
+        'de86b1f:src/phycoflow_reconstruction/coherence/scale_compute.py'], cwd=root)
+    old = types.ModuleType('phycoflow_reconstruction.coherence._round4_scale')
+    old.__package__ = 'phycoflow_reconstruction.coherence'
+    exec(compile(source, '<round4 scale>', 'exec'), old.__dict__)
+    torch.manual_seed(203)
+    members, count, k, fields, bands = (1 if mode == 'paired' else 2), 3, 4, 3, 2
+    draws = torch.randn(members, count, k, fields, dtype=torch.double, requires_grad=True)
+    target = torch.randn(count, k, fields, dtype=torch.double)
+    kwargs = dict(filters=torch.rand(bands, k, dtype=torch.double),
+        scales=torch.ones(bands, fields, dtype=torch.double), mass=torch.ones(k, dtype=torch.double),
+        power_floor=torch.ones(bands, fields, dtype=torch.double),
+        band_weights=torch.ones(bands, dtype=torch.double) / bands,
+        self_descriptors=torch.randn(members, count, bands*fields, dtype=torch.double),
+        target_self_descriptor=torch.randn(count, bands*fields, dtype=torch.double),
+        mean_kwargs={'draw_piece_means':torch.randn(members, count, 1, fields, dtype=torch.double),
+            'target_piece_means':torch.randn(count, 1, fields, dtype=torch.double),
+            'piece_weights':torch.ones(1, dtype=torch.double),
+            'mean_scales':torch.ones(1, fields, dtype=torch.double), 'mean_weight':1.0}, mode=mode)
+    query = SharedQuerySampler(['a', 'b', 'c'], seed=91).draw()
+    previous = old.sampled_scale(draws, target, query, **kwargs)
+    current = sampled_scale(draws, target, query, **kwargs)
+    for key in ('signed', 'rho', 'joint', 'log_power_self'):
+        torch.testing.assert_close(previous[key], current[key], rtol=0, atol=0)
+        previous_grad = torch.autograd.grad(previous[key].sum(), draws, retain_graph=True, allow_unused=True)[0] if previous[key].requires_grad else None
+        current_grad = torch.autograd.grad(current[key].sum(), draws, retain_graph=True, allow_unused=True)[0] if current[key].requires_grad else None
+        assert (previous_grad is None) == (current_grad is None)
+        if previous_grad is not None:
+            torch.testing.assert_close(previous_grad, current_grad, rtol=0, atol=0)
+
+
 def test_lazy_shape_calibration_roundtrip_and_gradients():
     torch.manual_seed(2)
     x = torch.randn(2, 2, 4, 4, dtype=torch.double, requires_grad=True)
@@ -223,6 +261,68 @@ def test_fitted_relation_adapter_complete_anchor_and_gradients():
     )
     for i, value in original["self"].items():
         torch.testing.assert_close(priority["self"][i], value / 4)
+
+
+def test_condition_groups_scale_and_shape_match_per_condition(monkeypatch):
+    from dataclasses import replace
+    from types import SimpleNamespace
+    from scalable_test_helpers import _fitted, _states, config
+    from phycoflow_reconstruction.coherence.query_runtime import score
+    from phycoflow_reconstruction.coherence.query_sampling import ConditionQueryGroups
+    import phycoflow_reconstruction.coherence.query_runtime as query_runtime
+
+    torch.manual_seed(83)
+    states = _states()
+    scale, coords, _ = _fitted(config(), states)
+    n = 10
+    x, y = (states[i:i+1].repeat(n, 1, 1).clone().requires_grad_() for i in (0, 3))
+    target = states[1:2].repeat(n, 1, 1)
+    queries = tuple(SharedQuerySampler(scale.field_names, seed=i, epsilon=1).draw() for i in range(8))
+    # Exercise a nonuniform outer proposal and its inverse weight in both families.
+    queries = tuple(replace(q, self_queries=tuple(replace(d, probability=.2 if d.index == 0 else .8)
+                                                 for d in q.self_queries)) for q in queries)
+    grouped = ConditionQueryGroups(queries)
+    assert [sl.stop-sl.start for sl, _ in grouped.slices(3)] == [1, 1, 1]
+    assert [sl.stop-sl.start for sl, _ in grouped.slices(n)] == [2, 2, 1, 1, 1, 1, 1, 1]
+    condition_queries = [q for sl, q in grouped.slices(n) for _ in range(sl.start, sl.stop)]
+    xy = {"conditional_draws": (y,)}
+    coordinates = coords[None].expand(len(x), -1, -1)
+    calls = []
+    original_scale = query_runtime.sampled_scale
+    def counted_scale(*args, **kwargs):
+        calls.append((kwargs.get("_anchors_only", False), kwargs.get("_skip_anchors", False)))
+        return original_scale(*args, **kwargs)
+    monkeypatch.setattr(query_runtime, "sampled_scale", counted_scale)
+    actual, _, _ = score("scale", scale, x, target, coordinates, xy, grouped, {})
+    assert calls.count((True, False)) == 1
+    assert calls.count((False, True)) == 8
+    per = [score("scale", scale, x[i:i+1], target[i:i+1], coordinates[i:i+1],
+                 {"conditional_draws": (y[i:i+1],)}, condition_queries[i], {})[0] for i in range(n)]
+    expected = torch.cat([item.per_sample_cost for item in per])
+    torch.testing.assert_close(actual.per_sample_cost, expected)
+    for left, right in zip(torch.autograd.grad(actual.scalar_loss, (x, y), retain_graph=True),
+                           torch.autograd.grad(expected.mean(), (x, y))):
+        torch.testing.assert_close(left, right)
+
+    a = torch.randn(n, 2, 4, 4, requires_grad=True)
+    b = torch.randn_like(a, requires_grad=True)
+    ref = torch.randn_like(a)
+    shape = LazyPooledShape([0, 0], [1, 1], dimensions=(0,), projections=4)
+    shape.accumulate(a.detach(), ref, full_batch(2))
+    shape.freeze(provenance={"split": "train", "sample_ids": [str(i) for i in range(n)], "source_checkpoint_sha256": "a" * 64})
+    family = SimpleNamespace(field_names=tuple(scale.field_names), _raster_map=lambda coordinates: None,
+        native_masked=False, spatial_objective=SimpleNamespace(weights={"self.persistence": 1., "mutual.persistence": 1.}))
+    monkeypatch.setattr(query_runtime, "_shape_grid", lambda family, values, reference: values)
+    context = {"conditional_draws": (b,), "field_order": tuple(scale.field_names)}
+    grouped_score = score("shape", family, a, ref, None, context, grouped, {"shape_object": shape})[0]
+    per = [score("shape", family, a[i:i+1], ref[i:i+1], None,
+                 {"conditional_draws": (b[i:i+1],), "field_order": tuple(scale.field_names)},
+                 condition_queries[i], {"shape_object": shape})[0] for i in range(n)]
+    expected = torch.cat([item.per_sample_cost for item in per])
+    torch.testing.assert_close(grouped_score.per_sample_cost, expected)
+    for left, right in zip(torch.autograd.grad(grouped_score.scalar_loss, (a, b), retain_graph=True),
+                           torch.autograd.grad(expected.mean(), (a, b))):
+        torch.testing.assert_close(left, right)
 
 
 def test_real_sampled_scale_and_shape_importance_value_gradient_and_variance():

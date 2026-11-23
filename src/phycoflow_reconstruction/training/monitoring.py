@@ -132,6 +132,7 @@ class TrainingMonitor:
         self._calibration_freeze_epoch = None
         self._recording_definitions = None
         self._loss_component_order = []
+        self._direct_recording = False
         self._recording_definitions_path = self.run_dir / "logs" / "recording_definitions.json"
         config_path = self.run_dir / "resolved_config.yaml"
         if config_path.is_file():
@@ -140,7 +141,10 @@ class TrainingMonitor:
             self._calibration_freeze_epoch = find_calibration_freeze([], load_config(config_path))
             config = load_config(config_path)
             self._loss_component_order = [name for name, settings in config.get("coherence", {}).get("families", {}).items() if settings.get("enabled", True)]
-            self._ordered_recording = bool(config.get("coherence", {}).get("scalable_anchored_coherence", {}).get("common_prefit"))
+            self._ordered_recording = bool(config.get("coherence", {}).get("scalable_anchored_coherence", {}).get("common_prefit") or config.get("optimization", {}).get("direct_supervision"))
+            if config.get("optimization", {}).get("direct_supervision"):
+                self._direct_recording = True
+                self._loss_component_order = ["native", "state", "scale", "shape"] if config["optimization"]["direct_supervision"]["mode"] == "safeguarded" else ["native"]
         else:
             self._ordered_recording = False
         if self._ordered_recording and int(start_step) % self.steps_per_epoch:
@@ -283,6 +287,10 @@ class TrainingMonitor:
             row["update_mode"] = (
                 next(iter(self._epoch_modes)) if len(self._epoch_modes) == 1 else "mixed"
             )
+        if "attempted_condition_visits" in self._epoch_sums:
+            row["attempted_condition_visits"] = int(self._epoch_sums["attempted_condition_visits"])
+            row["accepted_objective_condition_visits"] = int(self._epoch_sums["accepted_objective_condition_visits"])
+            row["accepted_actions"] = int(self._epoch_booleans.get("update_accepted", batches))
         if self._ordered_recording:
             if self._recording_definitions is not None:
                 order = self._recording_definitions["accumulation_order"]
@@ -301,6 +309,46 @@ class TrainingMonitor:
                     return "string"
                 return "object"
             def definition(key, value):
+                if self._direct_recording:
+                    units = "dimensionless"
+                    meaning = "Finite numeric values are averaged over attempted updates, including rejected attempts; structured values retain the last attempt."
+                    if key in {"step", "batches", "attempted_updates"}:
+                        units, meaning = "attempts", "Completed attempted updates, including consumed rejections."
+                    elif key == "epoch":
+                        units, meaning = "reporting_epochs", "Completed reporting epoch."
+                    elif key in {"accepted_actions", "accepted_updates"}:
+                        units, meaning = "actions", "Number of accepted optimizer actions in this reporting epoch."
+                    elif key == "attempted_condition_visits":
+                        units, meaning = "condition_visits", "Sum of condition visits in attempted updates, including rejections."
+                    elif key == "accepted_objective_condition_visits":
+                        units, meaning = "condition_visits", "Sum of objective-bearing condition visits for accepted actions."
+                    elif key.endswith("_seconds"):
+                        units, meaning = "seconds", "Measured wall duration averaged over attempted updates; update and data-wait durations are recorded separately."
+                    elif key in {"native_data_loss", "data_loss"}:
+                        units, meaning = "native_objective_units", "Raw sampled mean-squared bridge-velocity error in model-field velocity units squared, averaged over attempted updates before the native outer unit is applied."
+                    elif key in {"total", "direct_scalar"}:
+                        units, meaning = "normalized_scalar", "Attempt-mean optimized scalar: native divided by its fixed unit, plus the equally weighted unit-normalized State, Scale and Shape terms for the safeguarded route."
+                    elif key in {"field_excess_pre", "field_excess_post", "field_source_risk", "field_tolerance"}:
+                        units, meaning = "model_field_units_squared", "Last attempted batch values, ordered by the saved dataset field order; excess is the paired live-minus-immutable-SOURCE signed mean risk and tolerance is the fixed replay-derived numerical allowance."
+                    elif key == "action_dot":
+                        units, meaning = "normalized_scalar", "Attempt-mean dot product of the unclipped direct-objective gradient and the complete proposed AdamW displacement, including weight decay."
+                    elif key == "action_norm":
+                        units, meaning = "parameter_space_norm", "Attempt-mean Euclidean norm of the complete proposed AdamW displacement before any half action."
+                    elif key == "action_alpha":
+                        units, meaning = "displacement_fraction", "Attempt-mean applied fraction: 1 for full action, 0.5 for half action, 0 for rejection or no-op."
+                    elif key == "action_reason":
+                        units, meaning = "category", "Reason for the last attempted proposal; per-attempt reasons are in direct_updates.jsonl."
+                    elif key in {"field_source_ensemble_checks", "field_post_ensemble_checks"}:
+                        units, meaning = "ensemble_checks_per_attempt", "Mean count of no-gradient SOURCE or post-proposal J2 field checks per attempted update."
+                    elif key in {"update_accepted", "update_accepted_fraction"}:
+                        units, meaning = "boolean_or_fraction", "Any accepted action in the epoch, or the fraction of all attempts accepted."
+                    elif key == "optimizer_lr":
+                        units, meaning = "optimizer_step_scale", "AdamW learning rate used by the attempted proposal, averaged over attempts."
+                    elif key.startswith("coherence_family/") or "coherence" in key:
+                        units, meaning = "declared_representation_units", "Sampled coherence diagnostic under the frozen family definitions, averaged over attempts."
+                    elif key.endswith(("_grad_norm", "_direction_norm")):
+                        units, meaning = "parameter_gradient_norm", "Attempt-mean norm in the declared trainable parameter space."
+                    return {"name": key, "type": kind(value), "units": units, "meaning": meaning}
                 units, meaning = "dimensionless", "Accepted-update epoch diagnostic; structured values retain their named axes."
                 if key in {"step", "epoch", "batches", "completed_updates"}:
                     units, meaning = "updates" if key != "epoch" else "reporting_epochs", "Completed clock or count in the saved B64/12 reporting convention."
@@ -323,7 +371,7 @@ class TrainingMonitor:
                     "columns": [definition(k, v) for k, v in row.items()],
                     "accumulation_order": list(self._epoch_sums),
                     "loss_component_accumulation_order": self._loss_component_order,
-                    "aggregation": "finite values averaged in accepted update order; booleans recorded as any and fraction",
+                    "aggregation": ("finite numeric values averaged over attempted updates including consumed rejections; structured values retain the last attempt; booleans recorded as any and fraction; explicit visit and action counts are summed" if self._direct_recording else "finite values averaged in accepted update order; booleans recorded as any and fraction"),
                 }
                 self._recording_definitions_path.write_text(json.dumps(self._recording_definitions, indent=2) + "\n")
             else:
@@ -400,7 +448,8 @@ class TrainingMonitor:
             "version": "complete_epoch_timing_v1",
             "epoch": int(pending["epoch"]),
             "step": int(pending["step"]),
-            "accepted_updates": int(summary["batches"]),
+            "attempted_updates": int(summary["batches"]),
+            "accepted_updates": int(summary.get("accepted_actions", summary["batches"])),
             "train_seconds": train_seconds,
             "wall_seconds": wall_seconds,
             "callback_and_reporting_seconds": max(0.0, wall_seconds - train_seconds),
