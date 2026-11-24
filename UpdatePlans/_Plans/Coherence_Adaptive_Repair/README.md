@@ -7,6 +7,7 @@ This is the reading collection for Coherence Adaptive Repair. Round 6 has resume
 - [Workplan](Round_6/WORKPLAN.md), [review and decisions](Round_6/REVIEW_AND_DECISIONS.md), [historical audit](Round_6/evidence/HISTORICAL_AUDIT.md), and [execution prompt](Round_6/EXECUTION_PROMPT.md).
 - [Execution record](Round_6/EXECUTION_STATUS.md), [scientific report](../../_Reports/Coherence_Adaptive_Repair/Round_6/report.md), and [PDF master](../../_Reports/Coherence_Adaptive_Repair/Round_6/report.pdf).
 - [Resumption decisions](Round_6/RESUMPTION_DECISIONS.md) nominate the already measured positive-feedback probe for fresh-SOURCE pilot/learning and preserve the original audit as a stage snapshot. The original 30 occupied GPU-hour ceiling includes prior preparation.
+- [Method and change ledger](Round_6/METHOD_AND_CHANGE_LEDGER.md) connects the completed mechanism audit, controller nomination, production qualifications and measured computation/query decisions to the selected package.
 - Round 5 rejected native supervision plus SSS plus local filtering. It did not test a repaired Lagrangian mainline. SOURCE/C8 remains retained.
 
 ## Round 5 closeout and planning snapshot
