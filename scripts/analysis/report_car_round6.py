@@ -135,6 +135,88 @@ def complete_epoch_engineering_figure(engineering, directory):
             'two per method in separate, batched, batched, separate order. Points show individual epoch wall times and peak allocated memory; bars show within-method means. These qualifications do not establish mature-trajectory performance or model efficacy.')
 
 
+def grouped_query_diagnostic(geometry_ref, decision_ref, directory):
+    """Render the optional hash-bound mature TRAIN800 query-law comparison."""
+    import numpy as np
+    import matplotlib; matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    geometry = doc(geometry_ref); decision = doc(decision_ref)
+    fields = geometry['field_order']; families = geometry['family_order']
+    if (geometry.get('status') != 'completed' or geometry.get('sample_count') != 800
+            or geometry.get('seeds') != [1,2,3,4]
+            or 'U_1' not in fields or len(families) != 3
+            or decision.get('schema') != 'car_round6_joint_audit_decision_v1'
+            or decision.get('status') != 'completed'
+            or geometry.get('audit_sha256') != decision['evidence']['audit']['sha256']
+            or geometry.get('checkpoint_sha256') != decision.get('mature_checkpoint_sha256')
+            or fields != decision['field_order'] or families != decision['family_order']):
+        raise ValueError('matched hash-bound mature TRAIN800 grouped-query evidence required')
+    reference = decision['constraint_reference']
+    if fields != reference['field_names']:
+        raise ValueError('grouped-query field order differs from reference')
+    scales = np.asarray(reference['risk_scales'], dtype=float)
+    allowances = np.asarray(reference['absolute_allowance'], dtype=float)
+    if (scales.shape != (len(fields),) or allowances.shape != scales.shape
+            or not np.isfinite(scales).all() or not np.isfinite(allowances).all()
+            or np.any(scales <= 0) or np.any(allowances <= 0)):
+        raise ValueError('positive finite field scales and allowances required')
+    weight = scales / allowances
+    shared = geometry['summaries']['shared']; grouped = geometry['summaries']['condition_groups_8']
+    values = []
+    for summary in (shared,grouped):
+        pre = np.asarray(summary['field_pre'],dtype=float)
+        post = np.asarray(summary['field_post'],dtype=float)
+        decreases = np.asarray(summary['independent_normalized_family_decreases'],dtype=float)
+        variances = np.asarray([summary['per_batch_shape_gradient_variance_sample_weighted'],
+                                summary['panel_mean_shape_gradient_variance']],dtype=float)
+        if (pre.shape != scales.shape or post.shape != pre.shape or decreases.shape != (len(families),)
+                or not all(np.isfinite(x).all() for x in (pre,post,decreases,variances))
+                or np.any(variances < 0)):
+            raise ValueError('finite matched grouped-query metrics required')
+        feasibility = float(np.linalg.norm(weight*np.maximum(post,0)))
+        if not math.isclose(feasibility,float(summary['field_feasibility_post']),rel_tol=1e-10,abs_tol=1e-10):
+            raise ValueError('field feasibility differs from saved reference and pooled errors')
+        target = -np.maximum(pre,0)/10.0
+        residual_squared = float(np.square(weight*(12.0*(post-pre)-target)).sum())
+        values.append({'pre':pre,'post':post,'decreases':decreases,'variances':variances,
+                       'feasibility':feasibility,'residual_squared':residual_squared})
+    if not np.allclose(values[0]['pre'],values[1]['pre'],rtol=1e-10,atol=1e-12):
+        raise ValueError('grouped and shared pre-action field risks must match')
+    fig, axes = plt.subplots(2,2,figsize=(10.5,8),constrained_layout=True)
+    axes=axes.flat; width=.36
+    for index,title in ((0,'Shape gradient variance per batch'),(1,'Shape gradient variance of panel mean')):
+        axes[index].bar(['Shared','Eight groups'],[value['variances'][index] for value in values],color=['#336b9a','#d9792b'])
+        axes[index].set(ylabel='Centered squared parameter-gradient norm',title=title)
+    x=np.arange(len(families))
+    for offset,label,value in ((-width/2,'Shared',values[0]),(width/2,'Eight groups',values[1])):
+        axes[2].bar(x+offset,value['decreases'],width,label=label)
+    axes[2].set(xticks=x,xticklabels=['State','Scale','Shape'],ylabel='Independent-query decrease / SOURCE unit',title='Finite one-action family changes')
+    x=np.arange(len(fields))
+    for offset,label,value in ((-width/2,'Shared',values[0]),(width/2,'Eight groups',values[1])):
+        axes[3].bar(x+offset,weight*np.maximum(value['post'],0),width,label=label)
+    axes[3].set(xticks=x,xticklabels=fields,ylabel='Pooled positive excess / allowance',title='Remaining field excess after action')
+    for axis in axes:
+        axis.grid(axis='y',alpha=.2);axis.set_axisbelow(True)
+    axes[2].legend(fontsize=8)
+    save_figure(fig,directory,'grouped_query_diagnostic')
+    if values[0]['residual_squared'] <= 0:
+        raise ValueError('nonzero shared response residual required for percentage comparison')
+    residual_change=100*(values[1]['residual_squared']/values[0]['residual_squared']-1)
+    body=['## Matched grouped-query action diagnostic','',
+          'On one matched TRAIN800 panel, four paired query seeds repeat estimators at the same mature model and Adam state. Each result is a finite single-action diagnostic with the nominated off-policy feedback profile; these are not four datasets or learning efficacy evidence.','',
+          '| Measurement | Shared query | Eight groups |','| --- | ---: | ---: |',
+          f"| Shape parameter-gradient variance, per batch | {values[0]['variances'][0]:.6g} | {values[1]['variances'][0]:.6g} |",
+          f"| Shape parameter-gradient variance, panel mean | {values[0]['variances'][1]:.6g} | {values[1]['variances'][1]:.6g} |"]
+    for i,label in enumerate(('State','Scale','Shape')):
+        body.append(f"| Independent-query {label} decrease / SOURCE unit | {values[0]['decreases'][i]:.6g} | {values[1]['decreases'][i]:.6g} |")
+    body += [f"| Post-action pooled field positive-excess J | {values[0]['feasibility']:.6g} | {values[1]['feasibility']:.6g} |",
+             f"| Ten-epoch target weighted response residual squared | {values[0]['residual_squared']:.6g} | {values[1]['residual_squared']:.6g} |",'',
+             'J is the norm of positive pooled signed field excess weighted by the saved scale-to-allowance ratio. The original response-to-target residual uses delta = 1/12 epoch, H = 10 epochs and the same saved field weights.', '',
+             f"The grouped action lowers J by {values[0]['feasibility']-values[1]['feasibility']:.6g}; its original target residual squared changes by {residual_change:+.3f}% because the stronger field recovery overshoots that drift target. State decreases by {values[0]['decreases'][0]-values[1]['decreases'][0]:.6g} fewer SOURCE units with grouping, while U_1 post-action excess changes by {(weight*(np.maximum(values[1]['post'],0)-np.maximum(values[0]['post'],0)))[fields.index('U_1')]:+.6g} allowance units. No query-law or model adoption follows from this diagnostic alone.",'']
+    caption=('One fixed mature model and Adam state on matched TRAIN800: four paired query-seed repetitions compare Shape parameter-gradient variance, finite independent-query State/Scale/Shape decreases, and pooled post-action field excess. The repetitions are not independent datasets; this one-action diagnostic is not learning efficacy.')
+    return body,caption
+
+
 def series(ax, x, y, label):
     import numpy as np
     y = np.asarray(y, dtype=float); x = np.asarray(x, dtype=float)
@@ -446,6 +528,11 @@ def produce(inputs_path,campaign,output):
     response = doc(inputs['controller_response']) if inputs.get('controller_response') else None
     if response is not None:
         captions['measured_controller_response'] = controller_response(response, figures)
+    grouped_body = []
+    if inputs.get('grouped_query_geometry'):
+        grouped_body,grouped_caption = grouped_query_diagnostic(
+            inputs['grouped_query_geometry'],inputs.get('grouped_query_reference'),figures)
+        captions['grouped_query_diagnostic'] = grouped_caption
     review_decision = None
     if assessment['epoch'] == 500:
         review_decision = doc(inputs['learning_review_100'])
@@ -491,6 +578,7 @@ def produce(inputs_path,campaign,output):
         for key,label in (('baseline_weighted_residual_squared','Zero-current-feedback weighted response residual squared'),('star_weighted_residual_squared','Calibrated weighted response residual squared'),('residual_norm_improvement','Measured residual norm improvement'),('replay_discrepancy_norm','Repeated numerical replay discrepancy')):
             if qualification.get(key) is not None: body += [f"{label}: {float(qualification[key]):.6g}.", '']
         if isinstance(audit.get('summary'),str):body += [audit['summary'],'']
+    body+=grouped_body
     body+=['','## Engineering and cost','',engineering['summary'],'',cost.get('summary','Measured cost details follow; unavailable values are shown as unavailable.'),'', '| Measurement | Value |','| --- | ---: |']
     measurements=cost.get('measurements')
     if not isinstance(measurements,dict) or not measurements:raise ValueError('measured cost and memory mapping required')
@@ -637,8 +725,38 @@ def produce_preparation(inputs_path,campaign,output):
         'cost_scope':'CPU-only report build including completed child processes; separate from GPU lease occupation'}
     (output/'report_receipt.json').write_text(json.dumps(receipt,indent=2,allow_nan=False)+'\n');return receipt
 
+def produce_grouped_preview(inputs_path,campaign,output):
+    """Render one standalone review bundle without generating a model assessment."""
+    inputs_path=inputs_path.resolve(strict=True);campaign=campaign.resolve(strict=True);output=output.resolve()
+    if campaign/'assessment'/'engineering' not in output.parents or output.exists():
+        raise ValueError('new campaign-owned engineering preview directory required')
+    inputs=json.loads(inputs_path.read_text())
+    if inputs.get('schema') != 'car_round6_grouped_query_preview_v1':
+        raise ValueError('grouped-query preview input manifest required')
+    output.mkdir(parents=True);figures=output/'figures';figures.mkdir()
+    body,caption=grouped_query_diagnostic(inputs['grouped_query_geometry'],inputs['grouped_query_reference'],figures)
+    name='grouped_query_diagnostic';captions={name:caption}
+    body=['# Coherence Adaptive Repair: grouped-query diagnostic preview','']+body+[
+        '## Figure index','',f'- [Figure grouped query diagnostic](#figure-grouped-query-diagnostic)','',
+        '## Figure grouped query diagnostic','',f'![{caption}](figures/{name}.png)','',
+        f'{caption} [PDF master](figures/{name}.pdf)','']
+    (output/'report.md').write_text('\n'.join(body),encoding='utf-8')
+    pages=render(output,captions)
+    receipt={'schema':'car_round6_grouped_query_preview_v1','status':'rendered_pending_visual_inspection',
+        'pages':pages,'inputs':{'grouped_query_geometry':inputs['grouped_query_geometry'],
+                               'grouped_query_reference':inputs['grouped_query_reference']},
+        'input_manifest_sha256':sha(inputs_path),'generator_sha256':sha(Path(__file__)),
+        'report_md_sha256':sha(output/'report.md'),'report_pdf_sha256':sha(output/'report.pdf'),
+        'figure_png_sha256':sha(figures/f'{name}.png'),'figure_pdf_sha256':sha(figures/f'{name}.pdf')}
+    (output/'receipt.json').write_text(json.dumps(receipt,indent=2,allow_nan=False)+'\n')
+    return receipt
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--inputs',type=Path,required=True);parser.add_argument('--campaign',type=Path,required=True);parser.add_argument('--output',type=Path,required=True)
-    args=parser.parse_args();kind=json.loads(args.inputs.read_text()).get('schema'); function=produce_preparation if kind=='car_round6_preparation_report_inputs_v1' else produce;print(json.dumps(function(args.inputs,args.campaign,args.output),indent=2))
+    args=parser.parse_args();kind=json.loads(args.inputs.read_text()).get('schema')
+    function=(produce_preparation if kind=='car_round6_preparation_report_inputs_v1' else
+              produce_grouped_preview if kind=='car_round6_grouped_query_preview_v1' else produce)
+    print(json.dumps(function(args.inputs,args.campaign,args.output),indent=2))
 
 if __name__=='__main__':main()

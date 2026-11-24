@@ -92,3 +92,35 @@ def test_preparation_figures_keep_action_products_distinct_from_finite_shape(tmp
     captions=preparation_figures(audit,{},profile,history,tmp_path)
     assert 'action_and_shape' in captions and 'first-order' in captions['action_and_shape']
     assert all((tmp_path/f'{name}.{suffix}').is_file() for name in captions for suffix in ('png','pdf'))
+
+
+def test_grouped_query_report_uses_bound_geometry_and_saved_field_units(tmp_path):
+    from scripts.analysis.report_car_round6 import grouped_query_diagnostic
+    from scripts.analysis.report_car_round5 import sha
+    fields=['CH4','CO','T','U_1','p']; families=['global_distribution','multiscale_spectrum','topology']
+    def summary(post,variances,decreases):
+        return {'field_pre':[.2]*5,'field_post':post,
+            'field_feasibility_post':float(np.linalg.norm(10*np.maximum(post,0))),
+            'per_batch_shape_gradient_variance_sample_weighted':variances[0],
+            'panel_mean_shape_gradient_variance':variances[1],
+            'independent_normalized_family_decreases':decreases}
+    geometry={'status':'completed','sample_count':800,'seeds':[1,2,3,4],'audit_sha256':'audit',
+        'checkpoint_sha256':'checkpoint','field_order':fields,'family_order':families,
+        'summaries':{'shared':summary([.10,.11,.12,.13,.14],[70.,6.],[.04,.05,.01]),
+                     'condition_groups_8':summary([.09,.10,.11,.14,.13],[60.,4.],[.039,.051,.011])}}
+    decision={'schema':'car_round6_joint_audit_decision_v1','status':'completed',
+        'mature_checkpoint_sha256':'checkpoint','evidence':{'audit':{'sha256':'audit'}},
+        'field_order':fields,'family_order':families,'constraint_reference':{
+            'field_names':fields,'risk_scales':[1.]*5,'absolute_allowance':[.1]*5}}
+    gp=tmp_path/'geometry.json';dp=tmp_path/'decision.json'
+    gp.write_text(json.dumps(geometry));dp.write_text(json.dumps(decision))
+    body,caption=grouped_query_diagnostic({'path':str(gp),'sha256':sha(gp)},
+                                          {'path':str(dp),'sha256':sha(dp)},tmp_path)
+    text='\n'.join(body)
+    assert 'response residual squared' in text and 'U_1' in text
+    assert 'not four datasets or learning efficacy' in text and 'one-action diagnostic' in caption
+    assert all((tmp_path/f'grouped_query_diagnostic.{ext}').is_file() for ext in ('png','pdf'))
+    decision['mature_checkpoint_sha256']='wrong';dp.write_text(json.dumps(decision))
+    with pytest.raises(ValueError,match='matched hash-bound'):
+        grouped_query_diagnostic({'path':str(gp),'sha256':sha(gp)},
+                                 {'path':str(dp),'sha256':sha(dp)},tmp_path)
