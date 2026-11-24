@@ -2,7 +2,31 @@
 
 **Resumed by explicit user authorization on 23 November 2026.** The preparation-stop decision below is a superseded stage record. [Resumption decisions](RESUMPTION_DECISIONS.md) replace the exact drift-target launch veto with a measured field/Shape tradeoff and require substantive learning evidence. The earlier raw audit and report bytes remain preserved; a measured probe is nominated for production resume qualification and a fresh-SOURCE 20-epoch pilot, followed by the 100-epoch review and conditional 500 endpoint within the original total budget.
 
-## Current execution
+## 100-epoch review and active 500-epoch continuation
+
+The fresh formal run completed 100 epochs and 1200 actions on GPU0 at 08:38:51 UTC on 24 November, with SOURCE immutability verified and 12472.582 seconds of occupied GPU time. One cached VALIDATION100/J4 bank used another 31.797 GPU seconds; task-free field/State/Scale/Shape scoring took 71.13 seconds wall and 98.23 CPU seconds. Complete history, PI journal, timing, recording definitions and curves were copied into the immutable `assessment/Epoch100_Validation100_J4_20261124/snapshot/` owner before continuation.
+
+**Continue the unchanged package to epoch 500; retain SOURCE/C8 operationally during the test.** The matched validation changes are State -0.116967, Scale +0.060983 and Shape -0.290255 in frozen TRAIN SOURCE units. The Shape interval is [-0.325953, -0.256641]; State and Scale condition-bootstrap intervals span zero. The matched historical epoch-100 values are +0.038649, +0.260590 and -0.292063. A cached paired comparison finds a Scale change of -0.199607 versus that historical package, with interval [-0.272678, -0.128289]; this is a package comparison, not an isolated controller effect.
+
+| Field | Native signed risk change / fixed allowance | Member MSE / SOURCE member MSE |
+| --- | ---: | ---: |
+| CH4 | 4.76413 | 1.06119 |
+| CO | 4.88042 | 1.10506 |
+| T | 8.08063 | 1.09538 |
+| U_1 | 5.60823 | 1.02655 |
+| p | -6.03218 | 0.994287 |
+
+Four signed-field guards and the CO member guard still fail; sensor fidelity passes. CH4 and T retention are worse than matched historical epoch 100, while CO, U_1 and pressure improve. The pooled positive native allowance-excess norm is 10.0298 versus 17.7823 historically. In the complete 300-action TRAIN windows at epochs 51–75 and 76–100, every pooled field excess decreases and the positive-excess norm falls 17.24%; feedback is active, with negative first-order constraint-displacement products in all 600 actions. Sampled State/Scale means fall about one percent while Shape is 0.43% higher. The useful remaining question is whether continued corrective feedback can recover native retention and Scale while preserving State/Shape gains. TRAIN temperature feasibility has not transferred to native validation. No gain, objective, query, learning-rate or output-policy retuning is authorized by this continuation.
+
+The explicit decision is `operations/learning_review_epoch_100.json`, SHA-256 `3ea449e25509e01e8c50845937f26144d58b36a3945a3881d8aacdbb5a9fdfcd`. The approved updated forecast `operations/FFM_PI_GroupedQueries_Epoch500_RemainingForecast_20261124.json`, SHA-256 `680df5150b810bf94b13df2c38fbf7c506ed6203afc16c55a8e6332868269a13`, retains all 26328.566 charged seconds before continuation and forecasts 24.675 occupied GPU-hours for the whole campaign including assessment and reserve, within the original 30-hour ceiling.
+
+The same formal run resumed on GPU0 at 09:37:10 UTC, token `6385be988d804f3d93fdcf1b128edcca`, with a 55303-second cap and persistent tmux `car_r6_epoch500_20261124T093709Z`. Actual preflight verified the immutable review, identical last/epoch-100 checkpoint payload, unchanged saved configuration and frozen code. A path-formatting precedence error was fixed in a new launcher copy `operations/launches/FFM_PI_GroupedQueries_ConditionalEpoch500_PathFix.py`; the original is preserved and no scientific code changed. Luna acknowledged a cost/failure observation at 14:52:22 UTC near epoch 250 and terminal observation at 23:34:22 UTC. Required first/every-ten-epoch and pause/end curves continue automatically. Endpoint tasks remain withheld and TEST stays locked.
+
+The coordinator prospectively authorized the terminal snapshot and task-free endpoint assessment in `operations/authorizations/Epoch500_TaskFreeAssessment_20261124.json`, SHA-256 `e2909f5a7a5995e79a6b34686ae6f91643ef3e21b9772a2afc0ac3ca4dc3981b`. On verified successful epoch-500 completion, Luna will trigger the controller to generate one native VALIDATION100/J4 bank on GPU0 and score field retention and State/Scale/Shape on CPU. The reviewed helper checks the unchanged epoch-100 log prefixes, configuration and recording definitions; the completed epoch-100 saved YAML is byte-identical to the frozen selection. The controller must reactivate Luna for a five-minute assessment observation with an immediate schedule acknowledgment. The final model decision and any subsequent task scoring remain with the coordinator.
+
+The original formal-100 monitor had completed its pilot turn and was not reactivated; this delayed assessment admission by 2829.024 seconds after training ended. The idle handoff interval is wall time, not occupied GPU time. The coordinator corrected the handoff using an explicit follow-up task; the new continuation monitor sent an immediate schedule acknowledgment. Raw timing receipts and the preserved monitoring incident distinguish this delay from training and scoring costs.
+
+## Qualified package and preparation provenance
 
 GPU0 is the main training GPU under the user's latest explicit direction. The selected package is the measured-gain PI controller with fresh parameter-space ConFIG, batched family VJPs and eight condition-query groups. The gain remains 11.621005062848388; SOURCE, fixed positive coefficients, signed Lagrangian field risk, independent J2 members, four Euler steps, B64/Q4096, twelve actions per reporting epoch and fifty-epoch LR warmup are unchanged. Native reconstruction loss remains disabled. The selected immutable YAML is `configs/FFM_SSS_EpochCalibrated_PI_Repair_BatchedVJP_EightQueryGroups.yaml`, SHA-256 `2785bd6382ea2e64e0c7886c8951f1c15a42c52a373c8fe51aedcdcc0d72b524`.
 
