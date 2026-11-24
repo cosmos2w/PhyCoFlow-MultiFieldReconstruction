@@ -19,16 +19,7 @@ from phycoflow_reconstruction.training.post_training import run_post_training
 from scripts.qualification.car_round6_batched_epoch_timing import final_model_comparison
 
 
-def common_initial_state_digest(path):
-    """Hash the full epoch-zero state except the deliberate query-law differences."""
-    state = torch.load(path, map_location='cpu', weights_only=False)
-    if state['global_step'] != 0:
-        raise ValueError('expected fresh SOURCE epoch-zero checkpoint')
-    state = deepcopy(state)
-    state.pop('config_sha256')  # Configs necessarily differ in query law and attempt output path.
-    runtime = state['scalable_runtime']
-    runtime.pop('condition_query_groups')
-    runtime.pop('group_samplers')
+def semantic_digest(state):
     digest = hashlib.sha256()
     def add(value):
         if isinstance(value, torch.Tensor):
@@ -50,6 +41,31 @@ def common_initial_state_digest(path):
             raise TypeError(f'unsupported initial-state value {type(value).__name__}')
     add(state)
     return digest.hexdigest()
+
+
+def common_initial_state_digest(path):
+    """Hash epoch-zero state except query-law and derived hash metadata."""
+    state = torch.load(path, map_location='cpu', weights_only=False)
+    if state['global_step'] != 0:
+        raise ValueError('expected fresh SOURCE epoch-zero checkpoint')
+    state = deepcopy(state)
+    state.pop('config_sha256')  # Configs differ in query law and attempt output path.
+    runtime = state['scalable_runtime']
+    runtime.pop('condition_query_groups')
+    runtime.pop('group_samplers')
+    runtime.pop('artifact_sha256')  # Compare normalized artifact content separately.
+    runtime['provenance'].pop('config_sha256')
+    return semantic_digest(state)
+
+
+def common_artifact_digest(path):
+    """Compare all scalable scientific artifact contents, apart from derived hashes."""
+    artifact = deepcopy(torch.load(path, map_location='cpu', weights_only=False))
+    artifact.pop('sha256')
+    artifact['provenance'].pop('config_sha256')
+    # The two provenance dictionaries may share identity in the saved artifact.
+    artifact['shape_artifact']['provenance'].pop('config_sha256', None)
+    return semantic_digest(artifact)
 
 
 def read_coupling(run, expected_count):
@@ -101,7 +117,8 @@ def main():
         'thread_environment':{key:os.environ.get(key) for key in ('OMP_NUM_THREADS','MKL_NUM_THREADS')},
         'family_vjp':family_vjp,'order':['shared','condition_groups_8','condition_groups_8','shared'],
         'scope':'fresh SOURCE, fresh AdamW and controller; two one-update warmups then four independent 12-update epochs, including optimizer, logging and callbacks',
-        'state_fingerprint_excludes':['config_sha256 (query law and output path differ)','condition_query_groups','group_samplers'],
+        'state_fingerprint_excludes':['config_sha256 (query law and output path differ)','condition_query_groups','group_samplers','scalable_runtime.provenance.config_sha256','scalable_runtime.artifact_sha256'],
+        'artifact_fingerprint_excludes':['sha256','provenance.config_sha256','shape_artifact.provenance.config_sha256'],
         'coupling_scope':'trainer records sample IDs, observation and spatial-query hashes, two member seeds and initial first-member RNG state; member predictions and final model trajectories may differ under the query laws',
         'timing_limits':'training time includes data waits and update work; callback/reporting time is separate. Whole-job and enclosing lease times overlap and must not be added.',
         'attempts':[]}
@@ -125,6 +142,7 @@ def main():
               'enclosing_wall_seconds':time.monotonic()-started,
               'peak_allocated_bytes':torch.cuda.max_memory_allocated(device),
               'common_initial_state_sha256':common_initial_state_digest(Path(run)/'checkpoints'/'epoch_000.pt'),
+              'common_artifact_sha256':common_artifact_digest(Path(run)/'artifacts'/'scalable_coherence.pt'),
               'coupling':read_coupling(run,count)}
         if count==steps:
             rows=[json.loads(line) for line in (Path(run)/'logs'/'epoch_timing.jsonl').read_text().splitlines() if line.strip()]
@@ -139,6 +157,8 @@ def main():
             if previous:
                 if row['common_initial_state_sha256'] != previous[0]['common_initial_state_sha256']:
                     error='common epoch-zero state differs across attempts'
+                if row['common_artifact_sha256'] != previous[0]['common_artifact_sha256']:
+                    error='common scalable scientific artifact contents differ across attempts'
                 baseline=max(previous,key=lambda item:len(item['coupling']))['coupling']
                 count=min(len(baseline),len(row['coupling']))
                 if row['coupling'][:count] != baseline[:count]:

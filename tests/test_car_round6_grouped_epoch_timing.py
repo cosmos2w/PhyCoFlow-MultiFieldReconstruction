@@ -5,7 +5,7 @@ import sys
 
 import pytest
 import torch
-from scripts.qualification.car_round6_grouped_epoch_timing import common_initial_state_digest, completed_epoch_record, read_coupling
+from scripts.qualification.car_round6_grouped_epoch_timing import common_artifact_digest, common_initial_state_digest, completed_epoch_record, read_coupling
 from scripts.qualification import car_round6_grouped_epoch_timing as driver
 
 
@@ -14,17 +14,32 @@ def test_common_state_fingerprint_excludes_only_query_group_metadata(tmp_path):
         'optimizer':{'step':0},'rng_state':{'torch_cpu':torch.tensor([1],dtype=torch.uint8)},
         'external_policy':{'multipliers':[0.]},'training_monitor':{'step':0},
         'scalable_runtime':{'condition_query_groups':1,'group_samplers':[],
+                            'artifact_sha256':'first','provenance':{'config_sha256':'one'},
                             'sampler':{'seed':1},'probe_sampler':{'seed':2}}}
     changed=deepcopy(state)
     changed['config_sha256']='grouped-config'
     changed['scalable_runtime']['condition_query_groups']=8
     changed['scalable_runtime']['group_samplers']=[{'seed':n} for n in range(7)]
+    changed['scalable_runtime']['artifact_sha256']='second'
+    changed['scalable_runtime']['provenance']['config_sha256']='two'
     first=tmp_path/'first.pt';second=tmp_path/'second.pt'
     torch.save(state,first);torch.save(changed,second)
     assert common_initial_state_digest(first)==common_initial_state_digest(second)
     changed['scalable_runtime']['sampler']['seed']=3
     torch.save(changed,second)
     assert common_initial_state_digest(first)!=common_initial_state_digest(second)
+
+
+def test_artifact_digest_preserves_science_but_excludes_derived_hashes(tmp_path):
+    first={'sha256':'one','provenance':{'config_sha256':'a'},
+           'shape_artifact':{'provenance':{'config_sha256':'a'},'scale':torch.tensor([2.])}}
+    second=deepcopy(first);second['sha256']='two';second['provenance']['config_sha256']='b'
+    second['shape_artifact']['provenance']['config_sha256']='b'
+    a=tmp_path/'a.pt';b=tmp_path/'b.pt';torch.save(first,a);torch.save(second,b)
+    assert common_artifact_digest(a)==common_artifact_digest(b)
+    second['shape_artifact']['scale'][0]=3
+    torch.save(second,b)
+    assert common_artifact_digest(a)!=common_artifact_digest(b)
 
 
 def test_coupling_read_requires_both_members_and_accepted_actions(tmp_path):
@@ -61,7 +76,11 @@ def test_complete_epoch_trials_preserve_fixed_vjp_and_verify_coupling(tmp_path,m
         group=cfg['coherence']['scalable_anchored_coherence']['condition_query_groups']
         torch.save({'global_step':0,'config_sha256':f'config{group}','model':{'weight':torch.tensor([1.])},
             'scalable_runtime':{'condition_query_groups':group,'group_samplers':list(range(group-1)),
+                                'artifact_sha256':f'artifact{group}','provenance':{'config_sha256':f'config{group}'},
                                 'sampler':{'seed':1}}},run/'checkpoints'/'epoch_000.pt')
+        torch.save({'sha256':f'artifact{group}','provenance':{'config_sha256':f'config{group}'},
+                    'shape_artifact':{'provenance':{'config_sha256':f'config{group}'},'scale':torch.tensor([2.])}},
+                   run/'artifacts'/'scalable_coherence.pt')
         row={'sample_ids':['one'],'observation_sha256':'obs','query_sha256':'grid','member_seeds':[5,6],
              'first_member_generator_state_sha256':'rng','accepted':True}
         (run/'metrics'/'training_coupling.jsonl').write_text(''.join(json.dumps(dict(row,step=i+1))+'\n' for i in range(max_steps)))

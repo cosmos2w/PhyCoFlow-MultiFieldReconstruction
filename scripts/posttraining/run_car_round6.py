@@ -210,7 +210,7 @@ def selected_prepared(campaign, selected_path):
         raise ValueError("derived selection must use configs/formal_prepared.json")
     if selected.get("base_prepared") != reference(base_path):
         raise ValueError("derived selection does not bind the original prepared manifest")
-    if {k:v for k,v in selected.items() if k not in ("arms", "base_prepared", "execution_qualification")} != {k:v for k,v in base.items() if k != "arms"}:
+    if {k:v for k,v in selected.items() if k not in ("arms", "base_prepared", "execution_qualification", "query_law")} != {k:v for k,v in base.items() if k not in ("arms", "query_law")}:
         raise ValueError("derived manifest changes non-execution identity")
     if set(base["arms"]) != {ARM} or set(selected["arms"]) != {ARM}:
         raise ValueError("one unchanged candidate identity required")
@@ -218,14 +218,32 @@ def selected_prepared(campaign, selected_path):
     derived = yaml.safe_load(checked(selected["arms"][ARM]).read_text())
     expected = copy.deepcopy(original)
     expected["optimization"]["multitask"]["coherence_aggregation"]["family_vjp"] = "batched"
+    grouped = selected.get("query_law") == "condition_groups_8"
+    if grouped:
+        expected["coherence"]["scalable_anchored_coherence"]["condition_query_groups"] = 8
+    elif selected.get("query_law") != base.get("query_law"):
+        raise ValueError("unsupported query law")
     if derived != expected:
-        raise ValueError("derived config differs beyond qualified family_vjp=batched")
+        raise ValueError("derived config differs beyond the selected batched VJP and query law")
     qualification = selected.get("execution_qualification", {})
     resume = json.loads(checked(qualification["production_resume"]).read_text())
     engineering = json.loads(checked(qualification["engineering"]).read_text())
     if (resume.get("qualified") is not True or resume.get("config_sha256") != selected["arms"][ARM]["sha256"]
             or engineering.get("qualified") is not True or engineering.get("config_sha256") != base["arms"][ARM]["sha256"]):
         raise ValueError("batched execution needs matching qualified production resume and timing")
+    if grouped:
+        query_decision = json.loads(checked(qualification["query_decision"]).read_text())
+        geometry = json.loads(checked(qualification["query_geometry"]).read_text())
+        cost = json.loads(checked(qualification["query_cost"]).read_text())
+        pilot = json.loads(checked(qualification["candidate_pilot"]).read_text())
+        if (query_decision.get("qualified") is not True or geometry.get("status") != "completed"
+                or geometry.get("sample_count") != 800 or cost.get("status") != "completed"
+                or query_decision.get("geometry_sha256") != qualification["query_geometry"]["sha256"]
+                or query_decision.get("cost_sha256") != qualification["query_cost"]["sha256"]
+                or pilot.get("qualified") is not True or pilot.get("epochs") != 20
+                or pilot.get("candidate_config_sha256") != selected["arms"][ARM]["sha256"]
+                or pilot.get("resume_qualification", {}).get("sha256") != qualification["production_resume"]["sha256"]):
+            raise ValueError("grouped law requires bound geometry, cost, candidate resume and fresh pilot")
     return selected
 
 
@@ -249,6 +267,8 @@ def freeze(args, campaign):
     forecast = json.loads(args.forecast.read_text())
     if not forecast.get("fits_gpu_budget") or forecast["forecast_gpu_seconds"] > CAP_SECONDS:
         raise ValueError("whole measured forecast must fit the authorized GPU ceiling")
+    if prepared.get("query_law") == "condition_groups_8" and digest(checked(prepared["execution_qualification"]["candidate_pilot"])) != digest(args.pilot):
+        raise ValueError("grouped formal freeze requires its own qualified pilot")
     if digest(checked(forecast["pilot"])) != digest(args.pilot):
         raise ValueError("measured forecast must bind the same qualified pilot")
     # All repository Python drivers are modest; include their real dependencies
@@ -333,11 +353,26 @@ def train(args, campaign):
         raise ValueError("training must run under the Round 6 enclosing GPU lease")
     if args.pilot:
         prepared = json.loads((campaign / "configs/prepared.json").read_text())
-        cfg = yaml.safe_load(checked(prepared["arms"][ARM]).read_text())
+        binding = prepared["arms"][ARM]
+        if args.candidate_config is not None:
+            if not args.candidate_sha256 or not args.resume_qualification:
+                raise ValueError("candidate pilot requires config hash and qualified resume")
+            binding = {"path": str(args.candidate_config), "sha256": args.candidate_sha256}
+            candidate = yaml.safe_load(checked(binding).read_text())
+            original = yaml.safe_load(checked(prepared["arms"][ARM]).read_text())
+            expected = copy.deepcopy(original)
+            expected["optimization"]["multitask"]["coherence_aggregation"]["family_vjp"] = "batched"
+            expected["coherence"]["scalable_anchored_coherence"]["condition_query_groups"] = 8
+            resume = json.loads(args.resume_qualification.read_text())
+            if candidate != expected or resume.get("qualified") is not True or resume.get("config_sha256") != binding["sha256"]:
+                raise ValueError("grouped pilot config or fresh-process resume differs")
+        cfg = yaml.safe_load(checked(binding).read_text())
         if args.stop_epoch != 20 or args.resume is not None:
             raise ValueError("pilot is a fresh SOURCE 20-epoch run")
-        cfg["output"]["experiment_name"] = "coherence_adaptive_repair/round_6/runs/pilot/" + ARM
+        cfg["output"]["experiment_name"] = "coherence_adaptive_repair/round_6/runs/pilot/" + ARM + ("_GroupedQueries" if args.candidate_config is not None else "")
     else:
+        if args.candidate_config is not None or args.candidate_sha256 is not None or args.resume_qualification is not None:
+            raise ValueError("candidate override is only valid for the separate pilot")
         manifest = json.loads((campaign / "configs/formal_freeze.json").read_text())
         _, prepared = frozen_prepared(campaign, manifest)
         cfg = yaml.safe_load(checked(prepared["arms"][ARM]).read_text())
@@ -367,7 +402,8 @@ def train(args, campaign):
     run = run_post_training(cfg, case_dir=ROOT / "cases/turbulent_combustion",
                             resume=args.resume, budget_stop_requested=stop)
     status = json.loads((run / "status.json").read_text())
-    atomic_json(campaign / "operations" / ("pilot_run.json" if args.pilot else f"formal_epoch_{args.stop_epoch}.json"),
+    pilot_result = "pilot_" + ARM + "_GroupedQueries.json" if args.candidate_config is not None else "pilot_run.json"
+    atomic_json(campaign / "operations" / (pilot_result if args.pilot else f"formal_epoch_{args.stop_epoch}.json"),
                 {"schema": "car_round6_training_result_v1", "run_dir": str(run),
                  "target_epoch": args.stop_epoch, "status": status})
     print(run, flush=True)
@@ -393,6 +429,9 @@ def main():
     p = sub.add_parser("train")
     p.add_argument("--stop-epoch", type=int, choices=(20, 100, 500), required=True)
     p.add_argument("--pilot", action="store_true")
+    p.add_argument("--candidate-config", type=Path)
+    p.add_argument("--candidate-sha256")
+    p.add_argument("--resume-qualification", type=Path)
     p.add_argument("--resume", type=Path)
     args = parser.parse_args()
     campaign = args.campaign.resolve(strict=True)

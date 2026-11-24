@@ -11,6 +11,34 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(ROOT / 'src'), str(ROOT)]
 
 
+def expected_pilot_config(campaign, candidate_config, candidate_sha256, resume):
+    import copy
+    import yaml
+    from phycoflow_reconstruction.evaluation.adaptive_campaign import digest
+    prepared = json.loads((campaign / 'configs/prepared.json').read_text())
+    if len(prepared['arms']) != 1:
+        raise ValueError('exactly one prepared Round 6 pilot required')
+    arm, original_binding = next(iter(prepared['arms'].items()))
+    if digest(Path(original_binding['path'])) != original_binding['sha256']:
+        raise ValueError('original prepared config changed')
+    grouped = candidate_config is not None
+    if grouped and not candidate_sha256:
+        raise ValueError('candidate config hash required')
+    binding = {'path': str(candidate_config), 'sha256': candidate_sha256} if grouped else original_binding
+    prepared_path = Path(binding['path'])
+    if digest(prepared_path) != binding['sha256'] or resume.get('config_sha256') != binding['sha256']:
+        raise ValueError('pilot and production resume must bind the same prepared configuration')
+    expected = yaml.safe_load(prepared_path.read_text())
+    if grouped:
+        original = yaml.safe_load(Path(original_binding['path']).read_text())
+        allowed = copy.deepcopy(original)
+        allowed['optimization']['multitask']['coherence_aggregation']['family_vjp'] = 'batched'
+        allowed['coherence']['scalable_anchored_coherence']['condition_query_groups'] = 8
+        if expected != allowed:
+            raise ValueError('candidate configuration changes scientific settings')
+    expected['output']['experiment_name'] = 'coherence_adaptive_repair/round_6/runs/pilot/' + arm + ('_GroupedQueries' if grouped else '')
+    return expected, binding
+
 def main():
     import numpy as np
     import torch
@@ -24,6 +52,8 @@ def main():
     from scripts.qualification.car_round6_joint_audit import coarse_profile
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--run', type=Path, required=True)
+    parser.add_argument('--candidate-config', type=Path)
+    parser.add_argument('--candidate-sha256')
     parser.add_argument('--resume-qualification', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
@@ -33,15 +63,7 @@ def main():
     if resume.get('qualified') is not True:
         raise ValueError('the affected production fresh-process resume must qualify')
     campaign = run.parents[3]
-    prepared = json.loads((campaign / 'configs/prepared.json').read_text())
-    if len(prepared['arms']) != 1:
-        raise ValueError('exactly one prepared Round 6 pilot required')
-    arm, binding = next(iter(prepared['arms'].items()))
-    prepared_path = Path(binding['path'])
-    if digest(prepared_path) != binding['sha256'] or resume.get('config_sha256') != binding['sha256']:
-        raise ValueError('pilot and production resume must bind the same prepared configuration')
-    expected = yaml.safe_load(prepared_path.read_text())
-    expected['output']['experiment_name'] = 'coherence_adaptive_repair/round_6/runs/pilot/' + arm
+    expected, binding = expected_pilot_config(campaign, args.candidate_config, args.candidate_sha256, resume)
     if config != expected:
         raise ValueError('pilot saved configuration differs from its prepared scientific configuration')
     history = [json.loads(line) for line in (run / 'logs/history.jsonl').read_text().splitlines() if line.strip()]
@@ -103,6 +125,7 @@ def main():
     immutable_json(args.output, {
         'schema': 'car_round6_pilot_qualification_v1', 'qualified': True,
         'run_dir': str(run), 'epochs': 20, 'actions': 240, 'objective_condition_visits': 240*64,
+        'candidate_config_sha256': binding['sha256'],
         'checkpoint_sha256': digest(run / 'checkpoints/last.pt'),
         'source_initial_checkpoint_sha256': digest(initial_path),
         'source_parameter_buffer_sha256': source['source_parameter_buffer_sha256'],
