@@ -459,11 +459,14 @@ class TrainingMonitor:
         # This separate append-only operational journal includes the data
         # stream wait and leaves the existing scientific history unchanged.
         timing = {
-            "version": "complete_epoch_timing_v1",
+            "version": "complete_epoch_timing_v2",
             "epoch": int(pending["epoch"]),
             "step": int(pending["step"]),
             "attempted_updates": int(summary["batches"]),
             "accepted_updates": int(summary.get("accepted_actions", summary["batches"])),
+            "timed_updates": batches,
+            "complete_epoch_duration": bool(summary["epoch_complete"] and batches == int(summary["batches"])),
+            "duration_scope": "current-process epoch span including callbacks; excludes prior-process time and offline pauses",
             "train_seconds": train_seconds,
             "wall_seconds": wall_seconds,
             "callback_and_reporting_seconds": max(0.0, wall_seconds - train_seconds),
@@ -506,7 +509,8 @@ class TrainingMonitor:
             self.progress = self._new_epoch_bar(epoch, initial=0)
         batch_in_epoch = (step - 1) % self.steps_per_epoch + 1
         increment = max(0, batch_in_epoch - self.progress.n)
-        self._epoch_observed_batches += increment
+        # Count record calls independently of tqdm; disabled bars do not advance n.
+        self._epoch_observed_batches += 1
         elapsed = perf_counter() - self._epoch_started
         epoch_estimate = (
             elapsed * self._epoch_batch_count(epoch) / self._epoch_observed_batches

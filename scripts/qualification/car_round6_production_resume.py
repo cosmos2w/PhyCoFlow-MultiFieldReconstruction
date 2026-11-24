@@ -18,6 +18,7 @@ import sys
 import time
 
 ROOT = Path(__file__).resolve().parents[2]
+CASE_ROOT = Path(os.environ.get('CAR_REPO_ROOT', ROOT)).resolve()
 sys.path[:0] = [str(ROOT / 'src'), str(ROOT)]
 from phycoflow_reconstruction.evaluation.adaptive_campaign import atomic_json, digest
 from scripts.posttraining.qualify_car_round2_resume import (
@@ -37,7 +38,7 @@ def worker(args):
     if pi is None:
         raise ValueError('the affected PI configuration is required')
     started = time.time()
-    run = run_post_training(cfg, case_dir=ROOT / 'cases/turbulent_combustion',
+    run = run_post_training(cfg, case_dir=CASE_ROOT / 'cases/turbulent_combustion',
         resume=args.resume, budget_stop_requested=lambda step, _run: step >= args.stop_action)
     atomic_json(args.output, {'run_dir': str(run), 'pid': os.getpid(),
         'resume': str(args.resume) if args.resume else None, 'stop_action': args.stop_action,

@@ -10,8 +10,20 @@ import time
 
 CODE = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(CODE / 'src'), str(CODE)]
-from scripts.posttraining.assess_car_round5 import context, check_bank, generate, load_json, verify, paired_condition_intervals, source_task_values
+from scripts.posttraining.assess_car_round5 import context as legacy_context, check_bank, generate, load_json, verify, paired_condition_intervals, source_task_values
 from scripts.posttraining.assess_car_round2_checkpoints import hash_file, matched_rows, score_event, sensor_mse
+
+
+def context(campaign):
+    from scripts.posttraining.run_car_round6 import frozen_prepared
+    ctx = legacy_context(campaign)
+    freeze = load_json(ctx['campaign'] / 'configs/formal_freeze.json')
+    path, prepared = frozen_prepared(ctx['campaign'], freeze)
+    # selected_prepared proves source snapshot and all other non-execution
+    # metadata match the SOURCE identities already verified by legacy_context.
+    ctx['prepared_path'] = path
+    ctx['prepared'] = prepared
+    return ctx
 
 
 def selected(ctx):

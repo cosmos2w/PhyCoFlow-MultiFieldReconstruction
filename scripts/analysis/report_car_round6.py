@@ -70,6 +70,31 @@ def original_target_fit_text(gamma):
             'This fitted value is a diagnostic, not the executed training gain; the scientific intervention above describes the actual saved configuration.')
 
 
+def pilot_pi_comparison(ref, fields):
+    """Describe the completed pilot's actual PI state and coarse reconstruction."""
+    if ref is None:
+        return []
+    pilot = doc(ref)
+    if (pilot.get('schema') != 'car_round6_pilot_qualification_v1'
+            or pilot.get('qualified') is not True or pilot.get('epochs') != 20
+            or pilot.get('actions') != 240 or pilot.get('exact_pi_recursion_matches') is not True):
+        raise ValueError('completed 20-epoch pilot with exact 240-action PI recursion required')
+    actual = pilot.get('actual_multipliers'); coarse = pilot.get('coarse_last_batch_multipliers')
+    if (not isinstance(fields, list) or not fields or len(set(fields)) != len(fields)
+            or not isinstance(actual, list) or not isinstance(coarse, list)
+            or len(actual) != len(fields) or len(coarse) != len(fields)
+            or any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v)
+                   for v in actual + coarse)):
+        raise ValueError('finite pilot multipliers must match the assessment field order')
+    maximum = max(abs(a-b) for a,b in zip(actual, coarse))
+    body = ['', '## Pilot PI reconstruction', '',
+            'The 20-epoch pilot completed 240 actions, and its exact PI recursion matched the recorded state. The coarse reconstruction repeats each epoch’s last-batch errors for all 12 actions; it is neither a trained counterfactual trajectory nor validation of the hypothetical mature profile.', '',
+            '| Field | Actual multiplier | Coarse last-batch multiplier | Coarse minus actual |',
+            '| --- | ---: | ---: | ---: |']
+    body += [f'| {name} | {a:.8g} | {b:.8g} | {b-a:+.8g} |' for name,a,b in zip(fields,actual,coarse)]
+    return body + ['', f'Maximum absolute multiplier discrepancy: {maximum:.8g}.', '']
+
+
 def complete_epoch_engineering_figure(engineering, directory):
     """Plot only the completed, hash-bound matched epoch qualification, if supplied."""
     ref = engineering.get('complete_epoch_timing')
@@ -453,6 +478,7 @@ def produce(inputs_path,campaign,output):
     if response is not None:
         body += ['', '## Controller nomination and learning evidence', '',
             f"The user-authorized resumption nominated the measured norm-balanced probe gamma = {float(response['gamma']):.8g} for a fresh SOURCE trajectory. The prior exact ten-epoch drift fit selected zero because the saved mature AdamW action already corrected faster than that target. The measured probe lowered the remaining pooled field-violation norm from {float(response['positive_excess_norm_zero']):.6g} to {float(response['positive_excess_norm_probe']):.6g}, with a weaker but positive independent-query Shape decrease. This supports the bounded learning test; it does not establish an optimal gain or model replacement.", '']
+    body += pilot_pi_comparison(inputs.get('pilot_qualification'), assessment['field_order'])
     if review_decision is not None:
         body += ['', '## Epoch100 learning review', '', review_decision['scientific_progress'], '',
                  f"Continuation question and decision: {review_decision['decision_rationale']}", '',

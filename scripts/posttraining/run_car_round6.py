@@ -197,8 +197,50 @@ def prepare(args, campaign):
     print(config_path, flush=True)
 
 
+def selected_prepared(campaign, selected_path):
+    """Validate only the authorized execution change against the immutable pilot."""
+    import yaml
+    base_path = (campaign / "configs/prepared.json").resolve(strict=True)
+    selected_path = Path(selected_path).resolve(strict=True)
+    base, selected = (json.loads(p.read_text()) for p in (base_path, selected_path))
+    if selected_path == base_path:
+        checked(base["arms"][ARM])
+        return base
+    if selected_path != (campaign / "configs/formal_prepared.json").resolve():
+        raise ValueError("derived selection must use configs/formal_prepared.json")
+    if selected.get("base_prepared") != reference(base_path):
+        raise ValueError("derived selection does not bind the original prepared manifest")
+    if {k:v for k,v in selected.items() if k not in ("arms", "base_prepared", "execution_qualification")} != {k:v for k,v in base.items() if k != "arms"}:
+        raise ValueError("derived manifest changes non-execution identity")
+    if set(base["arms"]) != {ARM} or set(selected["arms"]) != {ARM}:
+        raise ValueError("one unchanged candidate identity required")
+    original = yaml.safe_load(checked(base["arms"][ARM]).read_text())
+    derived = yaml.safe_load(checked(selected["arms"][ARM]).read_text())
+    expected = copy.deepcopy(original)
+    expected["optimization"]["multitask"]["coherence_aggregation"]["family_vjp"] = "batched"
+    if derived != expected:
+        raise ValueError("derived config differs beyond qualified family_vjp=batched")
+    qualification = selected.get("execution_qualification", {})
+    resume = json.loads(checked(qualification["production_resume"]).read_text())
+    engineering = json.loads(checked(qualification["engineering"]).read_text())
+    if (resume.get("qualified") is not True or resume.get("config_sha256") != selected["arms"][ARM]["sha256"]
+            or engineering.get("qualified") is not True or engineering.get("config_sha256") != base["arms"][ARM]["sha256"]):
+        raise ValueError("batched execution needs matching qualified production resume and timing")
+    return selected
+
+
+def frozen_prepared(campaign, freeze):
+    """Resolve the same literal selected manifest for training and assessment."""
+    path = checked(freeze["selected_prepared"]) if "selected_prepared" in freeze else (campaign / "configs/prepared.json").resolve(strict=True)
+    selected = selected_prepared(campaign, path)
+    for key, value in selected.items():
+        if key != "schema" and freeze.get(key) != value:
+            raise ValueError(f"frozen selection changed: {key}")
+    return path, selected
+
 def freeze(args, campaign):
-    prepared = json.loads((campaign / "configs/prepared.json").read_text())
+    prepared_path = (args.prepared or campaign / "configs/prepared.json").resolve(strict=True)
+    prepared = selected_prepared(campaign, prepared_path)
     for ref in prepared["arms"].values():
         checked(ref)
     pilot = json.loads(args.pilot.read_text())
@@ -216,6 +258,7 @@ def freeze(args, campaign):
     immutable_json(campaign / "configs/formal_freeze.json", {
         **prepared, "schema": "car_round6_freeze_v1", "code_root": str(code),
         "code_sha256": code.name, "created_unix": time.time(),
+        "selected_prepared": reference(prepared_path),
         "pilot": reference(args.pilot), "forecast": reference(args.forecast),
         "selection_use": "reused development VALIDATION100; tasks withheld until endpoint",
     })
@@ -288,14 +331,16 @@ def train(args, campaign):
     from phycoflow_reconstruction.training.post_training import run_post_training
     if not os.environ.get("CAR_ROUND6_LEASE_TOKEN"):
         raise ValueError("training must run under the Round 6 enclosing GPU lease")
-    prepared = json.loads((campaign / "configs/prepared.json").read_text())
-    cfg = yaml.safe_load(checked(prepared["arms"][ARM]).read_text())
     if args.pilot:
+        prepared = json.loads((campaign / "configs/prepared.json").read_text())
+        cfg = yaml.safe_load(checked(prepared["arms"][ARM]).read_text())
         if args.stop_epoch != 20 or args.resume is not None:
             raise ValueError("pilot is a fresh SOURCE 20-epoch run")
         cfg["output"]["experiment_name"] = "coherence_adaptive_repair/round_6/runs/pilot/" + ARM
     else:
         manifest = json.loads((campaign / "configs/formal_freeze.json").read_text())
+        _, prepared = frozen_prepared(campaign, manifest)
+        cfg = yaml.safe_load(checked(prepared["arms"][ARM]).read_text())
         if CODE.resolve() != Path(manifest["code_root"]).resolve():
             raise ValueError("formal training must use the frozen execution copy")
         if args.stop_epoch not in (100, 500):
@@ -340,6 +385,7 @@ def main():
     p.add_argument("--audit", type=Path, required=True)
     p.add_argument("--group-queries", action="store_true")
     p = sub.add_parser("freeze")
+    p.add_argument("--prepared", type=Path)
     p.add_argument("--pilot", type=Path, required=True)
     p.add_argument("--forecast", type=Path, required=True)
     p = sub.add_parser("forecast")
