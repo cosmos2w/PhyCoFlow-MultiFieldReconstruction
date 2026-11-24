@@ -65,6 +65,51 @@ def scientific_method(config_ref):
     return paragraphs
 
 
+def original_target_fit_text(gamma):
+    return (f'The preserved original TRAIN-only symmetric drift-target diagnostic fitted gamma = {float(gamma):.6g}. '
+            'This fitted value is a diagnostic, not the executed training gain; the scientific intervention above describes the actual saved configuration.')
+
+
+def complete_epoch_engineering_figure(engineering, directory):
+    """Plot only the completed, hash-bound matched epoch qualification, if supplied."""
+    ref = engineering.get('complete_epoch_timing')
+    if ref is None:
+        return None
+    timing = doc(ref)
+    order = ['separate', 'batched', 'batched', 'separate']
+    epochs = [item for item in timing.get('attempts', []) if 'epoch_timing' in item]
+    if (timing.get('schema') != 'car_round6_batched_epoch_timing_v1'
+            or timing.get('status') != 'completed' or timing.get('order') != order
+            or [item.get('family_vjp') for item in epochs] != order
+            or not isinstance(timing.get('device_name'), str) or not timing['device_name'].strip()):
+        raise ValueError('completed matched complete-epoch timing receipt required')
+    values = {'separate': [[], []], 'batched': [[], []]}
+    for item in epochs:
+        row = item['epoch_timing']
+        seconds, memory = row.get('wall_seconds'), item.get('peak_allocated_bytes')
+        if (row.get('attempted_updates') != 12 or row.get('accepted_updates') != 12
+                or row.get('complete_epoch_duration') is False
+                or any(isinstance(v, bool) or not isinstance(v, (int, float))
+                       or not math.isfinite(v) or v <= 0 for v in (seconds, memory))):
+            raise ValueError('four complete epochs with finite measured time and memory required')
+        values[item['family_vjp']][0].append(seconds)
+        values[item['family_vjp']][1].append(memory / 1024**3)
+    import matplotlib; matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    fig, axes = plt.subplots(1, 2, figsize=(9, 4), constrained_layout=True)
+    for ax, index, title, ylabel in zip(axes, (0, 1), ('Complete-epoch time', 'Peak allocated memory'), ('Seconds', 'GiB')):
+        for x, method in enumerate(('separate', 'batched')):
+            samples = values[method][index]
+            ax.scatter([x - .06, x + .06], samples, label='Individual epochs' if x == 0 else None)
+            ax.scatter([x], [sum(samples) / len(samples)], marker='_', s=350, linewidths=2,
+                       color='black', label='Within-method mean' if x == 0 else None)
+        ax.set_xticks([0, 1], ['Separate', 'Batched'])
+        ax.set(title=title, ylabel=ylabel); ax.grid(axis='y', alpha=.2); ax.legend(fontsize=7)
+    save_figure(fig, directory, 'complete_epoch_engineering')
+    return (f"Four fresh-SOURCE complete-epoch engineering qualifications on the same GPU ({timing['device_name']}), "
+            'two per method in separate, batched, batched, separate order. Points show individual epoch wall times and peak allocated memory; bars show within-method means. These qualifications do not establish mature-trajectory performance or model efficacy.')
+
+
 def series(ax, x, y, label):
     import numpy as np
     y = np.asarray(y, dtype=float); x = np.asarray(x, dtype=float)
@@ -370,6 +415,9 @@ def produce(inputs_path,campaign,output):
     if not journal:
         captions['learning_and_action']='Parameter-direction norms, learning rate and the last recorded batch constraint and multiplier at each epoch; actual optimizer-displacement products are unavailable for this run.'
     for name in leaf_figures: captions[name]='Complete raw sampled leaf histories in their declared representation units; translucent values are epoch records and solid bars are descriptive ten-epoch means.'
+    engineering_caption = complete_epoch_engineering_figure(engineering, figures)
+    if engineering_caption is not None:
+        captions['complete_epoch_engineering'] = engineering_caption
     response = doc(inputs['controller_response']) if inputs.get('controller_response') else None
     if response is not None:
         captions['measured_controller_response'] = controller_response(response, figures)
@@ -413,7 +461,7 @@ def produce(inputs_path,campaign,output):
         audit=doc(inputs['audit']); qualification=audit.get('controller_qualification',audit)
         gamma=qualification.get('gamma_star',qualification.get('calibration',{}).get('gamma_star'))
         if gamma is not None:
-            body += ['', '## Controller diagnosis', '', f'The TRAIN-only controller uses delta = 1/12 reporting epoch, tau = 1 epoch, horizon = 10 epochs and measured gain gamma = {float(gamma):.6g}; its signed error is captured before the action and the combined PI increment is projected after the action.', '']
+            body += ['', '## Original controller target-fit diagnostic', '', original_target_fit_text(gamma), '']
         for key,label in (('baseline_weighted_residual_squared','Zero-current-feedback weighted response residual squared'),('star_weighted_residual_squared','Calibrated weighted response residual squared'),('residual_norm_improvement','Measured residual norm improvement'),('replay_discrepancy_norm','Repeated numerical replay discrepancy')):
             if qualification.get(key) is not None: body += [f"{label}: {float(qualification[key]):.6g}.", '']
         if isinstance(audit.get('summary'),str):body += [audit['summary'],'']
