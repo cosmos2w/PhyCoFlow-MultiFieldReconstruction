@@ -1,5 +1,7 @@
 # Coherence Adaptive Repair: source identity index
 
+Round 6's admitted planning material and evidence identities remain in `Round_6/evidence/HISTORICAL_AUDIT.md`; it is not a historical reading copy. The [execution record](Round_6/EXECUTION_STATUS.md) documents its preparation close and preserves the admitted workplan and review bytes.
+
 This index identifies the exact source bytes used for the portable Markdown reading copies. SHA-256 hashes describe the original files; reading copies add a status banner and rebase Markdown links. They do not alter scientific statements, fenced commands or literal historical paths.
 
 The **original source** links are local-only compatibility paths. They require the project's DATA2-backed campaign alias and are not prerequisites for reading the copies. The Round 1–5 prompts are historical and are not current launch instructions.

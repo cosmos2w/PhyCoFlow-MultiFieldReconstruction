@@ -1,0 +1,120 @@
+{
+  "schema": "car_round6_preparation_cost_v1",
+  "status": "completed",
+  "summary": "Six completed GPU0 preparation leases occupied 1134.659 seconds (0.315183 GPU-hours), including initialization, data waits, update work and enclosed CPU work; no leased failure cost is omitted. This is below the four-hour preparation allowance and the 30-hour campaign ceiling. The one complete instrumented trainer epoch is engineering qualification; no 20-epoch PI pilot, 100/500-epoch learning run or candidate VALIDATION assessment was launched. Recorded CPU user/system work inside leases is already enclosed in GPU occupation and is not added to it. Cached CPU support/Shape helper wall times are a sum of helper durations, not serial elapsed time; report generation is measured in its final build receipt. Other CPU coding, checks and orchestration time was not completely timed and remains unavailable.",
+  "measurements": {
+    "occupied_gpu_seconds": 1134.6591312885284,
+    "occupied_gpu_hours": 0.3151830920245912,
+    "failed_lease_gpu_seconds": 0,
+    "preparation_gpu_hour_ceiling": 4,
+    "campaign_gpu_hour_ceiling": 30,
+    "complete_qualification_trainer_epochs": 1,
+    "formal_candidate_training_epochs": 0,
+    "cpu_user_seconds_inside_gpu_leases": 1302.146483,
+    "cpu_system_seconds_inside_gpu_leases": 50.690443,
+    "cached_cpu_helper_wall_sum_seconds": 183.11123415315524,
+    "other_cpu_preparation_seconds": null
+  },
+  "ledger": {
+    "path": "/data2/wanglz/PhyCoFlow-MultiFieldReconstruction/cases/turbulent_combustion/runs/coherence_adaptive_repair/round_6/operations/gpu_ledger.json",
+    "sha256": "5c552ed26113bd0cd7af9b23d78ae71aef792f2c144f7de735d8626f2e52ba87"
+  },
+  "gpu_jobs": [
+    {
+      "name": "car_round6_computation",
+      "status": "completed",
+      "occupied_gpu_seconds": 125.20891499519348,
+      "receipt": {
+        "path": "/data2/wanglz/PhyCoFlow-MultiFieldReconstruction/cases/turbulent_combustion/runs/coherence_adaptive_repair/round_6/operations/completions/3b15cde2da4844d0982f08b455b00c9f.json",
+        "sha256": "d3ddeefe9fa61f62040c0925a90539a2b731d1d7be61af025932ca8594928a20"
+      },
+      "child_user_cpu_seconds": 261.270912,
+      "child_system_cpu_seconds": 5.879489
+    },
+    {
+      "name": "car_round6_mature_first_batch",
+      "status": "completed",
+      "occupied_gpu_seconds": 23.178374528884888,
+      "receipt": {
+        "path": "/data2/wanglz/PhyCoFlow-MultiFieldReconstruction/cases/turbulent_combustion/runs/coherence_adaptive_repair/round_6/operations/completions/308a5d30ac9c431b92084c870cbff241.json",
+        "sha256": "ee1eb73e7a80ef29c46125fc39cb3ac9a15bbc3ff2387f06b8c406af6f777c1e"
+      },
+      "child_user_cpu_seconds": 29.740410999999998,
+      "child_system_cpu_seconds": 2.915541
+    },
+    {
+      "name": "car_round6_panel_calibration",
+      "status": "completed",
+      "occupied_gpu_seconds": 791.1891152858734,
+      "receipt": {
+        "path": "/data2/wanglz/PhyCoFlow-MultiFieldReconstruction/cases/turbulent_combustion/runs/coherence_adaptive_repair/round_6/operations/completions/18d1b9702f5e4db8baf902d45fd74eb8.json",
+        "sha256": "e96320bbc4c8514d0535732238e1b44e65e55741f0632637a747ef55d8148748"
+      },
+      "child_user_cpu_seconds": 798.179881,
+      "child_system_cpu_seconds": 26.922411
+    },
+    {
+      "name": "car_round6_shape_leaf_fixture",
+      "status": "completed",
+      "occupied_gpu_seconds": 27.08528447151184,
+      "receipt": {
+        "path": "/data2/wanglz/PhyCoFlow-MultiFieldReconstruction/cases/turbulent_combustion/runs/coherence_adaptive_repair/round_6/operations/completions/410d892ca4fb445f86442a0d9bf306ba.json",
+        "sha256": "13504b8d0c031884eae39e647fff12d64c5b8822ec8f06b3ae43b54b6660931a"
+      },
+      "child_user_cpu_seconds": 34.722139,
+      "child_system_cpu_seconds": 2.2381900000000003
+    },
+    {
+      "name": "car_round6_batched_vjp",
+      "status": "completed",
+      "occupied_gpu_seconds": 20.519283056259155,
+      "receipt": {
+        "path": "/data2/wanglz/PhyCoFlow-MultiFieldReconstruction/cases/turbulent_combustion/runs/coherence_adaptive_repair/round_6/operations/completions/c1f8fafe46dc48ad8ed30e9c139a91c1.json",
+        "sha256": "f58507559cd9127f7e0a63ea73d388bce3a85c86cf2b2d229d464537a0d70579"
+      },
+      "child_user_cpu_seconds": 26.492639,
+      "child_system_cpu_seconds": 3.206559
+    },
+    {
+      "name": "car_round6_combined_vjp_parity",
+      "status": "completed",
+      "occupied_gpu_seconds": 147.47815895080566,
+      "receipt": {
+        "path": "/data2/wanglz/PhyCoFlow-MultiFieldReconstruction/cases/turbulent_combustion/runs/coherence_adaptive_repair/round_6/operations/completions/f5488d6d3bdf48e2a1ee5ba918695d5f.json",
+        "sha256": "e4d6c49d92b244cefe99465f0b79b60e7eb30a3331706c1da756435f428714f0"
+      },
+      "child_user_cpu_seconds": 151.740501,
+      "child_system_cpu_seconds": 9.528253
+    }
+  ],
+  "cached_cpu_jobs": [
+    {
+      "receipt": {
+        "path": "/data2/wanglz/PhyCoFlow-MultiFieldReconstruction/cases/turbulent_combustion/runs/coherence_adaptive_repair/round_6/assessment/source_support/native_selected_train800.json",
+        "sha256": "9adcf5ca9d7970ef67806f093491fd226397c5dc819acd6d2be4d834f82e64e1"
+      },
+      "wall_seconds": 10.775314660742879
+    },
+    {
+      "receipt": {
+        "path": "/data2/wanglz/PhyCoFlow-MultiFieldReconstruction/cases/turbulent_combustion/runs/coherence_adaptive_repair/round_6/assessment/source_support/sensor_seed_pairing_train800.json",
+        "sha256": "8cbcf3685e8173e76c3e50489e1288bd86e5c0af9aa548f710d986136703f779"
+      },
+      "wall_seconds": 1.9984057312831283
+    },
+    {
+      "receipt": {
+        "path": "/data2/wanglz/PhyCoFlow-MultiFieldReconstruction/cases/turbulent_combustion/runs/coherence_adaptive_repair/round_6/assessment/source_shape_variance/cached_j4_train800.json",
+        "sha256": "d691554eaec99aa2c7c4fbcac3598d10be58e3e216801208f24a6ece3a7aca7d"
+      },
+      "wall_seconds": 170.33751376112923
+    }
+  ],
+  "test_locked": true,
+  "cost_limits": [
+    "No uninstrumented epoch-speed or time-to-quality claim.",
+    "CPU helper wall durations may overlap GPU leases or each other.",
+    "Code review, unit-check and orchestration CPU durations are not completely recorded.",
+    "Report rendering CPU and wall times are recorded separately after generation."
+  ]
+}

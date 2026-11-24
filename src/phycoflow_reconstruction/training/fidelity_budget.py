@@ -309,6 +309,8 @@ class ExternalPolicy:
         self._constraint_state_type = None
         self._barrier_settings = None
         self._penalty_interval_updates = 1
+        self._pi = None
+        self._pi_z = None
         if self.method == "lagrangian":
             self._init_lagrangian()
         elif self.method == "extended_log_barrier":
@@ -336,6 +338,19 @@ class ExternalPolicy:
         if isinstance(interval, bool) or not isinstance(interval, int) or interval < 1:
             raise ValueError("lagrangian penalty_interval_updates must be a positive integer")
         self._penalty_interval_updates = interval
+        pi = settings.get("epoch_calibrated_pi")
+        if pi is not None:
+            if not isinstance(pi, Mapping) or set(pi) != {"gamma", "tau_epochs", "horizon_epochs", "steps_per_epoch"}:
+                raise ValueError("epoch_calibrated_pi requires gamma, tau_epochs, horizon_epochs and steps_per_epoch")
+            gamma, tau, horizon = (float(pi[k]) for k in ("gamma", "tau_epochs", "horizon_epochs"))
+            steps = pi["steps_per_epoch"]
+            if not all(math.isfinite(x) for x in (gamma, tau, horizon)) or gamma < 0 or tau <= 0 or horizon <= 0 or isinstance(steps, bool) or not isinstance(steps, int) or steps < 1 or interval != 1:
+                raise ValueError("invalid epoch_calibrated_pi parameters or penalty interval")
+            if not isinstance(self.reference, MeanRiskDifferenceBudget):
+                raise ValueError("epoch_calibrated_pi requires a signed mean-risk reference")
+            self._pi = dict(pi)
+            source = torch.tensor(self.reference.reference_risks, dtype=torch.float64, device=self.device)
+            self._pi_z = self.reference.violations(source).detach()
         zeros = torch.zeros(len(self.reference.field_names), dtype=torch.float64, device=self.device)
         self._multiplier = DenseMultiplier(
             num_constraints=len(self.reference.field_names), init=zeros, device=self.device, dtype=torch.float64
@@ -393,14 +408,13 @@ class ExternalPolicy:
             raise FloatingPointError("model gradient norm is non-finite; refusing update")
         clip_coefficient = min(1.0, clip / (norm_value + 1.0e-6)) if clip else 1.0
 
-        if self.method == "lagrangian":
+        if self.method == "lagrangian" and self._pi is None:
             self._prepare_dual_gradient(violations)
         optimizer.step()
         if not _all_finite(parameters):
             raise FloatingPointError("model optimizer produced non-finite parameters")
         if self.method == "lagrangian":
-            self._dual_optimizer.step()
-            self._multiplier.post_step_()
+            self._commit_feedback(violations, dual_prepared=self._pi is None)
             diagnostics["multipliers_after"] = self._multipliers()
         self.completed_updates += 1
         diagnostics.update(
@@ -616,15 +630,32 @@ class ExternalPolicy:
             raise FloatingPointError("model gradient norm is non-finite; refusing update")
         clip_coefficient = min(1.0, clip / (norm_value + 1.0e-6)) if clip else 1.0
 
+        # The Round 6 action audit reuses existing family/combined-field VJPs.
+        # No individual field gradients or finite rollout are added to training.
+        action_before = _flat_parameters(parameters) if self._pi is not None else None
         optimizer.step()
         if not _all_finite(parameters):
             raise FloatingPointError("model optimizer produced non-finite parameters")
+        if action_before is not None:
+            displacement = _flat_parameters(parameters) - action_before
+            products = {
+                "fresh_config": matrix64 @ config_direction,
+                "composed": matrix64 @ direction,
+                "clipped": matrix64 @ (clip_coefficient * direction),
+                "actual_displacement": matrix64 @ displacement,
+            }
+            policy_diagnostics["action_family_products"] = {
+                stage: dict(zip(family_names, values.detach().cpu().tolist()))
+                for stage, values in products.items()
+            }
+            policy_diagnostics["action_constraint_product"] = float(
+                torch.dot(constraint_gradient.to(torch.float64), displacement).detach().cpu())
+            policy_diagnostics["action_displacement_norm"] = float(
+                torch.linalg.vector_norm(displacement).detach().cpu())
         if self.method == "lagrangian":
             # Cooper's dual term detaches violations; prepare it only after the model
             # update has succeeded so dual state cannot advance on a rejected step.
-            self._prepare_dual_gradient(violations.detach())
-            self._dual_optimizer.step()
-            self._multiplier.post_step_()
+            self._commit_feedback(violations)
             policy_diagnostics["multipliers_after"] = self._multipliers()
 
         self.completed_updates += 1
@@ -711,6 +742,26 @@ class ExternalPolicy:
         if gradient is None or not bool(torch.isfinite(gradient).all()):
             raise FloatingPointError("Cooper dual gradient is missing or non-finite")
 
+    def _commit_feedback(self, violations: Tensor, *, dual_prepared: bool = False) -> None:
+        if self._pi is None:
+            if not dual_prepared:
+                self._prepare_dual_gradient(violations.detach())
+            self._dual_optimizer.step()
+            self._multiplier.post_step_()
+            return
+        error = violations.detach().to(device=self.device, dtype=torch.float64)
+        delta = 1.0 / self._pi["steps_per_epoch"]
+        nu = math.exp(-delta / self._pi["tau_epochs"])
+        new_z = nu * self._pi_z + (1.0 - nu) * error
+        integral_gain = self._pi["gamma"] * 0.0012
+        increment = integral_gain * delta * error + self._pi["horizon_epochs"] * integral_gain * (new_z - self._pi_z)
+        new_multiplier = torch.clamp(self._multiplier.weight.detach() + increment, min=0.0)
+        if not _all_finite((new_z, new_multiplier)):
+            raise FloatingPointError("PI feedback became non-finite; recover from checkpoint")
+        with torch.no_grad():
+            self._multiplier.weight.copy_(new_multiplier)
+        self._pi_z = new_z
+
     def _rectify_objective(self, primary: Tensor, violations: Tensor) -> tuple[Tensor, dict[str, Any]]:
         maximum, index = torch.max(violations.detach(), dim=0)
         if float(maximum) <= 0:
@@ -741,6 +792,8 @@ class ExternalPolicy:
         }
         if getattr(self, "periodic_config", None) is not None:
             state["periodic_config"] = self.periodic_config.state_dict()
+        if self._pi is not None:
+            state["epoch_calibrated_pi"] = {"field_names": list(self.reference.field_names), "z": self._pi_z.cpu().tolist(), "epoch": self.completed_updates / self._pi["steps_per_epoch"]}
         return state
 
     def load_state_dict(self, state: Mapping[str, Any]) -> None:
@@ -754,6 +807,16 @@ class ExternalPolicy:
         if isinstance(updates, bool) or not isinstance(updates, int) or updates < 0:
             raise ValueError("invalid completed update count")
         self.completed_updates = updates
+        pi_state = state.get("epoch_calibrated_pi")
+        if (pi_state is not None) != (self._pi is not None):
+            raise ValueError("PI controller state/configuration mismatch")
+        if self._pi is not None:
+            if pi_state.get("field_names") != list(self.reference.field_names) or pi_state.get("epoch") != updates / self._pi["steps_per_epoch"]:
+                raise ValueError("PI field order or epoch clock mismatch")
+            z = torch.as_tensor(pi_state.get("z"), dtype=torch.float64, device=self.device)
+            if z.shape != (len(self.reference.field_names),) or not bool(torch.isfinite(z).all()):
+                raise ValueError("invalid PI smoothing state")
+            self._pi_z = z
         periodic = getattr(self, "periodic_config", None)
         if (periodic is not None) != ("periodic_config" in state):
             raise ValueError("periodic ConFIG recovery state/configuration mismatch")
@@ -766,6 +829,13 @@ class ExternalPolicy:
             with torch.no_grad():
                 self._multiplier.weight.copy_(values.reshape(-1))
             self._dual_optimizer.load_state_dict(state["dual_optimizer"])
+
+
+def _flat_parameters(parameters: Sequence[nn.Parameter]) -> Tensor:
+    return torch.cat([
+        (torch.view_as_real(p.detach()) if p.is_complex() else p.detach()).reshape(-1)
+        for p in parameters
+    ]).to(torch.float64)
 
 
 def _all_finite(values: Iterable[Tensor]) -> bool:

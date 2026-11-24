@@ -364,6 +364,12 @@ class TrainingMonitor:
                     units, meaning = "parameter_gradient_norm", "Norm in the declared trainable parameter space before the documented clipping/update stage."
                 elif key == "optimizer_lr":
                     units, meaning = "optimizer_step_scale", "AdamW learning rate actually used for the accepted update."
+                elif key == "action_family_products":
+                    units, meaning = "family_units_times_parameter_action", "Last accepted action products of each fixed-unit family gradient with fresh ConFIG, composed and clipped gradients (positive denotes first-order descent for their negation), and the actual AdamW displacement (negative denotes first-order descent)."
+                elif key == "action_constraint_product":
+                    units, meaning = "normalized_constraint_units", "Dot product of the current multiplier-weighted combined field gradient and the actual AdamW displacement, including weight decay."
+                elif key == "action_displacement_norm":
+                    units, meaning = "parameter_space_norm", "Euclidean norm of the actual accepted AdamW parameter displacement, including weight decay."
                 return {"name": key, "type": kind(value), "units": units, "meaning": meaning}
             if self._recording_definitions is None:
                 self._recording_definitions = {
@@ -380,7 +386,15 @@ class TrainingMonitor:
                 added, missing = [k for k in new if k not in old], [k for k in old if k not in new]
                 # JSON/dictionary order does not redefine the saved columns.
                 reordered = self._recording_definitions.get("loss_component_accumulation_order", self._loss_component_order) != self._loss_component_order
-                semantic = [c["name"] for c in columns if c["name"] in row and c["type"] not in ("nullable", kind(row[c["name"]])) and kind(row[c["name"]]) != "nullable"]
+                semantic = []
+                for column in columns:
+                    name = column["name"]
+                    if name not in row:
+                        continue
+                    current = definition(name, row[name])
+                    type_changed = column["type"] not in ("nullable", current["type"]) and current["type"] != "nullable"
+                    if type_changed or any(column.get(key) != current[key] for key in ("units", "meaning")):
+                        semantic.append(name)
                 if added or missing or reordered or semantic or list(self._epoch_sums) != self._recording_definitions["accumulation_order"]:
                     raise ValueError(f"recording definitions incompatible: added={added}, missing={missing}, reordered={reordered}, semantic={semantic}, accumulation_order_changed={list(self._epoch_sums) != self._recording_definitions['accumulation_order']}")
                 row = {k: row[k] for k in old}

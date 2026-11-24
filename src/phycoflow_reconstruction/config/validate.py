@@ -568,9 +568,17 @@ def _validate_external_policy(multitask: Mapping[str, Any]) -> None:
     defaults, integer_keys = parameter_defaults[method]
     _reject_unknown(
         parameters,
-        set(defaults),
+        set(defaults) | ({"epoch_calibrated_pi"} if method == "lagrangian" else set()),
         f"optimization.multitask.external_policy.{parameter_key}",
     )
+    if method == "lagrangian" and "epoch_calibrated_pi" in parameters:
+        pi = parameters["epoch_calibrated_pi"]
+        if not isinstance(pi, Mapping) or set(pi) != {"gamma", "tau_epochs", "horizon_epochs", "steps_per_epoch"}:
+            raise ValueError("epoch_calibrated_pi requires gamma, tau_epochs, horizon_epochs and steps_per_epoch")
+        for key in ("gamma", "tau_epochs", "horizon_epochs", "steps_per_epoch"):
+            _method_parameter(pi[key], f"epoch_calibrated_pi.{key}", allow_zero=key == "gamma")
+        if isinstance(pi["steps_per_epoch"], bool) or not isinstance(pi["steps_per_epoch"], int) or parameters.get("penalty_interval_updates", 1) != 1:
+            raise ValueError("epoch_calibrated_pi requires integer steps_per_epoch and penalty_interval_updates=1")
     values: dict[str, float] = {}
     for key, default in defaults.items():
         value = parameters.get(key, default)

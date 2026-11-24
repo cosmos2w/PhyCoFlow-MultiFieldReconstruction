@@ -2144,6 +2144,15 @@ def run_post_training(
             if stream.get("scheme") != "per_attempt_seed_v1" or stream.get("next_attempt") != start_step or not torch.equal(stream.get("next_state", torch.empty(0, dtype=torch.uint8)).cpu(), expected.cpu()):
                 raise ValueError("direct native random stream checkpoint mismatch")
         store.recover_metric_histories(start_step)
+        if (external_settings or {}).get("lagrangian", {}).get("epoch_calibrated_pi") is not None:
+            from .journals import recover_journal
+            pi_journal = store.run_dir / "logs" / "epoch_calibrated_pi_updates.jsonl"
+            if start_step and not pi_journal.is_file():
+                raise FileNotFoundError("PI checkpoint is missing its action history")
+            recover_journal(pi_journal, start_step)
+            cursors = [json.loads(line)["step"] for line in pi_journal.read_text().splitlines() if line.strip()] if pi_journal.is_file() else []
+            if cursors != list(range(1, start_step + 1)):
+                raise ValueError("PI action history is incomplete at checkpoint cursor")
         if direct_settings is not None:
             from .journals import recover_journal
             direct_journal = store.run_dir / "logs" / "direct_updates.jsonl"
@@ -2402,6 +2411,9 @@ def run_post_training(
             raise ValueError("resume checkpoint family scales differ from calibration artifact")
     family_scales = {name: float(calibration["resolved_scales"][name]) for name in families}
     if external_settings is not None:
+        pi = external_settings.get("lagrangian", {}).get("epoch_calibrated_pi")
+        if pi is not None and pi["steps_per_epoch"] != post_training_steps_per_epoch(config, len(train_dataset)):
+            raise ValueError("epoch_calibrated_pi steps_per_epoch differs from resolved reporting clock")
         declaration = config["optimization"]["multitask"].get("fidelity_budget", {}).get("reference_artifact")
         reference_binding = _fidelity_reference_binding(
             config, train_dataset, source_hashes_before, source_metadata, scalable_runtime, family_scales
@@ -3306,6 +3318,10 @@ def run_post_training(
                 **_family_scalar_report(result),
                 **gradient,
             )
+            if policy is not None and policy._pi is not None:
+                pi_state = policy.state_dict()["epoch_calibrated_pi"]
+                with (store.run_dir / "logs" / "epoch_calibrated_pi_updates.jsonl").open("a", encoding="utf-8") as stream:
+                    stream.write(json.dumps({"step": global_step + 1, "epoch": epoch, "field_violation": gradient["field_violation"], "multipliers_before": gradient["multipliers_before"], "multipliers_after": gradient["multipliers_after"], "z_after": pi_state["z"], "action_family_products": gradient["action_family_products"], "action_constraint_product": gradient["action_constraint_product"], "action_displacement_norm": gradient["action_displacement_norm"]}, allow_nan=False) + "\n")
             if "lpc_ordered" in gradient:
                 row["objective_semantics"] = "T_over_T0_with_dense_A_B_and_endpoint_constraints"
                 with (store.run_dir / "metrics/lpc_ordered_updates.jsonl").open("a") as handle:
