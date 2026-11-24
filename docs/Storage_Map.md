@@ -16,10 +16,11 @@ The HOME checkout is `/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstr
 | `UpdatePlans/Coherence_Adaptive_Repair/` | Small retained original scientific contracts and local campaign aliases; reading copies live in the plan library |
 | `UpdatePlans/CoherenceComputeEnhancement_20261106` | Ignored alias to DATA2 `_bk/research_collections/CoherenceComputeEnhancement_20261106` |
 | `UpdatePlans/Coherence_Manuscript_Foundation` | Ignored alias to DATA2 `_bk/research_collections/Coherence_Manuscript_Foundation` |
-| `LegacyCoherence` | Ignored historical-source alias to DATA2 `_bk/research_collections/Legacy_LegacyCoherence` |
-| `reports`, `figures` | Ignored compatibility aliases to DATA2 `reports/_bk/Legacy_reports` and `reports/_bk/Legacy_figures` |
+| `_bk/legacy_sources/LegacyCoherence` | Archived local alias to DATA2 `_bk/research_collections/Legacy_LegacyCoherence`; the old root entrance is retired |
+| `_bk/legacy_exports/reports`, `_bk/legacy_exports/figures` | Archived local aliases to the DATA2 historical exports; the old root entrances are retired |
 | `cases/turbulent_combustion/diagnostics/ExampleVisual/.work` | Ignored alias to DATA2 `_bk/diagnostics/ExampleVisual_Work` |
-| Four root `Coherence_Adaptive_Repair_*_Review` aliases | Retained local compatibility for frozen references; the report library is the reading entry |
+| `UpdatePlans/_Reports/_bk/Retired_Local_Aliases/` | Four archived historical review aliases; no review alias remains at the repository root. Read ordinary files in the report library. |
+| `UpdatePlans/{_Plans,_Reports}/_bk/Legacy_Aliases/` | Twenty-four archived old flat aliases; maintained reading links use the ordinary `Legacy_Local_*` archive copies |
 
 The intended DATA2 structure is:
 
@@ -55,3 +56,5 @@ Dataset ownership is separate from the run migration:
 | New project-owned datasets | DATA2 `datasets/<case>/<version>/` | Create directly on DATA2 and expose ignored catalog links; never copy payloads into Git |
 
 The old flat plan and report collections are grouped under their library `_bk/Legacy_Local_*` directories. Exact original snapshots on DATA2 preserve original source bytes before presentation-link rebasing. They are local historical context, not new public or scientific authority.
+
+The navigation follow-up archived 31 duplicate symlink entries without changing any DATA2 target inode or original regular file. Historical path strings in immutable source documents remain source records; archived alias mappings identify their former targets. Current reading links were rebased. `build/`, `dist/` and the four original source/research collections directly under `UpdatePlans/` remain protected, explicitly listed migration exceptions pending approval of their path changes. They are not destinations for new reports or scratch. See [the follow-up and pending moves](../UpdatePlans/_Reports/Project_Organization/NAVIGATION_FOLLOWUP.md).

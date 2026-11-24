@@ -2,7 +2,7 @@
 
 # Coherence_Adaptive_Repair — Round 1 workplan
 
-Date: 2026-11-13. Status: proposed execution contract, prepared from main `a18d2bd27cac0c72a902242477e98eb8f511f03f` with three GPT-6.1 Terra max reviews. This planning task creates no branch, model or GPU job. When execution is requested, start from current main and create the Git branch **`Coherence_Adaptive_Repair`**, using the owner's exact name. Physical GPU0 is primary; physical GPU1 may accelerate independent work when available. The [branch roadmap](../../../CoherenceRepair_Branch_Roadmap_20261113.md) supplies the wider program; this workplan selects its first substantive round.
+Date: 2026-11-13. Status: proposed execution contract, prepared from main `a18d2bd27cac0c72a902242477e98eb8f511f03f` with three GPT-6.1 Terra max reviews. This planning task creates no branch, model or GPU job. When execution is requested, start from current main and create the Git branch **`Coherence_Adaptive_Repair`**, using the owner's exact name. Physical GPU0 is primary; physical GPU1 may accelerate independent work when available. The [branch roadmap](../../../_bk/Legacy_Local_Plans/CoherenceRepair_Branch_Roadmap_20261113.md) supplies the wider program; this workplan selects its first substantive round.
 
 ## 1. Objective, scope and decisions
 

@@ -53,6 +53,7 @@ benchmarks/**/runs_summary
 /figures
 /reports
 /artifacts
+/_bk
 cases/**/diagnostics/**/.work
 
 # Python, test, editor, and build caches.
@@ -96,6 +97,9 @@ LegacyCoherence/
 !/UpdatePlans/_Reports/
 /UpdatePlans/_Plans/_bk/Legacy_Local_Plans
 /UpdatePlans/_Reports/_bk/Legacy_Local_Reports
+/UpdatePlans/_Plans/_bk/Legacy_Aliases
+/UpdatePlans/_Reports/_bk/Legacy_Aliases
+/UpdatePlans/_Reports/_bk/Retired_Local_Aliases
 /UpdatePlans/_Plans/*.md
 /UpdatePlans/_Plans/*.pdf
 /UpdatePlans/_Plans/*.html

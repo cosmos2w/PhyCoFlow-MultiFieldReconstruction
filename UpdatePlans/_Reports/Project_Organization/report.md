@@ -36,4 +36,6 @@ A separate browser preview was unavailable because the installed Firefox could n
 
 The upgraded artifact policy and contributor guide define code boundaries, HOME/DATA2 ownership, `_bk` retention, source/publication identity, migration checks and GitHub inclusion. `.gitignore` now treats both directory and symlink forms correctly, excludes raw historical collections and makes reviewed plan/report libraries trackable. GitHub CI checks portable publication links in a clean checkout; scientific payloads and machine-specific aliases remain local. There is no automatic deletion by age or archive status, no silent HOME storage fallback and no automatic experiment extension.
 
+A later [navigation follow-up](NAVIGATION_FOLLOWUP.md) corrects the initially over-retained compatibility entrances: 31 redundant aliases are now archived, and current reading links are updated. The earlier statements above about aliases describe the initial migration state; the follow-up records the current state.
+
 The storage reorganization is adopted. The retained cleanup items remain in place pending the user's later review; they do not block the new reading/navigation structure.

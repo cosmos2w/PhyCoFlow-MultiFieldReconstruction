@@ -5,3 +5,5 @@ Adaptive Repair Rounds 1–4 are readable under [the campaign's archive](../Cohe
 The old flat plan collection is grouped locally at `Legacy_Local_Plans/`. It includes the earlier 1002, fidelity-budget, topology, compute-enhancement and branch-review material, plus historical source snapshots. Its byte-preserving originals are stored on DATA2 under `_bk/research_collections/Legacy_Plans/`; that raw collection is deliberately excluded from Git publication. Consult the local archive index for its relocation map and pre-existing unresolved dependencies.
 
 Archive status does not establish that a file is disposable. Preserve scientific originals, failed attempts, logs and provenance until a specific reviewed cleanup is authorized.
+
+Redundant flat aliases have been archived locally under `Legacy_Aliases/`; use the ordinary `Legacy_Local_*` reading copies. Historical path mentions remain in immutable originals and do not require those aliases at the current library level.
