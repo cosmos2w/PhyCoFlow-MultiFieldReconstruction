@@ -12,7 +12,7 @@ from torch import Tensor, nn
 
 from .gradient_balance import _assign_flat_gradient, _flat_gradient
 from .gradients import stable_clip_grad_norm_
-from .multitask import OuterAggregator
+from .multitask import OuterAggregator, batched_family_gradients
 
 
 def field_error_sums(prediction: Tensor, target: Tensor, mask: Tensor) -> tuple[Tensor, Tensor]:
@@ -502,14 +502,17 @@ class ExternalPolicy:
             ]
             if missing:
                 raise TypeError(f"coherence family losses must be real scalars: {missing}")
-            gradients = []
             for name, loss in ordered_losses.items():
                 # reduce_primary already validated every family before backward.
                 if not loss.requires_grad:
                     raise FloatingPointError(f"ConFIG family {name!r} has no model gradient")
-                gradients.append(_flat_gradient(loss.reshape(()), parameters))
-            family_gradient_evaluations = len(gradients)
-            gradient_matrix = torch.stack(gradients)
+            if aggregator.family_vjp == "batched":
+                gradient_matrix = batched_family_gradients(list(ordered_losses.values()), parameters)
+            else:
+                gradient_matrix = torch.stack([
+                    _flat_gradient(loss.reshape(()), parameters) for loss in ordered_losses.values()
+                ])
+            family_gradient_evaluations = len(ordered_losses)
             if not bool(torch.isfinite(gradient_matrix).all()):
                 raise FloatingPointError("ConFIG family gradient matrix is non-finite")
             matrix64 = gradient_matrix.detach().to(torch.float64)
@@ -543,6 +546,7 @@ class ExternalPolicy:
                 raise FloatingPointError("TorchJD ConFIG returned a zero or non-finite direction")
             aggregation_diagnostics.update(
                 method=aggregator.method,
+                family_vjp=aggregator.family_vjp,
                 family_order=list(family_names),
                 gradient_matrix_shape=list(gradient_matrix.shape),
                 source_gradient_dtype=str(gradient_matrix.dtype),

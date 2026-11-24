@@ -31,6 +31,18 @@ def main():
     resume = json.loads(args.resume_qualification.read_text())
     if resume.get('qualified') is not True:
         raise ValueError('the affected production fresh-process resume must qualify')
+    campaign = run.parents[3]
+    prepared = json.loads((campaign / 'configs/prepared.json').read_text())
+    if len(prepared['arms']) != 1:
+        raise ValueError('exactly one prepared Round 6 pilot required')
+    arm, binding = next(iter(prepared['arms'].items()))
+    prepared_path = Path(binding['path'])
+    if digest(prepared_path) != binding['sha256'] or resume.get('config_sha256') != binding['sha256']:
+        raise ValueError('pilot and production resume must bind the same prepared configuration')
+    expected = yaml.safe_load(prepared_path.read_text())
+    expected['output']['experiment_name'] = 'coherence_adaptive_repair/round_6/runs/pilot/' + arm
+    if config != expected:
+        raise ValueError('pilot saved configuration differs from its prepared scientific configuration')
     history = [json.loads(line) for line in (run / 'logs/history.jsonl').read_text().splitlines() if line.strip()]
     journal = [json.loads(line) for line in (run / 'logs/epoch_calibrated_pi_updates.jsonl').read_text().splitlines() if line.strip()]
     state = torch.load(run / 'checkpoints/last.pt', map_location='cpu', weights_only=False)
@@ -46,7 +58,6 @@ def main():
         raise ValueError('the pilot must preserve the SSS-only Lagrangian route')
     reference = MeanRiskDifferenceBudget.from_state_dict(state['external_policy']['reference'])
     policy = ExternalPolicy(settings, reference, 'cpu')
-    campaign = run.parents[3]
     initial_path = run / 'checkpoints/epoch_000.pt'
     initial = torch.load(initial_path, map_location='cpu', weights_only=False)
     source = context(campaign.parent / 'round_3')['source']

@@ -17,6 +17,30 @@ def lines(path):
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
+def validate_model_decision(decision, candidate, arm):
+    """Keep physical safeguards while allowing the authorized measured judgment."""
+    if decision['recommendation'] not in (arm, 'retain SOURCE/C8'):
+        raise ValueError('decision must identify the raw candidate or retain SOURCE/C8')
+    resumed = decision.get('schema') == 'car_round6_terminal_disposition_v1'
+    if resumed:
+        if (decision.get('status') != 'completed' or decision.get('test_locked') is not True
+                or not isinstance(decision.get('scientific_progress'), str)
+                or not decision['scientific_progress'].strip()):
+            raise ValueError('completed disposition with explicit scientific progress required')
+        bound(decision.get('evidence', {}).get('resumption_protocol'))
+        flags = decision.get('metrics', {}).get('physical_safeguards')
+        fidelity = candidate['fidelity']
+        actual = {key: fidelity[key] for key in ('primary_field_pass', 'sensor_pass',
+                                                'primary_pass', 'legacy_member_pass')}
+        if flags != actual:
+            raise ValueError('disposition physical safeguards differ from the assessment')
+        if decision['recommendation'] == arm and not (actual['primary_pass'] and actual['legacy_member_pass']):
+            raise ValueError('candidate replacement requires field, sensor and member safeguards')
+    elif decision['recommendation'] == arm and not candidate['replacement_eligible']:
+        raise ValueError('candidate cannot be adopted without the original guards or an authorized disposition')
+    return resumed
+
+
 def series(ax, x, y, label):
     import numpy as np
     y = np.asarray(y, dtype=float); x = np.asarray(x, dtype=float)
@@ -105,6 +129,55 @@ def outcomes(a, directory):
     save_figure(fig,directory,'field_core_task')
 
 
+def controller_response(nomination, directory):
+    """Show the measured nomination separately from subsequent learning evidence."""
+    import numpy as np
+    import matplotlib; matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    if (nomination.get('schema') != 'car_round6_measured_response_qualification_v1'
+            or nomination.get('status') != 'completed'
+            or nomination.get('panel_sample_count') != 800
+            or nomination.get('dataset_split') != 'train'):
+        raise ValueError('completed matched TRAIN800 response nomination required')
+    fields = nomination['field_order']
+    zero = np.asarray(nomination['panel_mean_excess_zero'], dtype=float)
+    probe = np.asarray(nomination['panel_mean_excess_probe'], dtype=float)
+    norms = np.asarray([nomination['positive_excess_norm_zero'],
+                        nomination['positive_excess_norm_probe']], dtype=float)
+    ratios = np.asarray([nomination['shape_finite_change'][key]['probe_fraction_of_zero_decrease']
+                         for key in ('fixed', 'independent')], dtype=float)
+    if (zero.shape != (len(fields),) or probe.shape != zero.shape
+            or not all(np.isfinite(x).all() for x in (zero, probe, norms, ratios))):
+        raise ValueError('finite fieldwise and query-response evidence required')
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4.5), constrained_layout=True)
+    x = np.arange(len(fields)); width = .36
+    axes[0].bar(x-width/2, zero, width, label='Zero current feedback')
+    axes[0].bar(x+width/2, probe, width, label='Measured PI probe')
+    axes[0].axhline(0, color='black', linewidth=.7)
+    axes[0].set(xticks=x, xticklabels=fields, ylabel='Pooled signed excess e',
+                title='One mature AdamW action')
+    axes[0].legend(fontsize=7)
+    bars = axes[1].bar(['Zero current\nfeedback', 'Measured\nprobe'], norms)
+    for bar, value in zip(bars, norms, strict=True):
+        axes[1].text(bar.get_x()+bar.get_width()/2, value, f'{value:.4g}',
+                     ha='center', va='bottom')
+    axes[1].set(ylabel='norm((s/a) positive_part(mean e))',
+                title='Remaining mean field violation')
+    axes[1].set_ylim(0, max(norms)*1.2)
+    axes[2].bar(['Fixed query', 'Independent query'], ratios)
+    axes[2].axhline(1, color='black', linewidth=.7)
+    axes[2].set(ylabel='Probe / zero-feedback Shape decrease',
+                title='Measured local Shape tradeoff', ylim=(0, max(1.1, float(max(ratios))*1.1)))
+    for axis in axes:
+        axis.grid(axis='y', alpha=.2)
+        axis.set_axisbelow(True)
+    save_figure(fig, directory, 'measured_controller_response')
+    return ('Matched TRAIN800 mature-state actions nominate the already measured positive PI probe: '
+            'pool signed field errors before taking their positive part. Both Shape decreases remain positive; '
+            'the independent-query decrease is weaker under the probe. Actual saved Adam moments contain '
+            'historical feedback. This is local nomination evidence, not a fresh-state trajectory or held-out efficacy result.')
+
+
 def case_figures(a, selection, source_path, source, candidate_path, candidate, event, directory):
     import numpy as np
     import torch
@@ -187,10 +260,7 @@ def produce(inputs_path,campaign,output):
         or decision.get('assessment_sha256')!=inputs['assessment']['sha256'] or not decision.get('recommendation') or not decision.get('reason')):
         raise ValueError('terminal matched assessment and explicit bound decision required')
     arm=assessment['arm'];candidate_result=assessment['candidates'][arm]
-    if decision['recommendation'] not in (arm, 'retain SOURCE/C8'):
-        raise ValueError('decision must identify the raw candidate or retain SOURCE/C8')
-    if decision['recommendation']==arm and not candidate_result['replacement_eligible']:
-        raise ValueError('candidate cannot be adopted without passing the declared guards')
+    resumed_disposition = validate_model_decision(decision, candidate_result, arm)
     source_path=bound(inputs['source_bank']);source=json.loads(source_path.read_text());candidate_path=bound(inputs['candidate_bank']);candidate=json.loads(candidate_path.read_text())
     if (sha(source_path)!=assessment['source_bank_sha256'] or sha(candidate_path)!=assessment['bank_receipt_sha256']
         or source['sample_ids']!=assessment['sample_ids'] or candidate['sample_ids']!=assessment['sample_ids']
@@ -217,6 +287,9 @@ def produce(inputs_path,campaign,output):
     if not journal:
         captions['learning_and_action']='Parameter-direction norms, learning rate and the last recorded batch constraint and multiplier at each epoch; actual optimizer-displacement products are unavailable for this run.'
     for name in leaf_figures: captions[name]='Complete raw sampled leaf histories in their declared representation units; translucent values are epoch records and solid bars are descriptive ten-epoch means.'
+    response = doc(inputs['controller_response']) if inputs.get('controller_response') else None
+    if response is not None:
+        captions['measured_controller_response'] = controller_response(response, figures)
     captions.update(case_figures(assessment,selection,source_path,source,candidate_path,candidate,event,figures))
     f=candidate_result['fidelity']; scores=candidate_result['normalized_core_differences'];task=candidate_result['reused_tasks']
     body=['# Coherence Adaptive Repair: Round 6','',f"**Decision:** {decision['recommendation']}. {decision['reason']}",'',
@@ -224,6 +297,9 @@ def produce(inputs_path,campaign,output):
         '## Field retention and coherence','',f"Signed field and sensor guard: {f['primary_pass']}; member-MSE guard: {f['legacy_member_pass']}. State, Scale and Shape normalized changes: "+', '.join(f'{k} {v:+.5g}' for k,v in scores.items())+'.','',
         f"Regional task improvement in frozen TRAIN units: {task['regional_normalized_improvement']:+.5g}; joint-event score change: {task['event_normalized_difference']:+.5g}. Positive regional improvement and negative event change favor the repair. These are reused development outcomes, not independent confirmation.",'',
         '| Field | Signed risk change | TRAIN allowance | Change / allowance | SOURCE sensor MSE | Repair sensor MSE | Sensor allowance |','| --- | ---: | ---: | ---: | ---: | ---: | ---: |']
+    if resumed_disposition:
+        body[4:4] = [f"**Scientific progress:** {decision['scientific_progress']}", '',
+            f"The user-authorized resumption treats the original core/task percentage margins as reported references. Their combined replacement flag is {candidate_result['replacement_eligible']}; the operational recommendation above is an explicit measured judgment, with field, sensor and member safeguards retained.", '']
     for i,name in enumerate(assessment['field_order']):
         def fmt(v):return 'unavailable' if v is None else f'{v:.6g}'
         allowance=f['field_allowance'][i]
@@ -231,6 +307,9 @@ def produce(inputs_path,campaign,output):
     body += ['', '| Field | SOURCE mean MSE | Repair mean MSE | SOURCE member MSE | Repair member MSE | SOURCE spread | Repair spread |', '| --- | ---: | ---: | ---: | ---: | ---: | ---: |']
     for i,name in enumerate(assessment['field_order']):
         body.append('| '+' | '.join([name,*[fmt(view['risk'][key][i]) for key in ('ensemble_mean_mse','member_mse','unbiased_member_variance') for view in (assessment['source'],candidate_result)]])+' |')
+    if response is not None:
+        body += ['', '## Controller nomination and learning evidence', '',
+            f"The user-authorized resumption nominated the measured norm-balanced probe gamma = {float(response['gamma']):.8g} for a fresh SOURCE trajectory. The prior exact ten-epoch drift fit selected zero because the saved mature AdamW action already corrected faster than that target. The measured probe lowered the remaining pooled field-violation norm from {float(response['positive_excess_norm_zero']):.6g} to {float(response['positive_excess_norm_probe']):.6g}, with a weaker but positive independent-query Shape decrease. This supports the bounded learning test; it does not establish an optimal gain or model replacement.", '']
     if inputs.get('audit'):
         audit=doc(inputs['audit']); qualification=audit.get('controller_qualification',audit)
         gamma=qualification.get('gamma_star',qualification.get('calibration',{}).get('gamma_star'))

@@ -65,6 +65,34 @@ def acquire(state, *, token, device, phase, duration, now):
         "start_unix": now, "max_seconds": duration, "pid": os.getpid()}
 
 
+def controller_admission(audit):
+    """Accept the original qualification or an explicit evidence-bound revision."""
+    if audit.get("schema") == "car_round6_measured_response_qualification_v1":
+        if (audit.get("status") != "completed" or audit.get("qualified") is not True
+                or not isinstance(audit.get("rationale"), str) or not audit["rationale"].strip()):
+            raise ValueError("completed qualified measured-response rationale required")
+        evidence = audit.get("evidence")
+        if not isinstance(evidence, dict) or not {"joint_audit", "production_probe"}.issubset(evidence):
+            raise ValueError("measured-response admission requires joint audit and production probe evidence")
+        for ref in evidence.values():
+            checked(ref)
+        joint = json.loads(checked(evidence["joint_audit"]).read_text())
+        probe = json.loads(checked(evidence["production_probe"]).read_text())
+        if (joint.get("status") != "completed" or probe.get("status") != "completed"
+                or joint.get("evidence", {}).get("parity", {}).get("sha256") != evidence["production_probe"]["sha256"]):
+            raise ValueError("measured-response evidence must bind the completed joint audit's production probe")
+        value = audit.get("gamma")
+        basis = "revised measured-response qualification"
+    else:
+        if audit.get("status") != "completed" or audit.get("controller_qualification", {}).get("qualified") is not True:
+            raise ValueError("a completed, measured controller qualification is required")
+        value = audit["controller_qualification"]["gamma_star"]
+        basis = "original target-fit qualification"
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+        raise ValueError("PI requires a measured positive finite gain")
+    return float(value), basis
+
+
 def lease(args, campaign):
     from scripts.posttraining.prepare_car_round4 import device_identity
     if not args.child_command:
@@ -130,12 +158,7 @@ def prepare(args, campaign):
     import yaml
     from scripts.posttraining.prepare_car_round4 import resolve_config
     audit = json.loads(args.audit.read_text())
-    qualification = audit["controller_qualification"]
-    gamma = float(qualification["gamma_star"])
-    if audit.get("status") != "completed" or qualification.get("qualified") is not True:
-        raise ValueError("a completed, measured controller qualification is required")
-    if not math.isfinite(gamma) or gamma <= 0:
-        raise ValueError("PI requires a measured positive finite gain")
+    gamma, admission_basis = controller_admission(audit)
     cfg, prior = resolve_config(campaign.parent / "round_3")
     cfg = copy.deepcopy(cfg)
     policy = cfg["optimization"]["multitask"]["external_policy"]
@@ -163,6 +186,7 @@ def prepare(args, campaign):
     immutable_json(campaign / "configs/prepared.json", {
         "schema": "car_round6_prepared_v1", "arms": {ARM: reference(config_path)},
         "audit": reference(args.audit), "historical_config": prior,
+        "controller_admission_basis": admission_basis,
         "source_snapshot": cfg["source_run"], "maximum_epoch": 500,
         "source_reference": cfg["optimization"]["multitask"]["fidelity_budget"]["reference_artifact"],
         "review_epoch": 100, "pilot_epoch": 20, "gpu_hour_ceiling": 30,
@@ -183,6 +207,8 @@ def freeze(args, campaign):
     forecast = json.loads(args.forecast.read_text())
     if not forecast.get("fits_gpu_budget") or forecast["forecast_gpu_seconds"] > CAP_SECONDS:
         raise ValueError("whole measured forecast must fit the authorized GPU ceiling")
+    if digest(checked(forecast["pilot"])) != digest(args.pilot):
+        raise ValueError("measured forecast must bind the same qualified pilot")
     # All repository Python drivers are modest; include their real dependencies
     # rather than importing mutable helper code from the working checkout.
     drivers = [str(p.relative_to(ROOT)) for p in (ROOT / "scripts").rglob("*.py")]

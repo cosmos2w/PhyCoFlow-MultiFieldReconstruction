@@ -277,6 +277,11 @@ class OuterAggregator:
 
     def __init__(self, settings: Mapping[str, Any] | None = None) -> None:
         self.method, options = _setting(settings, default="sum", supported=self._METHODS)
+        self.family_vjp = str((settings or {}).get("family_vjp", "separate"))
+        if self.family_vjp not in {"separate", "batched"}:
+            raise ValueError("family_vjp must be 'separate' or 'batched'")
+        if self.family_vjp == "batched" and self.method != "torchjd_config":
+            raise ValueError("batched family VJPs require torchjd_config")
         self._c = 0.5
         if self.method == "cagrad":
             self._c = _finite_number(options.get("c", 0.5), name="cagrad.c")
@@ -336,6 +341,24 @@ class OuterAggregator:
         return direction, _gradient_diagnostics(
             gradients, direction, method=self.method, row_norms=row_norms, row_gram=row_gram
         )
+
+
+def batched_family_gradients(losses: list[Tensor], parameters: list[nn.Parameter]) -> Tensor:
+    """Compute fresh family parameter rows with one batched autograd call."""
+    values = torch.stack([loss.reshape(()) for loss in losses])
+    count = len(losses)
+    rows = torch.autograd.grad(
+        values, parameters, grad_outputs=torch.eye(count, device=values.device, dtype=values.dtype),
+        is_grads_batched=True, retain_graph=True, allow_unused=True,
+    )
+    parts = []
+    for parameter, gradient in zip(parameters, rows):
+        if gradient is None:
+            gradient = torch.zeros((count, *parameter.shape), device=parameter.device, dtype=parameter.dtype)
+        if torch.is_complex(gradient):
+            gradient = torch.view_as_real(gradient)
+        parts.append(gradient.reshape(count, -1))
+    return torch.cat(parts, dim=1)
 
 
 def _gradient_diagnostics(

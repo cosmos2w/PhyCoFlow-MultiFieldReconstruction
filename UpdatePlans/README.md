@@ -6,8 +6,8 @@ Use this index for current reading; historical source locations remain compatibi
 | --- | --- |
 | Plans and handoffs | [Plan library](_Plans/README.md) |
 | Reports and figures | [Report library](_Reports/README.md) |
-| Adaptive Repair execution record | [Round 6 preparation close](_Plans/Coherence_Adaptive_Repair/Round_6/EXECUTION_STATUS.md) |
-| Latest Adaptive Repair decision | [Round 6 report](_Reports/Coherence_Adaptive_Repair/Round_6/report.md) |
+| Adaptive Repair execution record | [Round 6 resumed execution](_Plans/Coherence_Adaptive_Repair/Round_6/EXECUTION_STATUS.md) |
+| Latest Adaptive Repair stage publication | [Round 6 preparation snapshot](_Reports/Coherence_Adaptive_Repair/Round_6/report.md) |
 | Project organization outcome | [Migration and management report](_Reports/Project_Organization/report.md) |
 | Storage ownership and physical map | [Storage map](../docs/Storage_Map.md) |
 | Authoritative management rules | [Experiment artifacts](../docs/Experiment_Artifacts.md) |

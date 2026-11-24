@@ -614,13 +614,15 @@ def _validate_coherence_aggregation(multitask: Mapping[str, Any]) -> None:
         raise TypeError("optimization.multitask.coherence_aggregation must be a mapping")
     _reject_unknown(
         aggregation,
-        {"method"},
+        {"method", "family_vjp"},
         "optimization.multitask.coherence_aggregation",
     )
     if aggregation.get("method") != "torchjd_config":
         raise ValueError(
             "optimization.multitask.coherence_aggregation.method must be torchjd_config"
         )
+    if aggregation.get("family_vjp", "separate") not in {"separate", "batched"}:
+        raise ValueError("coherence_aggregation.family_vjp must be separate or batched")
 
 
 def _validate_fidelity_budget(multitask: Mapping[str, Any]) -> None:

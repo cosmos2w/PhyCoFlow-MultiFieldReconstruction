@@ -1,12 +1,12 @@
 # Coherence Adaptive Repair plans
 
-This is the reading collection for Coherence Adaptive Repair. Round 6 closed at the workplan's bounded preparation stop: its predeclared calibration selected zero gain, so no qualified learning recipe was launched. SOURCE/C8 remains retained. Rounds 1–5 and their historical paths remain unchanged. Original identities and SHA-256 hashes for historical reading copies are listed in the [source identity index](SOURCE_INDEX.md).
+This is the reading collection for Coherence Adaptive Repair. Round 6 has resumed under explicit user authorization for flexible, evidence-led exploration. Its earlier zero-gain preparation stop is superseded; SOURCE/C8 remains operational during the learning experiment. Rounds 1–5 and their historical paths remain unchanged. Original identities and SHA-256 hashes for historical reading copies are listed in the [source identity index](SOURCE_INDEX.md).
 
-## Round 6 preparation close
+## Round 6 resumed execution
 
 - [Workplan](Round_6/WORKPLAN.md), [review and decisions](Round_6/REVIEW_AND_DECISIONS.md), [historical audit](Round_6/evidence/HISTORICAL_AUDIT.md), and [execution prompt](Round_6/EXECUTION_PROMPT.md).
 - [Execution record](Round_6/EXECUTION_STATUS.md), [scientific report](../../_Reports/Coherence_Adaptive_Repair/Round_6/report.md), and [PDF master](../../_Reports/Coherence_Adaptive_Repair/Round_6/report.pdf).
-- The matched TRAIN800 mature-action audit and production weighted-VJP replay both selected zero PI gain. Preparation occupied 0.315183 GPU-hours; no 20-epoch pilot or 100/500-epoch learning stage was launched. No new computation acceleration was adopted.
+- [Resumption decisions](Round_6/RESUMPTION_DECISIONS.md) nominate the already measured positive-feedback probe for fresh-SOURCE pilot/learning and preserve the original audit as a stage snapshot. The original 30 occupied GPU-hour ceiling includes prior preparation.
 - Round 5 rejected native supervision plus SSS plus local filtering. It did not test a repaired Lagrangian mainline. SOURCE/C8 remains retained.
 
 ## Round 5 closeout and planning snapshot

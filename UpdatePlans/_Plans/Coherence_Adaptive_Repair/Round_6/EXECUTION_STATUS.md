@@ -1,5 +1,17 @@
 # Round 6 execution record
 
+**Resumed by explicit user authorization on 23 November 2026.** The preparation-stop decision below is a superseded stage record. [Resumption decisions](RESUMPTION_DECISIONS.md) replace the exact drift-target launch veto with a measured field/Shape tradeoff and require substantive learning evidence. The earlier raw audit and report bytes remain preserved; a measured probe is nominated for production resume qualification and a fresh-SOURCE 20-epoch pilot, followed by the 100-epoch review and conditional 500 endpoint within the original total budget.
+
+## Current execution
+
+The real production-model fresh-process resume qualification passed. Its 24 uninterrupted actions matched a 17-action pause followed by seven resumed actions across three processes, including model, AdamW, PI/controller, RNG/data stream, loss accumulation, ordered typed definitions and complete history/journal appends. Receipt: `assessment/qualification/FFM_PI_ProductionResume_20261124T0235Z/receipt.json`, SHA-256 `27bc75027b838cb5875c2e9c326ba16ac95b1a2b56ea8fbacb08e1134c776f3f`. The enclosing GPU0 lease occupied 533.07 seconds. Continuous complete epochs took approximately 126 seconds; the resumed partial-epoch timer is a segment duration and is not used as a complete-epoch speed measurement.
+
+The fresh SOURCE 20-epoch pilot launched at 02:38 UTC on 24 November (21:38 EST on 23 November) under the 3600-second GPU0 preparation lease `f3a0cfd8b1a04398a9add7eb192398e5`. Its immutable prepared configuration SHA-256 is `e8c47d76eb6293935fa13d72addcf83033b92d9a55022e1ac76b20c3809ef026`, with measured gain 11.621005062848388, shared queries and separate fresh family VJPs. The launch receipt is `operations/launches/f3a0cfd8b1a04398a9add7eb192398e5.json`; completion records `operations/pilot_run.json`. Luna owns a completion check 45 minutes after launch. This is launch status, not completed learning evidence.
+
+Affected CPU checks cover the optional batched-VJP/paired-query drivers, explicit learning decisions and report adoption handling. The final report distinguishes scientific progress, the original numeric reference margins and physical/sensor/member suitability for replacement. The optional complete-epoch computation comparison and grouped-query fixture remain scheduled after the pilot; they do not veto the ready learning route.
+
+## Superseded preparation-close record
+
 **Decision: close preparation and retain SOURCE/C8.** The predeclared PI calibration and its production weighted-field-VJP verification both selected a gain of zero. No supported alternative execution correction was demonstrated. This invokes the bounded preparation stop in [workplan section 3](WORKPLAN.md#3-mandatory-joint-audit-answer-the-missing-mechanism-questions); it is not a 100-epoch candidate failure or a rejection of Lagrangian methods. The [scientific report](../../../_Reports/Coherence_Adaptive_Repair/Round_6/report.md) and [PDF master](../../../_Reports/Coherence_Adaptive_Repair/Round_6/report.pdf) contain the measured evidence.
 
 ## Controller and model decision
