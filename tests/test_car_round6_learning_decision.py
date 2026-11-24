@@ -33,7 +33,12 @@ def sample(tmp_path):
         'prepared_sha256':sha(prepared),'source_bank_sha256':'source-hash','panel_sha256':'panel-hash'}
     review=put(tmp_path/'review.json',assessment)
     history=tmp_path/'history.jsonl';history.write_text(''.join(json.dumps({'epoch':i,'epoch_complete':True,'step':12*i})+'\n' for i in range(1,101)))
-    args=Namespace(assessment=review,history=history,checkpoint=checkpoint,bank_receipt=bank,prepared=prepared,
+    journal=tmp_path/'pi_journal.jsonl'
+    journal.write_text(''.join(json.dumps({'step':i,'epoch':(i-1)//12+1,
+        'field_violation':{'one':2. if i%2 else -2.,'two':1. if i%2 else -3.},
+        'multipliers_before':[1. if i%2 else 0.,.25],
+        'action_constraint_product':-.2 if i%2 else .1})+'\n' for i in range(1,1201)))
+    args=Namespace(assessment=review,history=history,pi_journal=journal,checkpoint=checkpoint,bank_receipt=bank,prepared=prepared,
         resolved_config=config,resumption_protocol=protocol,historical_review=None,decision='continue_to_500',
         remaining_gpu_hours=10.,forecast_remaining_gpu_hours=9.,rationale='Field retention is improving and Scale is stable.',
         scientific_progress='Shape improves while all fields satisfy their guards.')
@@ -96,3 +101,36 @@ def test_resolved_config_and_core_unit_bindings(tmp_path):
     assert historical_comparison(current,prior,{})['sample_ids_match'] is True
     prior['normalizers']['shape']=4.
     with pytest.raises(ValueError,match='core normalizers'):historical_comparison(current,prior,{})
+
+
+def test_pi_window_pools_signed_actions_and_rejects_missing_or_reordered(tmp_path):
+    args,_,_,_=sample(tmp_path)
+    result=decide_review(args)
+    window=result['pi_action_windows_51_75_76_100']['windows']['epochs_51_75']
+    assert window['action_count']==300
+    assert window['mean_signed_e']=={'one':0.,'two':-1.}
+    assert window['positive_part_of_mean_e']=={'one':0.,'two':0.}
+    assert window['mean_multipliers_before']=={'one':.5,'two':.25}
+    assert window['fraction_nonzero_multiplier_by_field']=={'one':.5,'two':1.}
+    assert window['fraction_any_nonzero_multiplier']==1.
+    assert window['action_constraint_product']['negative_count']==150
+    assert window['action_constraint_product']['positive_count']==150
+    assert window['action_constraint_product']['mean']==pytest.approx(-.05)
+    assert result['evidence']['pi_journal']['sha256']==sha(args.pi_journal)
+    lines=args.pi_journal.read_text().splitlines()
+    args.pi_journal.write_text('\n'.join(lines[:-1])+'\n')
+    with pytest.raises(ValueError,match='exactly 12 actions'):decide_review(args)
+    lines[601],lines[602]=lines[602],lines[601]
+    args.pi_journal.write_text('\n'.join(lines)+'\n')
+    with pytest.raises(ValueError,match='contiguous and ordered'):decide_review(args)
+    lines[601],lines[602]=lines[602],lines[601]
+    reordered=json.loads(lines[600])
+    reordered['field_violation']=dict(reversed(list(reordered['field_violation'].items())))
+    lines[600]=json.dumps(reordered)
+    args.pi_journal.write_text('\n'.join(lines)+'\n')
+    assert decide_review(args)['pi_action_windows_51_75_76_100']==result['pi_action_windows_51_75_76_100']
+    wrong=json.loads(lines[600]);wrong['field_violation'].pop('two');lines[600]=json.dumps(wrong)
+    args.pi_journal.write_text('\n'.join(lines)+'\n')
+    with pytest.raises(ValueError,match='field identities'):decide_review(args)
+    args.pi_journal=None
+    with pytest.raises(ValueError,match='requires its immutable'):decide_review(args)

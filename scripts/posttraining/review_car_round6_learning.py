@@ -79,6 +79,45 @@ def check_history(history,epoch):
     return rows
 
 
+def summarize_pi_journal(rows,epoch,fields):
+    """Summarize every saved action; apply the positive part only after pooling."""
+    expected=12*epoch
+    if len(rows)!=expected:
+        raise ValueError('PI journal snapshot must contain exactly 12 actions per reviewed epoch')
+    for step,row in enumerate(rows,1):
+        if row.get('step')!=step or row.get('epoch')!=(step-1)//12+1:
+            raise ValueError('PI journal steps and epochs must be contiguous and ordered')
+        errors=row.get('field_violation')
+        multipliers=row.get('multipliers_before')
+        product=row.get('action_constraint_product')
+        if not isinstance(errors,dict) or set(errors)!=set(fields):
+            raise ValueError('PI journal field identities differ')
+        if not isinstance(multipliers,list) or len(multipliers)!=len(fields):
+            raise ValueError('PI journal multiplier count differs from field order')
+        numbers=[errors[name] for name in fields]+multipliers+[product]
+        if any(isinstance(x,bool) or not isinstance(x,(int,float)) or not math.isfinite(x) for x in numbers):
+            raise ValueError('PI journal error, multiplier and action product must be finite')
+        if any(x<0 for x in multipliers):raise ValueError('PI multipliers must be nonnegative')
+    result={}
+    for label,start,end in (('epochs_51_75',51,75),('epochs_76_100',76,100)):
+        selected=rows[(start-1)*12:end*12]
+        errors={name:sum(float(row['field_violation'][name]) for row in selected)/len(selected) for name in fields}
+        multipliers={name:sum(float(row['multipliers_before'][i]) for row in selected)/len(selected) for i,name in enumerate(fields)}
+        active={name:sum(row['multipliers_before'][i]!=0 for row in selected)/len(selected) for i,name in enumerate(fields)}
+        products=[float(row['action_constraint_product']) for row in selected]
+        result[label]={'action_count':len(selected),'mean_signed_e':errors,
+            'positive_part_of_mean_e':{name:max(value,0.0) for name,value in errors.items()},
+            'mean_multipliers_before':multipliers,'fraction_nonzero_multiplier_by_field':active,
+            'fraction_any_nonzero_multiplier':sum(any(x!=0 for x in row['multipliers_before']) for row in selected)/len(selected),
+            'action_constraint_product':{'mean':sum(products)/len(products),
+                'negative_count':sum(x<0 for x in products),'zero_count':sum(x==0 for x in products),
+                'positive_count':sum(x>0 for x in products)}}
+    return {'definition':'every saved successful action; fieldwise positive part is applied after pooling signed errors',
+        'feedback_activity_definition':'nonzero multipliers before the action; not a claim that the combined gradient is nonzero',
+        'action_constraint_product_definition':'combined constraint gradient dot actual AdamW displacement; negative indicates first-order descent',
+        'windows':result}
+
+
 def sampled_constraint_windows(rows,fields):
     """Descriptive last-batch samples, not complete-epoch constraint means."""
     if len(rows)<100:return None
@@ -140,6 +179,13 @@ def decide_review(args):
             raise ValueError('continuation must fit the stated remaining GPU budget')
     rationale=require_text(args.rationale,'decision rationale')
     progress=require_text(args.scientific_progress,'scientific progress')
+    pi_journal=getattr(args,'pi_journal',None)
+    journal_summary=None
+    if summary['arm']=='FFM_SSS_EpochCalibrated_PI_Repair' and pi_journal is None:
+        raise ValueError('PI arm requires its immutable complete action journal snapshot')
+    if pi_journal is not None:
+        journal_rows=[json.loads(line) for line in pi_journal.read_text().splitlines() if line.strip()]
+        journal_summary=summarize_pi_journal(journal_rows,epoch,summary['fields'])
     review_ref=binding(args.assessment);terminal=decision!='continue_to_500'
     result={'schema':'car_round6_learning_decision_v1','status':'completed','epoch':epoch,'decision':decision,
         'continue_to_500':decision=='continue_to_500','authorize_endpoint_tasks':terminal,
@@ -150,10 +196,12 @@ def decide_review(args):
         'metrics':summary,'reference_thresholds_interpretation':'predeclared numeric margins remain visible references; trajectory and scientific progress require evidence and explicit judgment',
         'history_complete_through_epoch':epoch,'history_step':rows[-1]['step'],
         'training_constraint_samples_51_75_76_100':sampled_constraint_windows(rows,summary['fields']),
+        'pi_action_windows_51_75_76_100':journal_summary,
         'remaining_gpu_hours':args.remaining_gpu_hours,'forecast_remaining_gpu_hours':args.forecast_remaining_gpu_hours,
         'evidence':{'history':binding(args.history),'checkpoint':binding(args.checkpoint),'bank_receipt':binding(args.bank_receipt),
                     'prepared':binding(args.prepared),'resolved_config':binding(args.resolved_config),'resumption_protocol':binding(args.resumption_protocol)},
         'test_locked':True}
+    if pi_journal is not None:result['evidence']['pi_journal']=binding(pi_journal)
     if args.historical_review:
         hist=read(args.historical_review);result['historical_comparison']=historical_comparison(doc,hist,summary)
         result['evidence']['historical_review']=binding(args.historical_review)
@@ -199,6 +247,7 @@ def main():
     r.add_argument('--checkpoint',type=Path,required=True);r.add_argument('--bank-receipt',type=Path,required=True)
     r.add_argument('--prepared',type=Path,required=True);r.add_argument('--resolved-config',type=Path,required=True)
     r.add_argument('--resumption-protocol',type=Path,required=True);r.add_argument('--historical-review',type=Path)
+    r.add_argument('--pi-journal',type=Path,help='immutable complete per-action PI journal through reviewed epoch; required for PI arm')
     r.add_argument('--decision',choices=('continue_to_500','stop_at_epoch_100','endpoint_at_epoch_500'),required=True)
     r.add_argument('--remaining-gpu-hours',type=float);r.add_argument('--forecast-remaining-gpu-hours',type=float)
     r.add_argument('--rationale',required=True);r.add_argument('--scientific-progress',required=True);r.add_argument('--output',type=Path,required=True)

@@ -41,6 +41,30 @@ def validate_model_decision(decision, candidate, arm):
     return resumed
 
 
+def scientific_method(config_ref):
+    """Describe the actual saved update rather than infer it from an arm name."""
+    import yaml
+    cfg = yaml.safe_load(bound(config_ref).read_text())
+    opt = cfg['optimization']; multitask = opt['multitask']
+    policy = multitask['external_policy']; aggregation = multitask['coherence_aggregation']
+    if (opt.get('direct_supervision') or policy['method'] != 'lagrangian'
+            or aggregation['method'] != 'torchjd_config'):
+        raise ValueError('report requires the saved SSS-only fresh ConFIG/Lagrangian method')
+    reference = doc(multitask['fidelity_budget']['reference_artifact'])['reference']
+    clock = int(opt['steps_per_epoch']); batch = int(opt['batch_size'])
+    grouping = cfg['coherence']['scalable_anchored_coherence'].get('condition_query_groups', 1)
+    warmup = opt.get('lr_warmup', {})
+    paragraphs = ['## Scientific intervention', '',
+        f"Each action computes fresh full-parameter State, Scale and Shape gradients. The pinned TorchJD operation normalizes the family rows, forms the ConFIG direction and assigns its length. Field feedback then forms `d = d_C/C0 + sum_f lambda_f grad(e_f)`, with fixed SOURCE scale C0 = {float(reference['objective_scale']):.8g}, followed by clipping and AdamW. This vector construction is not generally the gradient of one scalar loss; family scores and actual-displacement products are reported separately.", '',
+        'For field f, `e_f = (R_f - R0_f - a_f)/s_f`, with allowance `a_f = 0.10 M0_f` and positive scale `s_f = max(M0_f, 1e-8)` from the frozen TRAIN SOURCE reference. The signed J2 training risk is the physical integral of the product of the two independent members\' errors. Native J4 assessment uses ensemble-mean squared error minus sample variance divided by four, compares the child with matched VALIDATION SOURCE risk and converts the fixed TRAIN allowance by the squared saved field normalization. Signed finite-member risks are retained; member MSE, ensemble-mean MSE, spread and sensor errors are reported separately.', '',
+        f"A reporting epoch contains {clock} successful actions of batch size {batch}, or {clock*batch} objective-bearing condition visits under the saved full-pass stream. The saved maximum horizon is {int(opt['epochs'])} epochs. Learning-rate warmup is {int(warmup.get('epochs', 0)) if warmup.get('enabled') else 0} epochs. Query groups: {grouping}; family VJP execution: {aggregation.get('family_vjp', 'separate')}. These execution choices are included in the package decision and its measured cost.", '']
+    pi = policy['lagrangian'].get('epoch_calibrated_pi')
+    if pi is not None:
+        gamma = float(pi['gamma']); integral = gamma*float(policy['lagrangian']['dual_lr'])*clock
+        paragraphs += [f"The projected PI controller uses delta = 1/{clock} epoch, tau = {float(pi['tau_epochs']):g} epoch, H = {float(pi['horizon_epochs']):g} epochs and gamma = {gamma:.8g}. Its integral rate is {integral:.8g} per epoch and proportional rate is H times that value. It smooths detached signed pre-action errors, uses the current multiplier in the action, and commits `lambda_next = positive_part(lambda + kI*delta*e + kP*(z_next-z))` only after success. The whole increment is projected once; training errors are not clipped to positive parts.", '']
+    return paragraphs
+
+
 def series(ax, x, y, label):
     import numpy as np
     y = np.asarray(y, dtype=float); x = np.asarray(x, dtype=float)
@@ -178,6 +202,55 @@ def controller_response(nomination, directory):
             'historical feedback. This is local nomination evidence, not a fresh-state trajectory or held-out efficacy result.')
 
 
+def learning_review_comparison(review, endpoint, directory):
+    """Reuse the two planned assessments without suggesting continuous feasibility."""
+    import numpy as np
+    import matplotlib; matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    if (review.get('schema') != 'car_round6_matched_validation_v1'
+            or review.get('epoch') != 100 or review.get('task_scope') != 'both tasks excluded'
+            or endpoint.get('epoch') != 500):
+        raise ValueError('task-free epoch100 review and selected epoch500 endpoint required')
+    for key in ('arm', 'split', 'population', 'sample_ids', 'members', 'field_order',
+                'normalizers', 'native_allowance', 'prepared_sha256', 'source_checkpoint_sha256',
+                'source_bank_sha256', 'panel_sha256', 'contract_sha256', 'core_sha256', 'source_baseline_sha256'):
+        if review.get(key) != endpoint.get(key):
+            raise ValueError(f'learning review and endpoint comparison differ: {key}')
+    arm = endpoint['arm']
+    first, final = review['candidates'][arm], endpoint['candidates'][arm]
+    if 'reused_tasks' in first or 'reused_tasks' in review['source']:
+        raise ValueError('epoch100 continuation review must exclude endpoint tasks')
+    fields = endpoint['field_order']; families = ('state', 'scale', 'shape')
+    allowance = np.asarray(endpoint['native_allowance'], dtype=float)
+    field_rows = np.asarray([first['fidelity']['field_difference'],
+                             final['fidelity']['field_difference']], dtype=float)
+    core_rows = np.asarray([[row['normalized_core_differences'][key] for key in families]
+                             for row in (first, final)], dtype=float)
+    if (allowance.shape != (len(fields),) or (allowance <= 0).any()
+            or field_rows.shape != (2, len(fields))
+            or not all(np.isfinite(value).all() for value in (allowance, field_rows, core_rows))):
+        raise ValueError('finite matched review and endpoint values required')
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.5), constrained_layout=True)
+    for index, field in enumerate(fields):
+        axes[0].plot([0, 100, 500], [0, *(field_rows[:, index]/allowance[index])],
+                     marker='o', label=field)
+    axes[0].axhline(1, color='black', linestyle='--', linewidth=.8)
+    axes[0].set(ylabel='Signed risk change / fixed TRAIN allowance', title='Native field retention')
+    for index, family in enumerate(families):
+        axes[1].plot([0, 100, 500], [0, *core_rows[:, index]], marker='o', label=family)
+    axes[1].axhline(0, color='black', linewidth=.8)
+    axes[1].set(ylabel='Child minus SOURCE / frozen TRAIN unit', title='Held-out State, Scale and Shape')
+    for axis in axes:
+        axis.set(xlabel='Repair reporting epoch', xticks=[0, 100, 500],
+                 xticklabels=['SOURCE', '100', '500'])
+        axis.grid(alpha=.2); axis.legend(fontsize=7)
+    save_figure(fig, directory, 'learning_review_and_endpoint')
+    return ('The planned task-free epoch100 learning review and selected epoch500 endpoint reuse matched '
+            'VALIDATION100/J4 conditions, member manifests and observers. Lines connect the assessed values; '
+            'intermediate held-out values were not measured. Regional/event tasks were withheld at epoch100. '
+            'These development observations support the recorded continuation decision and do not establish continuous feasibility.')
+
+
 def case_figures(a, selection, source_path, source, candidate_path, candidate, event, directory):
     import numpy as np
     import torch
@@ -220,17 +293,26 @@ def case_figures(a, selection, source_path, source, candidate_path, candidate, e
             for j in range(3):
                 values=masks[j].astype(float) if i==0 else masks[j].mean(0)
                 axes[i,j].scatter(coords[mask,0],coords[mask,1],c=values[mask],s=.5,cmap='viridis',vmin=0,vmax=1,rasterized=True)
+                if i:
+                    residual = values-truth_masks[j].astype(float)
+                    rmse = np.sqrt(np.sum(weights*residual[mask]**2))
+                    axes[i,j].text(.02,.02,f'RMSE {rmse:.4g}',transform=axes[i,j].transAxes,
+                                   color='white',fontsize=7,bbox={'facecolor':'black','alpha':.7})
             if i==0:
                 values=truth_masks[-1].astype(float);prob=values
             else:
                 joint=masks[-1]; mean_joint=joint.mean(0); values=np.where(truth_masks[-1],-1,0)*(1-mean_joint)+np.where(~truth_masks[-1],1,0)*mean_joint;prob=mean_joint
             axes[i,3].scatter(coords[mask,0],coords[mask,1],c=values[mask],s=.5,cmap='coolwarm',vmin=-1,vmax=1,rasterized=True)
             axes[i,4].scatter(coords[mask,0],coords[mask,1],c=prob[mask],s=.5,cmap='viridis',vmin=0,vmax=1,rasterized=True)
+            if i:
+                rmse = np.sqrt(np.sum(weights*values[mask]**2))
+                axes[i,3].text(.02,.02,f'RMSE {rmse:.4g}',transform=axes[i,3].transAxes,
+                               color='white',fontsize=7,bbox={'facecolor':'black','alpha':.7})
             axes[i,0].set_ylabel(label)
             for ax in axes[i]:ax.set_aspect('equal');ax.set_xticks([]);ax.set_yticks([])
         for ax,title in zip(axes[0],('T support','CO support','CH4 support','Joint missing (-) / excess (+)','Joint member probability')):ax.set_title(title,fontsize=8)
         name=f'event_case_{index}';save_figure(fig,directory,name)
-        captions[name]=f'{sid}: frozen unary event supports, signed joint missing/excess and independent-member joint-event probability on native positive-mass support.'
+        captions[name]=f'{sid}: frozen unary event supports, signed joint missing/excess and independent-member joint-event probability on native positive-mass support. Predicted unary and joint-error panels display mass-weighted probability RMSE against the reference masks, in dimensionless units.'
     return captions
 
 
@@ -266,6 +348,7 @@ def produce(inputs_path,campaign,output):
         or source['sample_ids']!=assessment['sample_ids'] or candidate['sample_ids']!=assessment['sample_ids']
         or candidate['arm']!=arm or candidate['epoch']!=assessment['epoch'] or candidate['source_bank_sha256']!=sha(source_path)):
         raise ValueError('assessment and prediction bank identities differ')
+    method = scientific_method({'path': candidate['config_path'], 'sha256': candidate['config_sha256']})
     selection=doc(inputs['visual_selection']);event=FrozenRedesignedEvent(doc(inputs['event']))
     if selection['event']['sha256']!=inputs['event']['sha256']:raise ValueError('visual event freeze differs')
     history=lines(bound(inputs['history']));journal=lines(bound(inputs['pi_journal'])) if inputs.get('pi_journal') else []
@@ -290,6 +373,16 @@ def produce(inputs_path,campaign,output):
     response = doc(inputs['controller_response']) if inputs.get('controller_response') else None
     if response is not None:
         captions['measured_controller_response'] = controller_response(response, figures)
+    review_decision = None
+    if assessment['epoch'] == 500:
+        review_decision = doc(inputs['learning_review_100'])
+        if (review_decision.get('schema') != 'car_round6_learning_decision_v1'
+                or review_decision.get('status') != 'completed' or review_decision.get('epoch') != 100
+                or review_decision.get('continue_to_500') is not True
+                or review_decision.get('authorize_endpoint_tasks') is not False):
+            raise ValueError('explicit task-free epoch100 continuation decision required')
+        review_assessment = doc(review_decision['assessment'])
+        captions['learning_review_and_endpoint'] = learning_review_comparison(review_assessment, assessment, figures)
     captions.update(case_figures(assessment,selection,source_path,source,candidate_path,candidate,event,figures))
     f=candidate_result['fidelity']; scores=candidate_result['normalized_core_differences'];task=candidate_result['reused_tasks']
     body=['# Coherence Adaptive Repair: Round 6','',f"**Decision:** {decision['recommendation']}. {decision['reason']}",'',
@@ -300,6 +393,8 @@ def produce(inputs_path,campaign,output):
     if resumed_disposition:
         body[4:4] = [f"**Scientific progress:** {decision['scientific_progress']}", '',
             f"The user-authorized resumption treats the original core/task percentage margins as reported references. Their combined replacement flag is {candidate_result['replacement_eligible']}; the operational recommendation above is an explicit measured judgment, with field, sensor and member safeguards retained.", '']
+    field_section = body.index('## Field retention and coherence')
+    body[field_section:field_section] = method
     for i,name in enumerate(assessment['field_order']):
         def fmt(v):return 'unavailable' if v is None else f'{v:.6g}'
         allowance=f['field_allowance'][i]
@@ -310,6 +405,10 @@ def produce(inputs_path,campaign,output):
     if response is not None:
         body += ['', '## Controller nomination and learning evidence', '',
             f"The user-authorized resumption nominated the measured norm-balanced probe gamma = {float(response['gamma']):.8g} for a fresh SOURCE trajectory. The prior exact ten-epoch drift fit selected zero because the saved mature AdamW action already corrected faster than that target. The measured probe lowered the remaining pooled field-violation norm from {float(response['positive_excess_norm_zero']):.6g} to {float(response['positive_excess_norm_probe']):.6g}, with a weaker but positive independent-query Shape decrease. This supports the bounded learning test; it does not establish an optimal gain or model replacement.", '']
+    if review_decision is not None:
+        body += ['', '## Epoch100 learning review', '', review_decision['scientific_progress'], '',
+                 f"Continuation question and decision: {review_decision['decision_rationale']}", '',
+                 'Both endpoint tasks remained withheld at this review. The continuation used development VALIDATION and the recorded training trajectory, with an explicit remaining-resource forecast.', '']
     if inputs.get('audit'):
         audit=doc(inputs['audit']); qualification=audit.get('controller_qualification',audit)
         gamma=qualification.get('gamma_star',qualification.get('calibration',{}).get('gamma_star'))
@@ -326,6 +425,8 @@ def produce(inputs_path,campaign,output):
         elif isinstance(value,(int,float)) and not isinstance(value,bool) and math.isfinite(value):shown=f'{value:.6g}'
         else: raise ValueError('cost measurements must be finite numbers or null')
         body.append(f'| {name} | {shown} |')
+    body += ['', '## Interpretation boundary', '',
+             'The decision concerns this SOURCE and combustion cohort on 100 previously accessed development conditions. The controller and any adopted query/computation changes form the evaluated package; local action audits support mechanism statements but do not isolate every contribution to the learned outcome. Finite SSS observables and these reused tasks do not establish cross-model or cross-system performance. TEST remains locked.', '']
     body+=['','## Figure index','']+[f'- [Figure {name.replace("_"," ")}](#figure-{name.replace("_","-")})' for name in captions]+['']
     for name,caption in captions.items():body += [f'## Figure {name.replace("_"," ")}','',f'![{caption}](figures/{name}.png)','',f'{caption} [PDF master](figures/{name}.pdf)','']
     (output/'report.md').write_text('\n'.join(body),encoding='utf-8')
