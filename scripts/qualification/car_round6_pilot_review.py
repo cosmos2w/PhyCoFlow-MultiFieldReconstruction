@@ -20,6 +20,7 @@ def main():
     from phycoflow_reconstruction.training.fidelity_budget import ExternalPolicy, MeanRiskDifferenceBudget
     from phycoflow_reconstruction.training.scalable_fitting import _digest
     from scripts.posttraining.assess_car_round3 import context
+    from scripts.posttraining.run_car_round6 import validate_pilot_epoch_timing
     from scripts.qualification.car_round6_joint_audit import coarse_profile
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--run', type=Path, required=True)
@@ -95,8 +96,7 @@ def main():
         set(column) != {'name', 'type', 'units', 'meaning'} for column in definitions['columns']):
         raise ValueError('typed ordered recording definitions are incomplete')
     epoch_timing = [json.loads(line) for line in (run / 'logs/epoch_timing.jsonl').read_text().splitlines() if line.strip()]
-    if len(epoch_timing) != 20:
-        raise ValueError('complete epoch cost history required')
+    validate_pilot_epoch_timing(epoch_timing)
     coarse_lambda, coarse_z = coarse_profile(history, reference.field_names,
         reference.absolute_allowance, reference.risk_scales, epochs=20)
     coarse_lambda *= pi['gamma']

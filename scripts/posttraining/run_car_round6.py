@@ -222,6 +222,30 @@ def freeze(args, campaign):
     print(code, flush=True)
 
 
+def validate_pilot_epoch_timing(rows):
+    """Return complete per-epoch walls; reject resumed partial-duration records."""
+    if not isinstance(rows, list) or len(rows) != 20:
+        raise ValueError("twenty complete pilot epoch timing rows required")
+    walls = []
+    for epoch, row in enumerate(rows, 1):
+        if not isinstance(row, dict):
+            raise ValueError(f"invalid pilot timing row at epoch {epoch}")
+        for key, expected in (("epoch", epoch), ("step", 12 * epoch),
+                              ("attempted_updates", 12), ("accepted_updates", 12)):
+            value = row.get(key)
+            if isinstance(value, bool) or not isinstance(value, int) or value != expected:
+                raise ValueError(f"pilot timing epoch {epoch}: {key} must equal {expected}")
+        if "complete_epoch_duration" in row and row["complete_epoch_duration"] is not True:
+            raise ValueError(f"pilot timing epoch {epoch}: incomplete epoch duration")
+        if "timed_updates" in row and (isinstance(row["timed_updates"], bool) or not isinstance(row["timed_updates"], int) or row["timed_updates"] != 12):
+            raise ValueError(f"pilot timing epoch {epoch}: timed_updates must equal 12")
+        wall = row.get("wall_seconds")
+        if isinstance(wall, bool) or not isinstance(wall, (int, float)) or not math.isfinite(wall) or wall <= 0:
+            raise ValueError(f"pilot timing epoch {epoch}: positive finite wall_seconds required")
+        walls.append(float(wall))
+    return walls
+
+
 def forecast(args, campaign):
     """Resolve the whole bounded forecast from completed pilot epoch records."""
     import statistics
@@ -229,9 +253,7 @@ def forecast(args, campaign):
     if pilot.get("qualified") is not True or pilot.get("epochs") != 20:
         raise ValueError("completed qualified 20-epoch pilot required")
     timings = pilot["epoch_timing"]
-    values = [float(row["wall_seconds"]) for row in timings]
-    if len(values) != 20 or any(not math.isfinite(x) or x <= 0 for x in values):
-        raise ValueError("twenty complete measured epoch times required")
+    values = validate_pilot_epoch_timing(timings)
     ledger_path = campaign / "operations/gpu_ledger.json"
     with locked_ledger(ledger_path) as state:
         if state["active"]:

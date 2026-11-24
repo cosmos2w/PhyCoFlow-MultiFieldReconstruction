@@ -38,3 +38,29 @@ def test_measured_response_admission_keeps_original_audit_and_binds_probe(tmp_pa
     (tmp_path/'probe.json').write_text('{}')
     with pytest.raises(ValueError,match='bound artifact changed'):
         controller_admission(revision)
+
+
+def test_forecast_requires_complete_epoch_durations_and_accepts_legacy(tmp_path):
+    import json
+    from types import SimpleNamespace
+    from scripts.posttraining.run_car_round6 import forecast, validate_pilot_epoch_timing
+    timing=[{'version':'complete_epoch_timing_v1','epoch':i,'step':12*i,
+             'attempted_updates':12,'accepted_updates':12,'wall_seconds':100.+i}
+            for i in range(1,21)]
+    assert validate_pilot_epoch_timing(timing)==[100.+i for i in range(1,21)]
+    valid=[dict(row,complete_epoch_duration=True,timed_updates=12) for row in timing]
+    assert validate_pilot_epoch_timing(valid)==[100.+i for i in range(1,21)]
+    pilot=tmp_path/'pilot.json';pilot.write_text(json.dumps({'qualified':True,'epochs':20,'epoch_timing':timing}))
+    (tmp_path/'configs').mkdir()
+    forecast(SimpleNamespace(pilot=pilot),tmp_path)
+    result=json.loads((tmp_path/'configs/measured_forecast.json').read_text())
+    assert result['formal_training_gpu_seconds']==pytest.approx(500*max(120.,1.1*115.5))
+    partial=[dict(row) for row in timing];partial[4]['timed_updates']=7
+    pilot.write_text(json.dumps({'qualified':True,'epochs':20,'epoch_timing':partial}))
+    (tmp_path/'configs/measured_forecast.json').unlink()
+    with pytest.raises(ValueError,match='timed_updates must equal 12'):
+        forecast(SimpleNamespace(pilot=pilot),tmp_path)
+    assert not (tmp_path/'configs/measured_forecast.json').exists()
+    for key,value in [('complete_epoch_duration',False),('step',59),('epoch',6),('accepted_updates',11),('attempted_updates',11),('wall_seconds',float('nan'))]:
+        altered=[dict(row) for row in timing];altered[4][key]=value
+        with pytest.raises(ValueError):validate_pilot_epoch_timing(altered)
