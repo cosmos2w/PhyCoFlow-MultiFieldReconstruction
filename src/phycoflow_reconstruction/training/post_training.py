@@ -3188,6 +3188,9 @@ def run_post_training(
                         absolute_step=global_step, rollout_seed=seed + 1_000_003 + global_step,
                         device=device)
                     risks = field_risks.mean(dim=0)
+                    # Only risks should own this graph until the existing
+                    # post-action cleanup, before the next rollout allocates.
+                    del field_risks
                     actual_coupling["field_complement_sha256"] = _digest(field_complement)
                     actual_coupling["field_complement_seed"] = 20261125 + global_step
                     row["field_quadrature"] = {"selected_points": 4096, "complement_points": 512,
