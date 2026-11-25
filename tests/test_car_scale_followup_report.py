@@ -81,3 +81,28 @@ def test_candidate_promotion_requires_terminal_eligibility():
 def test_control_adoption_requires_own_task_evidence():
     with pytest.raises(ValueError,match='control endpoint task assessment'):
         report.check_adoption('control',{}, {})
+
+
+def test_completed_diagnostic_detail_uses_paired_evidence():
+    base=Path('cases/turbulent_combustion/runs/coherence_adaptive_repair/scale_alignment_followup_20261125/assessment')
+    readout=base/'ScaleAlignment_CompletedDiagnostics_20261125_v1/readout.json'
+    summary=base/'ScaleDefinition_Diagnosis_20261125_v1/summary.json'
+    if not readout.is_file() or not summary.is_file():
+        pytest.skip('completed campaign evidence unavailable')
+    d=json.loads(readout.read_text());localization=json.loads(summary.read_text())
+    adam=json.loads(report.bound(d['inputs']['adam']).read_text())
+    text='\n'.join(report.detailed_diagnostic(d,localization,adam))
+    assert '+0.2235' in text and '+0.2740' in text and '-0.0720' in text
+    assert '+0.3030' in text and '+0.1129' in text and '+0.00012118' in text
+    assert '13 independently reset' in text and 'held-out gaps are uncertain' in text
+
+
+def test_grouped_query_replays_use_matched_complete_evidence():
+    base=Path('cases/turbulent_combustion/runs/coherence_adaptive_repair/scale_alignment_followup_20261125/assessment')
+    paths=[base/'TRAIN800_GroupedScaleEstimator_20261125_v1/query_estimator.json',base/'Validation100_GroupedScaleEstimator_20261125_v1/query_estimator.json']
+    if not all(p.is_file() for p in paths):pytest.skip('completed grouped query evidence unavailable')
+    train,validation=(json.loads(p.read_text()) for p in paths)
+    text=report.grouped_query_text(train,validation,train['original_frozen_train_scale_normalizer'])
+    assert text.count('all negative')==3 and text.count('all positive')==3
+    assert '[-0.0733, -0.0712]' in text and '[+0.2234, +0.3051]' in text
+    assert 'J4/T256' in text and 'variable-observation TRAIN law' in text
