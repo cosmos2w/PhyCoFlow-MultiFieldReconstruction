@@ -122,7 +122,7 @@ def comparison_figures(views,states,aligned,keys,directory):
    vals=np.array([r['field_violation'][field] for r in journal]).reshape(-1,12).mean(1)
    axes[3].plot(np.arange(1,len(vals)+1),vals,color=colors[i],linestyle=style,label=role+' '+field)
    axes[4].plot(np.arange(1,len(multipliers)+1),multipliers[:,i],color=colors[i],linestyle=style,label=role+' '+field)
- for ax,title in zip(axes,('State sampled raw family','Scale sampled raw family','Shape sampled raw family','Signed field errors, epoch mean','PI multipliers, epoch mean')):ax.set_ylabel(title);ax.grid(alpha=.2);ax.legend(fontsize=6,ncol=5)
+ for ax,title in zip(axes,('State sampled raw family','Scale sampled raw family','Shape sampled raw family','Scaled field violations, epoch mean','PI multipliers, epoch mean')):ax.set_ylabel(title);ax.grid(alpha=.2);ax.legend(fontsize=6,ncol=5)
  axes[-1].set_xlabel('Phase reporting epoch')
  save_figure(fig,directory,'phase_learning_and_pi')
 
@@ -161,7 +161,7 @@ def produce(inputs_path,campaign,output):
  body[insertion:insertion]=['Candidate minus common-start core changes in frozen TRAIN units: '+', '.join(f"{k} {start_pair[k]['mean']:+.5g} (paired 95% interval [{start_pair[k]['interval_95'][0]:+.5g}, {start_pair[k]['interval_95'][1]:+.5g}])" for k in FAMILIES)+'.','']
  for i,field in enumerate(views['start']['field_order']):
   c=candidate['fidelity'];u=views['control']['candidates'][views['control']['arm']]['fidelity'];body.append(f"| {field} | {c['field_difference'][i]/c['field_allowance'][i]:+.5g} | {u['field_difference'][i]/u['field_allowance'][i]:+.5g} |")
- body+=['','Field metrics use the native physical mask. Signed-risk intervals are paired candidate minus SOURCE and divided by the fixed field allowance.','', '| Field | SOURCE member MSE | Candidate member MSE | SOURCE ensemble-mean MSE | Candidate ensemble-mean MSE | Signed-risk delta / allowance (95% interval) |','| --- | ---: | ---: | ---: | ---: | ---: |']
+ body+=['','Field metrics use the native physical mask, and MSE is in each field\'s squared physical units. Signed-risk intervals are paired candidate minus SOURCE and divided by the fixed field allowance.','', '| Field | SOURCE member MSE | Candidate member MSE | SOURCE ensemble-mean MSE | Candidate ensemble-mean MSE | Signed-risk delta / allowance (95% interval) |','| --- | ---: | ---: | ---: | ---: | ---: |']
  for i,field in enumerate(views['start']['field_order']):
   source=views['candidate']['source']['risk'];risk=candidate['risk'];paired=views['candidate']['paired_fields']['signed_mean_risk'];allow=candidate['fidelity']['field_allowance'][i]
   body.append(f"| {field} | {source['member_mse'][i]:.5g} | {risk['member_mse'][i]:.5g} | {source['ensemble_mean_mse'][i]:.5g} | {risk['ensemble_mean_mse'][i]:.5g} | {paired['mean'][i]/allow:+.5g} [{paired['interval_95'][0][i]/allow:+.5g}, {paired['interval_95'][1][i]/allow:+.5g}] |")
