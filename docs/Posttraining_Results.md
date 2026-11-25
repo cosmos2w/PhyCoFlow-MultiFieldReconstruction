@@ -23,6 +23,14 @@ The single-seed evidence does not establish scientific superiority, a universal 
 
 No TEST data was evaluated for this report. Repeated checkpoints share one training seed and validation source; repeated panel checks and related snapshots do not provide independent training replicates or confidence intervals.
 
+## Current Coherence Adaptive Repair result
+
+The [Round 6 execution record](../UpdatePlans/_Plans/Coherence_Adaptive_Repair/Round_6/EXECUTION_STATUS.md) records the SSS-only, fresh parameter-space ConFIG and signed Lagrangian PI repair through epoch 500 after a qualified pilot and 100-epoch learning review. Retain SOURCE/C8. On the matched VALIDATION100/J4 development panel, Shape improves by 0.310612 frozen TRAIN SOURCE units, but the published complete-core Scale worsens by 0.223544 units, four signed field allowances fail, CO/T member-MSE ratios exceed 1.10 and the regional covariance task worsens. The event fair-CRPS point estimate improves 3.04%, with a paired interval spanning zero. These observables differ from the historical T3 comparison above. The endpoint report is awaiting corrected portable publication.
+
+The late TRAIN controller response is useful execution evidence but did not transfer to native validation retention. Retain opt-in batched fresh VJPs and optional eight query groups within their qualified timing/memory and estimator scopes; the selected combined package provides no net speedup. The campaign charged 25.227 occupied GPU-hours, including conservative upper charges for missing timers. TEST remained locked. The reused single-trajectory development panel does not supply independent trajectory confirmation or an isolated PI efficacy estimate.
+
+The separately authorized [Scale alignment followup](../UpdatePlans/_Plans/Coherence_Adaptive_Repair/Round_6/SCALE_ALIGNMENT_FOLLOWUP.md) quantifies a pre-existing definition distinction: training uses nonuniform prefit weights and regional triples, whereas the published complete-core Scale uses unit base coefficients and no triples. Sampled training Scale decreases cannot directly establish improvement of that validation scalar. This diagnosis does not rewrite the completed field or task results.
+
 ## Durable workflow and local evidence
 
 Use [Post-training strategies](Posttraining_Strategies.md) for the maintained portable recipe, dependency extras, source binding, smoke, fresh run, resume and explicit-checkpoint validation evaluation. Older Run 11 operational notes are optional historical evidence preserved with local run artifacts and may not be present in a fresh clone.

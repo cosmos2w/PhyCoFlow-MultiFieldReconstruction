@@ -1,8 +1,18 @@
 # Round 6 execution record
 
+**New followup authorized on 25 November 2026.** The [Scale definition alignment followup](SCALE_ALIGNMENT_FOLLOWUP.md) quantifies the trained/published Scale definitions, matched TRAIN/VALIDATION behavior and a real saved-Adam action before selecting a repair. The user granted a separate 30 occupied GPU-hour budget and a new 100-epoch review with conditional maximum 500 epochs including that review. Original epoch-500 evidence below is preserved; the new investigation and final publication are in progress. GPU0 remains the main training GPU.
+
+**Terminal decision: retain SOURCE/C8.** The selected package completed 500 reporting epochs and 6000 accepted actions. VALIDATION100/J4 Shape improved by 0.31061 frozen TRAIN units (paired interval [-0.35084, -0.27111]), but four native signed-field allowances failed, Scale worsened by 0.22354 units and the regional score worsened by 0.60547 units. The event CRPS point improvement is uncertain (paired interval crosses zero). The final disposition is `operations/model_disposition_epoch_500.json` (SHA-256 `c71085668064a23ac6d027d380f75cc4034617c690cbb6513a1229dfde27c3d0`); this development VALIDATION panel is not independent confirmation.
+
+The original closed ledger charges 25.2268974161 GPU-hours, including 7800 seconds of conservative upper bounds; exact occupation of those recovered leases is unknown. Batched VJPs saved 3.612% in the matched isolated test at substantially higher memory, while grouped queries reduced measured Shape-gradient variance at added cost; the combined package showed no overall speedup. Final records for that package are cost v2 `operations/Epoch500_CompletedAssessment_CostEvidence_20261125_v2.json` (SHA-256 `de1a23276c73c4080a54e0b0d0b0a1d5218784ea0654b391a7548a980288dc11`), engineering v3 `assessment/engineering/FFM_PI_ResumedPackage_EngineeringDisposition_20261125_v3.json` (SHA-256 `3ce329d111ffb2322177cc6ee6fa76e4f19bb96fec03ffa6ea4ecf8f2b866911`), and training readout v2 `assessment/Epoch500_TrainingReadout_20261125/completed_training_readout_v2.json` (SHA-256 `21ced8cdab086a6b136ac67d43069d57f580a954af08fb2a418b49e57bdddfa1`). TEST remains locked and closed Rounds 1–5 are unchanged. Further learning belongs to the separately authorized followup above; publication and portable validation remain pending.
+
+## Historical stage records
+
+The following sections preserve stage-time evidence and decisions; references to active runs, future handoffs or pending outcomes describe their historical state, not current work.
+
 **Resumed by explicit user authorization on 23 November 2026.** The preparation-stop decision below is a superseded stage record. [Resumption decisions](RESUMPTION_DECISIONS.md) replace the exact drift-target launch veto with a measured field/Shape tradeoff and require substantive learning evidence. The earlier raw audit and report bytes remain preserved; a measured probe is nominated for production resume qualification and a fresh-SOURCE 20-epoch pilot, followed by the 100-epoch review and conditional 500 endpoint within the original total budget.
 
-## 100-epoch review and active 500-epoch continuation
+## Historical 100-epoch review and 500-epoch continuation
 
 The fresh formal run completed 100 epochs and 1200 actions on GPU0 at 08:38:51 UTC on 24 November, with SOURCE immutability verified and 12472.582 seconds of occupied GPU time. One cached VALIDATION100/J4 bank used another 31.797 GPU seconds; task-free field/State/Scale/Shape scoring took 71.13 seconds wall and 98.23 CPU seconds. Complete history, PI journal, timing, recording definitions and curves were copied into the immutable `assessment/Epoch100_Validation100_J4_20261124/snapshot/` owner before continuation.
 
@@ -68,7 +78,7 @@ The reviewed selection, pilot and semantic-identity fixes are committed and push
 
 ## Superseded preparation-close record
 
-**Decision: close preparation and retain SOURCE/C8.** The predeclared PI calibration and its production weighted-field-VJP verification both selected a gain of zero. No supported alternative execution correction was demonstrated. This invokes the bounded preparation stop in [workplan section 3](WORKPLAN.md#3-mandatory-joint-audit-answer-the-missing-mechanism-questions); it is not a 100-epoch candidate failure or a rejection of Lagrangian methods. The [scientific report](../../../_Reports/Coherence_Adaptive_Repair/Round_6/report.md) and [PDF master](../../../_Reports/Coherence_Adaptive_Repair/Round_6/report.pdf) contain the measured evidence.
+**Decision: close preparation and retain SOURCE/C8.** The predeclared PI calibration and its production weighted-field-VJP verification both selected a gain of zero. No supported alternative execution correction was demonstrated. This invokes the bounded preparation stop in [workplan section 3](WORKPLAN.md#3-mandatory-joint-audit-answer-the-missing-mechanism-questions); it is not a 100-epoch candidate failure or a rejection of Lagrangian methods. The [scientific report](../../../_Reports/Coherence_Adaptive_Repair/_bk/Round_6_Preparation_20261123/report.md) and [PDF master](../../../_Reports/Coherence_Adaptive_Repair/_bk/Round_6_Preparation_20261123/report.pdf) contain the measured evidence.
 
 ### Superseded controller and model decision
 

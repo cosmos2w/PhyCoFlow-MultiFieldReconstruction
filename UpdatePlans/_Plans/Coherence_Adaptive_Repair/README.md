@@ -1,13 +1,15 @@
 # Coherence Adaptive Repair plans
 
-This is the reading collection for Coherence Adaptive Repair. Round 6 has resumed under explicit user authorization for flexible, evidence-led exploration. Its earlier zero-gain preparation stop is superseded; SOURCE/C8 remains operational during the learning experiment. Rounds 1–5 and their historical paths remain unchanged. Original identities and SHA-256 hashes for historical reading copies are listed in the [source identity index](SOURCE_INDEX.md).
+This is the reading collection for Coherence Adaptive Repair. Round 6 completed its qualified pilot, 100-epoch review and conditional 500-epoch endpoint under the original 30 occupied GPU-hour ceiling. Retain SOURCE/C8: the tested package improved Shape and late TRAIN constraint response but failed native field retention, Scale and the regional task. Rounds 1–5 remain closed. Original identities and SHA-256 hashes for historical reading copies are listed in the [source identity index](SOURCE_INDEX.md).
 
-## Round 6 resumed execution
+The user authorized a [Scale definition alignment followup](Round_6/SCALE_ALIGNMENT_FOLLOWUP.md) on 25 November, with a separate 30 GPU-hour budget, a new 100-epoch learning review and conditional maximum 500 epochs including that review. It first separates definition, query and split effects and checks a saved-Adam action; any changed objective/update uses a same-start unchanged continuation control. GPU0 remains primary. Original results remain preserved.
+
+## Round 6 completed execution
 
 - [Workplan](Round_6/WORKPLAN.md), [review and decisions](Round_6/REVIEW_AND_DECISIONS.md), [historical audit](Round_6/evidence/HISTORICAL_AUDIT.md), and [execution prompt](Round_6/EXECUTION_PROMPT.md).
-- [Execution record](Round_6/EXECUTION_STATUS.md), [superseded preparation-stage report](../../_Reports/Coherence_Adaptive_Repair/Round_6/report.md), and [PDF master](../../_Reports/Coherence_Adaptive_Repair/Round_6/report.pdf). The 100-epoch learning review now supports unchanged continuation to epoch 500; the final scientific publication remains pending.
-- [Resumption decisions](Round_6/RESUMPTION_DECISIONS.md) nominate the already measured positive-feedback probe for fresh-SOURCE pilot/learning and preserve the original audit as a stage snapshot. The original 30 occupied GPU-hour ceiling includes prior preparation.
-- [Method and change ledger](Round_6/METHOD_AND_CHANGE_LEDGER.md) connects the completed mechanism audit, controller nomination, production qualifications and measured computation/query decisions to the selected package.
+- [Execution record](Round_6/EXECUTION_STATUS.md), [published preparation snapshot](../../_Reports/Coherence_Adaptive_Repair/Round_6/report.md), and [preparation PDF](../../_Reports/Coherence_Adaptive_Repair/Round_6/report.pdf). The completed original experiment charged 25.227 GPU-hours, including conservative charges for missing timers; TEST remained locked. Its endpoint report has rendered and awaits corrected portable publication.
+- [Resumption decisions](Round_6/RESUMPTION_DECISIONS.md) authorized the measured positive-feedback probe and substantive learning test after the earlier zero-gain stop. The published preparation report remains a superseded stage snapshot pending archive installation with the accepted endpoint report.
+- [Method and change ledger](Round_6/METHOD_AND_CHANGE_LEDGER.md) connects the completed mechanism audit, controller qualification and terminal model/engineering decisions. Retain optional batched fresh VJPs and eight query groups within their measured scopes; the combined selected package has no net speedup claim.
 - Round 5 rejected native supervision plus SSS plus local filtering. It did not test a repaired Lagrangian mainline. SOURCE/C8 remains retained.
 
 ## Round 5 closeout and planning snapshot

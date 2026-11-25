@@ -1,6 +1,6 @@
 # Coherence Adaptive Repair: source identity index
 
-Round 6's admitted planning material and evidence identities remain in `Round_6/evidence/HISTORICAL_AUDIT.md`; it is not a historical reading copy. The [execution record](Round_6/EXECUTION_STATUS.md) documents the superseded preparation stop and resumed execution while preserving the admitted workplan and review bytes.
+Round 6's admitted planning material and evidence identities remain in `Round_6/evidence/HISTORICAL_AUDIT.md`; it is not a historical reading copy. The [execution record](Round_6/EXECUTION_STATUS.md) documents the completed 500-epoch decision and superseded preparation stop while preserving the admitted workplan and review bytes.
 
 This index identifies the exact source bytes used for the portable Markdown reading copies. SHA-256 hashes describe the original files; reading copies add a status banner and rebase Markdown links. They do not alter scientific statements, fenced commands or literal historical paths.
 
