@@ -10,7 +10,7 @@ from pathlib import Path
 import sys
 import time
 
-ROOT = Path(os.environ.get('CAR_REPO_ROOT', Path(__file__).resolve().parents[2])).resolve(strict=True)
+ROOT = Path(os.environ.get('CAR_EXECUTION_ROOT', os.environ.get('CAR_REPO_ROOT', Path(__file__).resolve().parents[2]))).resolve(strict=True)
 sys.path[:0] = [str(ROOT/'src'), str(ROOT)]
 import torch
 from phycoflow_reconstruction.coherence.compose import three_family_order
@@ -30,6 +30,13 @@ from scripts.qualification.car_round5_panel_replay import load_context, replay_m
 from scripts.qualification.car_round6_joint_audit import sha256
 from scripts.qualification.car_round6_mature_first_batch import flattened
 from phycoflow_reconstruction.training.scalable_fitting import _digest
+
+
+def rollback_shadow(runtime):
+    """Discard a shadow query transaction and release graph-bearing diagnostics."""
+    runtime.finish_step(False)
+    runtime.blocks.clear()
+    runtime.difficulties.clear()
 
 
 def validate_source(source):
@@ -184,7 +191,8 @@ def main():
                 'field_violation_pre':error.detach().cpu().tolist(),'field_violation_post':ref.violations(risk_after).cpu().tolist(),
                 'full_core_gradient_dot_actual_displacement':float(core_grad@displacement),'family_gradient_dot_actual_displacement':(family_rows@displacement).cpu().tolist(),
                 'weighted_field_gradient_dot_actual_displacement':float(field@displacement),'displacement_l2_norm':float(torch.linalg.vector_norm(displacement.double())),'clip_pre_norm':float(clip)})
-            del losses,endpoint,members,ordered,full,core_grad,family_rows,direction,error,field,combined,displacement,after
+            rollback_shadow(runtime)
+            del losses,endpoint,members,ordered,full,core_grad,family_rows,direction,risk,error,field,combined,displacement,after,post_endpoint,selected,target
         count=sum(len(x['sample_ids']) for x in rows);assert count==(800 if a.max_batches==13 else 64)
         status.update(status='completed' if count==800 else 'completed_fixture_only',sample_count=count,batches_completed=len(rows),
             field_order=list(ref.field_names),family_order=list(order),actual_multipliers=mult.cpu().tolist(),

@@ -23,6 +23,7 @@ class PeriodicCheckpointManager:
         *,
         store: RunStore,
         steps_per_epoch: int,
+        origin_step: int = 0,
     ) -> None:
         settings = config.get("checkpointing", {})
         self.enabled = bool(settings.get("enabled", True))
@@ -38,6 +39,7 @@ class PeriodicCheckpointManager:
             else None
         )
         self.steps_per_epoch = max(1, int(steps_per_epoch))
+        self.origin_step = int(origin_step)
         self.store = store
         self.selection_metric = str(settings.get("selection_metric", "native_validation_loss"))
         self.external_assessment = bool(config.get("evaluation", {}).get("external_assessment", False))
@@ -62,7 +64,7 @@ class PeriodicCheckpointManager:
     def _epoch(self, global_step: int) -> int | None:
         if global_step % self.steps_per_epoch:
             return None
-        return global_step // self.steps_per_epoch
+        return (global_step - self.origin_step) // self.steps_per_epoch
 
     def last_due(self, global_step: int) -> bool:
         """Return whether the rolling recovery checkpoint should be refreshed."""
@@ -212,7 +214,7 @@ class PeriodicCheckpointManager:
         last_path = self.store.save_checkpoint("last", checkpoint) if last_due else None
         milestone_path = None
         if milestone_due:
-            epoch = global_step // self.steps_per_epoch
+            epoch = self._epoch(global_step)
             milestone_path = self.store.save_checkpoint(f"epoch_{epoch:03d}", checkpoint)
         best_path = self.store.save_checkpoint("best", checkpoint) if improved else None
         best_fidelity_path = (
@@ -234,7 +236,7 @@ class PeriodicCheckpointManager:
         if last_path is not None:
             checkpoint_hashes["last"] = file_sha256(last_path)
         if milestone_path is not None:
-            checkpoint_hashes[f"epoch_{global_step // self.steps_per_epoch:03d}"] = file_sha256(
+            checkpoint_hashes[f"epoch_{self._epoch(global_step):03d}"] = file_sha256(
                 milestone_path
             )
         existing_best = self.store.run_dir / "checkpoints" / "best.pt"

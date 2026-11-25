@@ -96,16 +96,18 @@ class TrainingMonitor:
         enabled: bool = True,
         plot_every_steps: int = 10,
         resume_state: Mapping[str, Any] | None = None,
+        origin_step: int = 0,
     ) -> None:
         self.run_dir = Path(run_dir)
         self.history_path = log_path(self.run_dir, "history.jsonl")
         self.validation_history_path = log_path(self.run_dir, "validation_history.jsonl")
         self.plot_path = log_path(self.run_dir, "loss_history.png")
         self.optimization_plot_path = log_path(self.run_dir, "optimization_diagnostics.png")
+        self.origin_step = int(origin_step)
         self.final_step = int(final_step)
         self.configured_steps = int(configured_steps)
         self.steps_per_epoch = max(1, int(steps_per_epoch))
-        self.total_epochs = max(1, math.ceil(self.configured_steps / self.steps_per_epoch))
+        self.total_epochs = max(1, math.ceil((self.configured_steps - self.origin_step) / self.steps_per_epoch))
         # Keep the established config key for compatibility, but interpret its
         # value as an epoch interval.  History and plots should scale with the
         # number of epochs, not with potentially millions of optimizer steps.
@@ -164,7 +166,7 @@ class TrainingMonitor:
         self._load_existing_history()
         self._load_existing_validation_history()
         self._last_step = int(start_step) if start_step else None
-        self.active_epoch = int(start_step) // self.steps_per_epoch + 1
+        self.active_epoch = (int(start_step) - self.origin_step) // self.steps_per_epoch + 1
         self._epoch_started = perf_counter()
         self._epoch_observed_batches = 0
         self.progress = self._new_epoch_bar(
@@ -177,7 +179,7 @@ class TrainingMonitor:
 
     def _epoch_batch_count(self, epoch: int) -> int:
         epoch_start = (epoch - 1) * self.steps_per_epoch
-        return min(self.steps_per_epoch, self.configured_steps - epoch_start)
+        return min(self.steps_per_epoch, self.configured_steps - self.origin_step - epoch_start)
 
     def checkpoint_state(self) -> dict[str, Any]:
         """Snapshot ordered partial-epoch accumulators at the accepted cursor."""
@@ -247,7 +249,7 @@ class TrainingMonitor:
 
     def _epoch_coordinates(self, steps: list[int]) -> list[float]:
         """Express completed optimizer batches as fractional training epochs."""
-        return [step / self.steps_per_epoch for step in steps]
+        return [(step - self.origin_step) / self.steps_per_epoch for step in steps]
 
     def _accumulate_epoch(self, row: Mapping[str, Any]) -> None:
         self._epoch_batch_count_seen += 1
@@ -272,6 +274,7 @@ class TrainingMonitor:
             raise RuntimeError("cannot flush an empty training-history epoch")
         row = {
             "step": int(step),
+            **({"absolute_epoch": int((step - 1) // self.steps_per_epoch + 1)} if self.origin_step else {}),
             "epoch": int(epoch),
             "batches": int(batches),
             "epoch_complete": batches == self._epoch_batch_count(epoch),
@@ -309,6 +312,15 @@ class TrainingMonitor:
                     return "string"
                 return "object"
             def definition(key, value):
+                if self.origin_step and key in {"step", "epoch", "absolute_epoch"}:
+                    meanings = {
+                        "step": "Absolute accepted updates, including the 6000 accepted parent updates before this fork.",
+                        "epoch": "Reporting epoch within this new fork phase, starting at 1.",
+                        "absolute_epoch": "Absolute reporting epoch including the 500 parent epochs before this fork.",
+                    }
+                    return {"name": key, "type": kind(value),
+                            "units": "updates" if key == "step" else "reporting_epochs",
+                            "meaning": meanings[key]}
                 if self._direct_recording:
                     units = "dimensionless"
                     meaning = "Finite numeric values are averaged over attempted updates, including rejected attempts; structured values retain the last attempt."
@@ -350,8 +362,8 @@ class TrainingMonitor:
                         units, meaning = "parameter_gradient_norm", "Attempt-mean norm in the declared trainable parameter space."
                     return {"name": key, "type": kind(value), "units": units, "meaning": meaning}
                 units, meaning = "dimensionless", "Accepted-update epoch diagnostic; structured values retain their named axes."
-                if key in {"step", "epoch", "batches", "completed_updates"}:
-                    units, meaning = "updates" if key != "epoch" else "reporting_epochs", "Completed clock or count in the saved B64/12 reporting convention."
+                if key in {"step", "epoch", "absolute_epoch", "batches", "completed_updates"}:
+                    units, meaning = "reporting_epochs" if key in {"epoch", "absolute_epoch"} else "updates", "Completed clock or count in the saved B64/12 reporting convention."
                 elif key.endswith("_seconds"):
                     units, meaning = "seconds", "Measured wall duration averaged over accepted updates in this epoch."
                 elif key == "field_risk" or key == "field_reference_risk" or key == "field_upper_bound":
@@ -500,7 +512,7 @@ class TrainingMonitor:
         # before the next batch starts.
         self._complete_pending_epoch()
         step = int(row["step"])
-        epoch = (max(step, 1) - 1) // self.steps_per_epoch + 1
+        epoch = (max(step - self.origin_step, 1) - 1) // self.steps_per_epoch + 1
         self._last_step = step
         self._last_epoch = epoch
         if epoch != self.active_epoch:

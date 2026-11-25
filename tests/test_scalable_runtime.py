@@ -66,6 +66,27 @@ def test_runtime_deploys_and_restores_fixed_profile(monkeypatch):
     grouped = ScalableRuntime(artifact, families, steps_per_epoch=1, expected_provenance=provenance,
                               allocation_mode="uniform", condition_query_groups=8)
     grouped.calibration.load_prefit(prefit)
+    # The actual-action diagnostic resets its transaction for every shadow.
+    from copy import deepcopy
+    import weakref
+    from scripts.qualification.car_scale_actual_adam_action import rollback_shadow
+    saved = deepcopy(grouped.state_dict())
+    for _ in range(2):
+        grouped.load_state_dict(saved)
+        grouped.begin_step(0)
+        graph_tensor = torch.tensor(1., requires_grad=True) * 2
+        graph_ref = weakref.ref(graph_tensor)
+        grouped.blocks['retained_graph'] = graph_tensor
+        del graph_tensor
+        rollback_shadow(grouped)
+        assert grouped.batch is None
+        rolled = grouped.state_dict()
+        assert rolled.pop('sampler_seconds') >= 0
+        expected = deepcopy(saved); expected.pop('sampler_seconds')
+        assert rolled == expected
+        grouped.load_state_dict(saved)
+        assert grouped.state_dict() == saved
+        assert graph_ref() is None
     grouped.begin_step(0)
     initial = grouped.batch
     grouped.finish_step(False)

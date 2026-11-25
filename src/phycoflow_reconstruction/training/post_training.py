@@ -1976,6 +1976,10 @@ def _fidelity_guard_report(
     }
 
 
+def _phase_milestone_path(run_dir, step, steps_per_epoch, origin_step=0):
+    return Path(run_dir) / 'checkpoints' / f'epoch_{(step-origin_step)//steps_per_epoch:03d}.pt'
+
+
 def _record_checkpoint_clock(run_dir, epoch, global_step, checkpoint_path):
     """Record the wall-clock instant and content identity of a saved milestone."""
     path = Path(checkpoint_path)
@@ -2104,6 +2108,7 @@ def run_post_training(
         else None
     )
 
+    origin_step = 0
     if resume is None:
         store = RunStore.create(
             case_dir,
@@ -2116,7 +2121,11 @@ def run_post_training(
     else:
         store = RunStore.resume(resume, config)
         config = store.config
+        fork_origin = json.loads((store.run_dir / "run_manifest.json").read_text()).get("fork_origin")
+        origin_step = int(fork_origin["absolute_step"]) if fork_origin else 0
         checkpoint = store.load_checkpoint("last")
+        if fork_origin and (origin_step != 6000 or checkpoint.get("fork_origin") != fork_origin):
+            raise ValueError("fork parent binding or absolute origin differs from checkpoint")
         if (
             config["optimization"].get("fast_lagrangian") is not None
             and checkpoint.get("fast_lagrangian_implementation") != implementation_binding()
@@ -2147,21 +2156,21 @@ def run_post_training(
         if (external_settings or {}).get("lagrangian", {}).get("epoch_calibrated_pi") is not None:
             from .journals import recover_journal
             pi_journal = store.run_dir / "logs" / "epoch_calibrated_pi_updates.jsonl"
-            if start_step and not pi_journal.is_file():
+            if start_step > origin_step and not pi_journal.is_file():
                 raise FileNotFoundError("PI checkpoint is missing its action history")
             recover_journal(pi_journal, start_step)
             cursors = [json.loads(line)["step"] for line in pi_journal.read_text().splitlines() if line.strip()] if pi_journal.is_file() else []
-            if cursors != list(range(1, start_step + 1)):
+            if cursors != list(range(origin_step + 1, start_step + 1)):
                 raise ValueError("PI action history is incomplete at checkpoint cursor")
         if direct_settings is not None:
             from .journals import recover_journal
             direct_journal = store.run_dir / "logs" / "direct_updates.jsonl"
-            if start_step and not direct_journal.is_file():
+            if start_step > origin_step and not direct_journal.is_file():
                 raise FileNotFoundError("direct checkpoint is missing its attempt history")
             recover_journal(direct_journal, start_step)
             cursors = ([json.loads(line)["step"] for line in direct_journal.read_text().splitlines() if line.strip()]
                        if direct_journal.is_file() else [])
-            if cursors != list(range(1, start_step + 1)):
+            if cursors != list(range(origin_step + 1, start_step + 1)):
                 raise ValueError("direct attempt history is not contiguous through the checkpoint")
         torch.set_rng_state(checkpoint["rng_state"]["torch_cpu"])
         if device.type == "cuda" and checkpoint["rng_state"].get("torch_cuda"):
@@ -2343,7 +2352,7 @@ def run_post_training(
             from .journals import recover_journal
 
             journal_path = store.run_dir / "logs" / "scalable_updates.jsonl"
-            if start_step and not journal_path.is_file():
+            if start_step > origin_step and not journal_path.is_file():
                 raise FileNotFoundError("scalable checkpoint is missing its update history")
             recover_journal(journal_path, start_step)
             if journal_path.is_file():
@@ -2352,15 +2361,15 @@ def run_post_training(
                     for line in journal_path.read_text().splitlines()
                     if line.strip()
                 ]
-                if cursors != list(range(1, start_step + 1)):
+                if cursors != list(range(origin_step + 1, start_step + 1)):
                     raise ValueError("scalable update history is incomplete at checkpoint cursor")
             coupling_path = store.run_dir / "metrics" / "training_coupling.jsonl"
-            if start_step and not coupling_path.is_file():
+            if start_step > origin_step and not coupling_path.is_file():
                 raise FileNotFoundError("scalable checkpoint is missing training coupling history")
             recover_journal(coupling_path, start_step)
             if coupling_path.is_file():
                 cursors = [json.loads(line)["step"] for line in coupling_path.read_text().splitlines() if line.strip()]
-                if cursors != list(range(1, start_step + 1)):
+                if cursors != list(range(origin_step + 1, start_step + 1)):
                     raise ValueError("training coupling history is incomplete at checkpoint cursor")
         train_dataset.scalable_runtime = scalable_runtime
     elif checkpoint is not None and "scalable_runtime" in checkpoint:
@@ -2686,7 +2695,7 @@ def run_post_training(
     if not 0.0 < fraction <= 1.0:
         raise ValueError("optimization.train_fraction must lie in (0,1]")
     steps_per_epoch = post_training_steps_per_epoch(config, len(train_dataset))
-    configured_steps = epochs * steps_per_epoch
+    configured_steps = origin_step + epochs * steps_per_epoch
     execution_probe_batches = []
     if execution_runtime is not None:
         from .execution_strategy.audit import preserve_rng_and_modes
@@ -2782,8 +2791,11 @@ def run_post_training(
         enabled=bool(config["runtime"].get("progress", True)),
         plot_every_steps=int(config["runtime"].get("plot_every_steps", 10)),
         resume_state=None if checkpoint is None else checkpoint.get("training_monitor"),
+        origin_step=origin_step,
     )
     train_dataset.training_monitor = monitor
+    if origin_step:
+        train_dataset.fork_origin = fork_origin
     preview = TrainingReconstructionPreview(
         config,
         store=store,
@@ -2794,6 +2806,7 @@ def run_post_training(
         config,
         store=store,
         steps_per_epoch=steps_per_epoch,
+        origin_step=origin_step,
     )
     panel_metrics_cache = {}
     if not external_assessment and policy is not None and checkpoint_manager.selection_metric == "reconstruction_mse":
@@ -2814,8 +2827,8 @@ def run_post_training(
             metrics["sensor_manifest_sha256"] = evaluation_manifest.digest()
             if evaluation_split == "train" and step % steps_per_epoch == 0:
                 store.write_json(
-                    f"evaluation/train_core_epoch_{step // steps_per_epoch:03d}.json",
-                    {"global_step": step, "epoch": step // steps_per_epoch, "metrics": metrics},
+                    f"evaluation/train_core_epoch_{(step-origin_step) // steps_per_epoch:03d}.json",
+                    {"global_step": step, "epoch": (step-origin_step) // steps_per_epoch, "metrics": metrics},
                 )
             panel_metrics_cache.clear()
             panel_metrics_cache[step] = metrics
@@ -2905,7 +2918,8 @@ def run_post_training(
             preview.close()
             store.set_status("budget_paused", global_step=start_step,
                              configured_steps=configured_steps, steps_per_epoch=steps_per_epoch,
-                             reporting_epoch=start_step / steps_per_epoch,
+                             reporting_epoch=(start_step-origin_step) / steps_per_epoch,
+                             absolute_reporting_epoch=start_step / steps_per_epoch,
                              source_immutable_verified=True)
             train_dataset.close()
             if evaluation_dataset is not None:
@@ -2922,8 +2936,8 @@ def run_post_training(
             ), model=model, preview=preview, global_step=start_step, fallback_metric=0.0,
         )
         if checkpoint_manager.milestone_due(start_step):
-            _record_checkpoint_clock(store.run_dir, start_step // steps_per_epoch, start_step,
-                                     store.run_dir / 'checkpoints' / f'epoch_{start_step // steps_per_epoch:03d}.pt')
+            _record_checkpoint_clock(store.run_dir, (start_step-origin_step) // steps_per_epoch, start_step,
+                                     _phase_milestone_path(store.run_dir, start_step, steps_per_epoch, origin_step))
         store.update_manifest(pending_panel_step=None)
     last_coherence_loss = None
     direct_batch_wait_started = perf_counter() if direct_settings is not None else None
@@ -2934,7 +2948,7 @@ def run_post_training(
         global_step = start_step + offset
         if not full_pass:
             torch.randperm(len(train_dataset), generator=index_generator)
-        epoch = global_step // steps_per_epoch + 1
+        epoch = (global_step - origin_step) // steps_per_epoch + 1
         if scalable_runtime is not None and (direct_settings is None or direct_safeguarded):
             scalable_runtime.begin_step(global_step)
         post_training_mode(model, config)
@@ -2965,7 +2979,7 @@ def run_post_training(
                 else model.training_loss(batch).total
             )
         every = int(config["coherence"]["schedule"].get("every_n_steps", 1))
-        coherence_weight = _coherence_weight(config, epoch)
+        coherence_weight = _coherence_weight(config, global_step // steps_per_epoch + 1)
         coherence_active = coherence_weight > 0 and global_step % every == 0
         if direct_settings is not None:
             coherence_active = direct_safeguarded
@@ -3541,16 +3555,16 @@ def run_post_training(
             last_path = store.save_checkpoint("last", payload)
             if checkpoint_manager.milestone_due(global_step + 1):
                 milestone = store.save_checkpoint(
-                    f"epoch_{(global_step + 1) // steps_per_epoch:03d}", payload
+                    f"epoch_{(global_step + 1 - origin_step) // steps_per_epoch:03d}", payload
                 )
                 current_manifest = json.loads((store.run_dir / "run_manifest.json").read_text())
                 hashes = dict(current_manifest.get("checkpoint_hashes", {}))
-                hashes[f"epoch_{(global_step + 1) // steps_per_epoch:03d}"] = file_sha256(milestone)
+                hashes[f"epoch_{(global_step + 1 - origin_step) // steps_per_epoch:03d}"] = file_sha256(milestone)
                 store.update_manifest(
                     checkpoint_hashes=hashes,
                     pending_panel_step=(global_step + 1 if checkpoint_manager.panel_evaluator is not None else None),
                 )
-                _record_checkpoint_clock(store.run_dir, (global_step+1)//steps_per_epoch, global_step+1, milestone)
+                _record_checkpoint_clock(store.run_dir, (global_step+1-origin_step)//steps_per_epoch, global_step+1, milestone)
             monitor.close(checkpoint_checked=False, best_checkpoint_saved=False)
             preview.close()
             if source_hashes(config) != source_hashes_before:
@@ -3562,7 +3576,8 @@ def run_post_training(
             store.set_status(
                 "budget_paused", global_step=global_step + 1,
                 configured_steps=configured_steps, steps_per_epoch=steps_per_epoch,
-                reporting_epoch=(global_step + 1) / steps_per_epoch,
+                reporting_epoch=(global_step + 1 - origin_step) / steps_per_epoch,
+                absolute_reporting_epoch=(global_step + 1) / steps_per_epoch,
                 source_immutable_verified=True,
             )
             train_dataset.close()
@@ -3603,14 +3618,15 @@ def run_post_training(
             )
         if checkpoint_result is not None:
             if checkpoint_manager.milestone_due(global_step + 1):
-                _record_checkpoint_clock(store.run_dir, (global_step+1)//steps_per_epoch, global_step+1,
-                                         store.run_dir / 'checkpoints' / f'epoch_{(global_step+1)//steps_per_epoch:03d}.pt')
+                _record_checkpoint_clock(store.run_dir, (global_step+1-origin_step)//steps_per_epoch, global_step+1,
+                                         _phase_milestone_path(store.run_dir, global_step+1, steps_per_epoch, origin_step))
             monitor.record_validation(checkpoint_manager.last_validation_report)
             store.write_json(
                 "progress.json",
                 {
                     "completed_updates": global_step + 1,
-                    "reporting_epoch": (global_step + 1) / steps_per_epoch,
+                    "reporting_epoch": (global_step + 1 - origin_step) / steps_per_epoch,
+                    "absolute_reporting_epoch": (global_step + 1) / steps_per_epoch,
                     **sample_exposure(global_step + 1, len(train_dataset), batch_size),
                     "last_update_seconds": row["update_seconds"],
                     "optimizer_lr": row["optimizer_lr"],
@@ -3721,8 +3737,8 @@ def run_post_training(
     if saved is None:
         raise RuntimeError("final checkpoint save was unexpectedly skipped")
     if checkpoint_manager.milestone_due(final_step):
-        _record_checkpoint_clock(store.run_dir, final_step//steps_per_epoch, final_step,
-                                 store.run_dir / 'checkpoints' / f'epoch_{final_step//steps_per_epoch:03d}.pt')
+        _record_checkpoint_clock(store.run_dir, (final_step-origin_step)//steps_per_epoch, final_step,
+                                 _phase_milestone_path(store.run_dir, final_step, steps_per_epoch, origin_step))
     last_path, saved_best_path = saved
     if last_path is None:
         raise RuntimeError("forced final save did not create last.pt")
@@ -3773,6 +3789,9 @@ def run_post_training(
         configured_steps=configured_steps,
         segment_start_step=start_step,
         segment_steps=final_step - start_step,
+        reporting_epoch=(final_step-origin_step)/steps_per_epoch,
+        absolute_reporting_epoch=final_step/steps_per_epoch,
+        phase_samples_seen=(final_step-origin_step)*batch_size,
         steps_per_epoch=steps_per_epoch,
         **sample_exposure(final_step, len(train_dataset), batch_size),
         source_immutable_verified=True,
@@ -3847,6 +3866,8 @@ def _post_checkpoint_payload(
         payload["native_stream"] = {"scheme": "per_attempt_seed_v1", "next_attempt": int(global_step), "next_state": next_native.get_state()}
     if hasattr(train_dataset, "scalable_runtime"):
         payload["scalable_runtime"] = train_dataset.scalable_runtime.state_dict()
+    if hasattr(train_dataset, "fork_origin"):
+        payload["fork_origin"] = train_dataset.fork_origin
     if hasattr(train_dataset, "training_monitor"):
         payload["training_monitor"] = train_dataset.training_monitor.checkpoint_state()
     if controller is not None:
