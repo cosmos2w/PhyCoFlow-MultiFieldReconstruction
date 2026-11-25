@@ -67,6 +67,7 @@ def test_completed_learning_binds_inputs_and_labels_distinct_measurements(tmp_pa
     assert '+0.16256' in result and '[+0.06396, +0.26323]' in result
     assert '600 late TRAIN actions' in result and 'same reused development trajectory' in result
     assert 'does not isolate a PI effect' in result and '-6.000%' in result
+    assert 'nonuniform SOURCE-prefit weights' in result and 'no triple queries' in result
     with pytest.raises(ValueError, match='history, journal'):
         completed_learning_section(training, paired, assessment, history, history, {'assessment': old})
     with pytest.raises(ValueError, match='endpoint, history'):
@@ -92,3 +93,28 @@ def test_report_evidence_binds_outputs_and_resource_timing(tmp_path):
     evidence.write_text('changed')
     with pytest.raises(ValueError,match='evidence changed'):
         finish_report_evidence(manifest,inputs,output,{},1,time.time(),resource.getrusage(resource.RUSAGE_SELF),resource.getrusage(resource.RUSAGE_CHILDREN))
+
+
+def test_round6_pdf_links_are_portable_after_relocation(tmp_path, monkeypatch):
+    import shutil
+    import subprocess
+    from scripts.analysis.report_car_round6 import repair_round6_pdf
+    import os
+    import sys
+    pdf_python=os.environ.get('CAR_REPORT_PDF_PYTHON',sys.executable)
+    if 'CAR_REPORT_PDF_PYTHON' not in os.environ and subprocess.run([pdf_python,'-c','import fitz'],capture_output=True).returncode:
+        pytest.skip('default interpreter lacks optional PyMuPDF')
+    output=tmp_path/'original';(output/'figures').mkdir(parents=True)
+    (output/'figures/master.pdf').write_bytes(b'figure fixture')
+    (output/'report.html').write_text('<title>Round 5 scientific report</title>')
+    code='''import fitz,sys\nd=fitz.open();p=d.new_page();p.insert_link({"kind":fitz.LINK_LAUNCH,"from":fitz.Rect(10,10,150,30),"file":"../../data2/x/figures/master.pdf"});d.save(sys.argv[1])'''
+    subprocess.run([pdf_python,'-c',code,str(output/'report.pdf')],check=True)
+    monkeypatch.setenv('CAR_REPORT_PDF_PYTHON',pdf_python)
+    repair_round6_pdf(output,{'master':'caption'})
+    assert 'Round 6 scientific report' in (output/'report.html').read_text()
+    for name in ('relocated','archive'):
+        target=tmp_path/name;shutil.copytree(output,target)
+        urls=subprocess.check_output(['pdfinfo','-url',str(target/'report.pdf')],text=True).splitlines()[1:]
+        assert [line.split(None,2)[2] for line in urls]==['figures/master.pdf']
+        assert (target/urls[0].split(None,2)[2]).is_file()
+    assert 'Coherence Adaptive Repair: Round 6' in subprocess.check_output(['pdfinfo',str(output/'report.pdf')],text=True)

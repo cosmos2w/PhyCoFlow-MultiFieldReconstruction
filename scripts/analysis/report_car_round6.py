@@ -4,6 +4,8 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
+import subprocess
 from pathlib import Path
 import sys
 import time
@@ -505,6 +507,7 @@ def completed_learning_section(training_ref, paired_ref, assessment, history_ref
     if any(windows[k]['action_count'] != 300 for k in labels):
         raise ValueError('completed learning requires three complete 300-action windows')
     body=['', '## Completed training and paired learning changes', '',
+          'The trained Scale scalar uses fixed, nonuniform SOURCE-prefit weights and eight fixed triple queries; published complete-core validation uses unit base coefficients and no triple queries. Sampled training and published validation Scale changes therefore describe different observables.', '',
           'TRAIN signed field errors are pooled over every action before applying the positive part for J; these are sampled training quantities, not native held-out field scores.', '',
           '| TRAIN window | Pooled positive-excess J | '+ ' | '.join(fields) +' |',
           '| --- | ---: | '+ ' | '.join('---:' for _ in fields) +' |']
@@ -513,14 +516,44 @@ def completed_learning_section(training_ref, paired_ref, assessment, history_ref
         body.append('| epochs '+key.split('_')[1]+'–'+key.split('_')[2]+' | '+f"{w['positive_pooled_excess_J']:.6g}"+' | '+' | '.join(f"{w['mean_signed_e'][f]:+.6g}" for f in fields)+' |')
     late=sum(windows[k]['constraint_actual_negative_count'] for k in labels[1:])
     body += ['', f'For the 600 late TRAIN actions, {late} combined constraint-gradient products with actual optimizer displacement were negative; these are first-order action diagnostics.', '',
-             '| Family | Sampled TRAIN change, epochs 76–100 to 476–500 | Held-out epoch 500 minus 100 | Held-out 95% interval | Epoch500 minus historical epoch500 | Historical 95% interval |',
-             '| --- | ---: | ---: | ---: | ---: | ---: |']
+             '| Family | Sampled TRAIN change, epochs 76–100 to 476–500 | Held-out epoch 500 minus 100 | Held-out 95% interval |',
+             '| --- | ---: | ---: | ---: |']
     same=paired['comparisons']['epoch500_minus_epoch100']['core']; hist=paired['comparisons']['epoch500_minus_historical_epoch500']['core']
     for family in ('state','scale','shape'):
-        a,b=same[family],hist[family];sample=training['sampled_family_change_early100_to_late500'][family]
-        body.append(f"| {family.capitalize()} | {sample:+.3%} | {a['mean']:+.5f} | [{a['interval_95'][0]:+.5f}, {a['interval_95'][1]:+.5f}] | {b['mean']:+.5f} | [{b['interval_95'][0]:+.5f}, {b['interval_95'][1]:+.5f}] |")
+        a=same[family];sample=training['sampled_family_change_early100_to_late500'][family]
+        body.append(f"| {family.capitalize()} | {sample:+.3%} | {a['mean']:+.5f} | [{a['interval_95'][0]:+.5f}, {a['interval_95'][1]:+.5f}] |")
+    body += ['', '| Family | Epoch500 minus historical epoch500 | Paired 95% interval |', '| --- | ---: | ---: |']
+    for family in ('state','scale','shape'):
+        b=hist[family]
+        body.append(f"| {family.capitalize()} | {b['mean']:+.5f} | [{b['interval_95'][0]:+.5f}, {b['interval_95'][1]:+.5f}] |")
     body += ['', 'TRAIN family changes are relative changes in sampled losses; held-out differences are in frozen SOURCE normalization units, with negative values favoring the current endpoint. Intervals are paired condition bootstraps on the same reused development trajectory, not independent trajectory confirmation. The historical comparison is between complete packages and does not isolate a PI effect.', '']
     return body
+
+
+def repair_round6_pdf(output, captions):
+    """Make PDF links portable; CAR_REPORT_PDF_PYTHON selects a Python with PyMuPDF."""
+    worker = r"""
+import fitz, json, pathlib, sys
+output=pathlib.Path(sys.argv[1]); expected=set(json.loads(sys.argv[2])); doc=fitz.open(output/'report.pdf'); found=[]
+for page in doc:
+    for link in page.get_links():
+        target=link.get('file','')
+        if '/figures/' not in target: continue
+        name=target.rsplit('/figures/',1)[1]
+        if name not in expected or '/' in name or not (output/'figures'/name).is_file(): raise ValueError('unexpected PDF figure target '+name)
+        doc.xref_set_key(link['xref'],'A','<</S /URI /URI (figures/'+name+')>>');found.append(name)
+if len(found)!=len(expected) or set(found)!=expected: raise ValueError('PDF figure annotations do not match expected masters')
+doc.set_metadata({**doc.metadata,'title':'Coherence Adaptive Repair: Round 6'})
+fixed=output/'report_relinked.pdf';doc.save(fixed,garbage=3,deflate=True);doc.close();fixed.replace(output/'report.pdf')
+"""
+    interpreter=os.environ.get('CAR_REPORT_PDF_PYTHON',sys.executable)
+    expected=[f'{name}.pdf' for name in captions]
+    subprocess.run([interpreter,'-c',worker,str(output),json.dumps(expected)],check=True,capture_output=True,text=True)
+    urls=subprocess.run(['pdfinfo','-url',str(output/'report.pdf')],check=True,capture_output=True,text=True).stdout.splitlines()[1:]
+    actual=[row.split(None,2)[2] for row in urls if row.strip()]
+    if sorted(actual)!=sorted('figures/'+name for name in expected) or any(not (output/path).is_file() for path in actual):
+        raise ValueError('PDF master annotations are not portable relative figure paths')
+    html=output/'report.html';text=html.read_text();html.write_text(text.replace('Round 5 scientific report','Round 6 scientific report'))
 
 
 def finish_report_evidence(inputs_path, inputs, output, captions, pages, started, own_cpu, child_cpu):
@@ -619,9 +652,16 @@ def produce(inputs_path,campaign,output):
         '| Field | Signed risk change | TRAIN allowance | Change / allowance | SOURCE sensor MSE | Repair sensor MSE | Sensor allowance |','| --- | ---: | ---: | ---: | ---: | ---: | ---: |']
     if resumed_disposition:
         body[4:4] = [f"**Scientific progress:** {decision['scientific_progress']}", '',
-            f"The user-authorized resumption treats the original core/task percentage margins as reported references. Their combined replacement flag is {candidate_result['replacement_eligible']}; the operational recommendation above is an explicit measured judgment, with field, sensor and member safeguards retained.", '']
+            f"The user-authorized resumption treats the original SOURCE-normalized core/task margins as reported references. Their combined replacement flag is {candidate_result['replacement_eligible']}; the operational recommendation above is an explicit measured judgment, with field, sensor and member safeguards retained.", '']
     field_section = body.index('## Field retention and coherence')
     body[field_section:field_section] = method
+    import yaml
+    saved_config=yaml.safe_load(bound({'path':candidate['config_path'],'sha256':candidate['config_sha256']}).read_text())
+    observed=list(saved_config['observations']['fields'])
+    counts=candidate_result['sensor_observation_counts']
+    if observed == ['T'] and saved_config['observation_consistency']['final_clamp'] is True and counts == [len(assessment['sample_ids'])*256 if field == 'T' else 0 for field in assessment['field_order']]:
+        body.insert(body.index('| Field | Signed risk change | TRAIN allowance | Change / allowance | SOURCE sensor MSE | Repair sensor MSE | Sensor allowance |'), 'The sensor guard covers observed T only (256 observations per condition); the final trusted-sensor clamp gives zero T sensor MSE. Other fields have no sensor observations, so their sensor MSE values are unavailable.')
+        body.insert(body.index('| Field | Signed risk change | TRAIN allowance | Change / allowance | SOURCE sensor MSE | Repair sensor MSE | Sensor allowance |'), '')
     for i,name in enumerate(assessment['field_order']):
         def fmt(v):return 'unavailable' if v is None else f'{v:.6g}'
         allowance=f['field_allowance'][i]
@@ -664,6 +704,15 @@ def produce(inputs_path,campaign,output):
     for name,caption in captions.items():body += [f'## Figure {name.replace("_"," ")}','',f'![{caption}](figures/{name}.png)','',f'{caption} [PDF master](figures/{name}.pdf)','']
     (output/'report.md').write_text('\n'.join(body),encoding='utf-8')
     pages=render(output,captions)
+    repair_round6_pdf(output,captions)
+    # Previews must depict the final PDF bytes, including repaired annotations.
+    preview=output/'page_previews'
+    subprocess.run(['pdftoppm','-png','-r','60',str(output/'report.pdf'),str(preview/'page')],check=True,capture_output=True,timeout=180)
+    from PIL import Image
+    images=sorted(preview.glob('page-*.png'))
+    if len(images)!=pages: raise ValueError('final PDF preview page count differs')
+    for image in images:
+        with Image.open(image) as im: im.verify()
     return finish_report_evidence(inputs_path,inputs,output,captions,pages,started,own_cpu,child_cpu)
 
 
