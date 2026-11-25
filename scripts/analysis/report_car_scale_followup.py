@@ -5,7 +5,7 @@ import argparse,json,math,shutil,sys,time
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[2];sys.path[:0]=[str(ROOT/'src'),str(ROOT)]
 from scripts.analysis.report_car_round5 import bound,doc,sha,save_figure,render
-from scripts.analysis.report_car_round6 import repair_round6_pdf
+from scripts.analysis.report_car_round6 import repair_round6_pdf,learning,outcomes,regional,case_figures
 from scripts.posttraining.assess_car_round6 import intervals,check_terminal
 
 ARM='FFM_SSS_EpochCalibrated_PI_Repair'
@@ -20,6 +20,14 @@ FIGURES={'matched_train_validation_scale':'Same complete Scale definitions on ca
 def lines(path):return [json.loads(s) for s in Path(path).read_text().splitlines() if s.strip()]
 def require(condition,message):
  if not condition:raise ValueError(message)
+def check_adoption(role,views,endpoint):
+ if role=='control':
+  raise ValueError('control adoption requires a completed control endpoint task assessment and eligibility evidence')
+ if role!='source':
+  chosen=views[role]['candidates'][views[role]['arm']]['fidelity']
+  require(chosen.get('primary_pass') is True and chosen.get('legacy_member_pass') is True,'replacement requires native field, sensor and member safeguards')
+ if role=='candidate':
+  require(endpoint['candidates'][endpoint['arm']].get('replacement_eligible') is True,'candidate adoption requires endpoint replacement eligibility')
 def endpoint_view(review, review_hash, endpoint, endpoint_hash, decision, decision_hash):
  check_terminal(decision,dict(review,_sha256=review_hash),review['bank_receipt_sha256'])
  require(endpoint.get('review_sha256')==review_hash and endpoint.get('task_decision_sha256')==decision_hash,'endpoint review or decision differs')
@@ -75,12 +83,17 @@ def validate(inputs):
  endpoint=doc(inputs['candidate_endpoint_assessment']);terminal=doc(inputs['endpoint_decision'])
  endpoint_view(all_views['candidate'],inputs['candidate']['assessment']['sha256'],endpoint,inputs['candidate_endpoint_assessment']['sha256'],terminal,inputs['endpoint_decision']['sha256'])
  require(decision.get('candidate_endpoint_assessment_sha256')==inputs['candidate_endpoint_assessment']['sha256'] and decision.get('endpoint_decision_sha256')==inputs['endpoint_decision']['sha256'],'disposition endpoint identity differs')
+ source=doc(inputs['source_bank']);bank=doc(inputs['candidate_bank']);selection=doc(inputs['visual_selection']);event=doc(inputs['event']);coefficients=doc(inputs['coefficients'])['coefficients']
+ original=doc(inputs['original_report_inputs']);freeze=doc(spec['formal_freeze'])
+ require(inputs['original_report_inputs']['sha256']=='f20a7266f11c6a8ee3ab3bb82904ea05572ce69c3ce1c2ba7529960a1c78512b' and Path(inputs['original_report_inputs']['path']).resolve().parent==Path(spec['formal_freeze']['path']).resolve().parent and original['visual_selection']['sha256']==inputs['visual_selection']['sha256'] and original['coefficients']['sha256']==inputs['coefficients']['sha256'],'original frozen visual selection or coefficients differ')
+ require(inputs['source_bank']['sha256']==start['source_bank_sha256'] and inputs['candidate_bank']['sha256']==all_views['candidate']['bank_receipt_sha256'] and source['sample_ids']==start['sample_ids'] and bank['sample_ids']==start['sample_ids'] and bank['source_bank_sha256']==inputs['source_bank']['sha256'] and bank['checkpoint_sha256']==all_views['candidate']['checkpoint_sha256'] and bank['epoch']==phase and bank['arm']==all_views['candidate']['arm'],'cached example bank identity differs')
+ require(selection['source_bank_sha256']==inputs['source_bank']['sha256'] and selection.get('candidates_used') is False and selection['event']['sha256']==inputs['event']['sha256'] and selection['panel']['sha256']==start['panel_sha256'] and selection['created_unix']<freeze['created_unix'] and len(selection['cases'])==3 and all(isinstance(c['ordinal'],int) and 0<=c['ordinal']<len(start['sample_ids']) and start['sample_ids'][c['ordinal']]==c['sample_id'] for c in selection['cases']),'original SOURCE-only example selection differs')
+ require(isinstance(bank.get('start_unix'),(int,float)) and selection['created_unix']<bank['start_unix'],'candidate generation must follow frozen visual selection')
+ require(bool(event) and bool(coefficients) and all(isinstance(v,(int,float)) and math.isfinite(v) for v in coefficients.values()),'event and finite fixed coefficients required')
  require(decision.get('adopted_role') in ('source','control','candidate'),'explicit adopted role required')
  expected_recommendation={'source':'retain SOURCE/C8','control':'FFM_SSS_Unchanged_Scale_Continuation','candidate':'FFM_SSS_RotatingComplement_FieldFeedback'}
  require(decision['recommendation']==expected_recommendation[decision['adopted_role']],'recommendation and adopted role differ')
- if decision['adopted_role']!='source':
-  chosen=all_views[decision['adopted_role']]['candidates'][all_views[decision['adopted_role']]['arm']]['fidelity']
-  require(chosen.get('primary_pass') is True and chosen.get('legacy_member_pass') is True,'replacement requires native field, sensor and member safeguards')
+ check_adoption(decision['adopted_role'],all_views,endpoint)
  require(aligned['sample_ids']==start['sample_ids'] and aligned['field_order']==start['field_order'] and [r['sample_id'] for r in aligned['records']]==start['sample_ids'],'aligned panel differs')
  require(spec['source_receipt']['sha256']==start['source_bank_sha256'] and spec['panel']['sha256']==start['panel_sha256'],'aligned SOURCE or panel differs')
  for role in ('start','control','candidate'):
@@ -141,6 +154,23 @@ def produce(inputs_path,campaign,output):
  for name,refs in inputs['diagnostic_figures'].items():
   for ext in ('png','pdf'):shutil.copyfile(bound(refs[ext]),figures/f'{name}.{ext}')
  comparison_figures(views,states,aligned,inputs['aligned_model_keys'],figures)
+ # Reuse the original scientific renderers with phase-relative journal steps.
+ coefficients=doc(inputs['coefficients'])['coefficients']
+ for role in ('control','candidate'):
+  temporary=figures/('_'+role);temporary.mkdir()
+  history,journal=states[role]
+  adjusted=[dict(row,step=row['step']-6000) for row in journal]
+  leaves=learning(history,adjusted,views['start']['field_order'],coefficients,temporary)
+  for name in ['learning_and_action','family_history','fixed_coefficients',*leaves]:
+   renamed=role+'_'+name
+   for ext in ('png','pdf'):shutil.move(temporary/f'{name}.{ext}',figures/f'{renamed}.{ext}')
+   captions[renamed]=f'{role.capitalize()} full phase {name.replace("_"," ")}; sampled losses and actual-displacement diagnostics retain their own units and do not define a scalar ConFIG loss.'
+  temporary.rmdir()
+ endpoint=doc(inputs['candidate_endpoint_assessment']);outcomes(endpoint,figures);regional(endpoint,figures)
+ captions['field_core_task']='Native field accuracy and spread, and paired State, Scale, Shape and task uncertainty on reused VALIDATION100; negative score changes favor the candidate.'
+ captions['regional_and_event']='Matched regional covariance and event fair-CRPS scatter on reused development VALIDATION100.'
+ from scripts.posttraining.freeze_car_event import FrozenRedesignedEvent
+ captions.update(case_figures(endpoint,doc(inputs['visual_selection']),bound(inputs['source_bank']),doc(inputs['source_bank']),bound(inputs['candidate_bank']),doc(inputs['candidate_bank']),FrozenRedesignedEvent(doc(inputs['event'])),figures))
  captions.update(matched_phase_comparison='Matched development VALIDATION100 comparisons against SOURCE: original core changes, native signed field changes relative to fixed allowances and three identical Scale definitions. Dashed line denotes the field allowance.',phase_learning_and_pi='Phase-indexed sampled family histories and per-action PI journal values averaged within each 12-action epoch; raw family units differ and no scalar objective is implied.')
  phase=inputs['phase'];candidate=views['candidate']['candidates'][views['candidate']['arm']];task=doc(inputs['candidate_endpoint_assessment'])['candidates'][views['candidate']['arm']]['reused_tasks'];pair=relative_score(views['control'],views['candidate']);start_pair=relative_score(views['start'],views['candidate'])
  body=['# Scale alignment and rotating field feedback','',f"**Decision:** {decision['recommendation']}. {decision['reason']}",'',f"**Scientific progress:** {decision['scientific_progress']}",'',f"The selected candidate is assessed at phase epoch {phase} after a common parent at absolute action 6000. The unchanged control is assessed at phase epoch 100. "+('Both arms have the same phase age.' if phase==100 else 'The control is younger; this is an unequal-exposure comparison.'),'', 'These are 100 reused development VALIDATION conditions with four paired members. VALIDATION informed selection and is not independent confirmation. TEST remains locked.','', '## Diagnostic evidence','',diagnostic_text(diagnostic),'', '## Matched learning outcome','', 'Candidate minus control core changes in frozen TRAIN units: '+', '.join(f"{k} {pair[k]['mean']:+.5g} (paired 95% interval [{pair[k]['interval_95'][0]:+.5g}, {pair[k]['interval_95'][1]:+.5g}])" for k in FAMILIES)+'.','',f"Candidate regional normalized improvement {task['regional_normalized_improvement']:+.5g}; event normalized score change {task['event_normalized_difference']:+.5g}. Positive regional improvement and negative event change favor the candidate.",'', '| Field | Candidate signed-risk change / allowance | Control signed-risk change / allowance |','| --- | ---: | ---: |']

@@ -66,3 +66,18 @@ def test_completed_endpoint_enrichment_binds_task_free_review_and_decision():
     endpoint['candidates']['repair']['risk']['member_mse']=[2.]
     with pytest.raises(ValueError, match='changed task-free risk'):
         report.endpoint_view(review,'review',endpoint,'endpoint',decision,'decision')
+
+
+def test_candidate_promotion_requires_terminal_eligibility():
+    views={'candidate':{'arm':'repair','candidates':{'repair':{'fidelity':{'primary_pass':True,'legacy_member_pass':True}}}}}
+    endpoint={'arm':'repair','candidates':{'repair':{'replacement_eligible':False}}}
+    report.check_adoption('source',views,endpoint)
+    with pytest.raises(ValueError,match='endpoint replacement eligibility'):
+        report.check_adoption('candidate',views,endpoint)
+    endpoint['candidates']['repair']['replacement_eligible']=True
+    report.check_adoption('candidate',views,endpoint)
+
+
+def test_control_adoption_requires_own_task_evidence():
+    with pytest.raises(ValueError,match='control endpoint task assessment'):
+        report.check_adoption('control',{}, {})

@@ -115,7 +115,7 @@ def generate(spec_path,spec,ctx,device,output):
     if (campaign/'assessment' not in output.parents or output.exists()
             or output!=Path(spec['bank_output']).resolve()):raise ValueError('declared new followup assessment bank required')
     output.mkdir(parents=True);started=time.time();cpu=time.process_time();train=dataset=None
-    receipt={'schema':'car_round3_native_bank_v1','status':'failed','arm':ARM,'variant':spec['variant'],
+    receipt={'schema':'car_round3_native_bank_v1','status':'failed','start_unix':started,'arm':ARM,'variant':spec['variant'],
         'epoch':spec['phase_epoch'],'phase_origin_step':6000,'global_step':step,'fork_spec':reference(spec_path),
         'fork_origin':state['fork_origin'],'checkpoint':str(checkpoint),'checkpoint_sha256':hash_file(checkpoint),
         'config_path':str(config),'config_sha256':hash_file(config),'prepared_sha256':hash_file(spec_path),
