@@ -33,7 +33,7 @@ def validate_clock(spec,manifest,state,run,config_path,checkpoint_path,parent_sn
     import yaml
     from phycoflow_reconstruction.training.run_store import config_digest
     phase=spec['phase_epoch']; expected=6000+12*phase
-    if phase not in (100,500) or spec.get('phase_origin_step')!=6000 or spec.get('global_step')!=expected:
+    if phase not in (100,225,500) or spec.get('phase_origin_step')!=6000 or spec.get('global_step')!=expected:
         raise ValueError('phase and global reporting clocks differ')
     if not isinstance(spec.get('variant'),str) or len(spec['variant'].strip())<3:
         raise ValueError('descriptive fork variant is required')
@@ -175,7 +175,7 @@ def authorize_endpoint(campaign,spec_path,spec,review_path,bank,decision,rationa
     validate_fork(campaign,spec)
     if bank.resolve()!=Path(spec['bank_output']).resolve():raise ValueError('declared bank identity differs')
     review=json.loads(review_path.read_text());phase=spec['phase_epoch']
-    if (not rationale.strip() or decision!=('stop_at_epoch_100' if phase==100 else 'endpoint_at_epoch_500')
+    if (not rationale.strip() or decision!={100:'stop_at_epoch_100',225:'endpoint_at_epoch_225',500:'endpoint_at_epoch_500'}[phase]
             or review.get('epoch')!=phase or review.get('task_scope')!='both tasks excluded'
             or review.get('bank_receipt_sha256')!=hash_file(bank/'receipt.json')
             or review.get('prepared_sha256')!=hash_file(spec_path)
@@ -220,7 +220,7 @@ def main():
     x=sub.add_parser('generate');x.add_argument('--device',type=__import__('torch').device,required=True);x.add_argument('--output',type=Path,required=True)
     x=sub.add_parser('score');x.add_argument('--bank',type=Path,required=True);x.add_argument('--output',type=Path,required=True)
     x=sub.add_parser('compare');x.add_argument('--left',type=Path,required=True);x.add_argument('--right',type=Path,required=True);x.add_argument('--output',type=Path,required=True)
-    x=sub.add_parser('authorize-endpoint');x.add_argument('--bank',type=Path,required=True);x.add_argument('--review',type=Path,required=True);x.add_argument('--decision',choices=('stop_at_epoch_100','endpoint_at_epoch_500'),required=True);x.add_argument('--rationale',required=True);x.add_argument('--output',type=Path,required=True)
+    x=sub.add_parser('authorize-endpoint');x.add_argument('--bank',type=Path,required=True);x.add_argument('--review',type=Path,required=True);x.add_argument('--decision',choices=('stop_at_epoch_100','endpoint_at_epoch_225','endpoint_at_epoch_500'),required=True);x.add_argument('--rationale',required=True);x.add_argument('--output',type=Path,required=True)
     x=sub.add_parser('endpoint');x.add_argument('--bank',type=Path,required=True);x.add_argument('--review',type=Path,required=True);x.add_argument('--decision',type=Path,required=True);x.add_argument('--output',type=Path,required=True)
     a=p.parse_args();campaign=a.campaign.resolve(strict=True);spec_path=a.spec.resolve(strict=True);spec=json.loads(spec_path.read_text());ctx=make_context(campaign,spec_path,spec)
     if a.command=='generate':generate(spec_path,spec,ctx,a.device,a.output)

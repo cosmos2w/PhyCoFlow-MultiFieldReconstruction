@@ -1,0 +1,200 @@
+{
+  "schema": "car_scale_phase225_portable_source_index_v1",
+  "visual_qa": "accepted by coordinator after inspection of all 27 final PDF pages",
+  "selected_phase": 225,
+  "training_cost_includes_graceful_stop_at_phase_epoch": 227.25,
+  "matched_phase100_review_preserved": true,
+  "failed_v1_render": {
+    "path": "/data2/wanglz/PhyCoFlow-MultiFieldReconstruction/cases/turbulent_combustion/runs/coherence_adaptive_repair/round_6/scale_alignment_followup_20261125/operations/Phase225_Final_Report_Render_20261125_v1/receipt.json",
+    "sha256": "d00b3fd997d647dc184cf4d834712aaf8893a35ae65ab9db99933719f9c31a60"
+  },
+  "failed_v2_render": {
+    "path": "/data2/wanglz/PhyCoFlow-MultiFieldReconstruction/cases/turbulent_combustion/runs/coherence_adaptive_repair/round_6/scale_alignment_followup_20261125/operations/Phase225_Final_Report_Render_20261125_v2/receipt.json",
+    "sha256": "dbd348f7db53d3061aceea280a39eb749bea9d167c6d42acfbe5513c49d11a36"
+  },
+  "failed_render_note": "Both failed attempts were presentation-only; retained and separately charged, with no scientific effect.",
+  "report_input": {
+    "path": "/data2/wanglz/PhyCoFlow-MultiFieldReconstruction/cases/turbulent_combustion/runs/coherence_adaptive_repair/round_6/scale_alignment_followup_20261125/configs/report_phase225_final_inputs_20261125_v1.json",
+    "sha256": "285ec4c041093ea0a017fd8ce46d920c24bf54edb382c904386fbabdaf28661b"
+  },
+  "render_receipt": {
+    "path": "/data2/wanglz/PhyCoFlow-MultiFieldReconstruction/cases/turbulent_combustion/runs/coherence_adaptive_repair/round_6/scale_alignment_followup_20261125/operations/Phase225_Final_Report_Render_20261125_v4/receipt.json",
+    "sha256": "234f6b80bc8a1487066b16b47351fc43881354c6765d2ec34f6bdd5a7474f6dd"
+  },
+  "raw_report_evidence": {
+    "path": "/data2/wanglz/PhyCoFlow-MultiFieldReconstruction/cases/turbulent_combustion/runs/coherence_adaptive_repair/round_6/scale_alignment_followup_20261125/reports/Phase225_Final_20261125_v4/evidence_index.json",
+    "sha256": "bbc40e666194f87e61e4ec9367af522d2718b599280046e40a7698cbf0aab35d"
+  },
+  "model_disposition": {
+    "path": "/data2/wanglz/PhyCoFlow-MultiFieldReconstruction/cases/turbulent_combustion/runs/coherence_adaptive_repair/round_6/scale_alignment_followup_20261125/operations/decisions/Phase225_UserRequested_Closeout_20261125_v1/model_disposition.json",
+    "sha256": "5ebd412b7075122ac471c84b9d004d23f7b1f509020077d81bc78dc6f89b460c"
+  },
+  "final_cost": {
+    "path": "/data2/wanglz/PhyCoFlow-MultiFieldReconstruction/cases/turbulent_combustion/runs/coherence_adaptive_repair/round_6/scale_alignment_followup_20261125/operations/ScaleAlignment_Phase225_FinalCost_20261125_v1.json",
+    "sha256": "356abf1dd4653b82fd860327c7eeeb34edbffea5da02b44544baca5880bf8433"
+  },
+  "matched_phase100_review": {
+    "path": "/data2/wanglz/PhyCoFlow-MultiFieldReconstruction/cases/turbulent_combustion/runs/coherence_adaptive_repair/round_6/scale_alignment_followup_20261125/operations/decisions/CandidatePhase100_JointReview_Continue500_20261125_v1/phase100_joint_review.json",
+    "sha256": "3d6f23b93eb0d76799ab79161269b7a90431562830275a8a1866fb3b36038be0"
+  },
+  "relocation": {
+    "final_comparison": {
+      "path": "/data2/wanglz/PhyCoFlow-MultiFieldReconstruction/cases/turbulent_combustion/runs/coherence_adaptive_repair/round_6/operations/relocations/ScaleAlignment_Followup_20261125_v1/final_comparison.json",
+      "sha256": "c2bbffec1f47283843952e7be4e659554394ebbaabc28b0d6ca46d72b96d2967"
+    },
+    "final_links": {
+      "path": "/data2/wanglz/PhyCoFlow-MultiFieldReconstruction/cases/turbulent_combustion/runs/coherence_adaptive_repair/round_6/operations/relocations/ScaleAlignment_Followup_20261125_v1/final_links.json",
+      "sha256": "46a96b9a720685e356beaf83afa71120a6fad9e2cb9a92d89491545d44b9520e"
+    },
+    "duplicate_retirement": {
+      "path": "/data2/wanglz/PhyCoFlow-MultiFieldReconstruction/cases/turbulent_combustion/runs/coherence_adaptive_repair/round_6/operations/relocations/ScaleAlignment_Followup_20261125_v1/duplicate_retirement.json",
+      "sha256": "63aa0ddee6bb4cd6c303d415e662eb67492f2e1c36c5f6a6e13779f90cf6e523"
+    },
+    "scope": "5313-entry exact copy; 8 healthy aliases and 10 pre-existing absent-log aliases preserved; no new breakage."
+  },
+  "portable_outputs": {
+    "report_md_sha256": "a9827da3043020170bc8b5fb6c9e665fc80b21558cf2fc0a6ad6021bdc6a625e",
+    "report_pdf_sha256": "35298118ecfda8b4f1f328dd8b4a398b9572da898818780498c0b3439264e0c8",
+    "figures": {
+      "actual_adam_complete_scale_changes": {
+        "png": "aa0783463825122609df7b16794b29ac463198d90d2fb7554a4de1a82edfdf3a",
+        "pdf": "a44eeff36e6b3f5374c972d575742cefd86a810af849f6288ba39710d55aad42"
+      },
+      "candidate_family_history": {
+        "png": "95ab97f3063d1fc5643ad0785808d0c9177800567d22b59c52dd15f43598a35a",
+        "pdf": "3fc1cf167bb78bd2a2feea444c2460ba79e461cf8ea4a0391d7240fa4ec1faac"
+      },
+      "candidate_fixed_coefficients": {
+        "png": "c9cdd1a6aba1b63a3d571a17df43e72ae805445bcb288623a6267cf44c1a4b6b",
+        "pdf": "09b4634617562a33d0bfab07d65e21225dd26aba5265d562c1ef26236ae34ea6"
+      },
+      "candidate_leaf_history_1": {
+        "png": "b7c4bfc6e9fa248133760de1ce06c4d6e02802ff6be70671f228d1070b88b999",
+        "pdf": "1dea2563803472ea7cd641d26297997990f2617660e00432d6eedbbccae98b72"
+      },
+      "candidate_leaf_history_2": {
+        "png": "0b3b3b6fafb256c7acda21ea119090929a636a6b2611103479e5247884d6303a",
+        "pdf": "4cfdc90105581db1b47469b6dfc0dff698bf81367765ee5568a34809acbc062c"
+      },
+      "candidate_learning_and_action": {
+        "png": "2e0a072ae51963b035361fac7f52fa1796fea35df738f2f7c75e915fe81e428b",
+        "pdf": "33b2639387648ec6c71726a51ea51ba2209cd8469771ee32bf42391c362ed4cf"
+      },
+      "control_family_history": {
+        "png": "edae8a3993e62173c04292845879d5d206fad14899230a817486f3682812c801",
+        "pdf": "a75faede9f92ef051f46840b9401459a26338301d0188ade13d468087de1a644"
+      },
+      "control_fixed_coefficients": {
+        "png": "0df5d81901725c6fa8f82908c72fd10b04ad280088c6be1f88331040ffd7e7b5",
+        "pdf": "f1b40eddbf07f14dc82ac310c6a1e675ac0a787e864f99b4e2645de9f3881766"
+      },
+      "control_leaf_history_1": {
+        "png": "8aa6ab64c6d4f3021eaf431725a0818251816ae83d76986598a7e868480dac18",
+        "pdf": "465996b7176472e39f8888f996c3ac18e4aa0774d21112b35c2b7b01ffd0fb22"
+      },
+      "control_leaf_history_2": {
+        "png": "7ce093a7d47314036065c3a6523dc783fd57082ce4e8a9f3285d7798d6e83e47",
+        "pdf": "c487c79a97ecb46911d820a73c608c92588c3af857e934bdebe3131eed3387a1"
+      },
+      "control_learning_and_action": {
+        "png": "1b52349e893261c3f020a50c53abbcbfdba302ded68ebfa4bfd0e74740f8ff12",
+        "pdf": "387a1351a29dabc42d08908b9b24270994c7439ffecb1a6f261533e3185497de"
+      },
+      "event_case_1": {
+        "png": "18737b35bf572ca2e81f3f98382db7b7fdf13fa8355da17072b1a48a3f52837d",
+        "pdf": "c7327f33bb8662d9c84d012ed1ef1cf906d979d9984a7ecbb9a8a91242f50bed"
+      },
+      "event_case_2": {
+        "png": "179b778635e8ee48f28f76825e33eaea7517864301f445c0b1438ee9916113d7",
+        "pdf": "004153d39e8a9ea8cbf6e2d33542a9fbb233ab7a4d8cb8d3a66858169b0d247a"
+      },
+      "event_case_3": {
+        "png": "19e527c8f05c0fb719662c9ecdb09878de5c3a1dacfdda84973a2191ec11fa50",
+        "pdf": "b070eeee9c5afb9f9621fa1bc7a72a192bcf9068eea408b2203db210ea1d72ef"
+      },
+      "field_core_task": {
+        "png": "2f858e9ddaf00370268c69d289aba6773956d909c1281e43aaf32e4b6e00cdc9",
+        "pdf": "79b0d77875b507b72c5acbdd39a28714b852b2dc68e9069245e465ce3967ba86"
+      },
+      "fields_case_1_part_1": {
+        "png": "d2e7b8b491bdd6c9a4f97acaf981318e8217dd2101ceb0356ba715599d101e57",
+        "pdf": "a4a56af75fb28f236f1a4933f3918521aec89112fe8856d597d8890acf006355"
+      },
+      "fields_case_1_part_2": {
+        "png": "6aa21b472ab72564c397c19ea471228ab070ab977c486ac7f004f0d2f6a5c51a",
+        "pdf": "79bab6f962a8c358461fd83736ee4188451c50012b20e33815ee8f3069aa085a"
+      },
+      "fields_case_1_part_3": {
+        "png": "e3bece02c09cc6999c62dc9d80e6221de99e4d14c069823684b87cbf2b4c2206",
+        "pdf": "9488df07218dd9152b80202c2d8f89d9e2a4ac63930b3b714575c3eaeb3e7d4b"
+      },
+      "fields_case_2_part_1": {
+        "png": "33c4c8998678c5368177fe87311060a0e667ea4c23afa0a3c3a00f7467cfed17",
+        "pdf": "4aa665e8bbe4b3ddad7eab469ccf624032956211c0804906fdc5f2ab10d79cb0"
+      },
+      "fields_case_2_part_2": {
+        "png": "53b14ae1c5bfd3e9bb5a2a5bd5155de5562d5545a86eaa90bcbcc024f34700b8",
+        "pdf": "aa0cef7a5adfe1126f67c9365deea7c3354d0c4c7e4f8e0f86a9a852244a7f0e"
+      },
+      "fields_case_2_part_3": {
+        "png": "0ca8fdeedab177ab5d2871e2eab27bd9cbe41dbb7cbb598328647b87f104800f",
+        "pdf": "6b84a11e6e42d3ca2dca0b5ec6c86ba804d5cd80c494efe6c10007c622cd9038"
+      },
+      "fields_case_3_part_1": {
+        "png": "623a5289a5c4a4d60a2924f8cb31146a2967c07bc49b3a0fe6c8d4cb6c4b535e",
+        "pdf": "959f8c44935c74d855ea8e574bb70604fec353f191afd61d3bb2db547f237b08"
+      },
+      "fields_case_3_part_2": {
+        "png": "da3957c3eae09a22cddf38ec59eb11afb0c01b2a897585a90aefa6506591fd05",
+        "pdf": "460f25da57b23196ffef39558a3f9c0901ee7272f533d851786e97f8fd220f1a"
+      },
+      "fields_case_3_part_3": {
+        "png": "5100343f95106be0764345b565240c007c081d8a60c0e5b4408698e0367865c1",
+        "pdf": "6dd824ea83521557b657d3ced04b6412a81b4dc62fc4b3c47e30c51e3116e66f"
+      },
+      "matched_phase_comparison": {
+        "png": "081a63858d4349d0f8f669cd9c311d091dbff6fb573b68d8e8c21badccb94b56",
+        "pdf": "3e0641bbd4169945f89794bbcbfb92658b7d6150622bc7ebef295dd925755bd9"
+      },
+      "matched_train_validation_scale": {
+        "png": "4242f8af1a1d39d64594ce9781b9de2a5caa01afe5e005fde514d8b32d9fed0c",
+        "pdf": "d667c97d2fd490b82912fe68f59fe372fab76d1c435afe9553d531ca13fa0643"
+      },
+      "native_field_support_gap": {
+        "png": "04167c6aba41b3964d61a462c2db727b78798c9a5ec73a2d2b4fcaa52ff89fab",
+        "pdf": "60af9652b0b07c3b1ac881cd6f22baec69309700231274df84a18906ef7b391c"
+      },
+      "phase_learning_and_pi": {
+        "png": "8ce423d83b7d0647449fd213d89ab39bf3e50983d8ec411ad8ce0d5d4c7fcc5e",
+        "pdf": "b75ff4b7f4031142b55f3fb703360bf21b471cb631bffc5bf6629b6386f720ad"
+      },
+      "regional_and_event": {
+        "png": "cbee1bf492144a65aa325a38097807e3050e5b2a3970affa93bd126835b897be",
+        "pdf": "e8c4701c2b38f49c3faa9337d03e9edf347aa7e0821fd80b8889de5b58fd6e1b"
+      },
+      "scale_components_and_definitions": {
+        "png": "5d67e34c73acae4286f573732ad13e1d20ee9f538bdae1f49f97dc31370406ec",
+        "pdf": "06225f66c81a74f0e54303d206c7fab51d43ffc4bbaee94bdb796f11e2d7ec11"
+      },
+      "scale_field_pair_band_localization": {
+        "png": "3b4ffa5f7b4fffa7bbc2500778f1b7a983db6211ca6d06cd04e914a30436dfab",
+        "pdf": "f6d5cf7e55963f1f7733fd2e7e63d977a263db70012891bfb6a741cb2f4e07aa"
+      }
+    }
+  },
+  "verification": {
+    "pages": 27,
+    "figure_pairs": 31,
+    "decoded_all_png_and_pdf": true,
+    "markdown_relative_links_resolve": true,
+    "pdf_master_annotations_resolve": true,
+    "visual_acceptance": true,
+    "independent_relocation_and_archive_passed": true
+  },
+  "previous_v3_render": {
+    "path": "/data2/wanglz/PhyCoFlow-MultiFieldReconstruction/cases/turbulent_combustion/runs/coherence_adaptive_repair/round_6/scale_alignment_followup_20261125/operations/Phase225_Final_Report_Render_20261125_v3/receipt.json",
+    "sha256": "e5459fecdb2d9e4981049cc4449f412f4354b96db290499a9715ef7f16eb7df1"
+  },
+  "visual_acceptance_file": "visual-acceptance.json",
+  "visual_acceptance_sha256": "72258ec32f76a13f166ddc02b214749a613e12722be7c6fe215e92eb7b7ede64"
+}

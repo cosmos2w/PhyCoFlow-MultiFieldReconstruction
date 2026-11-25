@@ -41,7 +41,7 @@ At the matched phase-100 review, cache one raw VALIDATION100/J4 prediction bank 
 
 Continue the repaired arm toward phase epoch 500 if learning is valid and the joint trajectories leave a useful recovery/retention question within the remaining allowance. After adequate learning, persistently uncompetitive Scale and fields without a recovery trend can close this route; a fixture missing an anticipated margin cannot. Before launch, replace the provisional timing with measured complete epochs and forecast the whole remaining training, generation, CPU scoring and queue tail. The hard budget remains binding. No second 500-epoch control is presumed, so any final comparison with its phase-100 endpoint discloses unequal exposure.
 
-The DATA2-owned campaign is `cases/turbulent_combustion/runs/coherence_adaptive_repair/scale_alignment_followup_20261125/`. Its compact diagnostic evidence is:
+The DATA2-owned Round 6 continuation is `cases/turbulent_combustion/runs/coherence_adaptive_repair/round_6/scale_alignment_followup_20261125/`. Execution originally used the sibling path outside `round_6`; frozen raw records preserve that historical prefix, with the verified relocation map retained under Round 6 `operations/relocations/ScaleAlignment_Followup_20261125_v1/`. Its compact diagnostic evidence is:
 
 | Evidence | Campaign-relative artifact | SHA256 |
 | --- | --- | --- |

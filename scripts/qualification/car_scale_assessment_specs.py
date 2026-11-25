@@ -67,7 +67,7 @@ def fork_spec(campaign,run,phase,variant,bank_output,output):
     import torch
     ctx,start_bank,start=base_context(campaign);run=run.resolve(strict=True);output=output.resolve()
     if campaign/'configs' not in output.parents or campaign/'runs' not in run.parents:raise ValueError('campaign-owned config and fork run required')
-    if phase not in (100,500):raise ValueError('phase epoch must be 100 or 500')
+    if phase not in (100,225,500):raise ValueError('phase epoch must be 100, 225 or 500')
     if variant not in ('FFM_SSS_Unchanged_Scale_Continuation','FFM_SSS_RotatingComplement_FieldFeedback') or run.parent.name!=variant:
         raise ValueError('named fork variant and run path differ')
     bank_output=bank_output.resolve()
@@ -115,7 +115,7 @@ def scale_spec(campaign,children,output):
                 or b.get('phase_origin_step')!=i.get('phase_origin_step') or b.get('global_step')!=i.get('global_step')
                 or b.get('epoch')!=i.get('phase_epoch')
                 or name not in (i.get('variant'),f"{i.get('variant')}_Phase{i.get('phase_epoch')}")
-                or i.get('phase_origin_step')!=6000 or i.get('phase_epoch') not in (100,500)
+                or i.get('phase_origin_step')!=6000 or i.get('phase_epoch') not in (100,225,500)
                 or i.get('global_step')!=6000+12*i['phase_epoch']):
             raise ValueError(f'fork cached assessment identity differs: {name}')
         spec['children'][name]={'receipt':reference(bank),'assessment':reference(assessment)}
@@ -151,7 +151,7 @@ def scale_compare(campaign,path,unit,pairs,output):
 def main():
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--campaign',type=Path,required=True);sub=p.add_subparsers(dest='command',required=True)
     x=sub.add_parser('context-check');x.add_argument('--output',type=Path,required=True)
-    x=sub.add_parser('fork-spec');x.add_argument('--run',type=Path,required=True);x.add_argument('--phase-epoch',type=int,choices=(100,500),required=True);x.add_argument('--variant',required=True);x.add_argument('--bank-output',type=Path,required=True);x.add_argument('--output',type=Path,required=True)
+    x=sub.add_parser('fork-spec');x.add_argument('--run',type=Path,required=True);x.add_argument('--phase-epoch',type=int,choices=(100,225,500),required=True);x.add_argument('--variant',required=True);x.add_argument('--bank-output',type=Path,required=True);x.add_argument('--output',type=Path,required=True)
     x=sub.add_parser('scale-spec');x.add_argument('--child',nargs=3,action='append',required=True,metavar=('VARIANT','BANK_RECEIPT','ASSESSMENT'));x.add_argument('--output',type=Path,required=True)
     x=sub.add_parser('scale-compare');x.add_argument('--decomposition',type=Path,required=True);x.add_argument('--scale-unit',type=float,required=True);x.add_argument('--pair',nargs=2,action='append',required=True,metavar=('LEFT','RIGHT'));x.add_argument('--output',type=Path,required=True)
     a=p.parse_args();campaign=a.campaign.resolve(strict=True)

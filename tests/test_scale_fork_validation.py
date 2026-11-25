@@ -15,7 +15,7 @@ def test_fork_clock_binds_parent_config_checkpoint_and_phase(tmp_path):
     parent=tmp_path/'parent500.pt';parent.write_bytes(b'immutable parent')
     snapshot={'run':str(tmp_path/'parent_run'),'checkpoint':reference(parent)}
     origin={'parent_run':snapshot['run'],'parent_checkpoint_sha256':snapshot['checkpoint']['sha256'],'absolute_step':6000}
-    for phase in (100,500):
+    for phase in (100,225,500):
         checkpoint=run/'checkpoints'/f'epoch_{phase:03d}.pt';checkpoint.write_bytes(f'phase {phase}'.encode())
         spec={'variant':'ScaleRepairedContinuation','phase_epoch':phase,'phase_origin_step':6000,'global_step':6000+12*phase,
               'run_config':reference(config),'checkpoint':reference(checkpoint)}
@@ -48,20 +48,21 @@ def test_paired_cache_compare_preserves_units_and_rejects_panel_mismatch(tmp_pat
     with pytest.raises(ValueError,match='identities'):compare(campaign,left,right,campaign/'assessment'/'bad.json')
 
 
-def test_explicit_phase_terminal_task_decision_binds_same_review_and_bank(tmp_path,monkeypatch):
+@pytest.mark.parametrize(('phase','decision'),[(100,'stop_at_epoch_100'),(225,'endpoint_at_epoch_225'),(500,'endpoint_at_epoch_500')])
+def test_explicit_phase_terminal_task_decision_binds_same_review_and_bank(tmp_path,monkeypatch,phase,decision):
     import scripts.qualification.car_scale_fork_validation as driver
     from scripts.posttraining.assess_car_round6 import check_terminal
     campaign=tmp_path/'campaign';bank=campaign/'assessment'/'bank';bank.mkdir(parents=True)
     receipt=bank/'receipt.json';receipt.write_text('{"status":"completed"}')
     spec_path=campaign/'spec.json';spec_path.write_text('{}')
-    spec={'phase_epoch':500,'global_step':12000,'variant':'ScaleRepairedContinuation',
+    spec={'phase_epoch':phase,'global_step':6000+12*phase,'variant':'ScaleRepairedContinuation',
           'bank_output':str(bank),'checkpoint':{'sha256':'checkpoint'}}
-    review={'epoch':500,'task_scope':'both tasks excluded','bank_receipt_sha256':reference(receipt)['sha256'],
+    review={'epoch':phase,'task_scope':'both tasks excluded','bank_receipt_sha256':reference(receipt)['sha256'],
             'prepared_sha256':reference(spec_path)['sha256'],'checkpoint_sha256':'checkpoint'}
     review_path=campaign/'assessment'/'review.json';review_path.write_text(json.dumps(review))
     monkeypatch.setattr(driver,'validate_fork',lambda *_:None)
     output=campaign/'assessment'/'task_decision.json'
-    driver.authorize_endpoint(campaign,spec_path,spec,review_path,bank,'endpoint_at_epoch_500','Selected terminal assessment.',output)
+    driver.authorize_endpoint(campaign,spec_path,spec,review_path,bank,decision,'Selected terminal assessment.',output)
     review['_sha256']=reference(review_path)['sha256'];check_terminal(json.loads(output.read_text()),review,reference(receipt)['sha256'])
     with pytest.raises(ValueError,match='terminal choice'):
-        driver.authorize_endpoint(campaign,spec_path,spec,review_path,bank,'stop_at_epoch_100','wrong phase',campaign/'assessment'/'bad.json')
+        driver.authorize_endpoint(campaign,spec_path,spec,review_path,bank,'endpoint_at_epoch_225' if phase!=225 else 'endpoint_at_epoch_500','wrong phase',campaign/'assessment'/'bad.json')

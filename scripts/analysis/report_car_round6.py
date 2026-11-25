@@ -542,7 +542,7 @@ for page in doc:
         name=target.rsplit('/figures/',1)[1]
         if name not in expected or '/' in name or not (output/'figures'/name).is_file(): raise ValueError('unexpected PDF figure target '+name)
         doc.xref_set_key(link['xref'],'A','<</S /URI /URI (figures/'+name+')>>');found.append(name)
-if len(found)!=len(expected) or set(found)!=expected: raise ValueError('PDF figure annotations do not match expected masters')
+if set(found)!=expected: raise ValueError('PDF figure annotations do not match expected masters')
 doc.set_metadata({**doc.metadata,'title':'Coherence Adaptive Repair: Round 6'})
 fixed=output/'report_relinked.pdf';doc.save(fixed,garbage=3,deflate=True);doc.close();fixed.replace(output/'report.pdf')
 """
@@ -551,7 +551,7 @@ fixed=output/'report_relinked.pdf';doc.save(fixed,garbage=3,deflate=True);doc.cl
     subprocess.run([interpreter,'-c',worker,str(output),json.dumps(expected)],check=True,capture_output=True,text=True)
     urls=subprocess.run(['pdfinfo','-url',str(output/'report.pdf')],check=True,capture_output=True,text=True).stdout.splitlines()[1:]
     actual=[row.split(None,2)[2] for row in urls if row.strip()]
-    if sorted(actual)!=sorted('figures/'+name for name in expected) or any(not (output/path).is_file() for path in actual):
+    if set(actual)!=set('figures/'+name for name in expected) or any(not (output/path).is_file() for path in actual):
         raise ValueError('PDF master annotations are not portable relative figure paths')
     html=output/'report.html';text=html.read_text();html.write_text(text.replace('Round 5 scientific report','Round 6 scientific report'))
 

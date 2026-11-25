@@ -107,7 +107,7 @@ def test_round6_pdf_links_are_portable_after_relocation(tmp_path, monkeypatch):
     output=tmp_path/'original';(output/'figures').mkdir(parents=True)
     (output/'figures/master.pdf').write_bytes(b'figure fixture')
     (output/'report.html').write_text('<title>Round 5 scientific report</title>')
-    code='''import fitz,sys\nd=fitz.open();p=d.new_page();p.insert_link({"kind":fitz.LINK_LAUNCH,"from":fitz.Rect(10,10,150,30),"file":"../../data2/x/figures/master.pdf"});d.save(sys.argv[1])'''
+    code='''import fitz,sys\nd=fitz.open();p=d.new_page();p.insert_link({"kind":fitz.LINK_LAUNCH,"from":fitz.Rect(10,10,150,30),"file":"../../data2/x/figures/master.pdf"});p.insert_link({"kind":fitz.LINK_LAUNCH,"from":fitz.Rect(10,31,150,50),"file":"../../data2/x/figures/master.pdf"});d.save(sys.argv[1])'''
     subprocess.run([pdf_python,'-c',code,str(output/'report.pdf')],check=True)
     monkeypatch.setenv('CAR_REPORT_PDF_PYTHON',pdf_python)
     repair_round6_pdf(output,{'master':'caption'})
@@ -115,6 +115,6 @@ def test_round6_pdf_links_are_portable_after_relocation(tmp_path, monkeypatch):
     for name in ('relocated','archive'):
         target=tmp_path/name;shutil.copytree(output,target)
         urls=subprocess.check_output(['pdfinfo','-url',str(target/'report.pdf')],text=True).splitlines()[1:]
-        assert [line.split(None,2)[2] for line in urls]==['figures/master.pdf']
+        assert [line.split(None,2)[2] for line in urls]==['figures/master.pdf','figures/master.pdf']
         assert (target/urls[0].split(None,2)[2]).is_file()
     assert 'Coherence Adaptive Repair: Round 6' in subprocess.check_output(['pdfinfo',str(output/'report.pdf')],text=True)

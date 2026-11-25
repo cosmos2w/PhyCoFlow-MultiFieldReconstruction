@@ -1,0 +1,97 @@
+{
+  "schema": "car_scale_final_visual_acceptance_v1",
+  "status": "accepted",
+  "accepted_unix": 1795642450.6304111,
+  "selected_report_version": "Phase225_Final_20261125_v4",
+  "pages_inspected": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    26,
+    27
+  ],
+  "figure_pairs": 31,
+  "report_markdown": {
+    "path": "/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/UpdatePlans/_Reports/Coherence_Adaptive_Repair/Round_6/Scale_Alignment_Followup/report.md",
+    "sha256": "a9827da3043020170bc8b5fb6c9e665fc80b21558cf2fc0a6ad6021bdc6a625e"
+  },
+  "report_pdf": {
+    "path": "/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/UpdatePlans/_Reports/Coherence_Adaptive_Repair/Round_6/Scale_Alignment_Followup/report.pdf",
+    "sha256": "35298118ecfda8b4f1f328dd8b4a398b9572da898818780498c0b3439264e0c8"
+  },
+  "raw_publication_bytes_match": true,
+  "visual_checks": [
+    "All27 final PDF pages inspected from final page previews; text, tables and figures are within page boundaries with no missing or clipped panels.",
+    "All31 figure groups appear with PNG previews, PDF-master links and captions.",
+    "Reconstruction residual panels display fieldwise mass-weighted mean-field RMSE badges; event prediction/error panels display dimensionless probability RMSE.",
+    "Sampled TRAIN histories, held-out endpoint scores and actual-displacement diagnostics are labeled separately; no scalar ConFIG training loss is asserted.",
+    "The historical matched100 review is distinct from the selected225/younger-control comparison; the complete Scale SOURCE-relative intervals and final disposition are visible."
+  ],
+  "pdf_master_target_count": 31,
+  "pdf_annotation_rectangles": 32,
+  "wrapped_link_disposition": "Two rectangles for one expected regional_and_event target are valid; exact target set and relative paths verified.",
+  "figure_decoding": "All31 PNG/PDF pairs decoded by build validation; final raw/publication hashes verified equal.",
+  "contact_previews": [
+    {
+      "path": "/data2/wanglz/PhyCoFlow-MultiFieldReconstruction/cases/turbulent_combustion/runs/coherence_adaptive_repair/round_6/scale_alignment_followup_20261125/cache/closeout_visual_qa_20261125_v1/pages_01_06.png",
+      "sha256": "47c54321a2f672ef90a769f411c8ea75a8204f92d5435d1e193f22d47298f826"
+    },
+    {
+      "path": "/data2/wanglz/PhyCoFlow-MultiFieldReconstruction/cases/turbulent_combustion/runs/coherence_adaptive_repair/round_6/scale_alignment_followup_20261125/cache/closeout_visual_qa_20261125_v1/pages_07_12.png",
+      "sha256": "59ebcec6233e93c4309c2f298dd62996693a95ee9b4d5474ca4c6e9f28966188"
+    },
+    {
+      "path": "/data2/wanglz/PhyCoFlow-MultiFieldReconstruction/cases/turbulent_combustion/runs/coherence_adaptive_repair/round_6/scale_alignment_followup_20261125/cache/closeout_visual_qa_20261125_v1/pages_13_18.png",
+      "sha256": "52d428cf1c844a46977ea29f1739043afd6b7c892ed9ce04d07c6497bfdc9a7d"
+    },
+    {
+      "path": "/data2/wanglz/PhyCoFlow-MultiFieldReconstruction/cases/turbulent_combustion/runs/coherence_adaptive_repair/round_6/scale_alignment_followup_20261125/cache/closeout_visual_qa_20261125_v1/pages_19_24.png",
+      "sha256": "a14b531f9d3ab109dd64915b38011bfd1012224bc106cc7c33f4875d2eb18ac0"
+    },
+    {
+      "path": "/data2/wanglz/PhyCoFlow-MultiFieldReconstruction/cases/turbulent_combustion/runs/coherence_adaptive_repair/round_6/scale_alignment_followup_20261125/cache/closeout_visual_qa_20261125_v1/pages_25_27.png",
+      "sha256": "177d99829dedbbd9a7b3c6e898dbf1b728d4a392848d5d7ef8f1475b56488793"
+    }
+  ],
+  "focused_tests": {
+    "status": "passed",
+    "command": [
+      "/home/wanglz/miniconda3/envs/phycoflow_env/bin/python",
+      "-m",
+      "pytest",
+      "-q",
+      "tests/test_scale_fork_validation.py",
+      "tests/test_car_scale_followup_report.py",
+      "--junitxml=/data2/wanglz/PhyCoFlow-MultiFieldReconstruction/cases/turbulent_combustion/runs/coherence_adaptive_repair/round_6/scale_alignment_followup_20261125/operations/closeout/Portable_Delivery_20261125_v1/focused_tests.xml"
+    ],
+    "wall_seconds": 3.573936939239502,
+    "returncode": 0,
+    "tests": 17,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "test_locked": true
+}

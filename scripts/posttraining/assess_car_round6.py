@@ -71,9 +71,8 @@ def intervals(left, right, *, scale=None, seed=6042026):
 
 
 def check_terminal(decision, review, receipt_hash):
-    if (decision.get('epoch') != review.get('epoch') or decision.get('epoch') not in (100, 500)
-        or decision.get('decision') not in ('stop_at_epoch_100', 'endpoint_at_epoch_500')
-        or (decision['epoch'] == 100) != (decision['decision'] == 'stop_at_epoch_100')
+    if (decision.get('epoch') != review.get('epoch') or decision.get('epoch') not in (100, 225, 500)
+        or decision.get('decision') != {100:'stop_at_epoch_100', 225:'endpoint_at_epoch_225', 500:'endpoint_at_epoch_500'}.get(decision.get('epoch'))
         or decision.get('authorize_endpoint_tasks') is not True
         or decision.get('review_sha256') != review['_sha256']
         or decision.get('bank_receipt_sha256') != receipt_hash):

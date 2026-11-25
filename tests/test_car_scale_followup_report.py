@@ -7,12 +7,23 @@ import pytest
 from scripts.analysis import report_car_scale_followup as report
 
 
+@pytest.fixture
+def relocated_campaign():
+    old=Path('/data2/wanglz/PhyCoFlow-MultiFieldReconstruction/cases/turbulent_combustion/runs/coherence_adaptive_repair/scale_alignment_followup_20261125')
+    new=old.parent/'round_6'/old.name
+    report.configure_relocation({'from':str(old),'to':str(new)})
+    try:
+        yield new
+    finally:
+        report.configure_relocation(None)
+
+
 def binding(path):
     return {'path': str(path), 'sha256': hashlib.sha256(path.read_bytes()).hexdigest()}
 
 
-def test_real_completed_diagnostic_text():
-    path = Path('cases/turbulent_combustion/runs/coherence_adaptive_repair/scale_alignment_followup_20261125/assessment/ScaleAlignment_CompletedDiagnostics_20261125_v1/readout.json')
+def test_real_completed_diagnostic_text(relocated_campaign):
+    path = relocated_campaign/'assessment/ScaleAlignment_CompletedDiagnostics_20261125_v1/readout.json'
     if not path.is_file():
         pytest.skip('campaign-owned completed diagnostic is unavailable')
     assert hashlib.sha256(path.read_bytes()).hexdigest() == '950ce3925e4f9bf534f0a2411133388ba5d8173b083038b47a7c639b8b338579'
@@ -83,8 +94,8 @@ def test_control_adoption_requires_own_task_evidence():
         report.check_adoption('control',{}, {})
 
 
-def test_completed_diagnostic_detail_uses_paired_evidence():
-    base=Path('cases/turbulent_combustion/runs/coherence_adaptive_repair/scale_alignment_followup_20261125/assessment')
+def test_completed_diagnostic_detail_uses_paired_evidence(relocated_campaign):
+    base=relocated_campaign/'assessment'
     readout=base/'ScaleAlignment_CompletedDiagnostics_20261125_v1/readout.json'
     summary=base/'ScaleDefinition_Diagnosis_20261125_v1/summary.json'
     if not readout.is_file() or not summary.is_file():
@@ -97,8 +108,8 @@ def test_completed_diagnostic_detail_uses_paired_evidence():
     assert '13 independently reset' in text and 'held-out gaps are uncertain' in text
 
 
-def test_grouped_query_replays_use_matched_complete_evidence():
-    base=Path('cases/turbulent_combustion/runs/coherence_adaptive_repair/scale_alignment_followup_20261125/assessment')
+def test_grouped_query_replays_use_matched_complete_evidence(relocated_campaign):
+    base=relocated_campaign/'assessment'
     paths=[base/'TRAIN800_GroupedScaleEstimator_20261125_v1/query_estimator.json',base/'Validation100_GroupedScaleEstimator_20261125_v1/query_estimator.json']
     if not all(p.is_file() for p in paths):pytest.skip('completed grouped query evidence unavailable')
     train,validation=(json.loads(p.read_text()) for p in paths)
@@ -108,9 +119,9 @@ def test_grouped_query_replays_use_matched_complete_evidence():
     assert 'J4/T256' in text and 'variable-observation TRAIN law' in text
 
 
-def test_phase100_review_uses_completed_matched_evidence_and_rejects_mismatch(monkeypatch):
+def test_phase100_review_uses_completed_matched_evidence_and_rejects_mismatch(monkeypatch,relocated_campaign):
     import copy
-    base=Path('cases/turbulent_combustion/runs/coherence_adaptive_repair/scale_alignment_followup_20261125/operations/decisions/CandidatePhase100_JointReview_Continue500_20261125_v1/phase100_joint_review.json')
+    base=relocated_campaign/'operations/decisions/CandidatePhase100_JointReview_Continue500_20261125_v1/phase100_joint_review.json'
     if not base.is_file():pytest.skip('completed phase100 review unavailable')
     ref=binding(base)
     assert ref['sha256']=='3d6f23b93eb0d76799ab79161269b7a90431562830275a8a1866fb3b36038be0'
@@ -123,6 +134,9 @@ def test_phase100_review_uses_completed_matched_evidence_and_rejects_mismatch(mo
     body=['## Diagnostic evidence','Detailed diagnostic','Grouped query','Reference scope','## Matched learning outcome','Final outcome']
     report.place_phase100_section(body,checked,start['field_order'],500)
     assert body.index('Reference scope') < body.index('## Matched phase-100 continuation review') < body.index('## Selected phase-500 outcome and unequal-exposure control') < body.index('Final outcome')
+    body225=['## Diagnostic evidence','## Matched learning outcome']
+    report.place_phase100_section(body225,checked,start['field_order'],225)
+    assert body225.index('## Matched phase-100 continuation review') < body225.index('## Selected phase-225 outcome and unequal-exposure control')
     bad=copy.deepcopy(review);bad['phase_epoch']=500
     old=report.doc
     monkeypatch.setattr(report,'doc',lambda x: bad if x is ref else old(x))
@@ -137,6 +151,8 @@ def test_phase500_requires_phase100_review(monkeypatch):
     monkeypatch.setattr(report,'doc',lambda ref:docs[ref])
     inputs={'schema':'car_scale_followup_report_inputs_v1','phase':500,'diagnostic_readout':'diag','decision':'decision','costs':'cost','common_start_assessment':'start','aligned_scale':'aligned'}
     with pytest.raises(ValueError,match='phase500 report requires'):report.validate(inputs)
+    inputs['phase']=225
+    with pytest.raises(ValueError,match='phase225 report requires'):report.validate(inputs)
 
 
 def test_relocated_campaign_evidence_and_bank_rows(tmp_path):
@@ -164,3 +180,13 @@ def test_relocated_campaign_evidence_and_bank_rows(tmp_path):
         with pytest.raises(ValueError,match='evidence changed'):report.doc(child_ref)
         with pytest.raises(ValueError,match='relocation must map'):report.configure_relocation({'from':str(old),'to':str(tmp_path/'elsewhere')})
     finally:report.configure_relocation(None)
+
+
+def test_selected_phase225_source_tables_use_saved_intervals(relocated_campaign):
+    manifest=relocated_campaign/'configs/report_phase225_final_inputs_20261125_v1.json'
+    if not manifest.is_file():pytest.skip('completed phase225 report inputs unavailable')
+    inputs=json.loads(manifest.read_text());endpoint=report.doc(inputs['candidate_endpoint_assessment']);aligned=report.doc(inputs['aligned_scale'])
+    text='\n'.join(report.selected_source_text(endpoint,aligned,inputs['aligned_model_keys']['candidate']))
+    assert '+0.19946673 [+0.07184266, +0.32063100]' in text
+    assert '+0.29046679 [-0.04936431, +0.67767068]' in text
+    assert 'reused VALIDATION100' in text
