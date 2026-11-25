@@ -137,3 +137,30 @@ def test_phase500_requires_phase100_review(monkeypatch):
     monkeypatch.setattr(report,'doc',lambda ref:docs[ref])
     inputs={'schema':'car_scale_followup_report_inputs_v1','phase':500,'diagnostic_readout':'diag','decision':'decision','costs':'cost','common_start_assessment':'start','aligned_scale':'aligned'}
     with pytest.raises(ValueError,match='phase500 report requires'):report.validate(inputs)
+
+
+def test_relocated_campaign_evidence_and_bank_rows(tmp_path):
+    import shutil
+    import torch
+    from scripts.analysis.report_car_round5 import rows_for_case
+    old=tmp_path/'scale_alignment_followup_20261125'
+    new=tmp_path/'round_6'/old.name
+    source=tmp_path/'source_bank';source.mkdir()
+    bank=old/'bank';bank.mkdir(parents=True)
+    row={name:torch.tensor([1.]) for name in ('truth_model','coordinates_model','coordinates_raw','native_masses','normalizer_offset','normalizer_scale','obs_indices','obs_values','obs_fields')}
+    row.update(sample_id='condition_1',sample_index=1,member_seeds=[7,8,9,10])
+    torch.save(row,source/'0000.pt');torch.save(row,bank/'0000.pt')
+    src_receipt=source/'receipt.json';src_receipt.write_text(json.dumps({'files_sha256':[hashlib.sha256((source/'0000.pt').read_bytes()).hexdigest()]}))
+    child_receipt=bank/'receipt.json';child_receipt.write_text(json.dumps({'files_sha256':[hashlib.sha256((bank/'0000.pt').read_bytes()).hexdigest()]}))
+    src_ref=binding(src_receipt);child_ref=binding(child_receipt)
+    new.parent.mkdir();shutil.move(str(old),str(new));assert not old.exists()
+    report.configure_relocation({'from':str(old),'to':str(new)})
+    try:
+        assert report.bound(src_ref)==src_receipt
+        mapped=report.bound(child_ref);assert mapped==new/'bank/receipt.json'
+        src,children=rows_for_case(report.bound(src_ref),report.doc(src_ref),{'candidate':(mapped,report.doc(child_ref))},0,'condition_1')
+        assert src['member_seeds']==children['candidate']['member_seeds']
+        mapped.write_text('{}')
+        with pytest.raises(ValueError,match='evidence changed'):report.doc(child_ref)
+        with pytest.raises(ValueError,match='relocation must map'):report.configure_relocation({'from':str(old),'to':str(tmp_path/'elsewhere')})
+    finally:report.configure_relocation(None)

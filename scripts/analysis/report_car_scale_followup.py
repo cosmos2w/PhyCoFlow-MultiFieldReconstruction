@@ -4,7 +4,7 @@ from __future__ import annotations
 import argparse,json,math,shutil,sys,time
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[2];sys.path[:0]=[str(ROOT/'src'),str(ROOT)]
-from scripts.analysis.report_car_round5 import bound,doc,sha,save_figure,render
+from scripts.analysis.report_car_round5 import sha,save_figure,render
 from scripts.analysis.report_car_round6 import repair_round6_pdf,learning,outcomes,regional,case_figures
 from scripts.posttraining.assess_car_round6 import intervals,check_terminal
 
@@ -16,6 +16,32 @@ FIGURES={'matched_train_validation_scale':'Same complete Scale definitions on ca
  'actual_adam_complete_scale_changes':'Thirteen independently reset TRAIN J2 shadows of the actual parent AdamW action; negative means an immediate decrease and the batches are not independent trajectories.',
  'scale_components_and_definitions':'VALIDATION100 attraction and separation changes and the three complete-Q4096 Scale definitions in frozen TRAIN units; negative score changes favor repair.',
  'scale_field_pair_band_localization':'Prefit-expanded field, pair and spectral-band changes; joint and log-power norm components are additive attributions, not independently proper field scores.'}
+
+RELOCATION=None
+def configure_relocation(mapping):
+ global RELOCATION
+ RELOCATION=None
+ if mapping is None:return
+ if not isinstance(mapping,dict) or set(mapping)!={'from','to'}:raise ValueError('relocation_prefix must contain from and to')
+ old,new=Path(mapping['from']),Path(mapping['to'])
+ if not old.is_absolute() or not new.is_absolute() or '..' in old.parts or '..' in new.parts or old.name!='scale_alignment_followup_20261125' or new!=old.parent/'round_6'/old.name:
+  raise ValueError('relocation must map the followup sibling to the nested Round 6 campaign')
+ RELOCATION=(old,new)
+
+def bound(ref):
+ if not isinstance(ref,dict) or set(('path','sha256'))-ref.keys():raise ValueError('required hash-bound evidence is missing')
+ path=Path(ref['path'])
+ if RELOCATION:
+  try:relative=path.relative_to(RELOCATION[0])
+  except ValueError:pass
+  else:
+   if '..' in relative.parts:raise ValueError('relocation path cannot escape its campaign')
+   path=RELOCATION[1]/relative
+ path=path.resolve(strict=True)
+ if sha(path)!=ref['sha256']:raise ValueError(f'evidence changed: {path}')
+ return path
+
+def doc(ref):return json.loads(bound(ref).read_text())
 
 def lines(path):return [json.loads(s) for s in Path(path).read_text().splitlines() if s.strip()]
 def require(condition,message):
@@ -104,6 +130,7 @@ def place_phase100_section(body,review,fields,phase):
  if phase==500:body[body.index(heading)]='## Selected phase-500 outcome and unequal-exposure control'
 
 def validate(inputs):
+ configure_relocation(inputs.get('relocation_prefix'))
  require(inputs.get('schema')=='car_scale_followup_report_inputs_v1' and inputs.get('phase') in (100,500),'completed selected phase manifest required')
  phase=inputs['phase'];diagnostic=doc(inputs['diagnostic_readout']);decision=doc(inputs['decision']);cost=doc(inputs['costs']);start=doc(inputs['common_start_assessment']);aligned=doc(inputs['aligned_scale'])
  require(phase!=500 or inputs.get('phase100_review'),'phase500 report requires the matched phase100 review')
@@ -312,7 +339,7 @@ def produce(inputs_path,campaign,output):
    if isinstance(ref,dict) and 'path' in ref and 'sha256' in ref:bindings[f'{role}_{key}']=ref
  for name,refs in inputs['diagnostic_figures'].items():
   for ext,ref in refs.items():bindings[f'diagnostic_{name}_{ext}']=ref
- evidence={'schema':'car_scale_followup_report_evidence_v1','status':'rendered_pending_visual_inspection','input_manifest':{'path':str(inputs_path.resolve()),'sha256':sha(inputs_path)},'bindings':bindings,'report_md_sha256':sha(output/'report.md'),'report_pdf_sha256':sha(output/'report.pdf'),'figures':{k:{e:sha(figures/f'{k}.{e}') for e in ('png','pdf')} for k in captions},'pages':pages,'elapsed_seconds':time.time()-started,'test_locked':True}
+ evidence={'schema':'car_scale_followup_report_evidence_v1','status':'rendered_pending_visual_inspection','input_manifest':{'path':str(inputs_path.resolve()),'sha256':sha(inputs_path)},'bindings':bindings,'relocation_prefix':inputs.get('relocation_prefix'),'report_md_sha256':sha(output/'report.md'),'report_pdf_sha256':sha(output/'report.pdf'),'figures':{k:{e:sha(figures/f'{k}.{e}') for e in ('png','pdf')} for k in captions},'pages':pages,'elapsed_seconds':time.time()-started,'test_locked':True}
  (output/'evidence_index.json').write_text(json.dumps(evidence,indent=2,allow_nan=False)+'\n');return evidence
 
 def main():
