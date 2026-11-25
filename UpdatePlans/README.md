@@ -8,7 +8,7 @@ Use this index for current reading; historical source locations remain compatibi
 | Reports and figures | [Report library](_Reports/README.md) |
 | Adaptive Repair execution record | [Round 6 epoch-500 result and Scale followup](_Plans/Coherence_Adaptive_Repair/Round_6/EXECUTION_STATUS.md) |
 | Active Scale followup | [Definition, split and actual-action measurements](_Plans/Coherence_Adaptive_Repair/Round_6/SCALE_ALIGNMENT_FOLLOWUP.md) |
-| Latest Adaptive Repair publication | [Superseded Round 6 preparation snapshot](_Reports/Coherence_Adaptive_Repair/Round_6/report.md); completed endpoint publication is in review |
+| Latest Adaptive Repair publication | [Round 6 original 500-epoch endpoint](_Reports/Coherence_Adaptive_Repair/Round_6/report.md); separate Scale alignment followup is active |
 | Project organization outcome | [Migration and management report](_Reports/Project_Organization/report.md) |
 | Storage ownership and physical map | [Storage map](../docs/Storage_Map.md) |
 | Authoritative management rules | [Experiment artifacts](../docs/Experiment_Artifacts.md) |

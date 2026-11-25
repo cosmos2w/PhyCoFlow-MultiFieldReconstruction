@@ -1,0 +1,206 @@
+{
+  "schema": "car_round6_report_evidence_v1",
+  "input_manifest": {
+    "path": "/data2/wanglz/PhyCoFlow-MultiFieldReconstruction/cases/turbulent_combustion/runs/coherence_adaptive_repair/round_6/configs/report_epoch500_final_inputs_20261125_v2.json",
+    "sha256": "15abd34d05fd9ab7c9db177b2a912aa0d70ca27f5d11e130388bae080343bed3"
+  },
+  "generator": {
+    "path": "/home/wanglz/Desktop/src/PhyCoFlow/Proj_MultiFieldReconstruction/scripts/analysis/report_car_round6.py",
+    "sha256": "aaa73585b5bab7c7e069cd7ddb0fc696517561ecb049b5f2cd78fb4de44f705f"
+  },
+  "bindings": {
+    "assessment": {
+      "path": "/data2/wanglz/PhyCoFlow-MultiFieldReconstruction/cases/turbulent_combustion/runs/coherence_adaptive_repair/round_6/assessment/Epoch500_RegionalEvent_Validation100_20261125T043025Z/assessment.json",
+      "sha256": "9a49ac68ed12ae7dda3aa66fb6b8beb009afb6d386dc512406aeaa0c3e90ec78"
+    },
+    "decision": {
+      "path": "/data2/wanglz/PhyCoFlow-MultiFieldReconstruction/cases/turbulent_combustion/runs/coherence_adaptive_repair/round_6/operations/model_disposition_epoch_500.json",
+      "sha256": "c71085668064a23ac6d027d380f75cc4034617c690cbb6513a1229dfde27c3d0"
+    },
+    "costs": {
+      "path": "/data2/wanglz/PhyCoFlow-MultiFieldReconstruction/cases/turbulent_combustion/runs/coherence_adaptive_repair/round_6/operations/Epoch500_CompletedAssessment_CostEvidence_20261125_v2.json",
+      "sha256": "de1a23276c73c4080a54e0b0d0b0a1d5218784ea0654b391a7548a980288dc11"
+    },
+    "engineering": {
+      "path": "/data2/wanglz/PhyCoFlow-MultiFieldReconstruction/cases/turbulent_combustion/runs/coherence_adaptive_repair/round_6/assessment/engineering/FFM_PI_ResumedPackage_EngineeringDisposition_20261125_v3.json",
+      "sha256": "3ce329d111ffb2322177cc6ee6fa76e4f19bb96fec03ffa6ea4ecf8f2b866911"
+    },
+    "source_bank": {
+      "path": "/data2/wanglz/PhyCoFlow-MultiFieldReconstruction/cases/turbulent_combustion/runs/coherence_adaptive_repair/round_2/assessment/early_closeout/validation/source_ffm/receipt.json",
+      "sha256": "471bb91325888546ca897cf79d3703973220cb557077b1467e378105a695211d"
+    },
+    "candidate_bank": {
+      "path": "/data2/wanglz/PhyCoFlow-MultiFieldReconstruction/cases/turbulent_combustion/runs/coherence_adaptive_repair/round_6/assessment/Epoch500_Validation100_J4_20261125T042223Z/bank/receipt.json",
+      "sha256": "6cdcc2d37e7bb99c0bff1b25f07b04dba698b471f95ecc1170d8f039d706ea9b"
+    },
+    "visual_selection": {
+      "path": "/data2/wanglz/PhyCoFlow-MultiFieldReconstruction/cases/turbulent_combustion/runs/coherence_adaptive_repair/round_6/configs/visual_selection.json",
+      "sha256": "27ece9dd625845b8386dbcc3b44cc0c770c76d480f3140e4074aeea8c147b727"
+    },
+    "event": {
+      "path": "/data2/wanglz/PhyCoFlow-MultiFieldReconstruction/cases/turbulent_combustion/runs/coherence_adaptive_repair/round_2/artifacts/development_event_round1_reused_v1.json",
+      "sha256": "25a518d2374eb9ff8484b3ec46ae5d7873067dee12fe3e593c3066aca3e13e58"
+    },
+    "history": {
+      "path": "/data2/wanglz/PhyCoFlow-MultiFieldReconstruction/cases/turbulent_combustion/runs/coherence_adaptive_repair/round_6/assessment/Epoch500_Validation100_J4_20261125T042223Z/snapshot/logs/history.jsonl",
+      "sha256": "6488898af88919c2a76b679c23f110025ad99c1744337ad93be53c63b2a89e59"
+    },
+    "pi_journal": {
+      "path": "/data2/wanglz/PhyCoFlow-MultiFieldReconstruction/cases/turbulent_combustion/runs/coherence_adaptive_repair/round_6/assessment/Epoch500_Validation100_J4_20261125T042223Z/snapshot/logs/epoch_calibrated_pi_updates.jsonl",
+      "sha256": "dea8bb7fe9ec7356ce739b8ba66b12f679a8cbf95bccee166acbb8b65b788039"
+    },
+    "coefficients": {
+      "path": "/data2/wanglz/PhyCoFlow-MultiFieldReconstruction/cases/turbulent_combustion/runs/coherence_adaptive_repair/round_2/artifacts/common_prefit/ffm_common_prefit_topology_stable_final_v1/common_prefit.json",
+      "sha256": "aa84f5db1762c7918e3a54c7f4df3c246629050549aae1d5988e114b99abc466"
+    },
+    "controller_response": {
+      "path": "/data2/wanglz/PhyCoFlow-MultiFieldReconstruction/cases/turbulent_combustion/runs/coherence_adaptive_repair/round_6/assessment/controller_response/Measured_Probe_PI_Pilot_20261123/qualification.json",
+      "sha256": "d3943d91d23664d966faf3fb59eb2f49b1e4ef00520f6021f9bca1768c507bfb"
+    },
+    "pilot_qualification": {
+      "path": "/data2/wanglz/PhyCoFlow-MultiFieldReconstruction/cases/turbulent_combustion/runs/coherence_adaptive_repair/round_6/assessment/qualification/FFM_PI_GroupedQueries_Pilot_20Epoch_20261124.json",
+      "sha256": "51e8b9f2f945295474fc7ab3bb9607249597d6c213f9f1e1a87fb6672c40d5f1"
+    },
+    "audit": {
+      "path": "/data2/wanglz/PhyCoFlow-MultiFieldReconstruction/cases/turbulent_combustion/runs/coherence_adaptive_repair/round_6/assessment/joint_audit/joint_audit_decision.json",
+      "sha256": "db391c44e8976d950a07dcef22680c80af5152d96412fba70d8194013c6ecd31"
+    },
+    "grouped_query_geometry": {
+      "path": "/data2/wanglz/PhyCoFlow-MultiFieldReconstruction/cases/turbulent_combustion/runs/coherence_adaptive_repair/round_6/assessment/engineering/FFM_PI_GroupedQuery_TRAIN800_GPU1_20261124/geometry.json",
+      "sha256": "710374728918f6c9cb5100640dc3e1137390468fd659d4b0f59e43d92a99eed7"
+    },
+    "grouped_query_reference": {
+      "path": "/data2/wanglz/PhyCoFlow-MultiFieldReconstruction/cases/turbulent_combustion/runs/coherence_adaptive_repair/round_6/assessment/joint_audit/joint_audit_decision.json",
+      "sha256": "db391c44e8976d950a07dcef22680c80af5152d96412fba70d8194013c6ecd31"
+    },
+    "learning_review_100": {
+      "path": "/data2/wanglz/PhyCoFlow-MultiFieldReconstruction/cases/turbulent_combustion/runs/coherence_adaptive_repair/round_6/operations/learning_review_epoch_100.json",
+      "sha256": "3ea449e25509e01e8c50845937f26144d58b36a3945a3881d8aacdbb5a9fdfcd"
+    },
+    "completed_training_readout": {
+      "path": "/data2/wanglz/PhyCoFlow-MultiFieldReconstruction/cases/turbulent_combustion/runs/coherence_adaptive_repair/round_6/assessment/Epoch500_TrainingReadout_20261125/completed_training_readout_v2.json",
+      "sha256": "21ced8cdab086a6b136ac67d43069d57f580a954af08fb2a418b49e57bdddfa1"
+    },
+    "paired_validation_comparisons": {
+      "path": "/data2/wanglz/PhyCoFlow-MultiFieldReconstruction/cases/turbulent_combustion/runs/coherence_adaptive_repair/round_6/assessment/Epoch500_TrainingReadout_20261125/paired_validation_comparisons.json",
+      "sha256": "da79a5f7e69f96540ed1b11c1d30623c5bcee9ee878a2e6570f6791980cd8256"
+    },
+    "independent_terminal_science_review": {
+      "path": "/data2/wanglz/PhyCoFlow-MultiFieldReconstruction/cases/turbulent_combustion/runs/coherence_adaptive_repair/round_6/assessment/Independent_Terminal_Science_Review_20261125/evidence.json",
+      "sha256": "7b970ea307563b9bbf7552f71ddd2144be704e8048aaf047f177b9ff2186a11f"
+    },
+    "closed_gpu_ledger": {
+      "path": "/data2/wanglz/PhyCoFlow-MultiFieldReconstruction/cases/turbulent_combustion/runs/coherence_adaptive_repair/round_6/operations/closed_gpu_ledger_through_epoch500_taskfree_20261125.json",
+      "sha256": "2da644fba2ab3fbef38fe057b6e91828970552c117ae27de334c3910db05412c"
+    },
+    "formal_freeze": {
+      "path": "/data2/wanglz/PhyCoFlow-MultiFieldReconstruction/cases/turbulent_combustion/runs/coherence_adaptive_repair/round_6/configs/formal_freeze.json",
+      "sha256": "8089c90316e4df65f42e18f5783ea97c21bdb17d2aa2bce54376e96e5c9cbc19"
+    }
+  },
+  "artifacts": {
+    "report_md_sha256": "6c1b8172804a3ac9149416e16a3ba5a1cd9295bf9666d9337dfb228e3d9d6835",
+    "report_pdf_sha256": "3c4f8c13b1a03d43769b6f6c65232e2215d5fb591c779be58468f19946b4b6d6",
+    "figures": {
+      "learning_and_action": {
+        "png_sha256": "e761fcee2950d6cfa9664de206cfcd64f8f8916b0310d6ac1dfbeba1de9ce6a7",
+        "pdf_sha256": "c4cbdb3ce89be0e9526a9e8143358d9f2fa7a27f01bba44042325032500b3f15"
+      },
+      "family_history": {
+        "png_sha256": "6bbc255caf0cc5448b944bfdc59efecc6013c1e47c5a68131b70f84189673d30",
+        "pdf_sha256": "9e451101954d6e7697dc28d8823f9eb834571f79dc6fb0cd7ce6e8b5aa844a4f"
+      },
+      "fixed_coefficients": {
+        "png_sha256": "370659ee6240add748873c36722ba595d0409950890ecb934082be07a204ea3e",
+        "pdf_sha256": "e9bb983e7f82782b77618d6b44fdd69672a881f3949268f41fc6f61a022bcc1b"
+      },
+      "field_core_task": {
+        "png_sha256": "9e45e4a1920398f1a6b4c9a04698f5c7ca0518b726f10ba976de4087049e36eb",
+        "pdf_sha256": "f54e9cdaa00f57752459491197be5935fbb107296cbeeabb3e60a24f69c8f532"
+      },
+      "regional_and_event": {
+        "png_sha256": "84ba90c5c35837988ecd8b9abb246edb09b1c9d696b5ecb65877c5187975939e",
+        "pdf_sha256": "233d6eebe2e90350a2c4e01fbc20bb334fea6a7a1fe1e58431c178b6d358a7c8"
+      },
+      "leaf_history_1": {
+        "png_sha256": "e126cb79eae56196acf54031f554a91baf7d135a6d67c5b588715ba73d24a472",
+        "pdf_sha256": "b4171bb097d87278f8bdf0559b35eedbe71ce1e9b1e0279684bdd2ec7aea2b9d"
+      },
+      "leaf_history_2": {
+        "png_sha256": "91ef17097669463667940c5f60eb30cedb2c8ac607b733c466d993e83c224f46",
+        "pdf_sha256": "13b5c099292017a14f68403bf1deeaba8585053896d12355ed1097f02ec2bfe8"
+      },
+      "complete_epoch_engineering": {
+        "png_sha256": "a2182825d3aed7f28a867e8bc060d8fab23f547d62a25eb93ce3e2988d2b4865",
+        "pdf_sha256": "c57028417c4a57a40c4077ca2f9ec9bfbb91730eaa270c9d616bf022c6e8e3a0"
+      },
+      "measured_controller_response": {
+        "png_sha256": "2f42aa96e957dd4b6f4cc9a6b80af6fbfc221b59dc9a455ad345ed5f6092fcdc",
+        "pdf_sha256": "f9d357f24c4c70188881e76145ff96c6785a50964d55a31069d8cd67edcfabd1"
+      },
+      "grouped_query_diagnostic": {
+        "png_sha256": "c6171df7152b5a8971392ee239a1c76f1516a60a7c816b64a19300a8fa573667",
+        "pdf_sha256": "be729bec56e28713960e57282b904c3fa52a4ca80a4aeec93fbe597c271d257a"
+      },
+      "learning_review_and_endpoint": {
+        "png_sha256": "02ef6bfcf3075ab6937ec22c4f506c97914b74b0a4dc41910c5b2466d901abd9",
+        "pdf_sha256": "112545a71530473bc59d4f0ea810a04e96a45a6eac7bdaa579c9a260b39a2c44"
+      },
+      "fields_case_1_part_1": {
+        "png_sha256": "7d5e2d0ef46cdd7a0469bbc765aab1e0f5ef2a785f56a14ff3b20922f90df3de",
+        "pdf_sha256": "a549beae8171461f292df16cca357e61c56904a97a149b57527ae59902d01daf"
+      },
+      "fields_case_1_part_2": {
+        "png_sha256": "047f31a79c85a20d6773e232a4a710d70e7efd3eae9ec0452193688c649393ba",
+        "pdf_sha256": "8dcc07dc06b29b86097d4184456db037dd17c29e78b2ddf43117d4825f8cea17"
+      },
+      "fields_case_1_part_3": {
+        "png_sha256": "012ef29400774161e201e6126111acfdac0ce3058887fc8a7f6b9543016349ec",
+        "pdf_sha256": "a7db47d3d3c2822d51ed1308468235465a2c8b47ac9351fb7aaea468e8094f1e"
+      },
+      "event_case_1": {
+        "png_sha256": "92baa20f2fcccd48cadafc3f7d9905bcb30e0af060718e691fb7b2a5eb115a90",
+        "pdf_sha256": "ea36f9409fbfa0e197a0de6ee668bbfee4ee3f74011eaff5113fded7ab2864c6"
+      },
+      "fields_case_2_part_1": {
+        "png_sha256": "2f776e53fa5d01e981e3a26b3de364866a55904f121153aaa5b752dc280e533e",
+        "pdf_sha256": "17bac5ad13ac80472677704e969d44e0ccd87cb83c89ef94080603d3de9f72ad"
+      },
+      "fields_case_2_part_2": {
+        "png_sha256": "fc1947d43f2e3c0202baecf93c7420df06af448ea6e042fe86d790a753b6d39d",
+        "pdf_sha256": "ac6979d3e97e8613c2d99bab85b42fc4aa5dbc6d40e76818c5154988dd105408"
+      },
+      "fields_case_2_part_3": {
+        "png_sha256": "d8a5eb16df5d49e2beef2a8ce4153582d1a2d446372f0f880345b70f4b2ee517",
+        "pdf_sha256": "905167bd8e1f1b014c2dff793d703fa416e56b8c5370b5f5be95ead07873639c"
+      },
+      "event_case_2": {
+        "png_sha256": "fcd4cb7cda4c1f6b71291abfd63f2cf22a89e440843513e5305ed10f532cbdb4",
+        "pdf_sha256": "b53376c8733b7e638392e4bdfa70247e52f11350934db67fbdb03262e89aa122"
+      },
+      "fields_case_3_part_1": {
+        "png_sha256": "16fcbfac2f9c4c42bbfbf62994f3edef80d6c58d25ce463c6fe9140936bf7993",
+        "pdf_sha256": "0c774ac29a3a04d4c4687ba6d7b6ed51dc2b56c542d4d7a324395ce57d0fabdd"
+      },
+      "fields_case_3_part_2": {
+        "png_sha256": "040fff079f1c22832d8758d94ed7ac810614a5bf17a45a7ca37c7604d4fc5dd2",
+        "pdf_sha256": "95982a7c6afb80142c7f3bc16cc10dbe4846d0c7667e253547c6d233658eb14e"
+      },
+      "fields_case_3_part_3": {
+        "png_sha256": "6801057f035851ef48b5fd4c04a5660b0135774b5ad56615d968fe1de248c870",
+        "pdf_sha256": "c51ba71998ff4df0211393bad5a7e077c955e51713d336f90b7c0abeeec98823"
+      },
+      "event_case_3": {
+        "png_sha256": "e4f5a8f2dcda9a84d7b4c6d112f8435f62742b26d3bd73cb204cc31602279e7e",
+        "pdf_sha256": "4683c070f9e2fbcf6ebb2022478402a1c7c24edf7fbe56dc722867b213b720da"
+      }
+    }
+  },
+  "production_timing": {
+    "elapsed_seconds": 145.22650623321533,
+    "cpu_user_seconds": 143.401052,
+    "cpu_system_seconds": 1.8606930000000002,
+    "cost_scope": "CPU-only report build through rendering and evidence hashing, including completed child processes; excludes final index/receipt writes and GPU lease occupation"
+  },
+  "test_locked": true
+}
