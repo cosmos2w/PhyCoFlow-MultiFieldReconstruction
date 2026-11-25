@@ -32,9 +32,10 @@ def worker(args):
     torch.set_num_threads(4)
     cfg = yaml.safe_load((args.resume / 'resolved_config.yaml' if args.resume else args.config).read_text())
     if args.resume is None:
-        from phycoflow_reconstruction.training.fork_control import create_control_fork
-        cfg['output']['experiment_name'] = 'qualification/IdenticalScaleFork_ProductionResume'
-        args.resume = create_control_fork(args.case_dir, cfg, args.parent, parent_checkpoint_sha256=args.parent_sha256)
+        from phycoflow_reconstruction.training.fork_control import create_control_fork, create_fidelity_quadrature_fork
+        cfg['output']['experiment_name'] = ('qualification/RotatingComplement_FieldFeedback_ProductionResume' if args.candidate else 'qualification/IdenticalScaleFork_ProductionResume')
+        create = create_fidelity_quadrature_fork if args.candidate else create_control_fork
+        args.resume = create(args.case_dir, cfg, args.parent, parent_checkpoint_sha256=args.parent_sha256)
     pi = cfg['optimization']['multitask']['external_policy']['lagrangian'].get('epoch_calibrated_pi')
     if pi is None:
         raise ValueError('the affected PI configuration is required')
@@ -96,7 +97,7 @@ def orchestrate(args):
     args.output.mkdir(parents=True, exist_ok=False)
     started = time.time()
     receipt = {'schema': 'car_scale_fork_resume_v1', 'status': 'failed',
-               'config_sha256': digest(args.config), 'start_unix': started}
+               'config_sha256': digest(args.config), 'candidate': args.candidate, 'start_unix': started}
     paths = []
     before = None
     try:
@@ -109,6 +110,8 @@ def orchestrate(args):
             output = args.output / f'{name}.json'
             command = [sys.executable, str(Path(__file__).resolve()), '--worker',
                 '--config', str(args.config), '--output', str(output), '--stop-action', str(stop), '--parent', str(args.parent), '--parent-sha256', args.parent_sha256, '--case-dir', str(args.case_dir)]
+            if args.candidate:
+                command.append('--candidate')
             if resume:
                 command += ['--resume', paths[-1]['run_dir']]
             with (args.output / f'{name}.log').open('x') as log:
@@ -145,6 +148,7 @@ def main():
     parser.add_argument('--config', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--worker', action='store_true')
+    parser.add_argument('--candidate', action='store_true')
     parser.add_argument('--stop-action', type=int, choices=(6017, 6024))
     parser.add_argument('--resume', type=Path)
     parser.add_argument('--parent', type=Path, required=True)

@@ -366,6 +366,8 @@ class TrainingMonitor:
                     units, meaning = "reporting_epochs" if key in {"epoch", "absolute_epoch"} else "updates", "Completed clock or count in the saved B64/12 reporting convention."
                 elif key.endswith("_seconds"):
                     units, meaning = "seconds", "Measured wall duration averaged over accepted updates in this epoch."
+                elif key == "field_quadrature":
+                    units, meaning = "native_grid_points", "Declared fixed SSS support and rotating without-replacement native complement for signed field-risk feedback."
                 elif key == "field_risk" or key == "field_reference_risk" or key == "field_upper_bound":
                     units, meaning = "model_field_units_squared", "Field-ordered physical risk under the saved point/member/signed-mean contract."
                 elif key.startswith("coherence_family/") or "coherence" in key or key.endswith("_loss"):

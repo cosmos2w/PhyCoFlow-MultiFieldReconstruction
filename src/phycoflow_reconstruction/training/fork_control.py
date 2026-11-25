@@ -16,11 +16,25 @@ def _science(config):
 
 
 def create_control_fork(case_dir, config, parent_run, *, parent_checkpoint_sha256):
-    """Create a new empty-log fork at a completed parent epoch; no updates run."""
+    """Create a new identical-science empty-log continuation."""
+    return _create_fork(case_dir, config, parent_run, parent_checkpoint_sha256=parent_checkpoint_sha256, quadrature=False)
+
+
+def create_fidelity_quadrature_fork(case_dir, config, parent_run, *, parent_checkpoint_sha256):
+    """Create the one explicitly admitted fixed-SSS/rotating-complement candidate."""
+    return _create_fork(case_dir, config, parent_run, parent_checkpoint_sha256=parent_checkpoint_sha256, quadrature=True)
+
+
+def _create_fork(case_dir, config, parent_run, *, parent_checkpoint_sha256, quadrature):
     parent = Path(parent_run).resolve(strict=True)
     old = yaml.safe_load((parent/'resolved_config.yaml').read_text())
-    if _science(old) != _science(config):
-        raise ValueError('fork control requires identical science; candidate transition needs explicit implementation')
+    current = _science(config)
+    if quadrature:
+        budget = current.get('optimization', {}).get('multitask', {}).get('fidelity_budget', {})
+        if budget.pop('rotating_complement', None) != {'points': 512, 'seed': 20261125}:
+            raise ValueError('candidate requires the reviewed 512-point rotating complement')
+    if _science(old) != current:
+        raise ValueError('fork requires identical science except the explicitly admitted field quadrature')
     checkpoint_path = parent/'checkpoints/epoch_500.pt'
     if file_sha256(checkpoint_path) != parent_checkpoint_sha256:
         raise ValueError('parent checkpoint changed')
@@ -38,6 +52,8 @@ def create_control_fork(case_dir, config, parent_run, *, parent_checkpoint_sha25
             store.update_manifest(**{name:parent_manifest[name]})
     checkpoint['config_sha256'] = store.config_hash
     checkpoint['fork_origin'] = {'parent_run':str(parent), 'parent_checkpoint_sha256':parent_checkpoint_sha256, 'absolute_step':origin}
+    if quadrature:
+        checkpoint['fork_origin']['scientific_transition'] = 'rotating_complement_field_quadrature_512_v1'
     store.save_checkpoint('last', checkpoint)
     store.update_manifest(fork_origin=checkpoint['fork_origin'])
     store.set_status('fork_initialized', global_step=origin, reporting_epoch=0, absolute_reporting_epoch=origin/12)

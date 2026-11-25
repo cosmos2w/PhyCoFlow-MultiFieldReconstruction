@@ -57,3 +57,24 @@ def test_fork_fresh_process_partial_recording_matches_full(tmp_path):
  assert columns['step']['units']=='updates' and columns['epoch']['units']==columns['absolute_epoch']['units']=='reporting_epochs'
  rows=[json.loads(x) for x in (full/'history.jsonl').read_text().splitlines()]
  assert [(r['step'],r['epoch'],r['absolute_epoch']) for r in rows]==[(6012,1,501),(6024,2,502)]
+
+@pytest.mark.skipif(PARENT is None or not PARENT.is_dir(), reason='set CAR_FORK_PARENT_RUN to the actual parent for integration test')
+def test_candidate_fork_admits_only_explicit_quadrature(tmp_path):
+ from phycoflow_reconstruction.training.fork_control import create_fidelity_quadrature_fork
+ cfg=yaml.safe_load((PARENT/'resolved_config.yaml').read_text())
+ cfg['output']['experiment_name']='RotatingComplement_FieldFeedback_Fork_Test'
+ cfg['runtime']['device']='cpu'
+ cfg['optimization']['multitask']['fidelity_budget']['rotating_complement']={'points':512,'seed':20261125}
+ bad=yaml.safe_load(yaml.safe_dump(cfg));bad['optimization']['lr']*=2
+ with pytest.raises(ValueError,match='identical science'):
+  create_fidelity_quadrature_fork(tmp_path,bad,PARENT,parent_checkpoint_sha256=SHA)
+ with pytest.raises(ValueError,match='identical science'):
+  create_control_fork(tmp_path,cfg,PARENT,parent_checkpoint_sha256=SHA)
+ run=create_fidelity_quadrature_fork(tmp_path,cfg,PARENT,parent_checkpoint_sha256=SHA)
+ ckpt=torch.load(run/'checkpoints/last.pt',map_location='cpu',weights_only=False)
+ old=torch.load(PARENT/'checkpoints/epoch_500.pt',map_location='cpu',weights_only=False)
+ assert ckpt['global_step']==old['global_step']==6000
+ assert ckpt['external_policy']==old['external_policy']
+ assert ckpt['fork_origin']['scientific_transition']=='rotating_complement_field_quadrature_512_v1'
+ assert torch.equal(ckpt['rng_state']['index_generator'],old['rng_state']['index_generator'])
+ assert file_sha256(PARENT/'checkpoints/epoch_500.pt')==SHA

@@ -642,6 +642,7 @@ def _validate_fidelity_budget(multitask: Mapping[str, Any]) -> None:
             "mean_risk_scales",
             "member_allowance_fraction",
             "reference_artifact",
+            "rotating_complement",
         },
         "optimization.multitask.fidelity_budget",
     )
@@ -659,6 +660,12 @@ def _validate_fidelity_budget(multitask: Mapping[str, Any]) -> None:
             _method_parameter(budget["member_allowance_fraction"], "member_allowance_fraction", allow_zero=True)
         if not isinstance(scales, (list, tuple)) or not scales or any(not math.isfinite(float(x)) or float(x) <= 0 for x in scales):
             raise ValueError("mean risk requires positive independent per-field mean_risk_scales")
+    complement = budget.get("rotating_complement")
+    if complement is not None:
+        if complement != {"points": 512, "seed": 20261125}:
+            raise ValueError("rotating_complement requires the declared 512-point/20261125 recipe")
+        if budget.get("metric") != "physical_mean_risk_model_units":
+            raise ValueError("rotating_complement requires physical mean risk")
     artifact = budget.get("reference_artifact")
     if artifact is not None:
         if not isinstance(artifact, Mapping) or set(artifact) != {"path", "sha256"}:

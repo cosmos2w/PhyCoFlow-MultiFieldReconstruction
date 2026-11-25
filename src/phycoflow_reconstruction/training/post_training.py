@@ -1144,6 +1144,8 @@ def _fidelity_reference_binding(config, dataset, source_hashes_before, source_me
     core_artifacts["shape_artifact"]["provenance"].pop("config_sha256", None)
     settings = dict(config["optimization"]["multitask"].get("fidelity_budget", {}))
     settings.pop("reference_artifact", None)
+    # Quadrature changes the live estimator, not the frozen SOURCE reference.
+    settings.pop("rotating_complement", None)
     value = {
         "version": 1,
         "source_checkpoint_sha256": source_hashes_before["checkpoint"],
@@ -3178,6 +3180,19 @@ def run_post_training(
                         endpoint_context["mask"],
                     )
                 )
+                if config["optimization"]["multitask"].get("fidelity_budget", {}).get("rotating_complement") is not None:
+                    if scalable_runtime is None or len(endpoint_context["members"]) != 2:
+                        raise ValueError("rotating complement requires scalable J2 fidelity")
+                    from .fidelity_quadrature import rotating_field_risks
+                    field_risks, field_complement = rotating_field_risks(model, endpoint_context, train_dataset, config,
+                        absolute_step=global_step, rollout_seed=seed + 1_000_003 + global_step,
+                        device=device)
+                    risks = field_risks.mean(dim=0)
+                    actual_coupling["field_complement_sha256"] = _digest(field_complement)
+                    actual_coupling["field_complement_seed"] = 20261125 + global_step
+                    row["field_quadrature"] = {"selected_points": 4096, "complement_points": 512,
+                        "native_points": int(train_dataset.physical_weights.numel()),
+                        "design": "fixed_S_plus_uniform_complement_without_replacement"}
                 if coherence_aggregator is not None:
                     # This mapping defines three separate parameter gradients.
                     # Keep A/B/T order explicit rather than the alphabetical
