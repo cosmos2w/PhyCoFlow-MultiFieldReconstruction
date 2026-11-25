@@ -49,6 +49,7 @@ def stratified_mean_risks(selected_members, selected_truth, complement_members, 
 
 def rotating_field_risks(model, endpoint, dataset, config, *, absolute_step, rollout_seed, device):
     """Replay only C with the original observation batch and paired RFF member draws."""
+    from dataclasses import replace
     from ..data.sensor_protocols import build_observation_batch
     from .common import sensor_protocol_from_config
     from .post_training import _conditional_draw_seed, _without_target
@@ -74,10 +75,26 @@ def rotating_field_risks(model, endpoint, dataset, config, *, absolute_step, rol
         fields = selected.obs_field_ids[i].detach().cpu()[valid].tolist()
         observations[sample_id] = list(zip(obs, fields, strict=True))
         query[sample_id] = complement[i].tolist()
-    batch = build_observation_batch(samples, sensor_protocol_from_config(config), query_indices=query, manifest_indices=observations).to(device)
-    for name in ('obs_indices','obs_field_ids','obs_valid_mask','obs_coords','obs_values'):
-        if not torch.equal(getattr(selected,name), getattr(batch,name)):
-            raise ValueError('complement observation differs: '+name)
+    rebuilt = build_observation_batch(samples, sensor_protocol_from_config(config), query_indices=query, manifest_indices=observations).to(device)
+    if rebuilt.sample_ids != selected.sample_ids or not torch.equal(rebuilt.metadata['query_indices'].cpu(), complement):
+        raise ValueError('complement sample or global query indices differ')
+    # The compact producer fills masked padding with real points, whereas the
+    # manifest builder pads with -1/zeros and may use a shorter padded width.
+    # Validate every valid observation exactly and keep the original full
+    # tensors, including its padding and mask, for the actual rollout.
+    for i in range(len(selected.sample_ids)):
+        original_mask, rebuilt_mask = selected.obs_valid_mask[i], rebuilt.obs_valid_mask[i]
+        if int(original_mask.sum()) != int(rebuilt_mask.sum()):
+            raise ValueError('complement observation count differs')
+        for name in ('obs_indices','obs_field_ids','obs_coords','obs_values'):
+            if not torch.equal(getattr(selected,name)[i][original_mask], getattr(rebuilt,name)[i][rebuilt_mask]):
+                raise ValueError('complement valid observation differs: '+name)
+    metadata = dict(rebuilt.metadata)
+    metadata['protocol'] = selected.metadata['protocol']
+    batch = replace(selected, query_coords=rebuilt.query_coords,
+        query_valid_mask=rebuilt.query_valid_mask, target_fields=rebuilt.target_fields,
+        metadata=metadata)
+    batch.validate()
     members = []
     for member in range(2):
         generator = torch.Generator(device=device)

@@ -81,3 +81,45 @@ def test_only_declared_complement_recipe_and_metric_are_admitted():
         _validate_fidelity_budget({'fidelity_budget':{**budget,'rotating_complement':{'points':1024,'seed':20261125}}})
     with pytest.raises(ValueError,match='physical mean risk'):
         _validate_fidelity_budget({'fidelity_budget':{**budget,'metric':'physical_member_mse_model_units'}})
+
+
+def test_real_compact_b64_variable_observation_padding(monkeypatch):
+    """Exercise the producer's actual masked slots and copy them byte-for-byte."""
+    import os
+    from pathlib import Path
+    config_path=os.environ.get('CAR_SCALE_REAL_COMPACT_CONFIG')
+    if not config_path or not Path(config_path).is_file():
+        pytest.skip('set CAR_SCALE_REAL_COMPACT_CONFIG to the admitted candidate for real-HDF5 fixture')
+    import yaml
+    from phycoflow_reconstruction.data.factory import open_field_dataset
+    from phycoflow_reconstruction.data.training_batches import _CompactH5Dataset, fixed_query_indices
+    from phycoflow_reconstruction.training.common import sensor_protocol_from_config
+    from phycoflow_reconstruction.training.fidelity_quadrature import rotating_field_risks
+    import phycoflow_reconstruction.training.rollout as rollout
+    cfg=yaml.safe_load(Path(config_path).read_text())
+    dataset=open_field_dataset(cfg['dataset'],split='train')
+    try:
+        fixed=fixed_query_indices(40300,4096,seed=cfg['coherence']['compute_budget']['query_seed'])
+        selected=_CompactH5Dataset(dataset,sensor_protocol_from_config(cfg),4096,fixed).__getitems__([(i,6000) for i in range(64)])[0]
+        counts=selected.obs_valid_mask.sum(1)
+        assert selected.obs_indices.shape==(64,384) and int(counts.min())>=192 and int(counts.max())<=384
+        assert int(counts.min()) < int(counts.max()) and bool((~selected.obs_valid_mask).any())
+        parameter=torch.tensor(0.8,requires_grad=True);calls=[]
+        def fake(model,batch,*,generator,**kwargs):
+            for key in ('obs_indices','obs_field_ids','obs_coords','obs_values','obs_valid_mask'):
+                assert getattr(batch,key) is getattr(selected,key)
+            assert batch.target_fields is None and batch.query_coords.shape[1]==512
+            calls.append(generator.get_state().clone())
+            return parameter*batch.query_coords[:,:,:1].expand(-1,-1,5)+torch.rand((),generator=generator)
+        monkeypatch.setattr(rollout,'differentiable_reconstruction',fake)
+        seed=1000093;gen=torch.Generator().manual_seed(seed);initial=gen.get_state().clone()
+        # Fake selected endpoint retains a differentiable graph; no model inference.
+        base=parameter*selected.query_coords[:,:,:1].expand(-1,-1,5)
+        endpoint={'coupling_selected_batch':selected,'members':[base,base+0.1],
+                  'target':selected.target_fields,'rollout_generator_state':initial}
+        rng=torch.get_rng_state().clone()
+        risk, complement=rotating_field_risks(None,endpoint,dataset,cfg,absolute_step=6000,rollout_seed=seed,device=torch.device('cpu'))
+        assert risk.shape==(64,5) and complement.shape==(64,512) and len(calls)==2
+        assert torch.equal(calls[0],initial) and torch.equal(rng,torch.get_rng_state())
+        assert torch.isfinite(torch.autograd.grad(risk.sum(),parameter)[0])
+    finally: dataset.close()
