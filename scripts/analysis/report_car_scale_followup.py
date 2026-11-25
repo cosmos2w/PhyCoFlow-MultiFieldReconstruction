@@ -49,9 +49,64 @@ def series(ref,age,fields):
   require(all(math.isfinite(float(x)) for x in list(row['field_violation'].values())+row['multipliers_before']+row['multipliers_after']),'nonfinite PI journal')
  return history,journal
 
+def phase100_review_data(reference,start,control,candidate_spec):
+ review=doc(reference)
+ require(review.get('schema')=='car_scale_phase100_joint_review_v1' and review.get('status')=='completed' and review.get('phase_epoch')==100 and review.get('global_step')==7200 and review.get('cumulative_reporting_epoch')==600 and review.get('test_locked') is True and review.get('decision')=='continue_to_phase500','completed matched phase100 continuation review required')
+ refs=review['inputs'];require(refs['common_start_assessment']['sha256']==sha(bound(refs['common_start_assessment'])) and doc(refs['common_start_assessment'])==start,'phase100 common start differs')
+ require(doc(refs['control_assessment'])==control,'phase100 control differs')
+ assessments={};identities={};specs={}
+ for role,variant in (('control','FFM_SSS_Unchanged_Scale_Continuation'),('candidate','FFM_SSS_RotatingComplement_FieldFeedback')):
+  a=doc(refs[role+'_assessment']);i=doc(refs[role+'_fork_identity']);s=doc(i['spec']);b=doc(i['bank_receipt']);parent=doc(s['parent_snapshot'])
+  for key in ('checkpoint','run_config','source_bank','panel'):bound(s[key])
+  bound(parent['checkpoint'])
+  require(i.get('schema')=='car_scale_fork_assessment_identity_v1' and i.get('variant')==variant and i.get('phase_epoch')==100 and i.get('phase_origin_step')==6000 and i.get('global_step')==7200 and i.get('test_locked') is True,'phase100 fork identity differs')
+  require(i['assessment']['sha256']==refs[role+'_assessment']['sha256'] and a.get('epoch')==100 and a.get('bank_receipt_sha256')==i['bank_receipt']['sha256'] and a.get('checkpoint_sha256')==s['checkpoint']['sha256'] and parent['checkpoint']['sha256']==start['checkpoint_sha256'],'phase100 checkpoint or parent differs')
+  require(s.get('variant')==variant and s.get('phase_epoch')==100 and s.get('global_step')==7200 and s['parent_snapshot']['sha256']==candidate_spec['parent_snapshot']['sha256'],'phase100 fork or common parent differs')
+  require(b.get('status')=='completed' and b.get('epoch')==100 and b.get('global_step')==7200 and b.get('phase_origin_step')==6000 and b.get('checkpoint_sha256')==s['checkpoint']['sha256'] and b.get('members')==4 and b.get('sample_ids')==start['sample_ids'] and b.get('source_bank_sha256')==start['source_bank_sha256'] and b.get('panel_sha256')==start['panel_sha256'],'phase100 cached bank or coupling differs')
+  for key in ('sample_ids','field_order','source_bank_sha256','source_checkpoint_sha256','panel_sha256','contract_sha256','core_sha256','source_baseline_sha256','normalizers'):
+   require(a[key]==start[key],f'phase100 {role} differs in {key}')
+  fidelity=a['candidates'][a['arm']]['fidelity']
+  require(review[role]['fidelity']==fidelity and all(math.isclose(review[role]['field_change_over_allowance'][j],fidelity['field_difference'][j]/fidelity['field_allowance'][j],rel_tol=1e-12,abs_tol=1e-12) for j in range(len(start['field_order']))) and all(review[role]['source_relative_core'][f][k]==a['paired_core'][f][k] for f in FAMILIES for k in ('mean','interval_95')),'phase100 SOURCE-relative results differ')
+  assessments[role]=a;identities[role]=i;specs[role]=s
+ require(specs['candidate']['run']==candidate_spec['run'],'phase100 and final candidate must be the same fork')
+ training=doc(refs['training_result']);require(training.get('status')=='completed_phase' and training.get('phase_target_epoch')==100 and training.get('phase_origin_step')==6000 and training.get('global_step')==7200 and training.get('run')==specs['candidate']['run'] and training['complete_epoch_evidence']['checkpoint']['sha256']==specs['candidate']['checkpoint']['sha256'],'phase100 completed training identity differs')
+ for key,left in (('compare_common_start',refs['common_start_assessment']),('compare_control',refs['control_assessment'])):
+  comparison=doc(refs[key]);embedded=review['candidate_minus_common_start' if key=='compare_common_start' else 'candidate_minus_control']
+  require(comparison['left']['sha256']==left['sha256'] and comparison['right']['sha256']==refs['candidate_assessment']['sha256'] and all(comparison['core_in_frozen_train_units'][f][k]==embedded['core_in_frozen_train_units'][f][k] for f in FAMILIES for k in ('mean','interval_95')),'phase100 paired comparison differs')
+ aligned=doc(refs['aligned_scale']);spec=doc(aligned['spec']);comparisons=doc(refs['aligned_comparisons'])
+ require(aligned.get('status')=='completed' and aligned.get('split')=='validation' and aligned.get('members')==4 and aligned.get('sample_ids')==start['sample_ids'] and aligned.get('field_order')==start['field_order'] and spec['source_receipt']['sha256']==start['source_bank_sha256'] and spec['panel']['sha256']==start['panel_sha256'] and comparisons['decomposition']['sha256']==refs['aligned_scale']['sha256'] and comparisons.get('sample_count')==100,'phase100 aligned Scale coupling differs')
+ for role,variant in (('control','FFM_SSS_Unchanged_Scale_Continuation'),('candidate','FFM_SSS_RotatingComplement_FieldFeedback')):
+  require(spec['children'][variant]['receipt']['sha256']==identities[role]['bank_receipt']['sha256'] and spec['children'][variant]['assessment']['sha256']==refs[role+'_assessment']['sha256'],'phase100 aligned Scale child differs')
+ require(spec['children']['original_epoch500']['receipt']['sha256']==start['bank_receipt_sha256'],'phase100 aligned common start differs')
+ for key,values in review['complete_scale_comparisons']['comparisons'].items():
+  for definition in DEFINITIONS:
+   require(values[definition]['mean']==comparisons['comparisons'][key][definition]['mean'] and values[definition]['interval_95']==comparisons['comparisons'][key][definition]['interval_95'],'phase100 aligned Scale comparison differs')
+ return review
+
+def phase100_review_text(review,fields):
+ def interval(x):return f"{x['mean']:+.4f} [{x['interval_95'][0]:+.4f}, {x['interval_95'][1]:+.4f}]"
+ out=['## Matched phase-100 continuation review','', 'Both forks had 100 additional epochs and the same original epoch-500 parent. Changes are candidate minus the stated baseline in frozen TRAIN units; intervals are paired condition bootstraps on the reused development panel, with negative favoring the candidate.','', '| Baseline | State | Scale | Shape |','| --- | ---: | ---: | ---: |']
+ for label,values in (('SOURCE',review['candidate']['source_relative_core']),('Common start',review['candidate_minus_common_start']['core_in_frozen_train_units']),('Same-age control',review['candidate_minus_control']['core_in_frozen_train_units'])):
+  out.append('| '+label+' | '+' | '.join(interval(values[k]) for k in FAMILIES)+' |')
+ out+=['','| Candidate contrast | Published core | Complete prefit core | Complete prefit expanded |','| --- | ---: | ---: | ---: |']
+ variants=('SOURCE','original_epoch500','FFM_SSS_Unchanged_Scale_Continuation');comparisons=review['complete_scale_comparisons']['comparisons']
+ for label,base in zip(('SOURCE','Common start','Same-age control'),variants):
+  values=comparisons['FFM_SSS_RotatingComplement_FieldFeedback_minus_'+base];out.append('| '+label+' | '+' | '.join(interval(values[k]) for k in DEFINITIONS)+' |')
+ out+=['','| Field | Candidate signed-risk change / allowance | Same-age control signed-risk change / allowance |','| --- | ---: | ---: |']
+ for i,field in enumerate(fields):out.append(f"| {field} | {review['candidate']['field_change_over_allowance'][i]:+.3f} | {review['control']['field_change_over_allowance'][i]:+.3f} |")
+ out+=['',review['scientific_progress'],'',review['coherence_tradeoff'],'',review['continuation_question'],'',review['limitations']]
+ return out
+
+def place_phase100_section(body,review,fields,phase):
+ heading='## Matched learning outcome'
+ position=body.index(heading)
+ if review:body[position:position]=phase100_review_text(review,fields)+['']
+ if phase==500:body[body.index(heading)]='## Selected phase-500 outcome and unequal-exposure control'
+
 def validate(inputs):
  require(inputs.get('schema')=='car_scale_followup_report_inputs_v1' and inputs.get('phase') in (100,500),'completed selected phase manifest required')
  phase=inputs['phase'];diagnostic=doc(inputs['diagnostic_readout']);decision=doc(inputs['decision']);cost=doc(inputs['costs']);start=doc(inputs['common_start_assessment']);aligned=doc(inputs['aligned_scale'])
+ require(phase!=500 or inputs.get('phase100_review'),'phase500 report requires the matched phase100 review')
  require(diagnostic.get('schema')=='car_scale_followup_diagnostic_readout_v1' and diagnostic.get('status')=='completed' and diagnostic.get('test_locked') is True,'completed diagnostic readout required')
  for r in diagnostic['inputs'].values():bound(r)
  require(decision.get('schema')=='car_scale_followup_disposition_v1' and decision.get('status')=='completed' and decision.get('phase')==phase and decision.get('test_locked') is True and all(isinstance(decision.get(k),str) and decision[k].strip() for k in ('recommendation','reason','scientific_progress','engineering_decision','material_limitations')),'explicit completed disposition required')
@@ -78,6 +133,7 @@ def validate(inputs):
   require(decision.get(role+'_assessment_sha256')==arm['assessment']['sha256'],'disposition does not bind both assessments')
   all_views[role]=assessment;parents.append(fork_spec['parent_snapshot']['sha256']);states[role]=series(arm,age,start['field_order'])
  require(parents[0]==parents[1],'forks must share the identical original parent snapshot')
+ if inputs.get('phase100_review'):phase100_review_data(inputs['phase100_review'],start,all_views['control'],fork_spec)
  require(decision.get('aligned_scale_sha256')==inputs['aligned_scale']['sha256'] and decision.get('common_start_assessment_sha256')==inputs['common_start_assessment']['sha256'],'disposition evidence differs')
  for role,a in all_views.items():
   require(a.get('schema')=='car_round6_matched_validation_v1' and a.get('split')=='validation' and a.get('population')==1000 and a.get('members')==4 and len(a.get('sample_ids',[]))==100,'matched J4 VALIDATION100 required')
@@ -231,6 +287,7 @@ def produce(inputs_path,campaign,output):
  if inputs.get('reference_scope'):
   position=body.index('## Matched learning outcome')
   body[position:position]=['The unchanged R0 was fitted using selected-support TRAIN800 J2 with training-observation draws; it is not an exact native-support SOURCE risk. Cached native J4/T256 SOURCE and the original R0 use different draw and observation laws, so their difference is descriptive and unpaired. Matched native field assessment uses its own paired J4 SOURCE bank.','']
+ place_phase100_section(body,doc(inputs['phase100_review']) if inputs.get('phase100_review') else None,views['start']['field_order'],phase)
  insertion=body.index('| Field | Candidate signed-risk change / allowance | Control signed-risk change / allowance |')
  body[insertion:insertion]=['Candidate minus common-start core changes in frozen TRAIN units: '+', '.join(f"{k} {start_pair[k]['mean']:+.5g} (paired 95% interval [{start_pair[k]['interval_95'][0]:+.5g}, {start_pair[k]['interval_95'][1]:+.5g}])" for k in FAMILIES)+'.','']
  for i,field in enumerate(views['start']['field_order']):

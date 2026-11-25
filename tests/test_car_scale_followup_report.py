@@ -106,3 +106,34 @@ def test_grouped_query_replays_use_matched_complete_evidence():
     assert text.count('all negative')==3 and text.count('all positive')==3
     assert '[-0.0733, -0.0712]' in text and '[+0.2234, +0.3051]' in text
     assert 'J4/T256' in text and 'variable-observation TRAIN law' in text
+
+
+def test_phase100_review_uses_completed_matched_evidence_and_rejects_mismatch(monkeypatch):
+    import copy
+    base=Path('cases/turbulent_combustion/runs/coherence_adaptive_repair/scale_alignment_followup_20261125/operations/decisions/CandidatePhase100_JointReview_Continue500_20261125_v1/phase100_joint_review.json')
+    if not base.is_file():pytest.skip('completed phase100 review unavailable')
+    ref=binding(base)
+    assert ref['sha256']=='3d6f23b93eb0d76799ab79161269b7a90431562830275a8a1866fb3b36038be0'
+    review=json.loads(base.read_text());start=report.doc(review['inputs']['common_start_assessment']);control=report.doc(review['inputs']['control_assessment'])
+    identity=report.doc(review['inputs']['candidate_fork_identity']);spec=report.doc(identity['spec'])
+    checked=report.phase100_review_data(ref,start,control,spec)
+    text='\n'.join(report.phase100_review_text(checked,start['field_order']))
+    assert '+0.3275' in text and '+0.1040' in text and '+7.745' in text
+    assert 'Same-age control' in text and 'paired condition bootstraps' in text and 'continue' in text.lower()
+    body=['## Diagnostic evidence','Detailed diagnostic','Grouped query','Reference scope','## Matched learning outcome','Final outcome']
+    report.place_phase100_section(body,checked,start['field_order'],500)
+    assert body.index('Reference scope') < body.index('## Matched phase-100 continuation review') < body.index('## Selected phase-500 outcome and unequal-exposure control') < body.index('Final outcome')
+    bad=copy.deepcopy(review);bad['phase_epoch']=500
+    old=report.doc
+    monkeypatch.setattr(report,'doc',lambda x: bad if x is ref else old(x))
+    with pytest.raises(ValueError,match='matched phase100 continuation review'):report.phase100_review_data(ref,start,control,spec)
+    monkeypatch.setattr(report,'doc',old)
+    altered=copy.deepcopy(spec);altered['run']+='-other'
+    with pytest.raises(ValueError,match='same fork'):report.phase100_review_data(ref,start,control,altered)
+
+
+def test_phase500_requires_phase100_review(monkeypatch):
+    docs={'diag':{},'decision':{},'cost':{},'start':{},'aligned':{}}
+    monkeypatch.setattr(report,'doc',lambda ref:docs[ref])
+    inputs={'schema':'car_scale_followup_report_inputs_v1','phase':500,'diagnostic_readout':'diag','decision':'decision','costs':'cost','common_start_assessment':'start','aligned_scale':'aligned'}
+    with pytest.raises(ValueError,match='phase500 report requires'):report.validate(inputs)
