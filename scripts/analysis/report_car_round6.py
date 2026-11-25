@@ -482,9 +482,76 @@ def regional(a,directory):
     save_figure(fig,directory,'regional_and_event')
 
 
+def completed_learning_section(training_ref, paired_ref, assessment, history_ref, journal_ref, review100):
+    """Report completed training and matched cached validation with bound identities."""
+    training = doc(training_ref); paired = doc(paired_ref)
+    if (training.get('schema') != 'car_round6_completed500_training_readout_v1'
+            or training.get('epoch_count') != 500 or training.get('accepted_action_count') != 6000
+            or paired.get('schema') != 'car_round6_cached_paired_endpoint_comparisons_v1'
+            or assessment.get('epoch') != 500 or journal_ref is None
+            or training['history']['sha256'] != history_ref['sha256']
+            or training['pi_journal']['sha256'] != journal_ref['sha256']
+            or paired['epoch500']['sha256'] != assessment.get('review_sha256')
+            or paired['epoch100']['sha256'] != review100['assessment']['sha256']
+            or training['field_order'] != assessment['field_order']):
+        raise ValueError('completed learning evidence does not match endpoint, history, journal or epoch100')
+    for ref in (training['history'], training['pi_journal'], paired['epoch500'], paired['epoch100'], paired['historical_epoch500']):
+        bound(ref)
+    current, prior, historical = (doc(paired[k]) for k in ('epoch500', 'epoch100', 'historical_epoch500'))
+    for key in paired['matched_identity_keys']:
+        if current.get(key) != prior.get(key) or current.get(key) != historical.get(key) or current.get(key) != assessment.get(key):
+            raise ValueError(f'completed learning matched assessment identity differs: {key}')
+    windows=training['windows']; fields=training['field_order']; labels=('epochs_76_100','epochs_451_475','epochs_476_500')
+    if any(windows[k]['action_count'] != 300 for k in labels):
+        raise ValueError('completed learning requires three complete 300-action windows')
+    body=['', '## Completed training and paired learning changes', '',
+          'TRAIN signed field errors are pooled over every action before applying the positive part for J; these are sampled training quantities, not native held-out field scores.', '',
+          '| TRAIN window | Pooled positive-excess J | '+ ' | '.join(fields) +' |',
+          '| --- | ---: | '+ ' | '.join('---:' for _ in fields) +' |']
+    for key in labels:
+        w=windows[key]
+        body.append('| epochs '+key.split('_')[1]+'–'+key.split('_')[2]+' | '+f"{w['positive_pooled_excess_J']:.6g}"+' | '+' | '.join(f"{w['mean_signed_e'][f]:+.6g}" for f in fields)+' |')
+    late=sum(windows[k]['constraint_actual_negative_count'] for k in labels[1:])
+    body += ['', f'For the 600 late TRAIN actions, {late} combined constraint-gradient products with actual optimizer displacement were negative; these are first-order action diagnostics.', '',
+             '| Family | Sampled TRAIN change, epochs 76–100 to 476–500 | Held-out epoch 500 minus 100 | Held-out 95% interval | Epoch500 minus historical epoch500 | Historical 95% interval |',
+             '| --- | ---: | ---: | ---: | ---: | ---: |']
+    same=paired['comparisons']['epoch500_minus_epoch100']['core']; hist=paired['comparisons']['epoch500_minus_historical_epoch500']['core']
+    for family in ('state','scale','shape'):
+        a,b=same[family],hist[family];sample=training['sampled_family_change_early100_to_late500'][family]
+        body.append(f"| {family.capitalize()} | {sample:+.3%} | {a['mean']:+.5f} | [{a['interval_95'][0]:+.5f}, {a['interval_95'][1]:+.5f}] | {b['mean']:+.5f} | [{b['interval_95'][0]:+.5f}, {b['interval_95'][1]:+.5f}] |")
+    body += ['', 'TRAIN family changes are relative changes in sampled losses; held-out differences are in frozen SOURCE normalization units, with negative values favoring the current endpoint. Intervals are paired condition bootstraps on the same reused development trajectory, not independent trajectory confirmation. The historical comparison is between complete packages and does not isolate a PI effect.', '']
+    return body
+
+
+def finish_report_evidence(inputs_path, inputs, output, captions, pages, started, own_cpu, child_cpu):
+    """Bind rendered outputs and report-build CPU without a circular receipt hash."""
+    import resource
+    figures=output/'figures'
+    bindings={key:ref for key,ref in inputs.items() if isinstance(ref,dict) and 'path' in ref and 'sha256' in ref}
+    for ref in bindings.values(): bound(ref)
+    artifacts={'report_md_sha256':sha(output/'report.md'),'report_pdf_sha256':sha(output/'report.pdf'),
+               'figures':{name:{'png_sha256':sha(figures/f'{name}.png'),'pdf_sha256':sha(figures/f'{name}.pdf')} for name in captions}}
+    manifest={'path':str(inputs_path),'sha256':sha(inputs_path)}
+    generator={'path':str(Path(__file__).resolve()),'sha256':sha(Path(__file__))}
+    own_after=resource.getrusage(resource.RUSAGE_SELF);child_after=resource.getrusage(resource.RUSAGE_CHILDREN)
+    timing={'elapsed_seconds':time.time()-started,
+            'cpu_user_seconds':own_after.ru_utime-own_cpu.ru_utime+child_after.ru_utime-child_cpu.ru_utime,
+            'cpu_system_seconds':own_after.ru_stime-own_cpu.ru_stime+child_after.ru_stime-child_cpu.ru_stime,
+            'cost_scope':'CPU-only report build through rendering and evidence hashing, including completed child processes; excludes final index/receipt writes and GPU lease occupation'}
+    index={'schema':'car_round6_report_evidence_v1','input_manifest':manifest,'generator':generator,
+           'bindings':bindings,'artifacts':artifacts,'production_timing':timing,'test_locked':True}
+    (output/'evidence_index.json').write_text(json.dumps(index,indent=2,allow_nan=False)+'\n')
+    receipt={'schema':'car_round6_report_v1','status':'rendered_pending_visual_inspection','pages':pages,
+             'input_manifest_sha256':sha(inputs_path),**artifacts,'evidence_index_sha256':sha(output/'evidence_index.json'),**timing}
+    (output/'report_receipt.json').write_text(json.dumps(receipt,indent=2,allow_nan=False)+'\n')
+    return receipt
+
+
 def produce(inputs_path,campaign,output):
     from scripts.posttraining.freeze_car_event import FrozenRedesignedEvent
-    started=time.time(); inputs_path=inputs_path.resolve(strict=True);campaign=campaign.resolve(strict=True);output=output.resolve()
+    import resource
+    started=time.time(); own_cpu=resource.getrusage(resource.RUSAGE_SELF); child_cpu=resource.getrusage(resource.RUSAGE_CHILDREN)
+    inputs_path=inputs_path.resolve(strict=True);campaign=campaign.resolve(strict=True);output=output.resolve()
     if campaign/'reports' not in output.parents or output.exists(): raise ValueError('new campaign-owned report directory required')
     inputs=json.loads(inputs_path.read_text())
     if inputs.get('schema')!='car_round6_report_inputs_v1': raise ValueError('Round 6 report input manifest required')
@@ -566,6 +633,10 @@ def produce(inputs_path,campaign,output):
         body += ['', '## Controller nomination and learning evidence', '',
             f"The user-authorized resumption nominated the measured norm-balanced probe gamma = {float(response['gamma']):.8g} for a fresh SOURCE trajectory. The prior exact ten-epoch drift fit selected zero because the saved mature AdamW action already corrected faster than that target. The measured probe lowered the remaining pooled field-violation norm from {float(response['positive_excess_norm_zero']):.6g} to {float(response['positive_excess_norm_probe']):.6g}, with a weaker but positive independent-query Shape decrease. This supports the bounded learning test; it does not establish an optimal gain or model replacement.", '']
     body += pilot_pi_comparison(inputs.get('pilot_qualification'), assessment['field_order'])
+    if inputs.get('completed_training_readout') or inputs.get('paired_validation_comparisons'):
+        if not inputs.get('completed_training_readout') or not inputs.get('paired_validation_comparisons') or review_decision is None:
+            raise ValueError('completed learning requires both evidence inputs and epoch100 review')
+        body += completed_learning_section(inputs['completed_training_readout'], inputs['paired_validation_comparisons'], assessment, inputs['history'], inputs.get('pi_journal'), review_decision)
     if review_decision is not None:
         body += ['', '## Epoch100 learning review', '', review_decision['scientific_progress'], '',
                  f"Continuation question and decision: {review_decision['decision_rationale']}", '',
@@ -593,11 +664,7 @@ def produce(inputs_path,campaign,output):
     for name,caption in captions.items():body += [f'## Figure {name.replace("_"," ")}','',f'![{caption}](figures/{name}.png)','',f'{caption} [PDF master](figures/{name}.pdf)','']
     (output/'report.md').write_text('\n'.join(body),encoding='utf-8')
     pages=render(output,captions)
-    receipt={'schema':'car_round6_report_v1','status':'rendered_pending_visual_inspection','pages':pages,'input_manifest_sha256':sha(inputs_path),
-        'report_md_sha256':sha(output/'report.md'),'report_pdf_sha256':sha(output/'report.pdf'),
-        'figures':{name:{'png_sha256':sha(figures/f'{name}.png'),'pdf_sha256':sha(figures/f'{name}.pdf')} for name in captions},'elapsed_seconds':time.time()-started}
-    (output/'report_receipt.json').write_text(json.dumps(receipt,indent=2,allow_nan=False)+'\n')
-    return receipt
+    return finish_report_evidence(inputs_path,inputs,output,captions,pages,started,own_cpu,child_cpu)
 
 
 def preparation_figures(audit, diagnosis, profile, history, directory):
