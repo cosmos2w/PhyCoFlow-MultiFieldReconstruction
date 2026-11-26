@@ -47,7 +47,8 @@ def stratified_mean_risks(selected_members, selected_truth, complement_members, 
         sampling='without_replacement', probabilities=probabilities)[1]
 
 
-def rotating_field_risks(model, endpoint, dataset, config, *, absolute_step, rollout_seed, device):
+def rotating_field_risks(model, endpoint, dataset, config, *, absolute_step, rollout_seed, device,
+                         endpoint_boundary=None, capture_endpoints=False):
     """Replay only C with the original observation batch and paired RFF member draws."""
     from dataclasses import replace
     from ..data.sensor_protocols import build_observation_batch
@@ -100,9 +101,16 @@ def rotating_field_risks(model, endpoint, dataset, config, *, absolute_step, rol
         generator = torch.Generator(device=device)
         if member == 0: generator.set_state(endpoint['rollout_generator_state'])
         else: generator.manual_seed(_conditional_draw_seed(rollout_seed, member))
-        members.append(differentiable_reconstruction(model, _without_target(batch),
-            steps=int(config['rollout']['steps']), solver=config['rollout']['solver'],
-            generator=generator, observation_config=dict(config['observation_consistency'])))
+        with torch.autograd.profiler.record_function('complement_endpoint_forward'):
+            members.append(differentiable_reconstruction(model, _without_target(batch),
+                steps=int(config['rollout']['steps']), solver=config['rollout']['solver'],
+                generator=generator, observation_config=dict(config['observation_consistency'])))
+    if endpoint_boundary is not None:
+        members = [endpoint_boundary.leaf(member, complement=True) for member in members]
+    if capture_endpoints:
+        endpoint['complement_members'] = tuple(members)
+        endpoint['complement_target'] = batch.target_fields
+        endpoint['complement_indices'] = complement
     risks = stratified_mean_risks(torch.stack(endpoint['members'],dim=1), endpoint['target'],
         torch.stack(members,dim=1), batch.target_fields, sites, complement, native)
     return risks, complement

@@ -443,6 +443,7 @@ class ExternalPolicy:
         risks: Tensor,
         grad_clip: float | None,
         aggregator: OuterAggregator,
+        endpoint_boundary=None,
     ) -> dict[str, Any]:
         """Apply internal ConFIG over ordered families with one external budget policy.
 
@@ -506,7 +507,12 @@ class ExternalPolicy:
                 # reduce_primary already validated every family before backward.
                 if not loss.requires_grad:
                     raise FloatingPointError(f"ConFIG family {name!r} has no model gradient")
-            if aggregator.family_vjp == "batched":
+            if aggregator.family_vjp == "factored":
+                if endpoint_boundary is None or self.method != "lagrangian":
+                    raise ValueError("factored VJP requires endpoint boundary and lagrangian policy")
+                gradient_matrix = endpoint_boundary.rows(
+                    list(ordered_losses.values()), parameters, chunk_size=aggregator.vjp_chunk_size)
+            elif aggregator.family_vjp == "batched":
                 gradient_matrix = batched_family_gradients(list(ordered_losses.values()), parameters)
             else:
                 gradient_matrix = torch.stack([
@@ -574,7 +580,11 @@ class ExternalPolicy:
                     contribution = self._lagrangian_objective(
                         coherence_value.new_zeros(()), violations
                     )
-                    constraint_gradient = _flat_gradient(contribution, parameters)
+                    constraint_gradient = (
+                        endpoint_boundary.rows([contribution], parameters, chunk_size=1,
+                                               include_complement=True)[0]
+                        if aggregator.family_vjp == "factored" else _flat_gradient(contribution, parameters)
+                    )
                     constraint_gradient_evaluations = 1
             elif self.method == "extended_log_barrier":
                 barrier_t = barrier_schedule(self.completed_updates, **self._barrier_settings)

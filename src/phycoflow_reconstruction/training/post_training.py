@@ -288,6 +288,7 @@ def _coherence_objective(
     execution: Mapping[str, Any] | None = None,
     scalable_runtime=None,
     scalable_probe=True,
+    endpoint_boundary=None,
 ) -> tuple[FamilyResult, tuple[str, ...]]:
     compute = config["coherence"]["compute_budget"]
     selected = _slice_batch(batch, int(compute["batch_size"]))
@@ -300,14 +301,15 @@ def _coherence_objective(
     model_batch = complete if model.capabilities.structured_grid_required else selected
     model_batch = _without_target(model_batch)
     initial_generator_state = generator.get_state()
-    prediction = differentiable_reconstruction(
-        model,
-        model_batch,
-        steps=int(config["rollout"]["steps"]),
-        solver=config["rollout"]["solver"],
-        generator=generator,
-        observation_config=dict(config["observation_consistency"]),
-    )
+    with torch.autograd.profiler.record_function("endpoint_forward"):
+        prediction = differentiable_reconstruction(
+            model,
+            model_batch,
+            steps=int(config["rollout"]["steps"]),
+            solver=config["rollout"]["solver"],
+            generator=generator,
+            observation_config=dict(config["observation_consistency"]),
+        )
     if model.capabilities.structured_grid_required:
         prediction = _gather_prediction(prediction, complete, selected)
     families = dict(family) if isinstance(family, Mapping) else {family.family_name: family}
@@ -324,17 +326,21 @@ def _coherence_objective(
         draw_generator = torch.Generator(device=prediction.device).manual_seed(
             _conditional_draw_seed(generator.initial_seed(), draw)
         )
-        value = differentiable_reconstruction(
-            model,
-            model_batch,
-            steps=int(config["rollout"]["steps"]),
-            solver=config["rollout"]["solver"],
-            generator=draw_generator,
-            observation_config=dict(config["observation_consistency"]),
-        )
+        with torch.autograd.profiler.record_function("endpoint_forward"):
+            value = differentiable_reconstruction(
+                model,
+                model_batch,
+                steps=int(config["rollout"]["steps"]),
+                solver=config["rollout"]["solver"],
+                generator=draw_generator,
+                observation_config=dict(config["observation_consistency"]),
+            )
         if model.capabilities.structured_grid_required:
             value = _gather_prediction(value, complete, selected)
         conditional_draws.append(value)
+    if endpoint_boundary is not None:
+        prediction = endpoint_boundary.leaf(prediction)
+        conditional_draws = [endpoint_boundary.leaf(value) for value in conditional_draws]
     if endpoint_context is not None:
         # Payload only: unlike the legacy component-controller context, this
         # never reconstructs a teacher or evaluates the live model again.
@@ -470,19 +476,20 @@ def _coherence_objective(
             },
             conditional_draws,
         )
-        if scalable_runtime is None:
-            result = family_call(
-                prediction, reference, coordinates=selected.query_coords, context=call_context
-            )
-        else:
-            result = scalable_runtime.score_family(
-                family_name,
-                family_module,
-                prediction,
-                reference,
-                coordinates=selected.query_coords,
-                context=call_context,
-            )
+        with torch.autograd.profiler.record_function("descriptor_forward_" + family_name):
+            if scalable_runtime is None:
+                result = family_call(
+                    prediction, reference, coordinates=selected.query_coords, context=call_context
+                )
+            else:
+                result = scalable_runtime.score_family(
+                    family_name,
+                    family_module,
+                    prediction,
+                    reference,
+                    coordinates=selected.query_coords,
+                    context=call_context,
+                )
         family_results[family_name] = result
         inclusion_scale = 1.0 / probability
         if family_losses is not None:
@@ -1144,8 +1151,10 @@ def _fidelity_reference_binding(config, dataset, source_hashes_before, source_me
     core_artifacts["shape_artifact"]["provenance"].pop("config_sha256", None)
     settings = dict(config["optimization"]["multitask"].get("fidelity_budget", {}))
     settings.pop("reference_artifact", None)
-    # Quadrature changes the live estimator, not the frozen SOURCE reference.
-    settings.pop("rotating_complement", None)
+    # Legacy references deliberately predate rotating quadrature. New-law
+    # references bind the complete estimator, including its complement RNG.
+    if settings.get("reference_law") != "training_selected_complement_v1":
+        settings.pop("rotating_complement", None)
     value = {
         "version": 1,
         "source_checkpoint_sha256": source_hashes_before["checkpoint"],
@@ -2330,6 +2339,8 @@ def run_post_training(
             allocation_mode=scalable_settings.get("allocation", {}).get("mode"),
             uniform_epochs=int(scalable_settings.get("allocation", {}).get("uniform_epochs", 0)),
             condition_query_groups=int(scalable_settings.get("condition_query_groups", 1)),
+            scale_objective=scalable_settings.get("scale_objective", "composite"),
+            scale_joint_kappa=scalable_settings.get("scale_joint_kappa", 1.0),
         )
         prefit_declaration = scalable_settings.get("common_prefit")
         if prefit_declaration is not None:
@@ -2942,9 +2953,13 @@ def run_post_training(
                                      _phase_milestone_path(store.run_dir, start_step, steps_per_epoch, origin_step))
         store.update_manifest(pending_panel_step=None)
     last_coherence_loss = None
-    direct_batch_wait_started = perf_counter() if direct_settings is not None else None
+    record_batch_wait = direct_settings is not None or (
+        (multitask or {}).get("fidelity_budget", {}).get("reference_law")
+        == "training_selected_complement_v1"
+    )
+    batch_wait_started = perf_counter() if record_batch_wait else None
     for offset, batch in enumerate(batch_source):
-        direct_data_wait_seconds = (perf_counter() - direct_batch_wait_started) if direct_batch_wait_started is not None else None
+        data_wait_seconds = (perf_counter() - batch_wait_started) if batch_wait_started is not None else None
         if direct_settings is not None:
             step_started = perf_counter()
         global_step = start_step + offset
@@ -3008,6 +3023,12 @@ def run_post_training(
         if coherence_active or retention_active:
             step_context = {} if constrained else None
             endpoint_context = {} if policy is not None or scalable_runtime is not None else None
+            endpoint_boundary = None
+            if coherence_aggregator is not None and coherence_aggregator.family_vjp == "factored":
+                if policy is None or policy.method != "lagrangian" or constrained or retention_active or getattr(policy, "periodic_config", None) is not None:
+                    raise ValueError("factored VJP requires fresh ConFIG, lagrangian feedback and endpoint-only objectives")
+                from .multitask import EndpointBoundary
+                endpoint_boundary = EndpointBoundary()
             retention_losses: dict[str, torch.Tensor] = {}
             raw_family_losses = {} if scalarizer is not None or direct_safeguarded else None
             rollout_generator = torch.Generator(device=device).manual_seed(
@@ -3034,6 +3055,7 @@ def run_post_training(
                 endpoint_context=endpoint_context,
                 execution=execution,
                 scalable_runtime=scalable_runtime,
+                endpoint_boundary=endpoint_boundary,
             )
             if scalable_runtime is not None:
                 from .scalable_fitting import _digest
@@ -3186,7 +3208,7 @@ def run_post_training(
                     from .fidelity_quadrature import rotating_field_risks
                     field_risks, field_complement = rotating_field_risks(model, endpoint_context, train_dataset, config,
                         absolute_step=global_step, rollout_seed=seed + 1_000_003 + global_step,
-                        device=device)
+                        device=device, endpoint_boundary=endpoint_boundary)
                     risks = field_risks.mean(dim=0)
                     # Only risks should own this graph until the existing
                     # post-action cleanup, before the next rollout allocates.
@@ -3260,6 +3282,7 @@ def run_post_training(
                                 risks,
                                 config["optimization"].get("grad_clip"),
                                 coherence_aggregator,
+                                endpoint_boundary=endpoint_boundary,
                             )
                         finally:
                             policy.force_periodic_refresh = False
@@ -3350,6 +3373,19 @@ def run_post_training(
                 **_family_scalar_report(result),
                 **gradient,
             )
+            fidelity_settings = config["optimization"].get("multitask", {}).get("fidelity_budget", {})
+            if fidelity_settings.get("reference_law") == "training_selected_complement_v1":
+                row["round7_executor"] = {
+                    "family_vjp": coherence_aggregator.family_vjp,
+                    "vjp_chunk_size": coherence_aggregator.vjp_chunk_size,
+                    "rollout_checkpointing": bool(getattr(model, "rollout_checkpointing", False)),
+                    "rollout_context_cache": getattr(model, "rollout_context_cache", "none"),
+                    "field_reference_sha256": fidelity_settings["reference_artifact"]["sha256"],
+                    "reference_law": fidelity_settings["reference_law"],
+                    "scale_objective": scalable_settings.get("scale_objective", "composite"),
+                }
+                row["round7_scale_kappa"] = float(scalable_settings.get("scale_joint_kappa", 1.0))
+                row["round7_active_field_row"] = bool(gradient["constraint_gradient_evaluations"])
             if policy is not None and policy._pi is not None:
                 pi_state = policy.state_dict()["epoch_calibrated_pi"]
                 with (store.run_dir / "logs" / "epoch_calibrated_pi_updates.jsonl").open("a", encoding="utf-8") as stream:
@@ -3421,7 +3457,7 @@ def run_post_training(
             # The final report needs a scalar, not a retained rollout graph.
             # Release it before the next rollout or large validation panel.
             del result, coherence_loss, coherence_objectives
-            del retention_losses, step_context, raw_family_losses, endpoint_context
+            del retention_losses, step_context, raw_family_losses, endpoint_context, endpoint_boundary
         else:
             row["data_update_weight"] = (1.0 / float(direct_settings["units"]["native"]) if direct_settings is not None else _data_weight(config))
             row["coherence_update_weight"] = 0.0
@@ -3454,9 +3490,11 @@ def run_post_training(
                 stream.write(json.dumps(coupling, allow_nan=False) + "\n")
         if direct_settings is not None:
             row["native_coupling"] = direct_native_coupling
-            row["data_wait_seconds"] = direct_data_wait_seconds
+            row["data_wait_seconds"] = data_wait_seconds
             row["attempted_condition_visits"] = len(batch.sample_ids)
             row["accepted_objective_condition_visits"] = len(batch.sample_ids) if row.get("update_accepted", True) else 0
+        elif record_batch_wait:
+            row["data_wait_seconds"] = data_wait_seconds
         if row.get("update_accepted", True):
             after_optimizer_step(model)
         if scalarizer is not None and (global_step + 1) % steps_per_epoch == 0:
@@ -3659,8 +3697,8 @@ def run_post_training(
                 checkpoint_result is not None and checkpoint_result[1] is not None
             ),
         )
-        if direct_settings is not None:
-            direct_batch_wait_started = perf_counter()
+        if record_batch_wait:
+            batch_wait_started = perf_counter()
 
     batch_source.close()
 

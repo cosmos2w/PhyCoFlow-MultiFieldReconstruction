@@ -218,7 +218,10 @@ class TrainingMonitor:
     def _capture(self, row: Mapping[str, Any]) -> None:
         freeze = find_calibration_freeze([dict(row)])
         if freeze is not None:
-            self._calibration_freeze_epoch = min(freeze, self._calibration_freeze_epoch or freeze)
+            self._calibration_freeze_epoch = (
+                freeze if self._calibration_freeze_epoch is None
+                else min(freeze, self._calibration_freeze_epoch)
+            )
         if row.get("validation_plot_label"):
             self._validation_plot_label = str(row["validation_plot_label"])
         step = int(row.get("step", 0))
@@ -362,8 +365,16 @@ class TrainingMonitor:
                         units, meaning = "parameter_gradient_norm", "Attempt-mean norm in the declared trainable parameter space."
                     return {"name": key, "type": kind(value), "units": units, "meaning": meaning}
                 units, meaning = "dimensionless", "Accepted-update epoch diagnostic; structured values retain their named axes."
-                if key in {"step", "epoch", "absolute_epoch", "batches", "completed_updates"}:
+                if key == "round7_executor":
+                    units, meaning = "configuration", "Executor row-chunk, checkpoint and rollout context-cache policies, fixed Scale objective, and SHA-256 identity of the selected-complement field reference."
+                elif key == "round7_scale_kappa":
+                    units, meaning = "dimensionless", "Fixed TRAIN-derived multiplier of raw joint Scale; one for the composite control."
+                elif key in {"round7_active_field_row", "round7_active_field_row_fraction"}:
+                    units, meaning = "boolean_or_fraction", "Any active multiplier-weighted field row, or fraction of accepted updates with that row."
+                elif key in {"step", "epoch", "absolute_epoch", "batches", "completed_updates"}:
                     units, meaning = "reporting_epochs" if key in {"epoch", "absolute_epoch"} else "updates", "Completed clock or count in the saved B64/12 reporting convention."
+                elif key == "data_wait_seconds":
+                    units, meaning = "seconds", "Mean host time from completed callbacks to the next yielded batch, including batch-source waiting and host-to-device enqueue; no GPU synchronization is added."
                 elif key.endswith("_seconds"):
                     units, meaning = "seconds", "Measured wall duration averaged over accepted updates in this epoch."
                 elif key == "field_quadrature":

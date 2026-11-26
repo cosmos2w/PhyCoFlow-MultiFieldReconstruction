@@ -100,6 +100,7 @@ def build_fidelity_history_figure(
     total_budget: float,
     field_budget: float,
     selected_step: int | None = None,
+    config: dict[str, Any] | None = None,
 ):
     """Build decision-focused score and relative-MSE panels from saved reports."""
     records, x_label = _observations(validation_rows, training_rows)
@@ -342,7 +343,7 @@ def build_fidelity_history_figure(
         handlelength=2.0,
         columnspacing=1.5,
     )
-    freeze = find_calibration_freeze(training_rows)
+    freeze = find_calibration_freeze(training_rows, config)
     if "epoch" in x_label.lower() and freeze is not None:
         for axis in (score_axis, full_range_axis, gate_axis):
             mark_calibration_freeze(axis, freeze, x_max=epoch_max)
@@ -402,6 +403,7 @@ def render_fidelity_history(
         total_budget=total_budget,
         field_budget=field_budget,
         selected_step=selected_step,
+        config=config,
     )
     if figure is None:
         return None

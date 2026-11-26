@@ -278,10 +278,13 @@ class OuterAggregator:
     def __init__(self, settings: Mapping[str, Any] | None = None) -> None:
         self.method, options = _setting(settings, default="sum", supported=self._METHODS)
         self.family_vjp = str((settings or {}).get("family_vjp", "separate"))
-        if self.family_vjp not in {"separate", "batched"}:
-            raise ValueError("family_vjp must be 'separate' or 'batched'")
-        if self.family_vjp == "batched" and self.method != "torchjd_config":
-            raise ValueError("batched family VJPs require torchjd_config")
+        if self.family_vjp not in {"separate", "batched", "factored"}:
+            raise ValueError("family_vjp must be 'separate', 'batched' or 'factored'")
+        self.vjp_chunk_size = int((settings or {}).get("vjp_chunk_size", 1))
+        if self.vjp_chunk_size not in (1, 2, 3):
+            raise ValueError("vjp_chunk_size must be 1, 2 or 3")
+        if self.family_vjp in {"batched", "factored"} and self.method != "torchjd_config":
+            raise ValueError("batched and factored family VJPs require torchjd_config")
         self._c = 0.5
         if self.method == "cagrad":
             self._c = _finite_number(options.get("c", 0.5), name="cagrad.c")
@@ -341,6 +344,60 @@ class OuterAggregator:
         return direction, _gradient_diagnostics(
             gradients, direction, method=self.method, row_norms=row_norms, row_gram=row_gram
         )
+
+
+class EndpointBoundary:
+    """Separate descriptor derivatives from model VJPs at live reconstruction endpoints."""
+
+    def __init__(self) -> None:
+        self.selected: list[tuple[Tensor, Tensor]] = []
+        self.complement: list[tuple[Tensor, Tensor]] = []
+
+    def leaf(self, value: Tensor, *, complement: bool = False) -> Tensor:
+        if not value.requires_grad:
+            raise ValueError("factored endpoint must retain its model graph")
+        leaf = value.detach().requires_grad_(True)
+        (self.complement if complement else self.selected).append((value, leaf))
+        return leaf
+
+    def rows(self, losses: list[Tensor], parameters: list[nn.Parameter], *,
+             chunk_size: int, include_complement: bool = False) -> Tensor:
+        pairs = self.selected + (self.complement if include_complement else [])
+        if not pairs or not losses:
+            raise ValueError("factored VJP requires endpoints and losses")
+        leaves = [leaf for _, leaf in pairs]
+        with torch.autograd.profiler.record_function("round7_descriptor_reverse"):
+            cotangents = [torch.autograd.grad(loss, leaves, retain_graph=True, allow_unused=True)
+                          for loss in losses]
+        result = []
+        for start in range(0, len(losses), chunk_size):
+            current = cotangents[start:start + chunk_size]
+            # Only include endpoints touched by at least one row in this chunk.
+            active = [i for i in range(len(pairs)) if any(row[i] is not None for row in current)]
+            if not active:
+                raise ValueError("objective does not depend on any registered endpoint")
+            outputs = [pairs[i][0] for i in active]
+            seeds = [torch.stack([row[i] if row[i] is not None else torch.zeros_like(leaves[i])
+                                  for row in current]) for i in active]
+            scope = "round7_field_model_reverse" if include_complement else "round7_selected_model_reverse"
+            with torch.autograd.profiler.record_function(scope):
+                if len(current) == 1:
+                    grads = torch.autograd.grad(outputs, parameters, grad_outputs=[v[0] for v in seeds],
+                                                retain_graph=True, allow_unused=True)
+                    grads = [None if v is None else v.unsqueeze(0) for v in grads]
+                else:
+                    grads = torch.autograd.grad(outputs, parameters, grad_outputs=seeds,
+                                                is_grads_batched=True, retain_graph=True, allow_unused=True)
+            parts = []
+            for parameter, gradient in zip(parameters, grads):
+                if gradient is None:
+                    gradient = torch.zeros((len(current), *parameter.shape), device=parameter.device,
+                                           dtype=parameter.dtype)
+                if torch.is_complex(gradient):
+                    gradient = torch.view_as_real(gradient)
+                parts.append(gradient.reshape(len(current), -1))
+            result.append(torch.cat(parts, dim=1))
+        return torch.cat(result, dim=0)
 
 
 def batched_family_gradients(losses: list[Tensor], parameters: list[nn.Parameter]) -> Tensor:

@@ -75,3 +75,24 @@ def test_implicit_scale_fit_and_exhaustive_values_gradients_match_full_reference
         torch.testing.assert_close(left, right, rtol=1e-7, atol=1e-9)
     with pytest.raises(ValueError, match="ScalableQueryAdapter"):
         sparse(first, reference, coordinates=coordinates, context=context)
+
+@pytest.mark.parametrize("deterministic", [False, True])
+def test_joint_anchor_matches_raw_joint_value_and_gradients(deterministic):
+    states = torch.randn(8, 16, 2, generator=torch.Generator().manual_seed(41), dtype=torch.float64)
+    family, coords = build(2, states, implicit=True)
+    first, second = (states[i:i+2].clone().requires_grad_() for i in (0, 2))
+    reference = states[4:6]
+    coordinates = coords[None].expand(2, -1, -1)
+    context = {"conditional_draws": (second,), "scoring_mode": "deterministic" if deterministic else "conditional"}
+    composite, _, _ = score("scale", family, first, reference, coordinates, context, full_batch(2), {})
+    candidate, _, leaves = score("scale", family, first, reference, coordinates,
+        {**context, "_scale_joint_anchor": True, "_scale_joint_kappa": 2.3}, full_batch(2), {})
+    expected = composite.component_results["multiscale_spectrum.joint"].scalar_loss * 2.3
+    torch.testing.assert_close(candidate.scalar_loss, expected)
+    assert set(candidate.component_results) == {"multiscale_spectrum.joint"}
+    assert leaves == {"self": {}, "pair": {}}
+    tensors = (first,) if deterministic else (first, second)
+    actual_grad = torch.autograd.grad(candidate.scalar_loss, tensors, retain_graph=True)
+    expected_grad = torch.autograd.grad(expected, tensors)
+    for actual, wanted in zip(actual_grad, expected_grad):
+        torch.testing.assert_close(actual, wanted)

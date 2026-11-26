@@ -532,3 +532,19 @@ def test_axis_scale_trend_and_freeze_marker_preserve_observations():
         for line in figure.axes[0].lines
     )
     plt.close(figure)
+
+
+def test_common_prefit_is_frozen_before_first_logged_epoch(tmp_path):
+    import yaml
+    from phycoflow_reconstruction.training.history_plotting import find_calibration_freeze
+    config = {'coherence': {'families': {}, 'scalable_anchored_coherence': {
+        'enabled': True, 'common_prefit': {'path': 'frozen.json', 'sha256': 'a' * 64}}}}
+    rows = [{'epoch': 1, 'step': 12, 'coherence_loss': 1.,
+             'scalable_coherence': {'calibration_frozen': True}}]
+    assert find_calibration_freeze(rows, config) == 0.
+    assert find_calibration_freeze(rows, {'coherence': {'scalable_anchored_coherence': {'enabled': True}}}) == 1.
+    (tmp_path / 'resolved_config.yaml').write_text(yaml.safe_dump(config))
+    monitor = TrainingMonitor(tmp_path, start_step=0, final_step=24, configured_steps=24,
+                              steps_per_epoch=12, description='prefit', enabled=False)
+    monitor._capture(rows[0])
+    assert monitor._calibration_freeze_epoch == 0.

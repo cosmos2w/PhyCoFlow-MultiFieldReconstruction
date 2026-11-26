@@ -6,9 +6,8 @@ Use this index for current reading; historical source locations remain compatibi
 | --- | --- |
 | Plans and handoffs | [Plan library](_Plans/README.md) |
 | Reports and figures | [Report library](_Reports/README.md) |
-| Adaptive Repair execution record | [Round 6 epoch-500 result and Scale followup](_Plans/Coherence_Adaptive_Repair/Round_6/EXECUTION_STATUS.md) |
-| Active Scale followup | [Definition, split and actual-action measurements](_Plans/Coherence_Adaptive_Repair/Round_6/SCALE_ALIGNMENT_FOLLOWUP.md) |
-| Latest Adaptive Repair publication | [Round 6 original 500-epoch endpoint](_Reports/Coherence_Adaptive_Repair/Round_6/report.md); separate Scale alignment followup is active |
+| Latest completed execution | [Round 7: matched 100-epoch comparison and unchanged joint-anchor continuation to epoch 500](_Plans/Coherence_Adaptive_Repair/_bk/Round_7/WORKPLAN.md); adopt the qualified exact executor, close the tested joint recipe, retain SOURCE/C8 |
+| Adaptive Repair publication | [Round 7 report](_Reports/Coherence_Adaptive_Repair/Round_7/report.md); [Round 6 Scale alignment supplement](_Reports/Coherence_Adaptive_Repair/Round_6/Scale_Alignment_Followup/report.md) |
 | Project organization outcome | [Migration and management report](_Reports/Project_Organization/report.md) |
 | Storage ownership and physical map | [Storage map](../docs/Storage_Map.md) |
 | Authoritative management rules | [Experiment artifacts](../docs/Experiment_Artifacts.md) |

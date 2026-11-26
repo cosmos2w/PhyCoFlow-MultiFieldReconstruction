@@ -36,11 +36,19 @@ class ScalableRuntime:
         allocation_mode=None,
         uniform_epochs=0,
         condition_query_groups=1,
+        scale_objective="composite",
+        scale_joint_kappa=1.0,
     ):
         validate_scalable_artifacts(artifacts, expected_provenance)
         if scoring_mode not in {"conditional", "deterministic"}:
             raise ValueError("invalid scalable scoring mode")
         self.scoring_mode = scoring_mode
+        if scale_objective not in {"composite", "joint_anchor"}:
+            raise ValueError("unknown Scale objective")
+        if isinstance(scale_joint_kappa, bool) or not math.isfinite(float(scale_joint_kappa)) or float(scale_joint_kappa) <= 0:
+            raise ValueError("Scale joint kappa must be positive and finite")
+        self.scale_objective = scale_objective
+        self.scale_joint_kappa = float(scale_joint_kappa)
         self.core_only = bool(core_only)
         if allocation_mode not in {None, "uniform", "qualified_fixed"} or isinstance(uniform_epochs, bool) or not isinstance(uniform_epochs, int) or uniform_epochs < 0:
             raise ValueError("invalid fixed-target allocation mode or initial uniform horizon")
@@ -88,6 +96,8 @@ class ScalableRuntime:
         self.families = families
         self.adapter = ScalableQueryAdapter(families, artifacts["shape_artifact"])
         self.bank = None if self.core_only else artifacts.get("adaptive_bank")
+        if self.scale_objective == "joint_anchor" and self.bank is None:
+            raise ValueError("joint-anchor training requires the fixed adaptive bank and prefit")
         if self.bank is not None:
             validate_bank(
                 self.bank,
@@ -262,7 +272,10 @@ class ScalableRuntime:
     def _score(self, name, family, prediction, reference, coordinates, context, batch):
         coefficients = self.coefficients
         context = {**context, "scoring_mode": self.scoring_mode, "field_order": self.fields}
-        if name == "multiscale_spectrum" and self.bank is not None and self.bank["triples"]:
+        joint_only = name == "multiscale_spectrum" and self.scale_objective == "joint_anchor"
+        if joint_only:
+            context.update(_scale_joint_anchor=True, _scale_joint_kappa=self.scale_joint_kappa)
+        if not joint_only and name == "multiscale_spectrum" and self.bank is not None and self.bank["triples"]:
             context["_reuse_scale_for_expanded"] = True
         if name == "global_distribution":
             result, blocks = self._state(family, prediction, reference, context, coefficients)
@@ -277,7 +290,7 @@ class ScalableRuntime:
                 batch=batch,
                 coefficients={**coefficients, "_difficulty_units": self.calibration.units},
             )
-        key, value = self._expanded(name, prediction, reference, context)
+        key, value = (None, None) if joint_only else self._expanded(name, prediction, reference, context)
         if value is not None:
             blocks[key] = value.mean()
             weighted = value * coefficients[key]
@@ -438,6 +451,11 @@ class ScalableRuntime:
         for kind in ("self", "pair"):
             scale = self.difficulties["multiscale_spectrum"][kind]
             shape = self.difficulties["topology"][kind]
+            if self.scale_objective == "joint_anchor":
+                # Fixed-bank sampling consumes identical queries, but no
+                # auxiliary Scale leaves are computed or used for allocation.
+                values[kind] = {}
+                continue
             if set(scale) != set(shape):
                 raise ValueError("Scale and Shape exposure differs")
             values[kind] = {i: (scale[i], shape[i]) for i in scale}
@@ -503,6 +521,8 @@ class ScalableRuntime:
             "allocation_mode": self.allocation_mode,
             "uniform_epochs": self.uniform_epochs,
             "condition_query_groups": self.condition_query_groups,
+            "scale_objective": self.scale_objective,
+            "scale_joint_kappa": self.scale_joint_kappa,
             "group_samplers": [sampler.state_dict() for sampler in self.group_samplers],
             "adaptive_bank_sha256": self.bank["sha256"] if self.bank is not None else None,
             "policy_seconds": self.policy_seconds,
@@ -527,6 +547,8 @@ class ScalableRuntime:
             or state.get("allocation_mode") != self.allocation_mode
             or state.get("uniform_epochs", 0) != self.uniform_epochs
             or state.get("condition_query_groups", 1) != self.condition_query_groups
+            or state.get("scale_objective", "composite") != self.scale_objective
+            or state.get("scale_joint_kappa", 1.0) != self.scale_joint_kappa
             or state.get("adaptive_bank_sha256")
             != (self.bank["sha256"] if self.bank is not None else None)
         ):

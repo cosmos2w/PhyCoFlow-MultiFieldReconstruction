@@ -124,7 +124,10 @@ def mark_calibration_freeze(axis, freeze_epoch, *, x_max):
 
 
 def find_calibration_freeze(rows, config=None):
-    """Return the first recorded calibration freeze, or the declared epoch-10 schedule."""
+    """Use epoch zero for a prefit; otherwise use the recorded or scheduled freeze."""
+    scalable = (config or {}).get("coherence", {}).get("scalable_anchored_coherence", {})
+    if scalable.get("enabled", False) and scalable.get("common_prefit"):
+        return 0.0
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -140,11 +143,6 @@ def find_calibration_freeze(rows, config=None):
                 and math.isfinite(epoch)
             ):
                 return float(epoch)
-    if (
-        (config or {})
-        .get("coherence", {})
-        .get("scalable_anchored_coherence", {})
-        .get("enabled", False)
-    ):
+    if scalable.get("enabled", False):
         return 10.0
     return None

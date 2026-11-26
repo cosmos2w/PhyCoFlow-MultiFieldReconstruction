@@ -614,15 +614,17 @@ def _validate_coherence_aggregation(multitask: Mapping[str, Any]) -> None:
         raise TypeError("optimization.multitask.coherence_aggregation must be a mapping")
     _reject_unknown(
         aggregation,
-        {"method", "family_vjp"},
+        {"method", "family_vjp", "vjp_chunk_size"},
         "optimization.multitask.coherence_aggregation",
     )
     if aggregation.get("method") != "torchjd_config":
         raise ValueError(
             "optimization.multitask.coherence_aggregation.method must be torchjd_config"
         )
-    if aggregation.get("family_vjp", "separate") not in {"separate", "batched"}:
-        raise ValueError("coherence_aggregation.family_vjp must be separate or batched")
+    if aggregation.get("family_vjp", "separate") not in {"separate", "batched", "factored"}:
+        raise ValueError("coherence_aggregation.family_vjp must be separate, batched or factored")
+    if aggregation.get("vjp_chunk_size", 1) not in (1, 2, 3):
+        raise ValueError("coherence_aggregation.vjp_chunk_size must be 1, 2 or 3")
 
 
 def _validate_fidelity_budget(multitask: Mapping[str, Any]) -> None:
@@ -642,6 +644,7 @@ def _validate_fidelity_budget(multitask: Mapping[str, Any]) -> None:
             "mean_risk_scales",
             "member_allowance_fraction",
             "reference_artifact",
+            "reference_law",
             "rotating_complement",
         },
         "optimization.multitask.fidelity_budget",
@@ -661,6 +664,12 @@ def _validate_fidelity_budget(multitask: Mapping[str, Any]) -> None:
         if not isinstance(scales, (list, tuple)) or not scales or any(not math.isfinite(float(x)) or float(x) <= 0 for x in scales):
             raise ValueError("mean risk requires positive independent per-field mean_risk_scales")
     complement = budget.get("rotating_complement")
+    if budget.get("reference_law") not in (None, "training_selected_complement_v1"):
+        raise ValueError("unsupported fidelity reference_law")
+    if budget.get("reference_law") == "training_selected_complement_v1" and (
+        complement is None or budget.get("reference_artifact") is None
+    ):
+        raise ValueError("training_selected_complement_v1 requires complement and an explicit reference artifact")
     if complement is not None:
         if complement != {"points": 512, "seed": 20261125}:
             raise ValueError("rotating_complement requires the declared 512-point/20261125 recipe")
@@ -956,11 +965,17 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
         raise TypeError("coherence.scalable_anchored_coherence must be a mapping")
     _reject_unknown(
         scalable,
-        {"enabled", "max_samples", "candidate_count", "shape_batches", "field_floor", "adaptive", "source_members", "source_sensor_count", "save_source_panel", "common_core", "common_prefit", "allocation", "condition_query_groups"},
+        {"enabled", "max_samples", "candidate_count", "shape_batches", "field_floor", "adaptive", "source_members", "source_sensor_count", "save_source_panel", "common_core", "common_prefit", "allocation", "condition_query_groups", "scale_objective", "scale_joint_kappa"},
         "coherence.scalable_anchored_coherence",
     )
     if not isinstance(scalable.get("enabled", False), bool):
         raise TypeError("coherence.scalable_anchored_coherence.enabled must be boolean")
+    if scalable.get("scale_objective", "composite") not in {"composite", "joint_anchor"}:
+        raise ValueError("scale_objective must be composite or joint_anchor")
+    if scalable.get("scale_objective") == "joint_anchor" and "scale_joint_kappa" not in scalable:
+        raise ValueError("joint_anchor requires an explicitly fitted scale_joint_kappa")
+    if "scale_joint_kappa" in scalable:
+        _method_parameter(scalable["scale_joint_kappa"], "scale_joint_kappa", allow_zero=False)
     allocation = scalable.get("allocation")
     if allocation is not None and (
             not isinstance(allocation, Mapping) or set(allocation) != {"mode", "uniform_epochs"}

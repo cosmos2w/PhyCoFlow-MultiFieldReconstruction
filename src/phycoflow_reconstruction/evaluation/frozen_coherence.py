@@ -49,6 +49,7 @@ class FrozenCoherenceObserver:
         query_batches: int = 8,
         coefficients: Mapping[str, float] | None = None,
         complete_scale: bool = True,
+        compiled_target: Mapping | None = None,
     ):
         validate_scalable_artifacts(artifacts, expected_provenance)
         if mode not in {"deterministic", "conditional"}:
@@ -133,25 +134,6 @@ class FrozenCoherenceObserver:
                 0,
             ),) if complete_scale else self.batches
         )
-        began = perf_counter()
-        scale_family = self.families["multiscale_spectrum"]
-        shape_family = self.families["topology"]
-        shape_family._raster_map(self.coordinates)
-        mask = shape_family.domain_mask if shape_family.native_masked else None
-        self.shape_queries = self.adapter.shape.compile_queries(self.batches)
-        with torch.no_grad():
-            state_family = self.families["global_distribution"]
-            state_target = state_family._in_declared_units(self.reference, self.reference)[1]
-            self.state_reference = prepare_endpoint(
-                state_target, normalized_reference_weights, self.artifacts["state_bank"]["directions"],
-                state_family.components_by_key["self_marginal_w2"].channel_weights,
-            )
-            self.scale_reference = _scale_statistics(scale_family, self.reference)
-            raster = _shape_grid(shape_family, self.reference, self.reference)
-            self.shape_reference = self.adapter.shape.compile_reference(
-                raster, self.shape_queries, valid_mask=mask
-            )
-        self.compile_seconds = perf_counter() - began
         families_identity = {
             k: {
                 "config": dict(self.families[k].config),
@@ -183,8 +165,52 @@ class FrozenCoherenceObserver:
         }
         receipt["sha256"] = _digest(receipt)
         self.receipt = receipt
+        began = perf_counter()
+        scale_family = self.families["multiscale_spectrum"]
+        shape_family = self.families["topology"]
+        shape_family._raster_map(self.coordinates)
+        mask = shape_family.domain_mask if shape_family.native_masked else None
+        self.shape_queries = self.adapter.shape.compile_queries(self.batches)
+        if compiled_target is None:
+            with torch.no_grad():
+                state_family = self.families["global_distribution"]
+                state_target = state_family._in_declared_units(self.reference, self.reference)[1]
+                self.state_reference = prepare_endpoint(
+                    state_target, normalized_reference_weights, self.artifacts["state_bank"]["directions"],
+                    state_family.components_by_key["self_marginal_w2"].channel_weights,
+                )
+                self.scale_reference = _scale_statistics(scale_family, self.reference)
+                raster = _shape_grid(shape_family, self.reference, self.reference)
+                self.shape_reference = self.adapter.shape.compile_reference(
+                    raster, self.shape_queries, valid_mask=mask
+                )
+        else:
+            from ..coherence.families.topology.persistence import Diagram
+            if compiled_target.get("schema") != "frozen_observer_target_v1" or compiled_target.get("observer_sha256") != self.receipt["sha256"]:
+                raise ValueError("compiled target does not match frozen observer")
+            self.state_reference = compiled_target["state"]
+            self.scale_reference = compiled_target["scale"]
+            diagrams = [{d: Diagram(**entry) for d, entry in row.items()} for row in compiled_target["diagrams"]]
+            self.shape_reference = (diagrams, compiled_target["norm"], tuple(compiled_target["reference_shape"]))
+            if self._cache_digest() != compiled_target.get("cache_sha256"):
+                raise ValueError("compiled target cache changed")
+        self.compile_seconds = perf_counter() - began
         self._frozen_sha256 = self._content_digest()
         self._compiled_sha256 = self._cache_digest()
+
+    def export_compiled_target(self):
+        """Export immutable target transforms bound to this observer's complete identity."""
+        if self._content_digest() != self._frozen_sha256 or self._cache_digest() != self._compiled_sha256:
+            raise ValueError("frozen observer content changed")
+        diagrams, norm, shape = self.shape_reference
+        return {"schema": "frozen_observer_target_v1", "observer_sha256": self.receipt["sha256"],
+                "cache_sha256": self._compiled_sha256, "state": deepcopy(self.state_reference),
+                "scale": deepcopy(self.scale_reference),
+                "diagrams": [{d: {"finite": item.finite.detach().clone(),
+                                   "essential": item.essential.detach().clone(),
+                                   "finite_locations": None if item.finite_locations is None else item.finite_locations.detach().clone()}
+                               for d, item in row.items()} for row in diagrams],
+                "norm": norm, "reference_shape": shape}
 
     def _content_digest(self):
         return _digest(
@@ -236,13 +262,15 @@ class FrozenCoherenceObserver:
                 or not torch.isfinite(members).all()):
             raise ValueError("members must be finite and match the panel device and dtype")
 
-    def score_tensors(self, members: torch.Tensor, *, compiled=True):
+    def score_tensors(self, members: torch.Tensor, *, compiled=True, include_components=False):
         """Differentiable shared kernel; never retain live features or graphs.
 
         ``compiled=False`` is the independent callback reference for numerical
         qualification. Both routes use the same fixed target and all members.
         """
         self._validate_members(members)
+        if include_components and (not compiled or (torch.is_grad_enabled() and members.requires_grad)):
+            raise ValueError("Shape components require the compiled inference path")
         family = self.families["global_distribution"]
         converted = [family._in_declared_units(x, self.reference)[0] for x in members]
         target = family._in_declared_units(members[0], self.reference)[1]
@@ -278,7 +306,8 @@ class FrozenCoherenceObserver:
             grids = torch.stack([_shape_grid(f, x, self.reference) for x in members])
             mask = f.domain_mask if f.native_masked else None
             blocks = self.adapter.shape.score_compiled(
-                grids, self.shape_queries, self.shape_reference, valid_mask=mask
+                grids, self.shape_queries, self.shape_reference, valid_mask=mask,
+                include_components=include_components,
             )
             physical = f.spatial_objective.weights
             shape = (blocks["self"] * physical.get("self.persistence", 0.0)
@@ -295,6 +324,14 @@ class FrozenCoherenceObserver:
             "scale": torch.stack([x.per_sample_cost for x in scale]).mean(0),
             "shape": shape,
         }
+        if include_components:
+            for kind in ("self", "mutual"):
+                weight = physical.get(f"{kind}.persistence", 0.0) * self.coefficients.get(f"shape.{kind}", 1.0)
+                values[f"shape.{kind}"] = blocks[kind] * weight
+                for category in ("finite", "essential"):
+                    for term in ("attraction", "separation"):
+                        key = f"{kind}.{category}.{term}"
+                        values[f"shape.{key}"] = blocks[key] * weight
         bank = self.artifacts.get("adaptive_bank")
         if bank is not None:
             from ..coherence.adaptive_fitting import score_bank, spectral_filter

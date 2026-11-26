@@ -1,10 +1,18 @@
 # Coherence Adaptive Repair plans
 
-This is the reading collection for Coherence Adaptive Repair. Round 6 completed its qualified pilot, 100-epoch review and conditional 500-epoch endpoint under the original 30 occupied GPU-hour ceiling. Retain SOURCE/C8: the tested package improved Shape and late TRAIN constraint response but failed native field retention, Scale and the regional task. Rounds 1–5 remain closed. Original identities and SHA-256 hashes for historical reading copies are listed in the [source identity index](SOURCE_INDEX.md).
+This is the reading collection for Coherence Adaptive Repair. Round 7 is closed: the qualified factored static-feature executor is adopted, the tested joint-anchor recipe is closed, and SOURCE/C8 remains the operational model. Original source identities and the Round 7 relocation are recorded in the [source identity index](SOURCE_INDEX.md).
+
+## Round 7 closed execution
+
+- The original matched comparison trained the composite control and joint-anchor arms for 100 epochs each. The unchanged selected joint-anchor lineage then continued to epoch 500; it is not a matched 500-versus-100 treatment comparison.
+- Adopt the qualified exact executor within its measured configuration. Close the tested joint-anchor recipe and retain SOURCE/C8: the endpoint's useful Shape and event gains did not overcome the held-out Scale and native field-retention tradeoff. TEST remains locked.
+- Archived [workplan](_bk/Round_7/WORKPLAN.md), [design review](_bk/Round_7/DESIGN_REVIEW.md), [cached Scale/cost audit](_bk/Round_7/evidence/SCALE_AND_COST_AUDIT.md), and [historical execution prompt](_bk/Round_7/EXECUTION_PROMPT.md). The reviewed [Round 7 report](../../_Reports/Coherence_Adaptive_Repair/Round_7/report.md) is the ordinary-file publication.
+
+## Completed Scale supplement
 
 The user authorized a [Scale definition alignment followup](Round_6/SCALE_ALIGNMENT_FOLLOWUP.md) on 25 November, with a separate 30 GPU-hour budget, a new 100-epoch learning review and conditional maximum 500 epochs including that review. It first separates definition, query and split effects and checks a saved-Adam action; any changed objective/update uses a same-start unchanged continuation control. GPU0 performed substantive learning. The [final supplement](../../_Reports/Coherence_Adaptive_Repair/Round_6/Scale_Alignment_Followup/report.md) now closes this continuation at selected phase225: late component gains did not qualify a replacement, so SOURCE/C8 remains retained. The continuation is nested inside Round 6 and used 13.941/30 separately authorized GPU-hours. Original results remain preserved.
 
-## Round 6 completed execution
+## Round 6 closed execution and retained planning record
 
 - [Workplan](Round_6/WORKPLAN.md), [review and decisions](Round_6/REVIEW_AND_DECISIONS.md), [historical audit](Round_6/evidence/HISTORICAL_AUDIT.md), and [execution prompt](Round_6/EXECUTION_PROMPT.md).
 - [Execution record](Round_6/EXECUTION_STATUS.md), [original 500-epoch endpoint report](../../_Reports/Coherence_Adaptive_Repair/Round_6/report.md), and [PDF master](../../_Reports/Coherence_Adaptive_Repair/Round_6/report.pdf). The completed original experiment charged 25.227 GPU-hours, including conservative charges for missing timers; TEST remained locked. Its Round 6 Scale-alignment supplement is closed at selected phase225, with the stopped tail preserved and separately charged.

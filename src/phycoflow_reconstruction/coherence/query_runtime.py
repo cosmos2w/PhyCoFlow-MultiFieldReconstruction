@@ -136,7 +136,24 @@ def score(
                 "mean_scales": f.piece_mean_scale,
                 "mean_weight": f.settings.mean_weight,
             }
-            if isinstance(sampler_batch, ConditionQueryGroups):
+            joint_only = (context or {}).get("_scale_joint_anchor", False)
+            if joint_only:
+                from .families.multiscale_spectrum.losses import (
+                    joint_spectral_energy_score, paired_joint_spectral_mean_distance,
+                )
+                if deterministic:
+                    paired_args = dict(mean_args)
+                    paired_args["prediction_piece_means"] = paired_args.pop("draw_piece_means")[0]
+                    joint = paired_joint_spectral_mean_distance(
+                        draw_coef[0], target, filters=f.filters, scales=f.band_scale,
+                        mass=f.mass, **paired_args)
+                else:
+                    joint = joint_spectral_energy_score(
+                        draw_coef, target, filters=f.filters, scales=f.band_scale,
+                        mass=f.mass, empirical=bool(context.get("_empirical_teacher")), **mean_args)[0]
+                blocks = {"version": "joint_anchor_v1", "joint": joint,
+                          "leaves": {"self": {}, "pair_signed": {}, "pair_rho": {}}}
+            elif isinstance(sampler_batch, ConditionQueryGroups):
                 groups = list(sampler_batch.slices(len(prediction)))
                 blocks = sampled_scale(draw_coef, target, groups[0][1],
                     self_descriptors=desc, target_self_descriptor=target_desc,
@@ -186,6 +203,10 @@ def score(
             "log_power_self": f.relation_extension["self_weight"],
             "rho": f.relation_extension["rho_weight"],
         }
+        if joint_only:
+            # The fitted multiplier applies to the raw joint score, independent
+            # of the composite's physical and calibration coefficients.
+            physical["joint"] = float(context["_scale_joint_kappa"])
     elif name in ("topology", "shape"):
         f = original_family
         shape = coefficients["shape_object"]
@@ -257,7 +278,8 @@ def score(
     weights = {}
     for key in blocks:
         prefix = "scale" if name in ("multiscale_spectrum", "scale") else "shape"
-        value = float(coefficients.get(f"{prefix}.{key}", coefficients.get(key, 1.0)))
+        value = (1.0 if prefix == "scale" and (context or {}).get("_scale_joint_anchor", False)
+                 else float(coefficients.get(f"{prefix}.{key}", coefficients.get(key, 1.0))))
         if not math.isfinite(value) or value <= 0:
             raise ValueError("positive finite frozen block coefficient required")
         weights[key] = physical[key] * value

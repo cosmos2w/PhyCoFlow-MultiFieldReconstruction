@@ -2,6 +2,7 @@
 
 Reviewed publication snapshots preserve the reported findings and figures. Each evidence index identifies the immutable campaign sources and locally stored raw evidence. TEST remains locked as documented in each report.
 
+- [Round 7: matched 100-epoch review and selected 500-epoch endpoint](Round_7/report.md) · [PDF](Round_7/report.pdf) · [evidence](Round_7/evidence/INDEX.md)
 - [Round 6 supplement: Scale alignment, matched100 review and selected225 endpoint](Round_6/Scale_Alignment_Followup/report.md) · [PDF](Round_6/Scale_Alignment_Followup/report.pdf) · [evidence](Round_6/Scale_Alignment_Followup/evidence/INDEX.md)
 - [Round 6: original 500-epoch endpoint](Round_6/report.md) · [PDF](Round_6/report.pdf) · [evidence](Round_6/evidence/INDEX.md)
 - [Round 5: native continuation and direct State–Scale–Shape supervision](Round_5/report.md) · [PDF](Round_5/report.pdf) · [evidence](Round_5/evidence/INDEX.md)

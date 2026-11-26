@@ -281,7 +281,7 @@ class LazyPooledShape:
             diagrams = self._diagram_bank(reference.detach(), queries, valid_mask)
         return diagrams, norm, tuple(reference.shape)
 
-    def score_compiled(self, members, queries, compiled_reference, *, valid_mask=None):
+    def score_compiled(self, members, queries, compiled_reference, *, valid_mask=None, include_components=False):
         """All-member fair score with one diagram construction per endpoint.
 
         No live feature is retained after this call. Only reference diagrams are
@@ -295,24 +295,38 @@ class LazyPooledShape:
             raise ValueError("compiled Shape domain changed")
         banks = [self._diagram_bank(x, queries, valid_mask) for x in members]
         j = len(banks)
-        raw = sum(self._distance(x, target, norm) for x in banks) / j
+        attraction = sum(self._distance(x, target, norm) for x in banks) / j
+        raw = attraction
+        separation = torch.zeros_like(attraction)
         if j > 1:
-            raw = raw - sum(
+            separation = sum(
                 self._distance(banks[a], banks[b], norm)
                 for a in range(j) for b in range(a + 1, j)
             ) / (j * (j - 1))
+            raw = raw - separation
         raw = raw.reshape(len(queries), len(members[0]), len(self.dimensions), 2)
         scales = torch.stack([self.scales[q[0]] for q in queries]).to(raw)
         leaf = raw / scales[:, None]
         values = (0.9 * leaf[..., 0] + 0.1 * leaf[..., 1]).mean(-1)
         weights = values.new_tensor([q[4] for q in queries])
-        return {
+        result = {
             kind: sum(
                 (values[i] * weights[i] for i, q in enumerate(queries) if q[0][0] == kind),
                 start=values.new_zeros(len(members[0])),
             )
             for kind in ("self", "mutual")
         }
+        if include_components:
+            for label, part in (("attraction", attraction), ("separation", separation)):
+                normalized = part.reshape(len(queries), len(members[0]), len(self.dimensions), 2) / scales[:, None]
+                for kind in ("self", "mutual"):
+                    for index, category, factor in ((0, "finite", 0.9), (1, "essential", 0.1)):
+                        result[f"{kind}.{category}.{label}"] = sum(
+                            (factor * normalized[i, ..., index].mean(-1) * weights[i]
+                             for i, q in enumerate(queries) if q[0][0] == kind),
+                            start=values.new_zeros(len(members[0])),
+                        )
+        return result
 
     def score(
         self,
