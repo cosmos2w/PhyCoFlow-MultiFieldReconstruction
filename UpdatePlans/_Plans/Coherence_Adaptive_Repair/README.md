@@ -1,6 +1,12 @@
 # Coherence Adaptive Repair plans
 
-This is the reading collection for Coherence Adaptive Repair. Round 7 is closed: the qualified factored static-feature executor is adopted, the tested joint-anchor recipe is closed, and SOURCE/C8 remains the operational model. Original source identities and the Round 7 relocation are recorded in the [source identity index](SOURCE_INDEX.md).
+This is the reading collection for Coherence Adaptive Repair. [Round 8](_bk/Round_8/README.md) is closed after the matched member-MSE/Shape review at epoch 100; neither arm was extended and SOURCE/C8 remains the operational model. Round 7 is closed and its qualified factored static-feature executor remains adopted in its measured scope. Original source identities and reading-copy relocations are recorded in the [source identity index](SOURCE_INDEX.md).
+
+## Round 8 closed execution
+
+- Archived [project review](_bk/Round_8/PROJECT_REVIEW.md), [workplan](_bk/Round_8/WORKPLAN.md), [evidence bundle](_bk/Round_8/README.md#evidence-bundle) and [historical execution prompt](_bk/Round_8/EXECUTION_PROMPT.md). The frozen source bytes and relocation map are preserved with campaign provenance.
+- Both `MemberMSE_BaseShape` and `MemberMSE_SpatialShape` closed at epoch 100 with all five member-MSE point limits satisfied. Validation Scale fair S worsened by 5.3975% and 5.4722%, respectively. The spatial package supplied no matched positional advantage sufficient to offset the Scale deterioration, while its event score improved relative to BaseShape by 0.223280 frozen TRAIN task units (paired 95% interval for SpatialShape minus BaseShape: −0.293732 to −0.150100); SOURCE-relative event utility remains unresolved. SOURCE/C8 remains retained; there was no extension.
+- [Round 8 report](../../_Reports/Coherence_Adaptive_Repair/Round_8/report.md) and [PDF master](../../_Reports/Coherence_Adaptive_Repair/Round_8/report.pdf) contain the completed comparison and its scientific scope.
 
 ## Round 7 closed execution
 

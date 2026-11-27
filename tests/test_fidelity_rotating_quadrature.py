@@ -72,15 +72,18 @@ def test_separate_complement_reuses_observations_and_member_rng(monkeypatch):
     assert not torch.isin(indices,torch.arange(4096)).any()
 
 
-def test_only_declared_complement_recipe_and_metric_are_admitted():
+def test_declared_complement_recipe_and_physical_metrics_are_admitted():
     from phycoflow_reconstruction.config.validate import _validate_fidelity_budget
     budget={'metric':'physical_mean_risk_model_units','mean_risk_scales':[1.0],
             'member_allowance_fraction':0.1,'rotating_complement':{'points':512,'seed':20261125}}
     _validate_fidelity_budget({'fidelity_budget':budget})
-    with pytest.raises(ValueError,match='512-point'):
-        _validate_fidelity_budget({'fidelity_budget':{**budget,'rotating_complement':{'points':1024,'seed':20261125}}})
-    with pytest.raises(ValueError,match='physical mean risk'):
-        _validate_fidelity_budget({'fidelity_budget':{**budget,'metric':'physical_member_mse_model_units'}})
+    _validate_fidelity_budget({'fidelity_budget':{**budget,'rotating_complement':{'points':1024,'seed':20261125}}})
+    _validate_fidelity_budget({'fidelity_budget':{'metric':'physical_member_mse_model_units',
+        'rotating_complement':{'points':3,'seed':1}}})
+    with pytest.raises(ValueError,match='positive integer'):
+        _validate_fidelity_budget({'fidelity_budget':{**budget,'rotating_complement':{'points':0,'seed':20261125}}})
+    with pytest.raises(ValueError,match='physical field risk'):
+        _validate_fidelity_budget({'fidelity_budget':{**budget,'metric':'endpoint_mse_model_units'}})
 
 
 def test_real_compact_b64_variable_observation_padding(monkeypatch):

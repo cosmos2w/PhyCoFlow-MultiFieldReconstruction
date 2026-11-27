@@ -137,13 +137,14 @@ class FidelityBudget:
     reference_risks: tuple[float, ...]
     denominators: tuple[float, ...]
     upper_bounds: tuple[float, ...]
-    relative_increase: float
-    absolute_allowance: float
-    denominator_floor: float
+    relative_increase: float | tuple[float, ...]
+    absolute_allowance: float | tuple[float, ...]
+    denominator_floor: float | tuple[float, ...]
     denominator_floor_activated: tuple[bool, ...]
     c0: float
     objective_scale: float
     objective_floor_activated: bool
+    field_units_squared: tuple[str, ...] | None = None
 
     @classmethod
     def from_reference(
@@ -152,24 +153,42 @@ class FidelityBudget:
         reference_risks: Tensor | Sequence[float],
         c0: Tensor | float,
         *,
-        relative_increase: float = 0.05,
-        absolute_allowance: float = 0.0,
-        denominator_floor: float = 1.0e-8,
+        relative_increase: float | Sequence[float] = 0.05,
+        absolute_allowance: float | Sequence[float] = 0.0,
+        denominator_floor: float | Sequence[float] = 1.0e-8,
+        field_units_squared: Sequence[str] | None = None,
     ) -> FidelityBudget:
         names = tuple(field_names)
         values = torch.as_tensor(reference_risks, dtype=torch.float64).detach().cpu().reshape(-1)
         c0_value = float(c0.detach().cpu()) if isinstance(c0, Tensor) else float(c0)
-        epsilon, delta, floor = map(float, (relative_increase, absolute_allowance, denominator_floor))
         if not names or len(set(names)) != len(names) or values.numel() != len(names):
             raise ValueError("field names and reference risks must have matching nonempty order")
         if any(not isinstance(name, str) or not name for name in names) or not bool(torch.isfinite(values).all()) or bool((values < 0).any()):
             raise ValueError("reference risks and field names must be valid")
-        if not math.isfinite(epsilon + delta + floor + c0_value) or epsilon < 0 or delta < 0 or floor <= 0 or c0_value < 0:
+        def parameter(value, *, positive=False):
+            vector = torch.as_tensor(value, dtype=torch.float64).detach().cpu()
+            scalar = vector.ndim == 0
+            if scalar:
+                vector = vector.repeat(len(names))
+            if (vector.ndim != 1 or vector.numel() != len(names)
+                    or not bool(torch.isfinite(vector).all())
+                    or bool((vector <= 0 if positive else vector < 0).any())):
+                raise ValueError("budget settings must be finite scalar or ordered per-field values")
+            ordered = tuple(float(item) for item in vector)
+            return (ordered[0] if scalar else ordered), ordered
+
+        epsilon, epsilons = parameter(relative_increase)
+        delta, deltas = parameter(absolute_allowance)
+        floor, floors = parameter(denominator_floor, positive=True)
+        units = None if field_units_squared is None else tuple(field_units_squared)
+        if units is not None and (len(units) != len(names) or any(not isinstance(unit, str) or not unit for unit in units)):
+            raise ValueError("field_units_squared must contain one nonempty unit per ordered field")
+        if not math.isfinite(c0_value) or c0_value < 0:
             raise ValueError("budget settings and C0 must be finite and non-negative; floor must be positive")
         references = tuple(float(value) for value in values)
-        denominators = tuple(max(value, floor) for value in references)
+        denominators = tuple(max(value, field_floor) for value, field_floor in zip(references, floors))
         # The scaling floor never appears in the accepted upper bound.
-        bounds = tuple((1.0 + epsilon) * value + delta for value in references)
+        bounds = tuple((1.0 + eps) * value + allowance for value, eps, allowance in zip(references, epsilons, deltas))
         if not all(math.isfinite(value) for value in (*denominators, *bounds)):
             raise ValueError("derived fidelity bounds must be finite")
         return cls(
@@ -180,10 +199,11 @@ class FidelityBudget:
             epsilon,
             delta,
             floor,
-            tuple(value < floor for value in references),
+            tuple(value < field_floor for value, field_floor in zip(references, floors)),
             c0_value,
             max(c0_value, 1.0e-8),
             c0_value < 1.0e-8,
+            units,
         )
 
     def violations(self, risks: Tensor) -> Tensor:
@@ -197,20 +217,23 @@ class FidelityBudget:
         return (risks - risks.new_tensor(self.upper_bounds)) / risks.new_tensor(self.denominators)
 
     def state_dict(self) -> dict[str, Any]:
-        return {
+        state = {
             "version": 1,
             "field_names": list(self.field_names),
             "reference_risks": list(self.reference_risks),
             "denominators": list(self.denominators),
             "upper_bounds": list(self.upper_bounds),
-            "relative_increase": self.relative_increase,
-            "absolute_allowance": self.absolute_allowance,
-            "denominator_floor": self.denominator_floor,
+            "relative_increase": list(self.relative_increase) if isinstance(self.relative_increase, tuple) else self.relative_increase,
+            "absolute_allowance": list(self.absolute_allowance) if isinstance(self.absolute_allowance, tuple) else self.absolute_allowance,
+            "denominator_floor": list(self.denominator_floor) if isinstance(self.denominator_floor, tuple) else self.denominator_floor,
             "denominator_floor_activated": list(self.denominator_floor_activated),
             "c0": self.c0,
             "objective_scale": self.objective_scale,
             "objective_floor_activated": self.objective_floor_activated,
         }
+        if self.field_units_squared is not None:
+            state["field_units_squared"] = list(self.field_units_squared)
+        return state
 
     @classmethod
     def from_state_dict(cls, state: Mapping[str, Any]) -> FidelityBudget:
@@ -221,6 +244,7 @@ class FidelityBudget:
             relative_increase=state["relative_increase"],
             absolute_allowance=state["absolute_allowance"],
             denominator_floor=state["denominator_floor"],
+            field_units_squared=state.get("field_units_squared"),
         )
         if reference.state_dict() != dict(state):
             raise ValueError("fidelity budget checkpoint contains inconsistent derived values")
@@ -346,8 +370,6 @@ class ExternalPolicy:
             steps = pi["steps_per_epoch"]
             if not all(math.isfinite(x) for x in (gamma, tau, horizon)) or gamma < 0 or tau <= 0 or horizon <= 0 or isinstance(steps, bool) or not isinstance(steps, int) or steps < 1 or interval != 1:
                 raise ValueError("invalid epoch_calibrated_pi parameters or penalty interval")
-            if not isinstance(self.reference, MeanRiskDifferenceBudget):
-                raise ValueError("epoch_calibrated_pi requires a signed mean-risk reference")
             self._pi = dict(pi)
             source = torch.tensor(self.reference.reference_risks, dtype=torch.float64, device=self.device)
             self._pi_z = self.reference.violations(source).detach()

@@ -1,0 +1,78 @@
+{
+  "created_utc": "2026-11-26T18:35:39.690950+00:00",
+  "dependencies": {
+    "gudhi": "3.13.0",
+    "numpy": "2.2.6",
+    "python": "3.10.19",
+    "scipy": "1.15.3",
+    "torch": "2.5.1+cu121",
+    "torch_cpu_threads": 1
+  },
+  "prototype": {
+    "distance": "Euclidean feature norm divided by sqrt(24).",
+    "equal_features_distance": 0.0,
+    "equal_features_gradient": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "finite_bars_h0_h1": [
+      [
+        1,
+        0
+      ],
+      [
+        1,
+        0
+      ]
+    ],
+    "grid_shape": [
+      32,
+      64
+    ],
+    "hard_left_right_half_translation_difference": 3.469446951953614e-18,
+    "masked_values_invariance_max_difference": 0.0,
+    "ph_distance_translation_8_columns": 0.0,
+    "saturated_features_finite": true,
+    "saturated_gradient_max": 0.0,
+    "sigmoid_inverse_temperature": 8.0,
+    "thresholds": [
+      -0.6,
+      -0.3,
+      0.0
+    ],
+    "translation_results": [
+      {
+        "displacement_columns": 0.25,
+        "distance": 0.00040324670849162345,
+        "distance_derivative_wrt_shift": 0.0015088392653017672
+      },
+      {
+        "displacement_columns": 1.0,
+        "distance": 0.0016255796764985126,
+        "distance_derivative_wrt_shift": 0.001486203246415504
+      },
+      {
+        "displacement_columns": 8.0,
+        "distance": 0.012353947474241986,
+        "distance_derivative_wrt_shift": 0.0012951964439227022
+      }
+    ],
+    "windows": "Eight untruncated overlapping Gaussian windows: 4 x 2 centers over grid extent; sigma_x=14 and sigma_y=12 grid units."
+  },
+  "quadrature": {
+    "complement_points": 2,
+    "complement_subsets_enumerated": 15,
+    "generated_members": 3,
+    "limitation": "Endpoint values are held fixed before selecting support; this is arithmetic evidence, not model support-invariance or physical efficacy.",
+    "member_mse_exact_design_expectation_max_error": 8.673617379884035e-19,
+    "native_points": 8,
+    "selected_points": 2
+  },
+  "schema": "round8_support_shape_cpu_diagnostic_v1",
+  "scope": "Synthetic CPU tensor calculations only; no model, dataset, training or GPU access.",
+  "source_sha256": {
+    "src/phycoflow_reconstruction/coherence/families/topology/persistence.py": "c4b1d2101dead36455986d67a714def593f92a829c82b3da5d3a108996206818",
+    "src/phycoflow_reconstruction/coherence/physical_risk.py": "5caa65fc2d469407eb3236ca55ef4509fe8899b5a9537b34b707126bd3816b93"
+  }
+}

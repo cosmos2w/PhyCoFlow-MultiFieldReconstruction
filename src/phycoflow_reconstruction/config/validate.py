@@ -169,6 +169,7 @@ def _validate_common_sections(config: Mapping[str, Any]) -> None:
         "seed",
         "device",
         "deterministic",
+        "strict_algorithms",
         "num_workers",
         "progress",
         "plot_every_steps",
@@ -176,6 +177,13 @@ def _validate_common_sections(config: Mapping[str, Any]) -> None:
         "vram_dataset_threshold_gb",
     }
     _reject_unknown(runtime, runtime_keys, "runtime")
+    if "strict_algorithms" in runtime:
+        if not isinstance(runtime["strict_algorithms"], bool):
+            raise TypeError("runtime.strict_algorithms must be boolean")
+        if config.get("stage") != "post_training" or "coherence" not in config:
+            raise ValueError("runtime.strict_algorithms currently requires coherence post-training")
+        if runtime["strict_algorithms"] and runtime.get("deterministic", True) is not True:
+            raise ValueError("runtime.strict_algorithms requires deterministic runtime")
     if int(runtime.get("num_workers", 0)) < 0:
         raise ValueError("runtime.num_workers must be non-negative")
     if "progress" in runtime and not isinstance(runtime["progress"], bool):
@@ -646,6 +654,9 @@ def _validate_fidelity_budget(multitask: Mapping[str, Any]) -> None:
             "reference_artifact",
             "reference_law",
             "rotating_complement",
+            "reference_member_mse_from_panel",
+            "reference_member_count_reuse",
+            "field_units_squared",
         },
         "optimization.multitask.fidelity_budget",
     )
@@ -666,15 +677,28 @@ def _validate_fidelity_budget(multitask: Mapping[str, Any]) -> None:
     complement = budget.get("rotating_complement")
     if budget.get("reference_law") not in (None, "training_selected_complement_v1"):
         raise ValueError("unsupported fidelity reference_law")
-    if budget.get("reference_law") == "training_selected_complement_v1" and (
-        complement is None or budget.get("reference_artifact") is None
-    ):
-        raise ValueError("training_selected_complement_v1 requires complement and an explicit reference artifact")
+    if budget.get("reference_law") == "training_selected_complement_v1" and complement is None:
+        raise ValueError("training_selected_complement_v1 requires a rotating complement")
     if complement is not None:
-        if complement != {"points": 512, "seed": 20261125}:
-            raise ValueError("rotating_complement requires the declared 512-point/20261125 recipe")
-        if budget.get("metric") != "physical_mean_risk_model_units":
-            raise ValueError("rotating_complement requires physical mean risk")
+        if (not isinstance(complement, Mapping) or set(complement) != {"points", "seed"}
+                or type(complement["points"]) is not int or complement["points"] < 1
+                or type(complement["seed"]) is not int or complement["seed"] < 0):
+            raise ValueError("rotating_complement requires positive integer points and nonnegative integer seed")
+        if budget.get("metric") not in {"physical_member_mse_model_units", "physical_mean_risk_model_units"}:
+            raise ValueError("rotating_complement requires a physical field risk")
+    reuse = budget.get("reference_member_mse_from_panel", False)
+    if not isinstance(reuse, bool):
+        raise TypeError("reference_member_mse_from_panel must be boolean")
+    if reuse and (budget.get("metric") != "physical_member_mse_model_units" or budget.get("reference_artifact") is None):
+        raise ValueError("reference_member_mse_from_panel requires a member-MSE metric and reference artifact")
+    count_reuse = budget.get("reference_member_count_reuse", False)
+    if not isinstance(count_reuse, bool):
+        raise TypeError("reference_member_count_reuse must be boolean")
+    if count_reuse and not reuse:
+        raise ValueError("reference_member_count_reuse requires explicit member-MSE panel reuse")
+    units = budget.get("field_units_squared")
+    if units is not None and (not isinstance(units, (list, tuple)) or not units or any(not isinstance(unit, str) or not unit for unit in units)):
+        raise ValueError("field_units_squared requires nonempty ordered field-unit strings")
     artifact = budget.get("reference_artifact")
     if artifact is not None:
         if not isinstance(artifact, Mapping) or set(artifact) != {"path", "sha256"}:
@@ -682,20 +706,15 @@ def _validate_fidelity_budget(multitask: Mapping[str, Any]) -> None:
         path, digest = artifact["path"], artifact["sha256"]
         if not isinstance(path, str) or not Path(path).is_absolute() or not isinstance(digest, str) or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
             raise ValueError("fidelity reference_artifact requires an absolute path and lowercase SHA-256")
-    _method_parameter(
-        budget.get("relative_increase", 0.05),
-        "optimization.multitask.fidelity_budget.relative_increase",
-        allow_zero=True,
-    )
-    _method_parameter(
-        budget.get("absolute_allowance", 0.0),
-        "optimization.multitask.fidelity_budget.absolute_allowance",
-        allow_zero=True,
-    )
-    _method_parameter(
-        budget.get("denominator_floor", 1.0e-8),
-        "optimization.multitask.fidelity_budget.denominator_floor",
-    )
+    for key, default, allow_zero in (("relative_increase", 0.05, True),
+                                      ("absolute_allowance", 0.0, True),
+                                      ("denominator_floor", 1.0e-8, False)):
+        setting = budget.get(key, default)
+        values = setting if isinstance(setting, (list, tuple)) else [setting]
+        if not values:
+            raise ValueError(f"fidelity_budget.{key} cannot be empty")
+        for value in values:
+            _method_parameter(value, f"optimization.multitask.fidelity_budget.{key}", allow_zero=allow_zero)
     for key, default in (("calibration_batches", 4), ("calibration_draws", 2)):
         value = budget.get(key, default)
         if isinstance(value, bool) or not isinstance(value, int) or value < 1:
@@ -965,11 +984,14 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
         raise TypeError("coherence.scalable_anchored_coherence must be a mapping")
     _reject_unknown(
         scalable,
-        {"enabled", "max_samples", "candidate_count", "shape_batches", "field_floor", "adaptive", "source_members", "source_sensor_count", "save_source_panel", "common_core", "common_prefit", "allocation", "condition_query_groups", "scale_objective", "scale_joint_kappa"},
+        {"enabled", "max_samples", "candidate_count", "shape_batches", "field_floor", "adaptive", "source_members", "source_sensor_count", "source_sensor_field", "save_source_panel", "common_core", "common_prefit", "position_artifact", "allocation", "condition_query_groups", "scale_objective", "scale_joint_kappa"},
         "coherence.scalable_anchored_coherence",
     )
     if not isinstance(scalable.get("enabled", False), bool):
         raise TypeError("coherence.scalable_anchored_coherence.enabled must be boolean")
+    sensor_field = scalable.get("source_sensor_field")
+    if sensor_field is not None and (not isinstance(sensor_field, str) or sensor_field not in config["observations"]["fields"]):
+        raise ValueError("source_sensor_field must identify a declared observed field")
     if scalable.get("scale_objective", "composite") not in {"composite", "joint_anchor"}:
         raise ValueError("scale_objective must be composite or joint_anchor")
     if scalable.get("scale_objective") == "joint_anchor" and "scale_joint_kappa" not in scalable:
@@ -993,6 +1015,13 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
             raise ValueError("common_prefit requires absolute path and lowercase SHA-256")
         if int(coherence["compute_budget"]["batch_size"]) != int(config["optimization"]["batch_size"]):
             raise ValueError("common prefit runs require coherence and optimization batch sizes to match")
+    position = scalable.get("position_artifact")
+    if position is not None:
+        if (not isinstance(position, Mapping) or set(position) != {"path", "sha256"}
+                or not isinstance(position["path"], str) or not Path(position["path"]).is_absolute()
+                or not isinstance(position["sha256"], str) or len(position["sha256"]) != 64
+                or any(char not in "0123456789abcdef" for char in position["sha256"])):
+            raise ValueError("position_artifact requires absolute path and lowercase SHA-256")
     common = scalable.get("common_core")
     if common is not None:
         if not isinstance(common, Mapping) or set(common) != {"path", "sha256", "source_panel_path", "source_panel_sha256"}:
@@ -1769,6 +1798,7 @@ def _validate_post_training(config: Mapping[str, Any]) -> None:
             "seed",
             "device",
             "deterministic",
+            "strict_algorithms",
             "num_workers",
             "progress",
             "plot_every_steps",

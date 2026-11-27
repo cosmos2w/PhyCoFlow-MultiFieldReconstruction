@@ -169,6 +169,7 @@ class FrozenCoherenceObserver:
         scale_family = self.families["multiscale_spectrum"]
         shape_family = self.families["topology"]
         shape_family._raster_map(self.coordinates)
+        self.adapter.shape.bind_position_geometry(shape_family)
         mask = shape_family.domain_mask if shape_family.native_masked else None
         self.shape_queries = self.adapter.shape.compile_queries(self.batches)
         if compiled_target is None:
@@ -192,6 +193,8 @@ class FrozenCoherenceObserver:
             self.scale_reference = compiled_target["scale"]
             diagrams = [{d: Diagram(**entry) for d, entry in row.items()} for row in compiled_target["diagrams"]]
             self.shape_reference = (diagrams, compiled_target["norm"], tuple(compiled_target["reference_shape"]))
+            if "position_features" in compiled_target:
+                self.shape_reference += (compiled_target["position_features"],)
             if self._cache_digest() != compiled_target.get("cache_sha256"):
                 raise ValueError("compiled target cache changed")
         self.compile_seconds = perf_counter() - began
@@ -202,8 +205,8 @@ class FrozenCoherenceObserver:
         """Export immutable target transforms bound to this observer's complete identity."""
         if self._content_digest() != self._frozen_sha256 or self._cache_digest() != self._compiled_sha256:
             raise ValueError("frozen observer content changed")
-        diagrams, norm, shape = self.shape_reference
-        return {"schema": "frozen_observer_target_v1", "observer_sha256": self.receipt["sha256"],
+        diagrams, norm, shape, *position = self.shape_reference
+        result = {"schema": "frozen_observer_target_v1", "observer_sha256": self.receipt["sha256"],
                 "cache_sha256": self._compiled_sha256, "state": deepcopy(self.state_reference),
                 "scale": deepcopy(self.scale_reference),
                 "diagrams": [{d: {"finite": item.finite.detach().clone(),
@@ -211,6 +214,9 @@ class FrozenCoherenceObserver:
                                    "finite_locations": None if item.finite_locations is None else item.finite_locations.detach().clone()}
                                for d, item in row.items()} for row in diagrams],
                 "norm": norm, "reference_shape": shape}
+        if position:
+            result["position_features"] = position[0].detach().clone()
+        return result
 
     def _content_digest(self):
         return _digest(
@@ -239,12 +245,15 @@ class FrozenCoherenceObserver:
         )
 
     def _cache_digest(self):
-        diagrams, norm, shape = self.shape_reference
+        diagrams, norm, shape, *position = self.shape_reference
+        shape_cache = [[{d: {"finite": x.finite, "essential": x.essential}
+                        for d, x in row.items()} for row in diagrams], norm, shape]
+        if position:
+            shape_cache.append(position[0])
         return _digest({
             "state": self.state_reference,
             "scale": self.scale_reference,
-            "shape": [[{d: {"finite": x.finite, "essential": x.essential}
-                        for d, x in row.items()} for row in diagrams], norm, shape],
+            "shape": shape_cache,
             "queries": self.shape_queries,
             "scale_batches": [asdict(q) for q in self.scale_batches],
         })
@@ -328,7 +337,8 @@ class FrozenCoherenceObserver:
             for kind in ("self", "mutual"):
                 weight = physical.get(f"{kind}.persistence", 0.0) * self.coefficients.get(f"shape.{kind}", 1.0)
                 values[f"shape.{kind}"] = blocks[kind] * weight
-                for category in ("finite", "essential"):
+                categories = ("finite", "essential", "position") if self.adapter.shape.position else ("finite", "essential")
+                for category in categories:
                     for term in ("attraction", "separation"):
                         key = f"{kind}.{category}.{term}"
                         values[f"shape.{key}"] = blocks[key] * weight
@@ -347,9 +357,9 @@ class FrozenCoherenceObserver:
         return values
 
     @torch.no_grad()
-    def score(self, members: torch.Tensor):
+    def score(self, members: torch.Tensor, *, include_components=False):
         """Score J1 or every supplied J>=2 member on the immutable panel."""
-        values = self.score_tensors(members)
+        values = self.score_tensors(members, include_components=include_components)
         return {
             "observer_sha256": self.receipt["sha256"],
             "sample_ids": self.receipt["sample_ids"],
@@ -359,6 +369,8 @@ class FrozenCoherenceObserver:
                 "scale": "complete_scale_fair" if self.complete_scale else "fixed_sampled_scale",
                 "shape": "fixed_pack_all_member_fair" if len(members) > 1 else "fixed_pack_paired",
             },
+            "shape_observation": ("ph_plus_fixed_position" if self.adapter.shape.position is not None
+                                  else "ph_only"),
             "per_sample": {k: v.detach().cpu().clone() for k, v in values.items()},
             "means": {k: float(v.mean()) for k, v in values.items()},
         }

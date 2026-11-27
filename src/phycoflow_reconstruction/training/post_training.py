@@ -318,9 +318,8 @@ def _coherence_objective(
         name: module for name, module in families.items() if family_execution(execution, name)[0]
     }
     draw_count = (
-        1
-        if scalable_runtime is not None and not model.capabilities.generative
-        else _conditional_draw_count(active_families)
+        (1 if not model.capabilities.generative else _conditional_draw_count(families))
+        if scalable_runtime is not None else _conditional_draw_count(active_families)
     )
     for draw in range(1, draw_count):
         draw_generator = torch.Generator(device=prediction.device).manual_seed(
@@ -476,6 +475,10 @@ def _coherence_objective(
             },
             conditional_draws,
         )
+        if scalable_runtime is not None:
+            # Scalable families score the same genuine endpoint population,
+            # even when one legacy family advertises fewer conditional draws.
+            call_context["conditional_draws"] = tuple(conditional_draws)
         with torch.autograd.profiler.record_function("descriptor_forward_" + family_name):
             if scalable_runtime is None:
                 result = family_call(
@@ -1091,7 +1094,7 @@ def _physical_endpoint_risk(endpoint, dataset, *, mean_risk=False):
     ).mean(dim=0)
 
 
-def _fit_source_physical_risk(model, dataset, config, device, *, seed):
+def _fit_source_physical_risk(model, dataset, config, device, *, seed, families):
     """Independently fit member fidelity on a reproducible ten-percent TRAIN panel."""
     limit = max(1, math.ceil(0.1 * len(dataset)))
     chosen = torch.randperm(len(dataset), generator=torch.Generator().manual_seed(seed))[:limit].tolist()
@@ -1103,6 +1106,7 @@ def _fit_source_physical_risk(model, dataset, config, device, *, seed):
     count = 0
     sample_ids = []
     draw_manifest = []
+    member_count = _conditional_draw_count(families) if model.capabilities.generative else 1
     try:
         with torch.no_grad():
             for index, batch in enumerate(source):
@@ -1110,29 +1114,51 @@ def _fit_source_physical_risk(model, dataset, config, device, *, seed):
                 complete = _slice_batch(batch, batch_size)
                 selected = subset_query_batch(complete, int(config["coherence"]["compute_budget"]["point_count"]), generator=generator)
                 model_batch = _without_target(complete if model.capabilities.structured_grid_required else selected)
+                initial_generator_state = generator.get_state().clone()
                 members = []
-                for j in range(2 if model.capabilities.generative else 1):
+                for j in range(member_count):
                     member_generator = generator if j == 0 else torch.Generator(device=device).manual_seed(_conditional_draw_seed(generator.initial_seed(), j))
                     value = differentiable_reconstruction(model, model_batch, steps=int(config["rollout"]["steps"]), solver=config["rollout"]["solver"], generator=member_generator, observation_config=dict(config["observation_consistency"]))
                     if model.capabilities.structured_grid_required:
                         value = _gather_prediction(value, complete, selected)
                     members.append(value)
-                endpoint = {"prediction": members[0], "members": tuple(members), "target": selected.target_fields, "mask": selected.query_valid_mask, "measure": batch_measure_context(selected)}
-                member_risk = _physical_endpoint_risk(endpoint, dataset)
+                endpoint = {"prediction": members[0], "members": tuple(members), "target": selected.target_fields, "mask": selected.query_valid_mask, "measure": batch_measure_context(selected),
+                            "coupling_selected_batch": selected, "query_indices": selected.metadata.get("query_indices"),
+                            "rollout_generator_state": initial_generator_state}
+                fidelity = config["optimization"]["multitask"].get("fidelity_budget", {})
+                if fidelity.get("rotating_complement") is not None:
+                    from .fidelity_quadrature import rotating_field_risks, stratified_field_risks
+                    selected_risk, complement = rotating_field_risks(model, endpoint, dataset, config,
+                        absolute_step=index, rollout_seed=seed + 1_000_003 + index,
+                        device=device, capture_endpoints=True)
+                    def quadrature(metric):
+                        return stratified_field_risks(torch.stack(members, dim=1), selected.target_fields,
+                            torch.stack(endpoint["complement_members"], dim=1), endpoint["complement_target"],
+                            endpoint["query_indices"], complement, dataset.physical_weights, metric=metric)
+                    member_risk = selected_risk if fidelity.get("metric") == "physical_member_mse_model_units" else quadrature("member_mse")
+                    mean_risk = (None if member_count < 2 else
+                        selected_risk if fidelity.get("metric") == "physical_mean_risk_model_units" else quadrature("mean_risk"))
+                else:
+                    member_risk = _physical_endpoint_risk(endpoint, dataset)
+                    mean_risk = _physical_endpoint_risk(endpoint, dataset, mean_risk=True) if member_count >= 2 else None
                 member_total = member_risk.double().sum(0) if member_total is None else member_total + member_risk.double().sum(0)
-                if model.capabilities.generative:
-                    mean_risk = _physical_endpoint_risk(endpoint, dataset, mean_risk=True)
+                if mean_risk is not None:
                     mean_total = mean_risk.double().sum(0) if mean_total is None else mean_total + mean_risk.double().sum(0)
                 count += member_risk.shape[0]
                 sample_ids.extend(selected.sample_ids)
-                draw_manifest.append({"sample_ids": list(selected.sample_ids), "query_sha256": _query_digest(selected.metadata["query_indices"]), "observation_indices_sha256": _query_digest(selected.obs_indices) if selected.obs_indices is not None else None, "rollout_seeds": [seed + 1_000_003 + index] + ([_conditional_draw_seed(seed + 1_000_003 + index, 1)] if model.capabilities.generative else [])})
+                draw_manifest.append({"sample_ids": list(selected.sample_ids), "query_sha256": _query_digest(selected.metadata["query_indices"]), "observation_indices_sha256": _query_digest(selected.obs_indices) if selected.obs_indices is not None else None, "rollout_seeds": [seed + 1_000_003 + index] + [_conditional_draw_seed(seed + 1_000_003 + index, j) for j in range(1, member_count)]})
     finally:
         source.close()
     if count != limit:
         raise ValueError("SOURCE risk panel did not cover its declared population")
     member_reference = member_total / count
     mean_reference = None if mean_total is None else mean_total / count
-    receipt = {"sample_ids": sample_ids, "seed": seed, "sample_count": count, "support": "native" if int(config["coherence"]["compute_budget"]["point_count"]) == math.prod(dataset.data_spec.logical_shape) else "selected", "units": "model_field_units_squared", "members": 2 if model.capabilities.generative else 1, "draw_manifest": draw_manifest, "field_order": list(dataset.field_names), "source_member_mse": member_reference.tolist(), "source_mean_risk": None if mean_reference is None else mean_reference.tolist()}
+    fidelity = config["optimization"]["multitask"].get("fidelity_budget", {})
+    support = ("selected_plus_rotating_complement" if fidelity.get("rotating_complement") is not None else
+               "native" if int(config["coherence"]["compute_budget"]["point_count"]) == math.prod(dataset.data_spec.logical_shape) else "selected")
+    receipt = {"sample_ids": sample_ids, "seed": seed, "sample_count": count, "support": support, "units": "model_field_units_squared", "members": member_count, "draw_manifest": draw_manifest, "field_order": list(dataset.field_names), "source_member_mse": member_reference.tolist(), "source_mean_risk": None if mean_reference is None else mean_reference.tolist()}
+    if fidelity.get("rotating_complement") is not None:
+        receipt.update(reference_law=fidelity.get("reference_law"), rotating_complement=dict(fidelity["rotating_complement"]))
     selected_risk = mean_reference if config["optimization"]["multitask"].get("fidelity_budget", {}).get("metric") == "physical_mean_risk_model_units" else member_reference
     return selected_risk, receipt
 
@@ -1148,6 +1174,9 @@ def _fidelity_reference_binding(config, dataset, source_hashes_before, source_me
     core_artifacts = {k: deepcopy(artifacts[k]) for k in ("state_bank", "shape_artifact", "priorities", "units", "active")}
     # Adaptive-bank settings change the outer config identity but not the C8
     # Shape object; bind its actual fitted values and shared source/support.
+    # A separately bound position observation does not alter the physical
+    # member-risk calibration or the pre-existing objective scale.
+    core_artifacts["shape_artifact"].pop("position", None)
     core_artifacts["shape_artifact"]["provenance"].pop("config_sha256", None)
     settings = dict(config["optimization"]["multitask"].get("fidelity_budget", {}))
     settings.pop("reference_artifact", None)
@@ -1183,7 +1212,76 @@ def _load_shared_fidelity_reference(declaration, expected_binding):
         raise ValueError("shared fidelity reference artifact hash mismatch")
     report = json.loads(path.read_text(encoding="utf-8"))
     if report.get("binding") != expected_binding:
-        raise ValueError("shared fidelity reference scientific binding mismatch")
+        new_settings = expected_binding.get("fidelity_settings", {})
+        if not new_settings.get("reference_member_mse_from_panel", False):
+            raise ValueError("shared fidelity reference scientific binding mismatch")
+        old_binding, new_binding = deepcopy(report.get("binding", {})), deepcopy(expected_binding)
+        old_binding.pop("sha256", None)
+        new_binding.pop("sha256", None)
+        old_settings = old_binding.pop("fidelity_settings", {})
+        new_binding.pop("fidelity_settings", None)
+        old_compute = dict(old_binding.pop("compute_budget", {}))
+        new_compute = dict(new_binding.pop("compute_budget", {}))
+        source_batch = old_compute.pop("batch_size", None)
+        training_batch = new_compute.pop("batch_size", None)
+        if (old_compute != new_compute or type(source_batch) is not int or source_batch < 1
+                or type(training_batch) is not int or training_batch < 1):
+            raise ValueError("member-MSE reuse requires the same query and support law")
+        panel = report.get("risk_reference_panel", {})
+        source_members = panel.get("members")
+        training_members = source_members
+        if new_settings.get("reference_member_count_reuse", False):
+            def without_draw_counts(value, counts):
+                if isinstance(value, Mapping):
+                    result = {}
+                    for key, child in value.items():
+                        if key == "conditional_draws":
+                            if type(child) is not int or child < 2:
+                                raise ValueError("conditional member count must describe independent draws")
+                            counts.append(child)
+                        else:
+                            result[key] = without_draw_counts(child, counts)
+                    return result
+                if isinstance(value, list):
+                    return [without_draw_counts(child, counts) for child in value]
+                return value
+            old_counts, new_counts = [], []
+            old_family = without_draw_counts(old_binding.pop("core_family_config", {}), old_counts)
+            new_family = without_draw_counts(new_binding.pop("core_family_config", {}), new_counts)
+            if (old_family != new_family or len(old_counts) != len(new_counts) or not old_counts
+                    or type(source_members) is not int or source_members < 2
+                    or max(old_counts) != source_members):
+                raise ValueError("member-count reuse requires the same independent-member family law")
+            training_members = max(new_counts)
+        adjustable = {"metric", "mean_risk_scales", "member_allowance_fraction",
+                      "relative_increase", "absolute_allowance", "denominator_floor",
+                      "field_units_squared", "reference_member_mse_from_panel", "reference_member_count_reuse"}
+        if (old_binding != new_binding or
+                {k: v for k, v in old_settings.items() if k not in adjustable} !=
+                {k: v for k, v in new_settings.items() if k not in adjustable}):
+            raise ValueError("shared member-MSE calibration observation, source, support or sampling law differs")
+        old_reference = _budget_from_state(report["reference"])
+        member = panel.get("source_member_mse")
+        if (not isinstance(old_reference, MeanRiskDifferenceBudget)
+                or panel.get("field_order") != list(old_reference.field_names)
+                or panel.get("source_mean_risk") != list(old_reference.reference_risks)
+                or panel.get("reference_law") != new_settings.get("reference_law")
+                or not isinstance(member, list) or len(member) != len(old_reference.field_names)
+                or any(not math.isfinite(float(x)) or float(x) < 0 for x in member)):
+            raise ValueError("shared reference lacks a matching ordered member-MSE calibration panel")
+        reference = FidelityBudget.from_reference(old_reference.field_names, member,
+            old_reference.objective_scale, relative_increase=new_settings.get("relative_increase", 0.05),
+            absolute_allowance=new_settings.get("absolute_allowance", 0.0),
+            denominator_floor=new_settings.get("denominator_floor", 1e-8),
+            field_units_squared=new_settings.get("field_units_squared"))
+        report = {**report, "binding": expected_binding, "settings": new_settings,
+                  "reference": reference.state_dict(),
+                  "member_mse_calibration_reuse": {"path": str(path), "sha256": declaration["sha256"],
+                    "source_reference_kind": "mean_risk_difference", "source_panel_member_count": source_members,
+                    "training_member_count": training_members, "source_batch_size": source_batch,
+                    "training_batch_size": training_batch,
+                    "member_count_effect": "Monte Carlo precision; population member-MSE estimand unchanged"}}
+        return reference, report
     reference = _budget_from_state(report["reference"])
     if isinstance(reference, MeanRiskDifferenceBudget):
         panel = report.get("risk_reference_panel", {})
@@ -1256,7 +1354,7 @@ def _calibrate_fidelity_budget(
         post_training_mode(model, config)
         risk_reference, risk_receipt = (None, None)
         if scalable:
-            risk_reference, risk_receipt = _fit_source_physical_risk(model, dataset, config, device, seed=seed + 271828)
+            risk_reference, risk_receipt = _fit_source_physical_risk(model, dataset, config, device, seed=seed + 271828, families=families)
         source = build_training_batch_source(
             dataset, indices, config, query_points=query_points, device=device, start_step=0
         )
@@ -1332,21 +1430,23 @@ def _calibrate_fidelity_budget(
     if family_means is not None:
         family_means.update({name: total / samples for name, total in family_sums.items()})
     if settings.get("metric") == "physical_mean_risk_model_units":
-        if not scalable or not model.capabilities.generative:
+        if not scalable or risk_reference is None:
             raise ValueError("mean risk requires a scalable generative source with independent members")
         fraction = settings.get("member_allowance_fraction")
-        allowance = ([float(fraction) * x for x in risk_receipt["source_member_mse"]] if fraction is not None else [float(settings.get("absolute_allowance", 0.0))] * len(dataset.field_names))
+        absolute = settings.get("absolute_allowance", 0.0)
+        allowance = ([float(fraction) * x for x in risk_receipt["source_member_mse"]] if fraction is not None else (list(absolute) if isinstance(absolute, (list, tuple)) else [float(absolute)] * len(dataset.field_names)))
         reference = MeanRiskDifferenceBudget.from_reference(dataset.field_names, risk_reference, allowance, settings["mean_risk_scales"], objective_scale=max(scientific_sum / samples, 1e-8))
     else:
         reference = FidelityBudget.from_reference(
             dataset.field_names, risk_reference if scalable else sums / counts, scientific_sum / samples,
-            relative_increase=float(settings.get("relative_increase", 0.05)),
-            absolute_allowance=float(settings.get("absolute_allowance", 0.0)),
-            denominator_floor=float(settings.get("denominator_floor", 1e-8)),
+            relative_increase=settings.get("relative_increase", 0.05),
+            absolute_allowance=settings.get("absolute_allowance", 0.0),
+            denominator_floor=settings.get("denominator_floor", 1e-8),
+            field_units_squared=settings.get("field_units_squared"),
         )
     return reference, {
         "settings": settings,
-        "effective_draws": (2 if model.capabilities.generative else 1) if scalable else draws,
+        "effective_draws": risk_receipt["members"] if scalable else draws,
         "calibration_repeats": draws,
         "batches": count,
         "risk_definition": settings.get("metric", "physical_member_mse_model_units")
@@ -2001,6 +2101,21 @@ def _record_checkpoint_clock(run_dir, epoch, global_step, checkpoint_path):
         stream.write(json.dumps(row, allow_nan=False) + "\n")
 
 
+def strict_post_training_algorithms(config):
+    """Resolve explicit strict mode without changing historical defaults."""
+    return bool(config.get("runtime", {}).get("strict_algorithms", False) or
+        config.get("coherence", {}).get("scalable_anchored_coherence", {}).get("common_prefit"))
+
+
+def prepare_post_training_cuda_workspace(config):
+    """Prepare strict CUDA workspace before an outer runner initializes CUDA."""
+    strict = strict_post_training_algorithms(config)
+    if strict:
+        from ..utils.reproducibility import configure_deterministic_cublas_workspace
+        configure_deterministic_cublas_workspace()
+    return strict
+
+
 def run_post_training(
     config: Mapping[str, Any],
     *,
@@ -2034,7 +2149,7 @@ def run_post_training(
         raise ValueError("prepare_only requires a fresh immutable attempt")
     _configure_persistence_workers(config)
     seed = int(config["runtime"].get("seed", 42))
-    strict_algorithms = bool(config.get("coherence", {}).get("scalable_anchored_coherence", {}).get("common_prefit"))
+    strict_algorithms = strict_post_training_algorithms(config)
     seed_everything(seed, bool(config["runtime"].get("deterministic", True)), strict_algorithms=strict_algorithms)
     device = torch.device(config["runtime"].get("device", "cpu"))
     if device.type == "cuda" and not torch.cuda.is_available():
@@ -2329,6 +2444,11 @@ def run_post_training(
             raise ValueError("scalable coherence requires live expected provenance")
         from .scalable_runtime import ScalableRuntime
 
+        position_declaration = scalable_settings.get("position_artifact")
+        if position_declaration is not None:
+            from .scalable_prefit import attach_position_artifact
+
+            scalable_artifacts = attach_position_artifact(scalable_artifacts, position_declaration)
         scalable_runtime = ScalableRuntime(
             scalable_artifacts,
             families,
@@ -3193,31 +3313,57 @@ def run_post_training(
                         ordered_losses, objective_scale=policy.reference.objective_scale
                     )
                     row["ordered_primary_surrogate"] = float(coherence_loss.detach().cpu())
-                risks = (
-                    _physical_endpoint_risk(endpoint_context, train_dataset, mean_risk=config["optimization"]["multitask"].get("fidelity_budget", {}).get("metric") == "physical_mean_risk_model_units").mean(dim=0)
-                    if scalable_runtime is not None
-                    else field_mse(
-                        endpoint_context["prediction"],
-                        endpoint_context["target"],
-                        endpoint_context["mask"],
-                    )
-                )
-                if config["optimization"]["multitask"].get("fidelity_budget", {}).get("rotating_complement") is not None:
-                    if scalable_runtime is None or len(endpoint_context["members"]) != 2:
-                        raise ValueError("rotating complement requires scalable J2 fidelity")
-                    from .fidelity_quadrature import rotating_field_risks
+                fidelity_settings = config["optimization"]["multitask"].get("fidelity_budget", {})
+                metric = fidelity_settings.get("metric")
+                record_member_diagnostics = monitor._member_mse_recording
+                if fidelity_settings.get("rotating_complement") is not None:
+                    if scalable_runtime is None:
+                        raise ValueError("rotating complement requires scalable physical fidelity")
+                    from .fidelity_quadrature import rotating_field_risks, stratified_field_risks
                     field_risks, field_complement = rotating_field_risks(model, endpoint_context, train_dataset, config,
                         absolute_step=global_step, rollout_seed=seed + 1_000_003 + global_step,
-                        device=device, endpoint_boundary=endpoint_boundary)
+                        device=device, endpoint_boundary=endpoint_boundary,
+                        capture_endpoints=record_member_diagnostics)
                     risks = field_risks.mean(dim=0)
+                    if record_member_diagnostics:
+                        with torch.no_grad():
+                            row["field_member_mse"] = dict(zip(train_dataset.field_names,
+                                (float(value) for value in risks.detach().cpu())))
+                            signed = None
+                            if len(endpoint_context["members"]) >= 2:
+                                signed = stratified_field_risks(
+                                    torch.stack(endpoint_context["members"], dim=1).detach(), endpoint_context["target"],
+                                    torch.stack(endpoint_context["complement_members"], dim=1).detach(), endpoint_context["complement_target"],
+                                    endpoint_context["query_indices"], field_complement, train_dataset.physical_weights,
+                                    metric="mean_risk").mean(dim=0)
+                            row["field_signed_mean_risk"] = (None if signed is None else
+                                dict(zip(train_dataset.field_names, (float(value) for value in signed.cpu()))))
+                            row["fidelity_estimator"] = {"risk": "member_mse", "units": "model_field_units_squared",
+                                "estimator": "selected_plus_rotating_complement", "members": len(endpoint_context["members"])}
                     # Only risks should own this graph until the existing
                     # post-action cleanup, before the next rollout allocates.
                     del field_risks
                     actual_coupling["field_complement_sha256"] = _digest(field_complement)
-                    actual_coupling["field_complement_seed"] = 20261125 + global_step
-                    row["field_quadrature"] = {"selected_points": 4096, "complement_points": 512,
+                    actual_coupling["field_complement_seed"] = fidelity_settings["rotating_complement"]["seed"] + global_step
+                    row["field_quadrature"] = {"selected_points": int(endpoint_context["query_indices"].shape[1]), "complement_points": int(field_complement.shape[1]),
                         "native_points": int(train_dataset.physical_weights.numel()),
                         "design": "fixed_S_plus_uniform_complement_without_replacement"}
+                else:
+                    risks = (
+                        _physical_endpoint_risk(endpoint_context, train_dataset, mean_risk=metric == "physical_mean_risk_model_units").mean(dim=0)
+                        if scalable_runtime is not None
+                        else field_mse(endpoint_context["prediction"], endpoint_context["target"], endpoint_context["mask"])
+                    )
+                    if record_member_diagnostics:
+                        with torch.no_grad():
+                            row["field_member_mse"] = dict(zip(train_dataset.field_names,
+                                (float(value) for value in risks.detach().cpu())))
+                            signed = (_physical_endpoint_risk(endpoint_context, train_dataset, mean_risk=True).mean(dim=0)
+                                      if len(endpoint_context["members"]) >= 2 else None)
+                            row["field_signed_mean_risk"] = (None if signed is None else
+                                dict(zip(train_dataset.field_names, (float(value) for value in signed.cpu()))))
+                            row["fidelity_estimator"] = {"risk": "member_mse", "units": "model_field_units_squared",
+                                "estimator": "selected_or_native_support", "members": len(endpoint_context["members"])}
                 if coherence_aggregator is not None:
                     # This mapping defines three separate parameter gradients.
                     # Keep A/B/T order explicit rather than the alphabetical
@@ -3380,7 +3526,8 @@ def run_post_training(
                     "vjp_chunk_size": coherence_aggregator.vjp_chunk_size,
                     "rollout_checkpointing": bool(getattr(model, "rollout_checkpointing", False)),
                     "rollout_context_cache": getattr(model, "rollout_context_cache", "none"),
-                    "field_reference_sha256": fidelity_settings["reference_artifact"]["sha256"],
+                    "field_reference_sha256": (fidelity_settings["reference_artifact"]["sha256"] if fidelity_settings.get("reference_artifact")
+                        else file_sha256(store.run_dir / "artifacts/fidelity_budget_reference.json")),
                     "reference_law": fidelity_settings["reference_law"],
                     "scale_objective": scalable_settings.get("scale_objective", "composite"),
                 }

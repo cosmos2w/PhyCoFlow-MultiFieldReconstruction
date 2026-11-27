@@ -6,8 +6,9 @@ Use this index for current reading; historical source locations remain compatibi
 | --- | --- |
 | Plans and handoffs | [Plan library](_Plans/README.md) |
 | Reports and figures | [Report library](_Reports/README.md) |
-| Latest completed execution | [Round 7: matched 100-epoch comparison and unchanged joint-anchor continuation to epoch 500](_Plans/Coherence_Adaptive_Repair/_bk/Round_7/WORKPLAN.md); adopt the qualified exact executor, close the tested joint recipe, retain SOURCE/C8 |
-| Adaptive Repair publication | [Round 7 report](_Reports/Coherence_Adaptive_Repair/Round_7/report.md); [Round 6 Scale alignment supplement](_Reports/Coherence_Adaptive_Repair/Round_6/Scale_Alignment_Followup/report.md) |
+| Completed Adaptive Repair plan | [Round 8: coherent fidelity and spatial observations](_Plans/Coherence_Adaptive_Repair/_bk/Round_8/WORKPLAN.md), closed at the matched 100-epoch review |
+| Latest completed execution | [Round 8: matched member-MSE/Shape review](_Plans/Coherence_Adaptive_Repair/_bk/Round_8/WORKPLAN.md); both arms closed at epoch 100 and SOURCE/C8 was retained. [Round 7](_Plans/Coherence_Adaptive_Repair/_bk/Round_7/WORKPLAN.md) remains closed. |
+| Adaptive Repair publication | [Round 8 report](_Reports/Coherence_Adaptive_Repair/Round_8/report.md); [Round 7 report](_Reports/Coherence_Adaptive_Repair/Round_7/report.md); [Round 6 Scale alignment supplement](_Reports/Coherence_Adaptive_Repair/Round_6/Scale_Alignment_Followup/report.md) |
 | Project organization outcome | [Migration and management report](_Reports/Project_Organization/report.md) |
 | Storage ownership and physical map | [Storage map](../docs/Storage_Map.md) |
 | Authoritative management rules | [Experiment artifacts](../docs/Experiment_Artifacts.md) |

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+from copy import deepcopy
 
 import torch
 
@@ -71,6 +72,41 @@ class LazyPooledShape:
         self.domain = None
         self.line_weights = list(LINE_WEIGHTS)
         self.provenance = None
+        self.position = None
+        self._position_geometry = None
+
+    def set_position(self, state):
+        """Opt into a separately TRAIN-fitted, fixed positional observation."""
+        from .positional_shape import PositionalShape, _key
+
+        position = PositionalShape(deepcopy(state))
+        if self.domain is None or tuple(position.grid_shape) != tuple(self.domain[0]):
+            raise ValueError("positional and pooled Shape domains differ")
+        if self.domain[1] is None and not position.mask.all():
+            raise ValueError("positional and pooled Shape masks differ")
+        required = {_key(key) for key in self.scales}
+        if not required.issubset(position.thresholds):
+            raise ValueError("positional calibration lacks a Shape category")
+        mask_digest = (None if self.domain[1] is None else hashlib.sha256(
+            position.mask.numpy().tobytes()).hexdigest())
+        if mask_digest != self.domain[1]:
+            raise ValueError("positional and pooled Shape masks differ")
+        self.position = position
+        self._position_geometry = None
+
+    def bind_position_geometry(self, family):
+        """Check the fitted position map against the actual fixed family raster."""
+        if self.position is None:
+            return
+        identity = family.geometry_sha256
+        if not identity:
+            raise ValueError("fitted Shape family geometry required")
+        if self._position_geometry != identity:
+            actual = family.grid_coordinates.detach().cpu().double()
+            expected = torch.as_tensor(self.position.state["coordinates"]).double()
+            if actual.shape != expected.shape or not torch.equal(actual, expected):
+                raise ValueError("positional Shape and family raster coordinates differ")
+            self._position_geometry = identity
 
     def _domain(self, x, mask):
         mask_digest = (
@@ -142,8 +178,8 @@ class LazyPooledShape:
         off = x.new_tensor(_OFFSETS[line])[None, :, None, None]
         return ((y * s - off) / v).amax(1)
 
-    def _diagram_bank(self, x, queries, mask):
-        """Construct only selected filtrations in query-major, then batch order."""
+    def _filtration_bank(self, x, queries):
+        """Construct selected scalar filtrations once, in batch/query order."""
         if not queries:
             raise ValueError("at least one selected Shape query is required")
         left = torch.tensor([q[1][0] for q in queries], device=x.device, dtype=torch.long)
@@ -171,10 +207,22 @@ class LazyPooledShape:
             [q[3] is not None for q in queries], device=x.device, dtype=torch.bool
         )[None, :, None, None]
         filtrations = torch.where(mutual, torch.maximum(lhs, rhs), a * signs_left)
+        return filtrations
+
+    def _diagram_bank(self, x, queries, mask, *, return_filtrations=False):
+        """Construct selected diagrams, optionally sharing their filtration."""
+        filtrations = self._filtration_bank(x, queries)
         flat = filtrations.permute(1, 0, 2, 3).reshape(-1, *x.shape[-2:])
-        return cubical_diagrams(
+        diagrams = cubical_diagrams(
             flat, periodic=self.periodic, dimensions=self.dimensions, valid_mask=mask
         )
+        return (diagrams, filtrations) if return_filtrations else diagrams
+
+    def _endpoint(self, x, queries, mask):
+        if self.position is None:
+            return self._diagram_bank(x, queries, mask), None
+        diagrams, filtrations = self._diagram_bank(x, queries, mask, return_filtrations=True)
+        return diagrams, self.position.features(filtrations, queries)
 
     def _distance(self, a, b, norm):
         left = [item[d] for item in a for d in self.dimensions]
@@ -278,8 +326,9 @@ class LazyPooledShape:
         self._validate(reference, reference)
         norm = self._domain(reference, valid_mask)
         with torch.no_grad():
-            diagrams = self._diagram_bank(reference.detach(), queries, valid_mask)
-        return diagrams, norm, tuple(reference.shape)
+            diagrams, features = self._endpoint(reference.detach(), queries, valid_mask)
+        result = (diagrams, norm, tuple(reference.shape))
+        return result if features is None else (*result, features)
 
     def score_compiled(self, members, queries, compiled_reference, *, valid_mask=None, include_components=False):
         """All-member fair score with one diagram construction per endpoint.
@@ -288,12 +337,15 @@ class LazyPooledShape:
         reusable across optimizer updates. This kernel is differentiable in every
         supplied member and supports deterministic J1 and conditional J>=2.
         """
-        target, norm, reference_shape = compiled_reference
+        target, norm, reference_shape, *position_target = compiled_reference
+        if bool(position_target) != (self.position is not None):
+            raise ValueError("compiled positional Shape target does not match observer")
         if members.ndim != 5 or tuple(members.shape[1:]) != reference_shape or not len(members):
             raise ValueError("Shape members must match compiled reference [J,B,C,H,W]")
         if self._domain(members[0], valid_mask) != norm:
             raise ValueError("compiled Shape domain changed")
-        banks = [self._diagram_bank(x, queries, valid_mask) for x in members]
+        endpoints = [self._endpoint(x, queries, valid_mask) for x in members]
+        banks = [item[0] for item in endpoints]
         j = len(banks)
         attraction = sum(self._distance(x, target, norm) for x in banks) / j
         raw = attraction
@@ -308,6 +360,17 @@ class LazyPooledShape:
         scales = torch.stack([self.scales[q[0]] for q in queries]).to(raw)
         leaf = raw / scales[:, None]
         values = (0.9 * leaf[..., 0] + 0.1 * leaf[..., 1]).mean(-1)
+        position_attraction = position_separation = None
+        if self.position is not None:
+            features = [item[1] for item in endpoints]
+            position_attraction = sum(self.position.distance(x, position_target[0]) for x in features) / j
+            position_separation = torch.zeros_like(position_attraction)
+            if j > 1:
+                position_separation = sum(
+                    self.position.distance(features[a], features[b])
+                    for a in range(j) for b in range(a + 1, j)
+                ) / (j * (j - 1))
+            values = 0.5 * (values + (position_attraction - position_separation) / self.position.unit)
         weights = values.new_tensor([q[4] for q in queries])
         result = {
             kind: sum(
@@ -322,7 +385,15 @@ class LazyPooledShape:
                 for kind in ("self", "mutual"):
                     for index, category, factor in ((0, "finite", 0.9), (1, "essential", 0.1)):
                         result[f"{kind}.{category}.{label}"] = sum(
-                            (factor * normalized[i, ..., index].mean(-1) * weights[i]
+                            ((0.5 if self.position is not None else 1.0) * factor * normalized[i, ..., index].mean(-1) * weights[i]
+                             for i, q in enumerate(queries) if q[0][0] == kind),
+                            start=values.new_zeros(len(members[0])),
+                        )
+            if self.position is not None:
+                for label, part in (("attraction", position_attraction), ("separation", position_separation)):
+                    for kind in ("self", "mutual"):
+                        result[f"{kind}.position.{label}"] = sum(
+                            (0.5 * part[i] / self.position.unit * weights[i]
                              for i, q in enumerate(queries) if q[0][0] == kind),
                             start=values.new_zeros(len(members[0])),
                         )
@@ -341,6 +412,7 @@ class LazyPooledShape:
         mode="conditional",
         additional_members=(),
         empirical=False,
+        return_components=False,
     ):
         if mode not in {"paired", "conditional"} or (mode == "paired") != (second is None):
             raise ValueError(
@@ -358,9 +430,10 @@ class LazyPooledShape:
         for member in additional_members:
             self._validate(member, reference)
         atoms = (first,) if second is None else (first, second, *additional_members)
-        banks = [self._diagram_bank(atom, queries, valid_mask) for atom in atoms]
+        endpoints = [self._endpoint(atom, queries, valid_mask) for atom in atoms]
+        banks = [item[0] for item in endpoints]
         with torch.no_grad():
-            t = self._diagram_bank(reference.detach(), queries, valid_mask)
+            t, target_features = self._endpoint(reference.detach(), queries, valid_mask)
         shape = (len(queries), len(first), len(self.dimensions), 2)
         if mode == "conditional" and len(banks) == 2 and not empirical:
             # Retain the historical arithmetic order and its tie gradients.
@@ -377,6 +450,18 @@ class LazyPooledShape:
         scales = torch.stack([self.scales[q[0]] for q in queries]).to(raw)
         leaf = raw / scales[:, None]
         values = (0.9 * leaf[..., 0] + 0.1 * leaf[..., 1]).mean(-1)
+        component_values = {"ph": values}
+        if self.position is not None:
+            features = [item[1] for item in endpoints]
+            location = sum(self.position.distance(value, target_features) for value in features) / len(features)
+            if mode == "conditional":
+                count = len(features)
+                location = location - sum(
+                    self.position.distance(features[i], features[j])
+                    for i in range(count) for j in range(i + 1, count)
+                ) / (count * (count if empirical else count - 1))
+            component_values = {"ph": 0.5 * values, "position": 0.5 * location / self.position.unit}
+            values = component_values["ph"] + component_values["position"]
         weights = values.new_tensor([q[4] for q in queries])
         totals = {}
         for kind in ("self", "mutual"):
@@ -388,8 +473,19 @@ class LazyPooledShape:
                 ).sum(0)
             else:
                 totals[kind] = first.new_zeros(len(first))
-        if not return_leaves:
+        if not return_leaves and not return_components:
             return totals
+        components = None
+        if return_components:
+            components = {
+                f"{kind}.{label}": sum(
+                    (part[i] * weights[i] for i, q in enumerate(queries) if q[0][0] == kind),
+                    start=values.new_zeros(len(first)),
+                )
+                for label, part in component_values.items() for kind in ("self", "mutual")
+            }
+        if not return_leaves:
+            return totals, components
         leaves = {"self": {}, "pair": {}}
         for kind, draws in (("self", batch.self_queries), ("pair", batch.pair_queries)):
             for draw in draws:
@@ -405,12 +501,12 @@ class LazyPooledShape:
                     values.index_select(0, selection)
                     * (weights.index_select(0, selection) / draw.weight)[:, None]
                 ).sum(0)
-        return totals, leaves
+        return (totals, leaves, components) if return_components else (totals, leaves)
 
     def state_dict(self):
         if self.scales is None:
             raise ValueError("calibration must be frozen")
-        return {
+        state = {
             "version": VERSION,
             "field_mean": self.mean.tolist(),
             "field_scale": self.scale.tolist(),
@@ -422,6 +518,9 @@ class LazyPooledShape:
             "provenance": self.provenance,
             "scales": [(k, v.tolist(), self.counts[k]) for k, v in self.scales.items()],
         }
+        if self.position is not None:
+            state["position"] = deepcopy(self.position.state)
+        return state
 
     @classmethod
     def from_state_dict(cls, state):
@@ -437,7 +536,8 @@ class LazyPooledShape:
             "provenance",
             "scales",
         }
-        if not isinstance(state, dict) or set(state) != required or state["version"] != VERSION:
+        if (not isinstance(state, dict) or set(state) not in (required, required | {"position"})
+                or state["version"] != VERSION):
             raise ValueError("incompatible Shape artifact")
         obj = cls(
             state["field_mean"],
@@ -517,4 +617,6 @@ class LazyPooledShape:
             scales,
             counts,
         )
+        if "position" in state:
+            obj.set_position(state["position"])
         return obj

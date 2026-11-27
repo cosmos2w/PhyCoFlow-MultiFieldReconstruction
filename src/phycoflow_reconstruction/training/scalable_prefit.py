@@ -85,6 +85,45 @@ def _core_body_digest(artifacts):
     return _digest(body)
 
 
+def attach_position_artifact(artifacts, declaration):
+    """Add a fitted position observation to an otherwise identical PH core.
+
+    The TRAIN/SOURCE, support, observer and fitted scales must match the live
+    common core. The new immutable identity is reconstructed on every resume.
+    """
+    path = Path(declaration["path"])
+    if file_sha256(path) != declaration["sha256"]:
+        raise ValueError("position observer artifact hash mismatch")
+    candidate = torch.load(path, map_location="cpu", weights_only=True)
+    validate_scalable_artifacts(candidate, candidate["provenance"])
+    old = candidate["provenance"]
+    current = artifacts["provenance"]
+    if any(old[key] != current[key] for key in current if key != "config_sha256"):
+        raise ValueError("position observer SOURCE, TRAIN population or support differs")
+    stripped = deepcopy(candidate)
+    position = stripped["shape_artifact"].pop("position", None)
+    # Some earlier fit scripts serialized the transform through the loader's
+    # tensor dtype before saving. Compare the actual loaded transforms, then
+    # retain the base artifact's original full-precision metadata unchanged.
+    from ..coherence.shape_compute import LazyPooledShape
+    candidate_shape = LazyPooledShape.from_state_dict(stripped["shape_artifact"])
+    original_shape = LazyPooledShape.from_state_dict(artifacts["shape_artifact"])
+    if not (torch.equal(candidate_shape.mean, original_shape.mean) and
+            torch.equal(candidate_shape.scale, original_shape.scale)):
+        raise ValueError("position observer field transform differs from the base PH core")
+    compare_candidate, compare_base = deepcopy(stripped), deepcopy(artifacts)
+    for value in (compare_candidate, compare_base):
+        value["shape_artifact"].pop("field_mean")
+        value["shape_artifact"].pop("field_scale")
+    if position is None or _core_body_digest(compare_candidate) != _core_body_digest(compare_base):
+        raise ValueError("position observer must retain the exact underlying PH core")
+    effective = deepcopy(artifacts)
+    effective["shape_artifact"]["position"] = position
+    effective["sha256"] = _digest({key: value for key, value in effective.items() if key != "sha256"})
+    validate_scalable_artifacts(effective, current)
+    return effective
+
+
 def prepare_scalable_artifacts(
     model, dataset, families, config, *, source_sha256, device, artifact_path
 ):
@@ -110,9 +149,18 @@ def prepare_scalable_artifacts(
     sensor_count = settings.get("source_sensor_count")
     manifest_indices = None
     if sensor_count is not None:
-        if "T" not in dataset.data_spec.field_names:
-            raise ValueError("fixed source sensor panel requires field T")
-        field = dataset.data_spec.field_names.index("T")
+        observed_fields = tuple(config["observations"]["fields"])
+        sensor_field = settings.get("source_sensor_field")
+        if sensor_field is None and len(observed_fields) == 1:
+            sensor_field = observed_fields[0]
+        if (sensor_field is None and "T" in observed_fields and
+                (artifact_path.exists() or settings.get("common_core") is not None)):
+            # Frozen legacy artifacts used T in this exact ambiguous case.
+            # Retain their manifest without imposing that role on new panels.
+            sensor_field = "T"
+        if sensor_field not in observed_fields or sensor_field not in dataset.data_spec.field_names:
+            raise ValueError("fixed source sensor panel requires a declared observed source_sensor_field")
+        field = dataset.data_spec.field_names.index(sensor_field)
         manifest_indices = {}
         for index, sample in zip(indexes, samples):
             condition_seed = 2047 + int(index)

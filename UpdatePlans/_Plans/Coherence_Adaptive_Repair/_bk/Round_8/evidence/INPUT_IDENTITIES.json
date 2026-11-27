@@ -1,0 +1,101 @@
+{
+  "purpose": "Read-only Round 8 planning input identities; not a freeze or terminal Round 7 receipt",
+  "review_date_local": "2026-11-26",
+  "timezone": "America/New_York",
+  "recorded_at_utc": "2026-11-26T18:31:58.170585+00:00",
+  "branch": "Coherence_Adaptive_Repair",
+  "head": "b5bbf8fce710746295853841473596c9832e290a",
+  "working_tree_contains_concurrent_round7_edits": true,
+  "files": [
+    {
+      "path": "UpdatePlans/Coherence_Manuscript_Foundation/00_Overall/MANUSCRIPT_GUIDE.md",
+      "sha256": "83af3229362f18ff66e3d0f7c46612f6e971b98cf2900e8e104415046a02696a"
+    },
+    {
+      "path": "UpdatePlans/Coherence_Manuscript_Foundation/00_Overall/MANUSCRIPT_EVIDENCE.md",
+      "sha256": "d9a4e7d638bc0fc069ee8224120e9ef03a8cf74f2169ce91c307c9d915697e86"
+    },
+    {
+      "path": "UpdatePlans/Coherence_Manuscript_Foundation/01_Theory/LPC_THEORY.md",
+      "sha256": "0fc1faaa88757d552d3f23800684cb66c7ce6679d9b85e89e8a1102dc17a8de9"
+    },
+    {
+      "path": "UpdatePlans/Coherence_Manuscript_Foundation/01_Theory/LPC_EVIDENCE.md",
+      "sha256": "abc318538a6176cfa577dbeddc774e9529ec53448878fe8edbd8b9c941a49d31"
+    },
+    {
+      "path": "src/phycoflow_reconstruction/data/training_batches.py",
+      "sha256": "6f50f82f135c5cdea81d85749af677077eb68b8da4f78b63ddddd9b0fe04e8a2"
+    },
+    {
+      "path": "src/phycoflow_reconstruction/training/scalable_prefit.py",
+      "sha256": "8e088a223ff11d21bc72740503e6cdf6025087325d8f625aaba8224b8850d1cf"
+    },
+    {
+      "path": "src/phycoflow_reconstruction/training/fidelity_budget.py",
+      "sha256": "24394387c1804add2552df789532cb9264d09a84052992db4382aa1d8d38ce2f"
+    },
+    {
+      "path": "src/phycoflow_reconstruction/training/fidelity_quadrature.py",
+      "sha256": "2583e0944dd2ee186a5c87f4089252fed0e9df33bbbab93ee9dcd07bfb9973b0"
+    },
+    {
+      "path": "src/phycoflow_reconstruction/training/post_training.py",
+      "sha256": "40696b93395ae6d0a3a2004f6aaebd2868158cd878cd35e554a4a4f16c5dba3b"
+    },
+    {
+      "path": "src/phycoflow_reconstruction/training/multitask.py",
+      "sha256": "55c1db3a96f99c4778c9cf44dfc71e454d0dc29e878cd70cf8b6e240e3c6a985"
+    },
+    {
+      "path": "src/phycoflow_reconstruction/training/scalable_runtime.py",
+      "sha256": "798c4440b5f56b35af3fff18dbcaaeda03f97df3b89a5ad65562db71b7b2df48"
+    },
+    {
+      "path": "src/phycoflow_reconstruction/coherence/physical_risk.py",
+      "sha256": "5caa65fc2d469407eb3236ca55ef4509fe8899b5a9537b34b707126bd3816b93"
+    },
+    {
+      "path": "src/phycoflow_reconstruction/coherence/state_compute.py",
+      "sha256": "eaa050e46880110bf6b5a021725fe7bf95be78b3a17e2cff6c20a48c423bfdf4"
+    },
+    {
+      "path": "src/phycoflow_reconstruction/coherence/scale_compute.py",
+      "sha256": "a2a0f6c74b0fe6ca321f885ca072ee306476d5130edc21efb46bfc9704fa9490"
+    },
+    {
+      "path": "src/phycoflow_reconstruction/coherence/query_runtime.py",
+      "sha256": "b1c28ac1e7d288423ee77351a06de8134545d5293d9f4788da89bbf41b457655"
+    },
+    {
+      "path": "src/phycoflow_reconstruction/coherence/shape_compute.py",
+      "sha256": "17befdc10b806ef5e29ff81bc3003bb61c41f21cd546f04034e99a4fbe7792fb"
+    },
+    {
+      "path": "src/phycoflow_reconstruction/coherence/families/topology/persistence.py",
+      "sha256": "c4b1d2101dead36455986d67a714def593f92a829c82b3da5d3a108996206818"
+    },
+    {
+      "path": "src/phycoflow_reconstruction/coherence/families/topology/spatial_persistence.py",
+      "sha256": "eda6d46150214ebdc506ac9908c1735322c19dbb82bba710d1aaba94e43c00e3"
+    },
+    {
+      "path": "src/phycoflow_reconstruction/evaluation/frozen_coherence.py",
+      "sha256": "a1ad9becca05e4a76f758b51817d96799501c1b47cee6da795c30af1f9a6a54f"
+    },
+    {
+      "path": "scripts/posttraining/assess_car_round7.py",
+      "sha256": "dc0fdf98fb232365cd7b58679eef98c7be6d3ec48eaf3d6e8ef6da760d1a20a5"
+    },
+    {
+      "path": "scripts/analysis/car_round7_scale_decompose.py",
+      "sha256": "0d98cbf251c670de1d5418a073f30d2826465080dc6cfca31322470db4621695"
+    }
+  ],
+  "user_five_question_attachment": {
+    "path": "/home/wanglz/.codex/attachments/7dd00335-b37d-4154-b5b5-64009594dee9/Pasted text.txt",
+    "sha256": "bc02939fe6d2ccaa51f21edce31177e26a0e787ec8100f7998306a0957d91f31"
+  },
+  "prior_method_pdf_is_a_different_attachment": true,
+  "round7_evidence_scope": "sealed matched100, preparation and revised manuscript ledger; terminal outcome pending reconciliation"
+}

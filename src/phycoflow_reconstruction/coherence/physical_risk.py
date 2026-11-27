@@ -39,6 +39,27 @@ def physical_field_mse(
     )
 
 
+def physical_ensemble_risk(
+    members: Tensor, reference: Tensor, masses: Tensor, *, metric: str, **sampling
+) -> Tensor:
+    """Physical member MSE or corrected signed mean risk on the stated design.
+
+    Member MSE permits a genuine single output. The signed correction requires
+    at least two independent members; a duplicate deterministic output is not
+    an independent draw.
+    """
+    if metric not in {"member_mse", "mean_risk"}:
+        raise ValueError("physical ensemble metric must be member_mse or mean_risk")
+    if members.ndim < 3 or members.shape[-3] < 1:
+        raise ValueError("physical ensemble requires at least one member")
+    if metric == "mean_risk":
+        return physical_ensemble_risks(members, reference, masses, **sampling)[1]
+    member_squared = (members - reference.unsqueeze(-3)).square().mean(dim=-3)
+    return _integral(member_squared, masses, total_mass=sampling.get("total_mass"),
+                     sampling=sampling.get("sampling", "full"),
+                     probabilities=sampling.get("probabilities"))
+
+
 def physical_ensemble_risks(members: Tensor, reference: Tensor, masses: Tensor, **sampling) -> tuple[Tensor, Tensor]:
     """Return member MSE and unbiased signed mean risk for [..., J, Q, C].
 

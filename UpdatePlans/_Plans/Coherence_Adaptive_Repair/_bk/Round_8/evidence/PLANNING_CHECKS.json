@@ -1,0 +1,80 @@
+{
+  "checked_at_utc": "2026-11-26T18:47:36.270799+00:00",
+  "scope": "planning bundle and synthetic CPU checks only; not production qualification",
+  "local_bundle": {
+    "documents": 8,
+    "local_links": 70,
+    "issues": []
+  },
+  "relocated_bundle": {
+    "documents": 8,
+    "local_links": 70,
+    "issues": []
+  },
+  "relocation": "isolated reviewed-working-tree bundle plus direct ordinary dependencies; no symlinks; not a HEAD-only export",
+  "direct_dependency_files": 33,
+  "existing_car_report_library": {
+    "documents": 20,
+    "local_links": 335,
+    "issues": []
+  },
+  "workspace_layout": "Workspace navigation: 0 issues",
+  "cpu_reproduction": {
+    "matches_saved_prototype_quadrature_dependencies_source_identities": true,
+    "device": "CPU",
+    "model_or_dataset_used": false
+  },
+  "execution_prompt_word_count": 123,
+  "input_source_drift": [],
+  "files": [
+    {
+      "path": "UpdatePlans/_Plans/Coherence_Adaptive_Repair/Round_8/EXECUTION_PROMPT.md",
+      "sha256": "f53cea32ecf4eed98f14a675ebbfbc1dad666f4185115cec813a475d8d768b16"
+    },
+    {
+      "path": "UpdatePlans/_Plans/Coherence_Adaptive_Repair/Round_8/PLANNING_VALIDATION.md",
+      "sha256": "6de94ac0fe1f1d18b422fd88545491beb7858f861a3832d31f8446e5bfe0e7a2"
+    },
+    {
+      "path": "UpdatePlans/_Plans/Coherence_Adaptive_Repair/Round_8/PROJECT_REVIEW.md",
+      "sha256": "216be8a65e53d27ad6373d4bba0e50c7fb2f60976b606fa5d2ca814b8456c4a1"
+    },
+    {
+      "path": "UpdatePlans/_Plans/Coherence_Adaptive_Repair/Round_8/README.md",
+      "sha256": "7b102815e17f4beaad209a49729acc69c58f41616d65947d7ecaa1c9483578a0"
+    },
+    {
+      "path": "UpdatePlans/_Plans/Coherence_Adaptive_Repair/Round_8/WORKPLAN.md",
+      "sha256": "486f13ecc46448b4f55ce5ed1231b5f16b1994c89b7f64531dcb9dbdfca7c0d8"
+    },
+    {
+      "path": "UpdatePlans/_Plans/Coherence_Adaptive_Repair/Round_8/evidence/FIDELITY_AND_EVALUATION_AUDIT.md",
+      "sha256": "d6cfa7275f0e6543a6a623d21315e2e9a384ca6b7ffe1303a2b593e7ced588d9"
+    },
+    {
+      "path": "UpdatePlans/_Plans/Coherence_Adaptive_Repair/Round_8/evidence/INPUT_IDENTITIES.json",
+      "sha256": "c0ee18e722f7a6d5fd7fa2269806e34c1d147345257937c695e318df3ed7952d"
+    },
+    {
+      "path": "UpdatePlans/_Plans/Coherence_Adaptive_Repair/Round_8/evidence/SUPPORT_AND_SHAPE_AUDIT.md",
+      "sha256": "27c5bbf35b75e5a1417329414a9d3ef0cff20d5c0475e240495bedd271540b3a"
+    },
+    {
+      "path": "UpdatePlans/_Plans/Coherence_Adaptive_Repair/Round_8/evidence/THEORY_AND_SCORE_AUDIT.md",
+      "sha256": "d2bace27fa3c3dbb8ae12ac330dd6b82a2c3321a42b006b6335a1e4b2562dcb6"
+    },
+    {
+      "path": "UpdatePlans/_Plans/Coherence_Adaptive_Repair/Round_8/evidence/support_shape_cpu_diagnostic.json",
+      "sha256": "9ffb12b35c6cda27dabf2fe75d1ac787732663619b0b739471531bf1b80d2123"
+    },
+    {
+      "path": "UpdatePlans/_Plans/Coherence_Adaptive_Repair/Round_8/evidence/support_shape_cpu_diagnostic.py",
+      "sha256": "3d50478b4d248595d6b44f384a2e9f7ea8ca950faab1339f13b0b797a41f738a"
+    }
+  ],
+  "production_changes": false,
+  "training_launched": false,
+  "gpu_use": false,
+  "run_monitoring": false,
+  "commit_or_push": false
+}

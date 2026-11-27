@@ -193,7 +193,7 @@ class ScalableRuntime:
         needed = 0 if self.scoring_mode == "deterministic" else int(family.conditional_draws) - 1
         if len(supplied) < needed:
             raise ValueError("conditional State requires independent draws")
-        members = (prediction, *supplied) if context.get("_empirical_teacher") else (prediction, *supplied[:needed])
+        members = (prediction,) if self.scoring_mode == "deterministic" else (prediction, *supplied)
         converted = [family._in_declared_units(x, reference)[0] for x in members]
         target = family._in_declared_units(prediction, reference)[1]
         left, right = family._endpoint_measures(prediction, reference, context, required=True)
@@ -228,10 +228,8 @@ class ScalableRuntime:
         supplied = tuple(context.get("conditional_draws", ()))
         if self.scoring_mode == "conditional" and not supplied:
             raise ValueError("expanded fair score requires two independent members")
-        members = torch.stack(
-            (prediction,) if self.scoring_mode == "deterministic" else
-            ((prediction, *supplied) if context.get("_empirical_teacher") else (prediction, supplied[0]))
-        )
+        members = torch.stack((prediction,) if self.scoring_mode == "deterministic" else
+                              (prediction, *supplied))
         family = self.families["global_distribution"]
         left, right = family._endpoint_measures(prediction, reference, context, required=True)
         expected = torch.as_tensor(
@@ -271,7 +269,10 @@ class ScalableRuntime:
 
     def _score(self, name, family, prediction, reference, coordinates, context, batch):
         coefficients = self.coefficients
-        context = {**context, "scoring_mode": self.scoring_mode, "field_order": self.fields}
+        context = {**context, "scoring_mode": self.scoring_mode, "field_order": self.fields,
+                   "score_all_conditional_draws": True}
+        if name == "topology" and getattr(self, "capture_shape_components", False):
+            context["_shape_capture_components"] = True
         joint_only = name == "multiscale_spectrum" and self.scale_objective == "joint_anchor"
         if joint_only:
             context.update(_scale_joint_anchor=True, _scale_joint_kappa=self.scale_joint_kappa)
@@ -355,7 +356,7 @@ class ScalableRuntime:
             "topology",
         }:
             return
-        inputs = (prediction, *tuple(context.get("conditional_draws", ()))[:1])
+        inputs = (prediction, *tuple(context.get("conditional_draws", ())))
         if any(not x.requires_grad for x in inputs):
             return
         if prediction.device.type == "cuda":

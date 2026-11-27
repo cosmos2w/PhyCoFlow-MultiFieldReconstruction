@@ -213,40 +213,36 @@ def score(
         if tuple(f.field_names) != tuple((context or {}).get("field_order", f.field_names)):
             raise ValueError("Shape field order differs from sampler")
         f._raster_map(coordinates)
+        shape.bind_position_geometry(f)
         deterministic = (context or {}).get("scoring_mode") == "deterministic"
         draws = (prediction,) if deterministic else _draws(context, prediction, 2)
 
         def grid(x):
             return _shape_grid(f, x, reference)
 
+        capture_components = bool((context or {}).get("_shape_capture_components", False))
+        component_parts = None
         with torch.autocast(device_type=prediction.device.type, enabled=False):
             with torch.no_grad():
                 target = grid(reference.detach())
             mask = f.domain_mask if f.native_masked else None
-            if len(draws) > 2 and not context.get("_empirical_teacher"):
-                if isinstance(sampler_batch, ConditionQueryGroups):
-                    raise ValueError("grouped queries support paired or J2 training, not compiled assessment")
-                queries = shape.compile_queries((sampler_batch,))
-                compiled = shape.compile_reference(target, queries, valid_mask=mask)
-                blocks = shape.score_compiled(
-                    torch.stack([grid(x) for x in draws]), queries, compiled, valid_mask=mask
-                )
-                # This branch is assessment-only; no adaptive difficulty update.
-                leaves = {"self": {}, "pair": {}}
-            elif isinstance(sampler_batch, ConditionQueryGroups):
+            if isinstance(sampler_batch, ConditionQueryGroups):
                 grids = [grid(x) for x in draws]
                 pieces = [shape.score(grids[0][sl], None if deterministic else grids[1][sl],
                     target[sl], group, valid_mask=mask, return_leaves=True,
                     exhaustive=bool(context.get("exhaustive_shape_queries", False)),
                     mode="paired" if deterministic else "conditional",
                     additional_members=tuple(value[sl] for value in grids[2:]),
-                    empirical=bool(context.get("_empirical_teacher")))
+                    empirical=bool(context.get("_empirical_teacher")),
+                    return_components=capture_components)
                     for sl, group in sampler_batch.slices(len(prediction))]
                 blocks = {key: torch.cat([p[0][key] for p in pieces]) for key in ("self", "mutual")}
                 leaves = {kind: {index: torch.cat([p[1][kind][index] for p in pieces if index in p[1][kind]])
                     for index in set().union(*(p[1][kind] for p in pieces))} for kind in ("self", "pair")}
+                if capture_components:
+                    component_parts = {key: torch.cat([p[2][key] for p in pieces]) for key in pieces[0][2]}
             else:
-                blocks, leaves = shape.score(
+                output = shape.score(
                     grid(draws[0]),
                     None if deterministic else grid(draws[1]),
                     target,
@@ -257,7 +253,11 @@ def score(
                     mode="paired" if deterministic else "conditional",
                     additional_members=tuple(grid(x) for x in draws[2:]),
                     empirical=bool(context.get("_empirical_teacher")),
+                    return_components=capture_components,
                 )
+                blocks, leaves = output[:2]
+                if capture_components:
+                    component_parts = output[2]
         physical = {
             "self": f.spatial_objective.weights.get("self.persistence", 0.0),
             "mutual": f.spatial_objective.weights.get("mutual.persistence", 0.0),
@@ -299,9 +299,19 @@ def score(
             PAIRED_SHAPE_VERSION if deterministic else ("round4_empirical_v_shape_v1" if context.get("_empirical_teacher") else SHAPE_VERSION)
         )
         result.diagnostics["shape_sampling"] = SHAPE_SAMPLING_VERSION
+        result.diagnostics["shape_observation"] = (
+            "ph_plus_fixed_position" if shape.position is not None else "ph_only"
+        )
         result.diagnostics["scoring_mode"] = (
             "deterministic" if deterministic else ("empirical_v" if context.get("_empirical_teacher") else "conditional_fair")
         )
+        if component_parts is not None:
+            labels = ("ph", "position") if shape.position is not None else ("ph",)
+            result.diagnostics["shape_component_tensors"] = {
+                label: sum(component_parts[f"{kind}.{label}"].mean() * weights[kind]
+                           for kind in ("self", "mutual"))
+                for label in labels
+            }
     semantic = {
         key: physical[key] * value.mean() for key, value in blocks.items() if value is not None
     }

@@ -1,10 +1,31 @@
 # Coherence Adaptive Repair: source identity index
 
+## Round 8 frozen source and archived reading copy
+
+The closed Round 8 reading files below map from the former `Round_8/` path to `_bk/Round_8/`, preserving the original relative file names. Their byte-identical originals and full source/reading-copy relocation map are preserved locally in the DATA2 campaign `operations/Plan_Archive_Round8_v1/`. The original planning prose and fenced historical commands remain unchanged; only actual relative Markdown destinations leaving the bundle are rebased. The scientific decision is recorded in the maintained navigation and final report, not substituted into the original plan.
+
+| Archived reading file | Frozen source SHA-256 |
+| --- | --- |
+| [_bk/Round_8/EXECUTION_PROMPT.md](_bk/Round_8/EXECUTION_PROMPT.md) | `f53cea32ecf4eed98f14a675ebbfbc1dad666f4185115cec813a475d8d768b16` |
+| [_bk/Round_8/PLANNING_VALIDATION.md](_bk/Round_8/PLANNING_VALIDATION.md) | `6de94ac0fe1f1d18b422fd88545491beb7858f861a3832d31f8446e5bfe0e7a2` |
+| [_bk/Round_8/PROJECT_REVIEW.md](_bk/Round_8/PROJECT_REVIEW.md) | `216be8a65e53d27ad6373d4bba0e50c7fb2f60976b606fa5d2ca814b8456c4a1` |
+| [_bk/Round_8/README.md](_bk/Round_8/README.md) | `cbb3acf63c24c510e127fd8f1c8ae6e9c48ee7fb6cf42f03614ee7736ff73cac` |
+| [_bk/Round_8/WORKPLAN.md](_bk/Round_8/WORKPLAN.md) | `486f13ecc46448b4f55ce5ed1231b5f16b1994c89b7f64531dcb9dbdfca7c0d8` |
+| [_bk/Round_8/evidence/FIDELITY_AND_EVALUATION_AUDIT.md](_bk/Round_8/evidence/FIDELITY_AND_EVALUATION_AUDIT.md) | `ffe0b8de1a4956866be2ae0bfe75f45073beaba3b841ddf481d14196606b11fb` |
+| [_bk/Round_8/evidence/INPUT_IDENTITIES.json](_bk/Round_8/evidence/INPUT_IDENTITIES.json) | `c0ee18e722f7a6d5fd7fa2269806e34c1d147345257937c695e318df3ed7952d` |
+| [_bk/Round_8/evidence/PLANNING_CHECKS.json](_bk/Round_8/evidence/PLANNING_CHECKS.json) | `ea696f84ec28b1016fe4501fb6649c5b4f7abff2875b9eaf3c9c18fbff4ba292` |
+| [_bk/Round_8/evidence/SUPPORT_AND_SHAPE_AUDIT.md](_bk/Round_8/evidence/SUPPORT_AND_SHAPE_AUDIT.md) | `f2cd9669f79d1c81aa63394ff84f7e4777811824a93f4aaf40afe80ee3d2e270` |
+| [_bk/Round_8/evidence/THEORY_AND_SCORE_AUDIT.md](_bk/Round_8/evidence/THEORY_AND_SCORE_AUDIT.md) | `d2bace27fa3c3dbb8ae12ac330dd6b82a2c3321a42b006b6335a1e4b2562dcb6` |
+| [_bk/Round_8/evidence/support_shape_cpu_diagnostic.json](_bk/Round_8/evidence/support_shape_cpu_diagnostic.json) | `9ffb12b35c6cda27dabf2fe75d1ac787732663619b0b739471531bf1b80d2123` |
+| [_bk/Round_8/evidence/support_shape_cpu_diagnostic.py](_bk/Round_8/evidence/support_shape_cpu_diagnostic.py) | `3d50478b4d248595d6b44f384a2e9f7ea8ca950faab1339f13b0b797a41f738a` |
+
+## Earlier rounds
+
 Round 7's [workplan](_bk/Round_7/WORKPLAN.md), [design review](_bk/Round_7/DESIGN_REVIEW.md), [execution prompt](_bk/Round_7/EXECUTION_PROMPT.md) and [cached evidence audit](_bk/Round_7/evidence/SCALE_AND_COST_AUDIT.md) are archived reading copies of the original planning documents reviewed against branch HEAD `b5bbf8f`. Round 7 is closed: the exact executor is adopted in its qualified scope, the tested joint-anchor recipe is closed, and SOURCE/C8 is retained. Before relocation, the original four documents were copied and hash-verified under the DATA2 campaign `operations/Plan_Archive_Round7_v1/source_copy/`; the archived Markdown copies rebase relative links while preserving historical prose and literal provenance. The relocation and per-file source hashes are recorded in that operation's `relocation_map.json`.
 
 Round 6's admitted planning material and evidence identities remain in `Round_6/evidence/HISTORICAL_AUDIT.md`; it is not a historical reading copy. The [execution record](Round_6/EXECUTION_STATUS.md) documents the completed 500-epoch decision and superseded preparation stop while preserving the admitted workplan and review bytes.
 
-This index identifies the exact source bytes used for the portable Markdown reading copies. SHA-256 hashes describe the original files; reading copies add a status banner and rebase Markdown links. They do not alter scientific statements, fenced commands or literal historical paths.
+This index identifies the exact source bytes used for the portable Markdown reading copies. SHA-256 hashes describe the original files; earlier reading copies add status banners and rebase Markdown links, while Round 8 only rebases relative Markdown links that leave its bundle. They do not alter scientific statements, fenced commands or literal historical paths.
 
 The **original source** entries are literal local-only provenance paths relative to this index. They require the original host and are intentionally not clickable publication dependencies; use the tracked reading-copy links on a clean export. The Round 1–5 prompts are historical and are not current launch instructions.
 

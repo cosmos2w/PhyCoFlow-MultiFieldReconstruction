@@ -135,6 +135,8 @@ class TrainingMonitor:
         self._recording_definitions = None
         self._loss_component_order = []
         self._direct_recording = False
+        self._member_mse_recording = False
+        self._recording_batch_size = None
         self._recording_definitions_path = self.run_dir / "logs" / "recording_definitions.json"
         config_path = self.run_dir / "resolved_config.yaml"
         if config_path.is_file():
@@ -142,8 +144,16 @@ class TrainingMonitor:
 
             self._calibration_freeze_epoch = find_calibration_freeze([], load_config(config_path))
             config = load_config(config_path)
+            self._recording_batch_size = config.get("optimization", {}).get("batch_size")
             self._loss_component_order = [name for name, settings in config.get("coherence", {}).get("families", {}).items() if settings.get("enabled", True)]
-            self._ordered_recording = bool(config.get("coherence", {}).get("scalable_anchored_coherence", {}).get("common_prefit") or config.get("optimization", {}).get("direct_supervision"))
+            fidelity = config.get("optimization", {}).get("multitask", {}).get("fidelity_budget", {})
+            saved_columns = []
+            if int(start_step) and self._recording_definitions_path.is_file():
+                saved_columns = [column["name"] for column in
+                    json.loads(self._recording_definitions_path.read_text()).get("columns", [])]
+            self._member_mse_recording = (fidelity.get("metric") == "physical_member_mse_model_units" and
+                (not int(start_step) or "fidelity_estimator" in saved_columns))
+            self._ordered_recording = bool(config.get("coherence", {}).get("scalable_anchored_coherence", {}).get("common_prefit") or config.get("optimization", {}).get("direct_supervision") or self._member_mse_recording)
             if config.get("optimization", {}).get("direct_supervision"):
                 self._direct_recording = True
                 self._loss_component_order = ["native", "state", "scale", "shape"] if config["optimization"]["direct_supervision"]["mode"] == "safeguarded" else ["native"]
@@ -315,6 +325,20 @@ class TrainingMonitor:
                     return "string"
                 return "object"
             def definition(key, value):
+                # Existing histories own their exact recording definitions.
+                # Retain these known predecessor descriptions on resume, while
+                # giving newly created member-risk runs their actual clock.
+                if self._member_mse_recording and self._recording_definitions is not None:
+                    prior = next((column for column in self._recording_definitions["columns"]
+                                  if column["name"] == key), None)
+                    legacy = {
+                        "field_violation": ("normalized_field_risk", "Field-ordered member-MSE excess above its frozen bound divided by the declared positive field scale."),
+                        "field_signed_mean_risk": ("model_field_units_squared", "Field-ordered signed mean-risk diagnostic on the same training action, unavailable for a single member."),
+                    }
+                    if key in {"step", "epoch", "absolute_epoch", "batches", "completed_updates"}:
+                        legacy[key] = ("reporting_epochs" if key in {"epoch", "absolute_epoch"} else "updates", "Completed clock or count in the saved B64/12 reporting convention.")
+                    if prior is not None and key in legacy and (prior.get("units"), prior.get("meaning")) == legacy[key]:
+                        return {"name": key, "type": kind(value), "units": prior["units"], "meaning": prior["meaning"]}
                 if self.origin_step and key in {"step", "epoch", "absolute_epoch"}:
                     meanings = {
                         "step": "Absolute accepted updates, including the 6000 accepted parent updates before this fork.",
@@ -365,7 +389,21 @@ class TrainingMonitor:
                         units, meaning = "parameter_gradient_norm", "Attempt-mean norm in the declared trainable parameter space."
                     return {"name": key, "type": kind(value), "units": units, "meaning": meaning}
                 units, meaning = "dimensionless", "Accepted-update epoch diagnostic; structured values retain their named axes."
-                if key == "round7_executor":
+                if self._member_mse_recording and key == "fidelity_estimator":
+                    units, meaning = "configuration", "Selected risk, sampled physical quadrature and genuine member count for the accepted training action."
+                elif self._member_mse_recording and key in {"field_risk", "field_member_mse", "field_reference_risk", "field_upper_bound"}:
+                    units, meaning = "model_field_units_squared", "Field-ordered pooled member MSE on the training batch, frozen SOURCE reference, or accepted bound as named; structured values retain the last accepted action."
+                elif self._member_mse_recording and key == "field_signed_mean_risk":
+                    units, meaning = "model_field_units_squared", "Field-ordered signed mean-risk diagnostic from the last accepted batch, unavailable for a single member."
+                elif self._member_mse_recording and key == "field_violation":
+                    units, meaning = "normalized_field_risk", "Field-ordered member-MSE excess above its frozen bound divided by the declared positive field scale for the last accepted batch."
+                elif self._member_mse_recording and key == "field_quadrature":
+                    units, meaning = "native_grid_points", "Declared selected support and rotating without-replacement complement for field-risk feedback."
+                elif self._member_mse_recording and key in {"step", "epoch", "absolute_epoch", "batches", "completed_updates"}:
+                    units = "reporting_epochs" if key in {"epoch", "absolute_epoch"} else "updates"
+                    meaning = (f"Completed clock or count with {self.steps_per_epoch} updates per reporting epoch "
+                               f"and an optimization batch cap of {self._recording_batch_size} conditions.")
+                elif key == "round7_executor":
                     units, meaning = "configuration", "Executor row-chunk, checkpoint and rollout context-cache policies, fixed Scale objective, and SHA-256 identity of the selected-complement field reference."
                 elif key == "round7_scale_kappa":
                     units, meaning = "dimensionless", "Fixed TRAIN-derived multiplier of raw joint Scale; one for the composite control."
